@@ -93,7 +93,7 @@ def test_ui_input_field(page: Page, benchmark: BenchmarkFixture) -> None:
 
     # タブを選択
     helper: "StreamlitTestHelper" = StreamlitTestHelper(page)
-    helper.select_tab(f"📝 {texts.tab1.menu_title}")
+    helper.select_tab(f"{texts.tab1.menu_title}")
 
     def _check_input_fields() -> None:
         # ファイルアップロードボタンを見つける
@@ -123,7 +123,7 @@ def test_ui_button_click(page: Page) -> None:
 
     # タブを選択
     helper: "StreamlitTestHelper" = StreamlitTestHelper(page)
-    helper.select_tab(f"📝 {texts.tab1.menu_title}")
+    helper.select_tab(f"{texts.tab1.menu_title}")
 
     # ボタンをクリック
     helper.click_button(texts.tab1.generate_text_button)
@@ -180,7 +180,7 @@ def test_ui_download_functionality(page: Page) -> None:
 
     # タブを選択
     helper: "StreamlitTestHelper" = StreamlitTestHelper(page)
-    helper.select_tab(f"📝 {texts.tab1.menu_title}")
+    helper.select_tab(f"{texts.tab1.menu_title}")
 
     # ダウンロードボタンを見つける
     download_button: Final[Locator] = page.locator("div[data-testid='stDownloadButton'] button").first
@@ -239,14 +239,14 @@ def test_ui_advanced_settings_in_tab3(page: Page) -> None:
     helper: "StreamlitTestHelper" = StreamlitTestHelper(page)
 
     # タブ3を選択
-    helper.select_tab(f"⚙️ {texts.tab3.menu_title}")
+    helper.select_tab(f"{texts.tab3.menu_title}")
 
     # 入力ファイルの設定セクションが表示されることを確認
     input_settings_header: Final[Locator] = page.locator(f"h3:has-text('{texts.tab3.subheader_input_file}')").first
     expect(input_settings_header).to_be_visible()
 
     # コマンド生成タブに戻る
-    helper.select_tab(f"📝 {texts.tab1.menu_title}")
+    helper.select_tab(f"{texts.tab1.menu_title}")
 
 
 @E2E
@@ -267,7 +267,7 @@ def test_ui_sample_collection_in_tab4(page: Page) -> None:
     helper: "StreamlitTestHelper" = StreamlitTestHelper(page)
 
     # タブ4を選択
-    helper.select_tab(f"💼 {texts.tab4.menu_title}")
+    helper.select_tab(f"{texts.tab4.menu_title}")
 
     # サンプル集の表示セクションが表示されることを確認
     sample_header: Final[Locator] = page.locator(f"h3:has-text('{texts.tab4.subheader}')").first
@@ -325,14 +325,14 @@ def test_ui_sample_collection_in_tab4(page: Page) -> None:
     ("tab_name", "expected_element"),
     [
         pytest.param(
-            f"📝 {texts.tab1.menu_title}", f"button:has-text('{texts.tab1.generate_text_button}')", id="e2e_tab_navigation_command_gen"
+            f"{texts.tab1.menu_title}", f"button:has-text('{texts.tab1.generate_text_button}')", id="e2e_tab_navigation_command_gen"
         ),
         pytest.param(
-            f"📜 {texts.tab2.menu_title}", f"button:has-text('{texts.tab2.generate_visual_button}')", id="e2e_tab_navigation_config_debug"
+            f"{texts.tab2.menu_title}", f"button:has-text('{texts.tab2.generate_visual_button}')", id="e2e_tab_navigation_config_debug"
         ),
-        pytest.param(f"⚙️ {texts.tab3.menu_title}", f"h3:has-text('{texts.tab3.subheader_input_file}')", id="e2e_tab_navigation_settings"),
-        pytest.param(f"💼 {texts.tab4.menu_title}", f"h3:has-text('{texts.tab4.subheader}')", id="e2e_tab_navigation_samples"),
-        pytest.param(f"🔀 {texts.tab5.menu_title}", f"h3:has-text('{texts.tab5.subheader}')", id="e2e_tab_navigation_workflow"),
+        pytest.param(f"{texts.tab3.menu_title}", f"h3:has-text('{texts.tab3.subheader_input_file}')", id="e2e_tab_navigation_settings"),
+        pytest.param(f"{texts.tab4.menu_title}", f"h3:has-text('{texts.tab4.subheader}')", id="e2e_tab_navigation_samples"),
+        pytest.param(f"{texts.tab5.menu_title}", f"h3:has-text('{texts.tab5.subheader}')", id="e2e_tab_navigation_workflow"),
     ],
 )
 def test_tab_navigation_parametrized(page: Page, tab_name: str, expected_element: str) -> None:
@@ -439,7 +439,7 @@ def test_command_generation_parametrized_in_tab1(
 
     # Arrange: コマンド生成タブを選択
     helper: "StreamlitTestHelper" = StreamlitTestHelper(page)
-    helper.select_tab(f"📝 {texts.tab1.menu_title}")
+    helper.select_tab(f"{texts.tab1.menu_title}")
 
     def _execute() -> None:
         # Act: 設定ファイルとテンプレートファイルをアップロード
@@ -479,7 +479,7 @@ def test_file_upload_in_tab1(page: Page, benchmark: BenchmarkFixture) -> None:
 
     # タブを選択
     helper: "StreamlitTestHelper" = StreamlitTestHelper(page)
-    helper.select_tab(f"📝 {texts.tab1.menu_title}")
+    helper.select_tab(f"{texts.tab1.menu_title}")
 
     # ファイルアップロード要素を見つける
     upload_container: Final[Locator] = page.locator("div[data-testid='stFileUploader']").first
@@ -526,7 +526,7 @@ def test_jinja_template_upload_in_tab1(page: Page, benchmark: BenchmarkFixture) 
 
     # タブを選択
     helper: "StreamlitTestHelper" = StreamlitTestHelper(page)
-    helper.select_tab(f"📝 {texts.tab1.menu_title}")
+    helper.select_tab(f"{texts.tab1.menu_title}")
 
     # Jinjaテンプレートファイルのアップロード要素を見つける
     # 2番目のファイルアップローダーを選択
@@ -567,9 +567,9 @@ def test_jinja_template_upload_in_tab1(page: Page, benchmark: BenchmarkFixture) 
 @pytest.mark.parametrize(
     ("tab_name", "upload_index", "file_type", "file_name"),
     [
-        pytest.param(f"📝 {texts.tab1.menu_title}", 0, texts.tab1.upload_config, "dns_dig_config.csv", id="e2e_upload_csv_config"),
-        pytest.param(f"📝 {texts.tab1.menu_title}", 1, texts.tab1.upload_template, "dns_dig_tmpl.j2", id="e2e_upload_jinja_template"),
-        pytest.param(f"📜 {texts.tab2.menu_title}", 0, texts.tab2.upload_debug_config, "cisco_config.toml", id="e2e_upload_toml_config"),
+        pytest.param(f"{texts.tab1.menu_title}", 0, texts.tab1.upload_config, "dns_dig_config.csv", id="e2e_upload_csv_config"),
+        pytest.param(f"{texts.tab1.menu_title}", 1, texts.tab1.upload_template, "dns_dig_tmpl.j2", id="e2e_upload_jinja_template"),
+        pytest.param(f"{texts.tab2.menu_title}", 0, texts.tab2.upload_debug_config, "cisco_config.toml", id="e2e_upload_toml_config"),
     ],
 )
 def test_file_upload_parametrized_in_tab1(
@@ -680,7 +680,7 @@ def test_config_debug_parametrized_in_tab2(
 
     # Arrange: 設定デバッグタブを選択
     helper: "StreamlitTestHelper" = StreamlitTestHelper(page)
-    helper.select_tab(f"📜 {texts.tab2.menu_title}")
+    helper.select_tab(f"{texts.tab2.menu_title}")
 
     def _execute() -> None:
         helper.upload_debug_config_file(file_name)
