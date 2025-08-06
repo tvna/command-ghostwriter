@@ -211,13 +211,13 @@ jobs:
         # are produced by the PR workflow instead.
         # Consider using actions/upload-artifact and actions/download-artifact
         # consistently across workflows if needed.
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           name: desktop-app-macOS.zip
           # path: artifacts/macos # Default path is $GITHUB_WORKSPACE
 
       - name: Download Windows build artifact
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           name: desktop-app-Windows.zip
           # path: artifacts/windows # Default path is $GITHUB_WORKSPACE
