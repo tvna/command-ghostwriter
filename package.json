@@ -42,19 +42,19 @@
         }
     },
     "devDependencies": {
-        "@commitlint/cli": "^19.8.1",
-        "@commitlint/config-conventional": "^19.8.1",
-        "@commitlint/cz-commitlint": "^19.8.1",
+        "@commitlint/cli": "^20.1.0",
+        "@commitlint/config-conventional": "^20.0.0",
+        "@commitlint/cz-commitlint": "^20.1.0",
         "@stlite/desktop": "^0.85.1",
         "commitizen": "^4.3.1",
-        "cross-env": "^7.0.3",
-        "electron": "^37.2.3",
+        "cross-env": "^10.1.0",
+        "electron": "^39.2.4",
         "electron-builder": "^26.0.12",
         "husky": "^9.1.7",
-        "lint-staged": "^16.1.2",
-        "prettier": "^3.6.2",
+        "lint-staged": "^16.2.7",
+        "prettier": "^3.7.3",
         "prettier-plugin-sort-json": "^4.1.1",
-        "rimraf": "^6.0.1"
+        "rimraf": "^6.1.2"
     },
     "stlite": {
         "desktop": {
