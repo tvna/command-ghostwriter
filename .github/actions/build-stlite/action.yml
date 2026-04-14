@@ -74,16 +74,13 @@ runs:
       run: |
         npm run dump
 
-    - name: Set GITHUB_TOKEN
-      shell: bash
-      run: |
-        echo "GITHUB_TOKEN=${{ inputs.github-token }}" >> "$GITHUB_ENV"
-        echo "GH_TOKEN=${{ inputs.github-token }}" >> "$GITHUB_ENV"
-
     - name: Build
       shell: bash
       run: |
         npm run dist
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        GH_TOKEN: ${{ inputs.github-token }}
 
     - name: Archive artifact (Windows)
       if: ${{ runner.os == 'Windows' }}

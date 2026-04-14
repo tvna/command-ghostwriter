@@ -1274,10 +1274,10 @@ def create_template_file() -> Callable[[bytes, str], BytesIO]:
             FORMAT_TYPE_COMPRESS_ALT,
             STRICT_UNDEFINED,
             {"limit": 1000000},
-            "",
+            None,
             EXPECTED_INITIAL_NO_ERROR,
-            EXPECTED_RUNTIME_NO_ERROR,
-            id="test_render_success_dynamic_loop_range_over_limit_strict",
+            "Template runtime error: Range too big. The sandbox blocks ranges larger than MAX_RANGE (100000).",
+            id="test_render_failure_dynamic_loop_range_over_sandbox_limit_strict",
         ),
         pytest.param(
             b"{% for i in range(limit) %}{% for j in range(limit) %}{% endfor %}{% endfor %}",
