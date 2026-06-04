@@ -60,12 +60,12 @@ alwaysApply: true
 ---
 
 ## パッケージ管理
-- pythonにおいては、poetryを利用します
+- pythonにおいては、uvを利用します
 - javascriptにおいては、npmを利用します
 
-### poetryの操作
-- pythonの依存パッケージを新規インストールする場合は、`pip install`ではなく`poetry add`を利用すること
-- テストコード専用の依存パッケージを新規インストールする場合は、`poetry add -G dev`を利用すること
+### uvの操作
+- pythonの依存パッケージを新規インストールする場合は、`pip install`ではなく`uv add`を利用すること
+- テストコード専用の依存パッケージを新規インストールする場合は、`uv add --group dev`を利用すること
 - pyproject.tomlにおいては、パッケージモードの有効化を禁止とします
 
 ### npmの操作

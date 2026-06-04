@@ -42,17 +42,17 @@ cd $env:PROGRAMDATA
 git clone https://github.com/tvna/streamlit-command-ghostwriter.git
 cd streamlit-command-ghostwriter
 
-(Invoke-WebRequest -Uri https://install.python-poetry.org -UseBasicParsing).Content | python -
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 
 [System.Environment]::SetEnvironmentVariable('path', $env:APPDATA + "\Python\Scripts;" + [System.Environment]::GetEnvironmentVariable('path', "User"),"User")
 
-poetry install
+uv sync
 ```
 
 3. 下記のコマンドでWebアプリを起動
 ```ps1
 cd $env:PROGRAMDATA\streamlit-command-ghostwriter
-poetry run streamlit app.py
+uv run streamlit run app.py
 ```
 
 まずはサンプルファイルをアップロードして、「CLIコマンド生成」をクリックした結果を確認してみてください。
