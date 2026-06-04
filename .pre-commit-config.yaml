@@ -161,7 +161,7 @@ repos:
     hooks:
       - id: pytest_without_e2e
         name: pytest (without e2e)
-        entry: pytest -vv -n auto -m "unit or integration or workflow" --disable-warnings --benchmark-disable
+        entry: uv run pytest -vv -n auto -m "unit or integration or workflow" --disable-warnings --benchmark-disable
         language: system
         pass_filenames: false
         types: [python]
@@ -169,7 +169,7 @@ repos:
       - id: lizard_combined
         name: lizard (check CCN for production codes)
         entry: |
-          poetry run lizard -l python -x "./node_modules/*" -x "./.venv/*" -x "./build/*"  -x "./dist/*"  --CCN "10"
+          uv run lizard -l python -x "./node_modules/*" -x "./.venv/*" -x "./build/*"  -x "./dist/*"  --CCN "10"
         language: system
         pass_filenames: false
         types: [python]
