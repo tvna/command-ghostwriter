@@ -1,0 +1,6 @@
+# Devcontainer-local defaults. This file lives on a container-engine
+# named volume and is not read by the host.
+approval_policy = "never"
+
+[projects."/workspaces/command-ghostwriter"]
+trust_level = "trusted"
