@@ -367,6 +367,8 @@ jobs:
             github.com:443
             api.github.com:443
             objects.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            get.trivy.dev:443
             files.pythonhosted.org:443
             pypi.org:443
             install.python-poetry.org:443
