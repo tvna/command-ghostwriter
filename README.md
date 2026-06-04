@@ -263,6 +263,14 @@ tar -czf {{ file.name }}.tar.gz {{ file.path }}
 
 開発に必要なコマンド集は[こちら](assets/docs/commands.md)を参照してください。
 
+### Dev Containers (エージェント開発環境)
+
+Claude / Codex の各エージェント向けに、ツールチェーンを nix flake で固定した build-on-open 方式の開発コンテナを用意しています。
+
+- VS Code の「Dev Containers: Reopen in Container」で、`.devcontainer/claude`（Claude 用）または `.devcontainer/codex`（Codex 用）を選択して起動します。
+- 初回起動時はベースイメージへの nix 導入とツールチェーンのビルドが走るため、起動完了まで時間がかかります。
+- Streamlit アプリは自動起動しません。コンテナ内で `uv run streamlit run app.py` を実行し、フォワードされたポート 8502 で確認してください。
+
 [streamlit-img]: https://img.shields.io/badge/-Streamlit-FF4B4B?style=flat&logo=streamlit&logoColor=white
 [streamlit-cloud-img]: https://static.streamlit.io/badges/streamlit_badge_black_white.svg
 [streamlit-cloud-link]: https://command-ghostwriter.streamlit.app/
