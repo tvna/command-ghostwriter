@@ -90,8 +90,9 @@ from typing import (
 )
 
 import jinja2
-from jinja2 import Environment, Template, nodes
+from jinja2 import Template, nodes
 from jinja2.runtime import StrictUndefined, Undefined
+from jinja2.sandbox import SandboxedEnvironment
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError
 
 from .validate_template import TemplateSecurityValidator, ValidationState
@@ -473,7 +474,7 @@ class DocumentRender(BaseModel):
             Optional[str]: レンダリング結果 (エラー時はNone)
         """
         try:
-            env: Environment = self._create_environment()
+            env: SandboxedEnvironment = self._create_environment()
             template: Template = env.from_string(template_content)
             return template.render(**context)
         except Exception as e:
@@ -577,16 +578,17 @@ class DocumentRender(BaseModel):
             return False
         return True
 
-    def _create_environment(self) -> Environment:
+    def _create_environment(self) -> SandboxedEnvironment:
         """Jinja2環境を作成する。
 
         カスタムフィルターやセキュリティ設定を含む環境を作成します。
         デフォルトでHTMLエスケープを有効化し、安全性を確保します。
+        SandboxedEnvironmentを使用して、テンプレート内からの危険な操作を防止します。
 
         Returns:
-            Environment: 設定済みのJinja2環境
+            SandboxedEnvironment: 設定済みのJinja2サンドボックス環境
         """
-        env: Environment = Environment(
+        env: SandboxedEnvironment = SandboxedEnvironment(
             autoescape=True,  # HTMLエスケープをデフォルトで有効化
             undefined=StrictUndefined if self._is_strict_undefined else CustomUndefined,
             extensions=["jinja2.ext.do"],  # 'do'拡張を有効化
