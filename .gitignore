@@ -194,3 +194,11 @@ apm_modules/
 # are committed; the entries below are local/regenerable artifacts.
 .claude/rules/
 .claude/settings.local.json
+
+# Claude Code / Codex local credentials and MCP config.
+# These may contain API keys, OAuth tokens, or service credentials and
+# must never be committed.
+.mcp.json
+.mcp.local.json
+.claude/.credentials.json
+.codex/auth.json
