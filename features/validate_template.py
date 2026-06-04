@@ -74,7 +74,8 @@ from typing import (
 )
 
 import jinja2
-from jinja2 import Environment, nodes
+from jinja2 import nodes
+from jinja2.sandbox import SandboxedEnvironment
 from markupsafe import Markup
 from pydantic import (
     BaseModel,
@@ -908,7 +909,7 @@ class TemplateSecurityValidator(BaseModel):
             Optional[nodes.Template]: 構文解析結果 (エラーの場合はNone)
         """
         try:
-            env = Environment(autoescape=True, extensions=["jinja2.ext.do"])
+            env = SandboxedEnvironment(autoescape=True, extensions=["jinja2.ext.do"])
             return env.parse(template_content)
         except jinja2.TemplateSyntaxError as e:
             validation_state.set_error(f"Template syntax error: {e!s}")
