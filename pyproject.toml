@@ -8,6 +8,9 @@ dependencies = [
   "pyyaml>=6.0.1,<7",
   "chardet>=5.2.0,<6",
   "python-box>=7.2.0,<8",
+  # Pinned to the 2.11 series for migrate-not-upgrade parity: tests/unit/test_document_render.py
+  # asserts pydantic's error-doc URL, which embeds the minor version (errors.pydantic.dev/2.11/).
+  # Lift the <2.12 ceiling in a dedicated upgrade PR that also updates that fixture.
   "pydantic>=2.11.4,<2.12",
   "toml>=0.10.2,<0.11",
   "markupsafe>=3.0.2,<4",

@@ -12,6 +12,10 @@ runs:
     - name: Install uv
       uses: astral-sh/setup-uv@v6
       with:
+        # Keep in lockstep with [tool.uv].required-version in pyproject.toml.
+        # That pin is exact (==) because flake.nix asserts the "==" form, so the
+        # installed uv must match exactly or every uv command fails the gate.
+        version: "0.8.17"
         enable-cache: true
         cache-dependency-glob: "uv.lock"
 

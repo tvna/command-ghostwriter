@@ -52,8 +52,7 @@
       "stlite",
       "streamlit",
       "USERPROFILE",
-      "venv",
-      "virtualenvs"
+      "venv"
     ],
     "editor.bracketPairColorization.enabled": true,
     "editor.codeActionsOnSave": {},
