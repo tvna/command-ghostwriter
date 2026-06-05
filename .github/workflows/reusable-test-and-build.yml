@@ -90,14 +90,24 @@ defaults:
     shell: bash
 
 env:
-  GLOBAL_ALLOWED_ENDPOINTS: |
+  # ---- harden-runner egress endpoint groups (single source of truth) ----
+  # Compose per step via ${{ env.EP_* }} so each step stays least-privilege.
+  EP_GITHUB_CORE: >-
     api.github.com:443
     github.com:443
-    objects.githubusercontent.com:443
-    registry.npmjs.org:443
-    pypi.org:443
+    release-assets.githubusercontent.com:443
+  EP_GITHUB_OBJECTS: objects.githubusercontent.com:443
+  EP_GITHUB_RAW: raw.githubusercontent.com:443
+  EP_PYTHON: >-
     files.pythonhosted.org:443
-    playwright.azureedge.net:443
+    pypi.org:443
+    astral.sh:443
+  EP_NODE: >-
+    registry.npmjs.org:443
+    mirror.gcr.io:443
+  EP_PLAYWRIGHT: >-
+    cdn.playwright.dev:443
+    playwright.download.prss.microsoft.com:443
   GLOBAL_NODE_VERSION: ${{ vars.GLOBAL_NODE_VERSION }}
   GLOBAL_PYTHON_VERSION: ${{ vars.GLOBAL_PYTHON_VERSION }}
   ALL_FETCH_DEPTH: 0
@@ -127,12 +137,8 @@ jobs:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: true
           allowed-endpoints: >
-            api.github.com:443
-            files.pythonhosted.org:443
-            github.com:443
-            pypi.org:443
-            astral.sh:443
-            release-assets.githubusercontent.com:443
+            ${{ env.EP_GITHUB_CORE }}
+            ${{ env.EP_PYTHON }}
 
       - name: Check out git repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -156,13 +162,9 @@ jobs:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: true
           allowed-endpoints: >
-            github.com:443
-            api.github.com:443
-            objects.githubusercontent.com:443
-            release-assets.githubusercontent.com:443
-            registry.npmjs.org:443
-            mirror.gcr.io:443
-            release-assets.githubusercontent.com:443
+            ${{ env.EP_GITHUB_CORE }}
+            ${{ env.EP_GITHUB_OBJECTS }}
+            ${{ env.EP_NODE }}
 
       - name: Check out git repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -186,11 +188,9 @@ jobs:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: true
           allowed-endpoints: >
-            github.com:443
-            objects.githubusercontent.com:443
-            release-assets.githubusercontent.com:443
-            raw.githubusercontent.com:443
-            release-assets.githubusercontent.com:443
+            ${{ env.EP_GITHUB_CORE }}
+            ${{ env.EP_GITHUB_OBJECTS }}
+            ${{ env.EP_GITHUB_RAW }}
 
       - name: Check out git repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -247,12 +247,9 @@ jobs:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: true
           allowed-endpoints: >
-            api.github.com:443
-            github.com:443
-            objects.githubusercontent.com:443
-            release-assets.githubusercontent.com:443
-            raw.githubusercontent.com:443
-            release-assets.githubusercontent.com:443
+            ${{ env.EP_GITHUB_CORE }}
+            ${{ env.EP_GITHUB_OBJECTS }}
+            ${{ env.EP_GITHUB_RAW }}
 
       - name: Check out git repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -294,12 +291,8 @@ jobs:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: true
           allowed-endpoints: >
-            api.github.com:443
-            files.pythonhosted.org:443
-            github.com:443
-            pypi.org:443
-            astral.sh:443
-            release-assets.githubusercontent.com:443
+            ${{ env.EP_GITHUB_CORE }}
+            ${{ env.EP_PYTHON }}
 
       - name: Check out git repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -371,16 +364,10 @@ jobs:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: true
           allowed-endpoints: >
-            github.com:443
-            api.github.com:443
-            objects.githubusercontent.com:443
-            release-assets.githubusercontent.com:443
-            files.pythonhosted.org:443
-            pypi.org:443
-            astral.sh:443
-            registry.npmjs.org:443
-            mirror.gcr.io:443
-            release-assets.githubusercontent.com:443
+            ${{ env.EP_GITHUB_CORE }}
+            ${{ env.EP_GITHUB_OBJECTS }}
+            ${{ env.EP_PYTHON }}
+            ${{ env.EP_NODE }}
             check.trivy.dev:443
 
       - name: Check out git repository
@@ -484,11 +471,8 @@ jobs:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: true
           allowed-endpoints: >
-            api.github.com:443
-            files.pythonhosted.org:443
-            github.com:443
-            pypi.org:443
-            release-assets.githubusercontent.com:443
+            ${{ env.EP_GITHUB_CORE }}
+            ${{ env.EP_PYTHON }}
 
       - name: Check out git repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -528,18 +512,15 @@ jobs:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: true
           allowed-endpoints: >
-            api.github.com:443
+            ${{ env.EP_GITHUB_CORE }}
+            ${{ env.EP_PYTHON }}
             cli.codecov.io:443
             codeclimate.com:443
             d3iz1jjs17r6kg.cloudfront.net:443
-            files.pythonhosted.org:443
-            github.com:443
             ingest.codecov.io:443
             keybase.io:443
             o26192.ingest.us.sentry.io:443
-            pypi.org:443
             storage.googleapis.com:443
-            release-assets.githubusercontent.com:443
 
       - name: Check out git repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -611,8 +592,14 @@ jobs:
         with:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: false
-
-          allowed-endpoints: |+
+          # NOTE: harden-runner is a no-op on macOS/Windows runners, so this list
+          # is advisory today; it documents the intended egress (incl. the current
+          # Playwright CDN) for a possible future Ubuntu E2E run.
+          allowed-endpoints: >
+            ${{ env.EP_GITHUB_CORE }}
+            ${{ env.EP_PYTHON }}
+            ${{ env.EP_NODE }}
+            ${{ env.EP_PLAYWRIGHT }}
 
       - name: Check out git repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -643,11 +630,8 @@ jobs:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: true
           allowed-endpoints: >
-            api.github.com:443
-            files.pythonhosted.org:443
-            github.com:443
-            pypi.org:443
-            release-assets.githubusercontent.com:443
+            ${{ env.EP_GITHUB_CORE }}
+            ${{ env.EP_PYTHON }}
 
       - name: Check out git repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -702,26 +686,23 @@ jobs:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: true
           allowed-endpoints: >
-            api.github.com:443
+            ${{ env.EP_GITHUB_CORE }}
+            ${{ env.EP_GITHUB_OBJECTS }}
+            ${{ env.EP_GITHUB_RAW }}
+            ${{ env.EP_PYTHON }}
             cfu.zaproxy.org:443
             checkip.amazonaws.com:80
             content-signature-2.cdn.mozilla.net:443
             data.streamlit.io:443
-            files.pythonhosted.org:443
             firefox-settings-attachments.cdn.mozilla.net:443
             firefox.settings.services.mozilla.com:443
             ghcr.io:443
-            github.com:443
             news.zaproxy.org:443
-            objects.githubusercontent.com:443
             pkg-containers.githubusercontent.com:443
-            pypi.org:443
             r10.o.lencr.org:80
             r11.o.lencr.org:80
-            raw.githubusercontent.com:443
             tel.zaproxy.org:443
             webhooks.fivetran.com:443
-            release-assets.githubusercontent.com:443
 
       - name: Check out git repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -779,11 +760,8 @@ jobs:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: true
           allowed-endpoints: >
-            api.github.com:443
-            files.pythonhosted.org:443
-            github.com:443
-            pypi.org:443
-            release-assets.githubusercontent.com:443
+            ${{ env.EP_GITHUB_CORE }}
+            ${{ env.EP_PYTHON }}
 
       - name: Check out git repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
