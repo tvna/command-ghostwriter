@@ -10,4 +10,4 @@
 
 ## 協議中の項目
 
-- [Harden Runner 撤去可否の調査 [課金回避の妥当性検証]](harden-runner-billing-investigation.md)
+- [Harden Runner 撤去可否の調査 [上限到達への対応]](harden-runner-billing-investigation.md)
