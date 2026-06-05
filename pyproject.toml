@@ -3,11 +3,7 @@ name = "command-ghostwriter"
 version = "0.0.0"
 requires-python = ">=3.11,<4.0"
 dependencies = [
-  # Pinned to the 1.45 series for migrate-not-upgrade parity: the e2e suite
-  # (tests/e2e/test_e2e.py) asserts the file-uploader DOM, whose "Browse files"
-  # button was relabelled in newer Streamlit (1.58 renders "Choose File"/"Upload").
-  # Lift the <1.46 ceiling in a dedicated upgrade PR that also updates those locators.
-  "streamlit>=1.45.0,<1.46",
+  "streamlit>=1.45.0,<2",
   "jinja2>=3.1.6,<4",
   "pyyaml>=6.0.1,<7",
   "chardet>=5.2.0,<6",
