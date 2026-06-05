@@ -333,12 +333,17 @@ jobs:
           requirements-path: "requirements.txt"
 
       - name: Convert SARIF to markdown summary
+        # Pyre runs with continue-on-error, so sarif.json may be absent (e.g. when
+        # pyre-action fails to install deps). Keep the Pyre summary/upload advisory:
+        # only run when pyre actually produced results, instead of hard-failing.
+        if: ${{ hashFiles('sarif.json') != '' }}
         uses: ./.github/actions/convert-sarif-to-summary
         with:
           sarif-path: sarif.json
           summary-title: "Pyre Static Analysis Results"
 
       - name: Upload Pyre scan results to GitHub Security tab
+        if: ${{ hashFiles('sarif.json') != '' }}
         uses: github/codeql-action/upload-sarif@v3
         with:
           category: pyre
