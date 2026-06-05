@@ -258,10 +258,13 @@ show startup-config"""
         """
         content: Final[str] = cls._get_file_content(file_name)
 
-        fd: int
-        path: str
-        fd, path = tempfile.mkstemp(suffix=f"_{file_name}")
-        with os.fdopen(fd, "w") as f:
+        # Streamlit のアップローダはファイル名が長いと中央を "..." で省略表示するため、
+        # mkstemp の "tmpXXXXXX_<name>" 形式ではアップロード後の表示名に元のファイル名が
+        # 残らず、表示名の検証 (file_name in displayed_text) が失敗する。
+        # 一時ディレクトリ配下に元のファイル名そのままで作成し、basename を保持する。
+        tmp_dir: str = tempfile.mkdtemp()
+        path: str = os.path.join(tmp_dir, file_name)
+        with open(path, "w") as f:
             f.write(content)
 
         return path
@@ -440,7 +443,12 @@ class StreamlitTestHelper:
             - 各ファイルのアップロードを実行
             - アップロード後のファイル名表示を確認
         """
-        upload_containers: Final[List[Locator]] = self.page.locator("div[data-testid='stFileUploader']").all()
+        uploaders: Final[Locator] = self.page.locator("div[data-testid='stFileUploader']")
+        # webkit など描画の遅い環境では .all() 実行時に2つ目のアップローダがまだ
+        # 描画されておらず "Not enough file uploaders" となるフレーキーが発生するため、
+        # 2つ目が DOM に出現するまで待ってから取得する。
+        expect(uploaders.nth(1)).to_be_attached()
+        upload_containers: Final[List[Locator]] = uploaders.all()
         assert len(upload_containers) > 1, "Not enough file uploaders found (expected at least 2)"
 
         config_upload_container: Final[Locator] = upload_containers[0]

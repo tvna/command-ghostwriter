@@ -48,6 +48,7 @@ dev = [
   "yamllint>=1.37.1,<2",
   "types-psutil>=7.0.0.20250601,<8",
   "types-requests>=2.32.4.20250611,<3",
+  "pytest-rerunfailures>=15,<16",
 ]
 # devcontainer 専用の対話デバッガ。CI では同期しない（uv sync --group local で追加）。
 local = [

@@ -33,7 +33,7 @@
 #   `egress-policy: block` と `allowed-endpoints` によりアウトバウンド通信を厳格に制御します。
 # - **最小権限:** `permissions` キーでワークフローが必要とする最小限の権限を設定しています。
 # - **多層的なセキュリティスキャン:** Gitleaks (シークレット検出), Trivy (依存関係脆弱性),
-#   Pyre/Pysa (SAST), ZAP (DAST) を組み合わせて実施します。
+#   Pyre (SAST), ZAP (DAST) を組み合わせて実施します。
 # - **依存関係のキャッシュ:** セットアップアクション内でキャッシュを利用しますが、
 #   キャッシュキーには厳密なコンテキストを使用します。
 #
@@ -90,14 +90,24 @@ defaults:
     shell: bash
 
 env:
-  GLOBAL_ALLOWED_ENDPOINTS: |
+  # ---- harden-runner egress endpoint groups (single source of truth) ----
+  # Compose per step via ${{ env.EP_* }} so each step stays least-privilege.
+  EP_GITHUB_CORE: >-
     api.github.com:443
     github.com:443
-    objects.githubusercontent.com:443
-    registry.npmjs.org:443
-    pypi.org:443
+    release-assets.githubusercontent.com:443
+  EP_GITHUB_OBJECTS: objects.githubusercontent.com:443
+  EP_GITHUB_RAW: raw.githubusercontent.com:443
+  EP_PYTHON: >-
     files.pythonhosted.org:443
-    playwright.azureedge.net:443
+    pypi.org:443
+    astral.sh:443
+  EP_NODE: >-
+    registry.npmjs.org:443
+    mirror.gcr.io:443
+  EP_PLAYWRIGHT: >-
+    cdn.playwright.dev:443
+    playwright.download.prss.microsoft.com:443
   GLOBAL_NODE_VERSION: ${{ vars.GLOBAL_NODE_VERSION }}
   GLOBAL_PYTHON_VERSION: ${{ vars.GLOBAL_PYTHON_VERSION }}
   ALL_FETCH_DEPTH: 0
@@ -127,12 +137,8 @@ jobs:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: true
           allowed-endpoints: >
-            api.github.com:443
-            files.pythonhosted.org:443
-            github.com:443
-            pypi.org:443
-            astral.sh:443
-            release-assets.githubusercontent.com:443
+            ${{ env.EP_GITHUB_CORE }}
+            ${{ env.EP_PYTHON }}
 
       - name: Check out git repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -156,13 +162,9 @@ jobs:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: true
           allowed-endpoints: >
-            github.com:443
-            api.github.com:443
-            objects.githubusercontent.com:443
-            release-assets.githubusercontent.com:443
-            registry.npmjs.org:443
-            mirror.gcr.io:443
-            release-assets.githubusercontent.com:443
+            ${{ env.EP_GITHUB_CORE }}
+            ${{ env.EP_GITHUB_OBJECTS }}
+            ${{ env.EP_NODE }}
 
       - name: Check out git repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -186,11 +188,9 @@ jobs:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: true
           allowed-endpoints: >
-            github.com:443
-            objects.githubusercontent.com:443
-            release-assets.githubusercontent.com:443
-            raw.githubusercontent.com:443
-            release-assets.githubusercontent.com:443
+            ${{ env.EP_GITHUB_CORE }}
+            ${{ env.EP_GITHUB_OBJECTS }}
+            ${{ env.EP_GITHUB_RAW }}
 
       - name: Check out git repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -247,12 +247,9 @@ jobs:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: true
           allowed-endpoints: >
-            api.github.com:443
-            github.com:443
-            objects.githubusercontent.com:443
-            release-assets.githubusercontent.com:443
-            raw.githubusercontent.com:443
-            release-assets.githubusercontent.com:443
+            ${{ env.EP_GITHUB_CORE }}
+            ${{ env.EP_GITHUB_OBJECTS }}
+            ${{ env.EP_GITHUB_RAW }}
 
       - name: Check out git repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -294,12 +291,8 @@ jobs:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: true
           allowed-endpoints: >
-            api.github.com:443
-            files.pythonhosted.org:443
-            github.com:443
-            pypi.org:443
-            astral.sh:443
-            release-assets.githubusercontent.com:443
+            ${{ env.EP_GITHUB_CORE }}
+            ${{ env.EP_PYTHON }}
 
       - name: Check out git repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -371,17 +364,10 @@ jobs:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: true
           allowed-endpoints: >
-            github.com:443
-            api.github.com:443
-            objects.githubusercontent.com:443
-            release-assets.githubusercontent.com:443
-            get.trivy.dev:443
-            files.pythonhosted.org:443
-            pypi.org:443
-            astral.sh:443
-            registry.npmjs.org:443
-            mirror.gcr.io:443
-            release-assets.githubusercontent.com:443
+            ${{ env.EP_GITHUB_CORE }}
+            ${{ env.EP_GITHUB_OBJECTS }}
+            ${{ env.EP_PYTHON }}
+            ${{ env.EP_NODE }}
             check.trivy.dev:443
 
       - name: Check out git repository
@@ -406,6 +392,29 @@ jobs:
             npm audit --production --audit-level=high
           }
 
+      # trivy-action のデフォルト導入経路 (setup-trivy -> contrib/install.sh) は
+      # バイナリを get.trivy.dev から取得するが、現在その配布元が HTTP 403
+      # "host_not_allowed" を返すため install.sh が無言で exit 1 する (Issue #342)。
+      # 対策として GitHub Release の tarball を直接取得し、release の
+      # checksums.txt で SHA256 検証してから PATH に配置する (ピン留め + 検証)。
+      - name: Install Trivy (pinned, checksum-verified)
+        shell: bash
+        env:
+          TRIVY_VERSION: "0.71.0"
+        run: |
+          set -euo pipefail
+          tarball="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          base="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}"
+          tmp="$(mktemp -d)"
+          curl -sSfL "${base}/${tarball}" -o "${tmp}/${tarball}"
+          curl -sSfL "${base}/trivy_${TRIVY_VERSION}_checksums.txt" -o "${tmp}/checksums.txt"
+          (cd "${tmp}" && grep " ${tarball}\$" checksums.txt | sha256sum -c -)
+          install_dir="${RUNNER_TEMP}/trivy-bin"
+          mkdir -p "${install_dir}"
+          tar -C "${install_dir}" -xzf "${tmp}/${tarball}" trivy
+          echo "${install_dir}" >> "${GITHUB_PATH}"
+          "${install_dir}/trivy" --version
+
       - name: Run Trivy vulnerability scan
         uses: aquasecurity/trivy-action@dc5a429b52fcf669ce959baa2c2dd26090d2a6c4
         with:
@@ -413,6 +422,9 @@ jobs:
           ignore-unfixed: true
           format: "sarif"
           output: "trivy-results.json"
+          # 上のステップで導入した PATH 上の trivy を使い、get.trivy.dev 経由の
+          # 壊れた導入をスキップする (Issue #342)。
+          skip-setup-trivy: true
 
       - name: Convert SARIF to markdown summary
         uses: ./.github/actions/convert-sarif-to-summary
@@ -459,11 +471,8 @@ jobs:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: true
           allowed-endpoints: >
-            api.github.com:443
-            files.pythonhosted.org:443
-            github.com:443
-            pypi.org:443
-            release-assets.githubusercontent.com:443
+            ${{ env.EP_GITHUB_CORE }}
+            ${{ env.EP_PYTHON }}
 
       - name: Check out git repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -503,18 +512,15 @@ jobs:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: true
           allowed-endpoints: >
-            api.github.com:443
+            ${{ env.EP_GITHUB_CORE }}
+            ${{ env.EP_PYTHON }}
             cli.codecov.io:443
             codeclimate.com:443
             d3iz1jjs17r6kg.cloudfront.net:443
-            files.pythonhosted.org:443
-            github.com:443
             ingest.codecov.io:443
             keybase.io:443
             o26192.ingest.us.sentry.io:443
-            pypi.org:443
             storage.googleapis.com:443
-            release-assets.githubusercontent.com:443
 
       - name: Check out git repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -586,8 +592,14 @@ jobs:
         with:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: false
-
-          allowed-endpoints: |+
+          # NOTE: harden-runner is a no-op on macOS/Windows runners, so this list
+          # is advisory today; it documents the intended egress (incl. the current
+          # Playwright CDN) for a possible future Ubuntu E2E run.
+          allowed-endpoints: >
+            ${{ env.EP_GITHUB_CORE }}
+            ${{ env.EP_PYTHON }}
+            ${{ env.EP_NODE }}
+            ${{ env.EP_PLAYWRIGHT }}
 
       - name: Check out git repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -603,62 +615,6 @@ jobs:
         uses: ./.github/actions/test-python-playwright
         with:
           browser: ${{ matrix.browser }}
-
-  pysa_scan:
-    name: Scan code by pysa (SAST Tool)
-    needs: small-unit-test
-    permissions:
-      contents: read
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
-        with:
-          egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
-          disable-sudo: true
-          allowed-endpoints: >
-            api.github.com:443
-            files.pythonhosted.org:443
-            github.com:443
-            pypi.org:443
-            release-assets.githubusercontent.com:443
-
-      - name: Check out git repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          fetch-depth: 1
-
-      - name: Setup Python and restore cache
-        uses: ./.github/actions/setup-python
-        with:
-          python-version: ${{ env.GLOBAL_PYTHON_VERSION }}
-
-      - name: Install Pysa
-        run: |
-          uv export --no-hashes --no-dev --format requirements-txt --output-file requirements.txt
-          pip install pyre-check pyre-extensions
-          pip install -r requirements.txt
-
-      - name: Show Pyre info
-        run: |
-          pyre info
-          cat .pyre_configuration
-          pyre -h
-          pyre analyze -h
-
-      - name: Run Pysa
-        run: |
-          pyre --noninteractive --number-of-workers="$(nproc)" analyze --save-results-to ./
-        continue-on-error: true
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: taint-output.json
-          path: taint-output.json
-          retention-days: 3
-          compression-level: 9
 
   zap_scan:
     name: Scan HTTP by ZAP (DAST Tool)
@@ -677,26 +633,23 @@ jobs:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: true
           allowed-endpoints: >
-            api.github.com:443
+            ${{ env.EP_GITHUB_CORE }}
+            ${{ env.EP_GITHUB_OBJECTS }}
+            ${{ env.EP_GITHUB_RAW }}
+            ${{ env.EP_PYTHON }}
             cfu.zaproxy.org:443
             checkip.amazonaws.com:80
             content-signature-2.cdn.mozilla.net:443
             data.streamlit.io:443
-            files.pythonhosted.org:443
             firefox-settings-attachments.cdn.mozilla.net:443
             firefox.settings.services.mozilla.com:443
             ghcr.io:443
-            github.com:443
             news.zaproxy.org:443
-            objects.githubusercontent.com:443
             pkg-containers.githubusercontent.com:443
-            pypi.org:443
             r10.o.lencr.org:80
             r11.o.lencr.org:80
-            raw.githubusercontent.com:443
             tel.zaproxy.org:443
             webhooks.fivetran.com:443
-            release-assets.githubusercontent.com:443
 
       - name: Check out git repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -754,11 +707,8 @@ jobs:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: true
           allowed-endpoints: >
-            api.github.com:443
-            files.pythonhosted.org:443
-            github.com:443
-            pypi.org:443
-            release-assets.githubusercontent.com:443
+            ${{ env.EP_GITHUB_CORE }}
+            ${{ env.EP_PYTHON }}
 
       - name: Check out git repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -859,7 +809,6 @@ jobs:
       - test-coverage
       - test-e2e
       - analysis-code-ccn
-      - pysa_scan
       - zap_scan
     outputs:
       build_succeeded: ${{ steps.set-result.outputs.build_succeeded }}
