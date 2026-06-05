@@ -8,4 +8,6 @@
 - 提案が決定に至ったら、内容を該当する `prd` / `standards` / `runbooks` へ昇格させ、本ディレクトリからは削除する。
 - 決定の経緯 [採用/不採用の理由] は `history` へ記録する。
 
-現時点で協議中の項目はありません。
+## 協議中の項目
+
+- [Harden Runner 撤去可否の調査 [課金回避の妥当性検証]](harden-runner-billing-investigation.md)
