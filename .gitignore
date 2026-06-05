@@ -189,8 +189,8 @@ docs/s-exp
 # APM dependencies
 apm_modules/
 
-# APM-regenerated local Claude state (the superpowers skills under
-# .claude/skills/ are committed; these are local/regenerable artifacts).
+# APM-regenerated local Claude state. The superpowers skills under
+# .claude/skills/, the repo-owned .claude/hooks/, and .claude/settings.json
+# are committed; the entries below are local/regenerable artifacts.
 .claude/rules/
-.claude/settings.json
 .claude/settings.local.json
