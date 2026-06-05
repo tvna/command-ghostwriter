@@ -462,11 +462,15 @@ class StreamlitTestHelper:
 
         self.wait_for_ui_stabilization()
 
-        config_text: Final[str] = config_upload_container.inner_text()
-        assert config_file in config_text, f"Config file name not displayed.\nExpected: {config_file}\nActual text: {config_text}"
+        # Streamlit 1.58 のアップローダはファイル名を中央省略 (例 "cisco...plate.jinja2")
+        # して表示するため、可視テキスト (inner_text) には元のファイル名が残らない。
+        # フルのファイル名はファイル名チップ ([data-testid='stFileChipName']) の title
+        # 属性に保持されるため、そちらを検証する。
+        config_chip_name: Final[Locator] = config_upload_container.locator("[data-testid='stFileChipName']").first
+        expect(config_chip_name).to_have_attribute("title", config_file)
 
-        jinja_text = jinja_upload_container.inner_text()
-        assert template_file in jinja_text, f"Template file name not displayed.\nExpected: {template_file}\nActual text: {jinja_text}"
+        jinja_chip_name: Final[Locator] = jinja_upload_container.locator("[data-testid='stFileChipName']").first
+        expect(jinja_chip_name).to_have_attribute("title", template_file)
 
     def get_display_button(self, display_format: str) -> Locator:
         """表示形式に応じたボタンを取得.
