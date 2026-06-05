@@ -443,7 +443,12 @@ class StreamlitTestHelper:
             - 各ファイルのアップロードを実行
             - アップロード後のファイル名表示を確認
         """
-        upload_containers: Final[List[Locator]] = self.page.locator("div[data-testid='stFileUploader']").all()
+        uploaders: Final[Locator] = self.page.locator("div[data-testid='stFileUploader']")
+        # webkit など描画の遅い環境では .all() 実行時に2つ目のアップローダがまだ
+        # 描画されておらず "Not enough file uploaders" となるフレーキーが発生するため、
+        # 2つ目が DOM に出現するまで待ってから取得する。
+        expect(uploaders.nth(1)).to_be_attached()
+        upload_containers: Final[List[Locator]] = uploaders.all()
         assert len(upload_containers) > 1, "Not enough file uploaders found (expected at least 2)"
 
         config_upload_container: Final[Locator] = upload_containers[0]
