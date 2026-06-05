@@ -132,6 +132,7 @@ jobs:
             github.com:443
             pypi.org:443
             astral.sh:443
+            release-assets.githubusercontent.com:443
 
       - name: Check out git repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -295,6 +296,7 @@ jobs:
             github.com:443
             pypi.org:443
             astral.sh:443
+            release-assets.githubusercontent.com:443
 
       - name: Check out git repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -451,6 +453,7 @@ jobs:
             files.pythonhosted.org:443
             github.com:443
             pypi.org:443
+            release-assets.githubusercontent.com:443
 
       - name: Check out git repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -501,6 +504,7 @@ jobs:
             o26192.ingest.us.sentry.io:443
             pypi.org:443
             storage.googleapis.com:443
+            release-assets.githubusercontent.com:443
 
       - name: Check out git repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -608,6 +612,7 @@ jobs:
             files.pythonhosted.org:443
             github.com:443
             pypi.org:443
+            release-assets.githubusercontent.com:443
 
       - name: Check out git repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -681,6 +686,7 @@ jobs:
             raw.githubusercontent.com:443
             tel.zaproxy.org:443
             webhooks.fivetran.com:443
+            release-assets.githubusercontent.com:443
 
       - name: Check out git repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -742,6 +748,7 @@ jobs:
             files.pythonhosted.org:443
             github.com:443
             pypi.org:443
+            release-assets.githubusercontent.com:443
 
       - name: Check out git repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
