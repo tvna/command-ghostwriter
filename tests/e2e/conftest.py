@@ -45,24 +45,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../.
 logger: logging.Logger = logging.getLogger(__name__)
 
 
-def pytest_addoption(parser: pytest.Parser) -> None:
-    """pytestのコマンドラインオプションを追加.
-
-    Args:
-        parser: pytestのパーサーオブジェクト
-
-    Note:
-        追加されるオプション:
-          --headed: ブラウザを表示モードで実行 [デフォルト: False]
-    """
-    parser.addoption(
-        "--headed",
-        action="store_true",
-        default=False,
-        help="Run browser in headed mode (browser will be visible)",
-    )
-
-
 @pytest.fixture(scope="session")
 def browser_type_launch_args(browser_type_launch_args: Dict[str, Any], pytestconfig: PytestConfig) -> Dict[str, Any]:
     """Playwrightブラウザの起動オプションを設定.
