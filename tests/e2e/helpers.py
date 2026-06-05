@@ -459,11 +459,37 @@ class StreamlitTestHelper:
 
         self.wait_for_ui_stabilization()
 
-        config_text: Final[str] = config_upload_container.inner_text()
-        assert config_file in config_text, f"Config file name not displayed.\nExpected: {config_file}\nActual text: {config_text}"
+        config_name: Final[str] = self.get_uploaded_file_name(config_upload_container)
+        assert config_file == config_name, f"Config file name not displayed.\nExpected: {config_file}\nActual: {config_name}"
 
-        jinja_text = jinja_upload_container.inner_text()
-        assert template_file in jinja_text, f"Template file name not displayed.\nExpected: {template_file}\nActual text: {jinja_text}"
+        jinja_name: Final[str] = self.get_uploaded_file_name(jinja_upload_container)
+        assert template_file == jinja_name, f"Template file name not displayed.\nExpected: {template_file}\nActual: {jinja_name}"
+
+    def get_uploaded_file_name(self, upload_container: Locator) -> str:
+        """アップロード済みファイルチップから完全なファイル名を取得.
+
+        Args:
+            upload_container: ファイルアップローダー要素のLocator
+
+        Returns:
+            str: アップロードされたファイルの完全な名前
+
+        Raises:
+            AssertionError: ファイル名チップまたはtitle属性が存在しない場合
+
+        Note:
+            Streamlit 1.58のファイルアップローダーは表示テキストを中央省略する
+            (例: ``cisco_template.jinja2`` -> ``cisco...plate.jinja2``)。
+            このため可視テキストではなく、完全なファイル名を保持する
+            ``[data-testid='stFileChipName']`` の ``title`` 属性から読み取る。
+        """
+        name_chip: Final[Locator] = upload_container.locator("[data-testid='stFileChipName']").first
+        expect(name_chip).to_be_visible()
+
+        file_name: Final[Optional[str]] = name_chip.get_attribute("title")
+        assert file_name is not None, "Uploaded file chip is missing its title attribute"
+
+        return file_name
 
     def get_display_button(self, display_format: str) -> Locator:
         """表示形式に応じたボタンを取得.
