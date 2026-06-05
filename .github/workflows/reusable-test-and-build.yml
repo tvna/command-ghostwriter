@@ -375,7 +375,6 @@ jobs:
             api.github.com:443
             objects.githubusercontent.com:443
             release-assets.githubusercontent.com:443
-            get.trivy.dev:443
             files.pythonhosted.org:443
             pypi.org:443
             astral.sh:443
@@ -406,6 +405,29 @@ jobs:
             npm audit --production --audit-level=high
           }
 
+      # trivy-action のデフォルト導入経路 (setup-trivy -> contrib/install.sh) は
+      # バイナリを get.trivy.dev から取得するが、現在その配布元が HTTP 403
+      # "host_not_allowed" を返すため install.sh が無言で exit 1 する (Issue #342)。
+      # 対策として GitHub Release の tarball を直接取得し、release の
+      # checksums.txt で SHA256 検証してから PATH に配置する (ピン留め + 検証)。
+      - name: Install Trivy (pinned, checksum-verified)
+        shell: bash
+        env:
+          TRIVY_VERSION: "0.71.0"
+        run: |
+          set -euo pipefail
+          tarball="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          base="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}"
+          tmp="$(mktemp -d)"
+          curl -sSfL "${base}/${tarball}" -o "${tmp}/${tarball}"
+          curl -sSfL "${base}/trivy_${TRIVY_VERSION}_checksums.txt" -o "${tmp}/checksums.txt"
+          (cd "${tmp}" && grep " ${tarball}\$" checksums.txt | sha256sum -c -)
+          install_dir="${RUNNER_TEMP}/trivy-bin"
+          mkdir -p "${install_dir}"
+          tar -C "${install_dir}" -xzf "${tmp}/${tarball}" trivy
+          echo "${install_dir}" >> "${GITHUB_PATH}"
+          "${install_dir}/trivy" --version
+
       - name: Run Trivy vulnerability scan
         uses: aquasecurity/trivy-action@dc5a429b52fcf669ce959baa2c2dd26090d2a6c4
         with:
@@ -413,6 +435,9 @@ jobs:
           ignore-unfixed: true
           format: "sarif"
           output: "trivy-results.json"
+          # 上のステップで導入した PATH 上の trivy を使い、get.trivy.dev 経由の
+          # 壊れた導入をスキップする (Issue #342)。
+          skip-setup-trivy: true
 
       - name: Convert SARIF to markdown summary
         uses: ./.github/actions/convert-sarif-to-summary
