@@ -214,7 +214,7 @@ def test_ui_responsive_design(page: Page) -> None:
 
     # モバイルビューでの表示を確認
     # ハンバーガーメニューが表示されることを確認
-    hamburger_button: Final[Locator] = page.locator("div[data-testid='stSidebarCollapsedControl']").first
+    hamburger_button: Final[Locator] = page.locator("[data-testid='stExpandSidebarButton']").first
     expect(hamburger_button).to_be_visible()
 
     # デスクトップビューに戻す
