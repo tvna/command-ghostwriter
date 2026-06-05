@@ -261,7 +261,7 @@ tar -czf {{ file.name }}.tar.gz {{ file.path }}
 
 ## 開発者向けドキュメント
 
-開発に必要なコマンド集は[こちら](assets/docs/commands.md)を参照してください。
+開発に必要なコマンド集は[こちら](docs/runbooks/commands.md)を参照してください。
 
 ### Dev Containers (エージェント開発環境)
 
