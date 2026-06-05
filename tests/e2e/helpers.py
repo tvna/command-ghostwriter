@@ -36,7 +36,7 @@ import tempfile
 from typing import Dict, Final, List, Optional
 
 from box import Box
-from playwright.sync_api import FileChooser, Locator, Page, expect
+from playwright.sync_api import Locator, Page, expect
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 from i18n import LANGUAGES
@@ -349,14 +349,10 @@ class StreamlitTestHelper:
         upload_container: Final[Locator] = self.page.locator(upload_container_selector).first
         expect(upload_container).to_be_visible()
 
-        upload_button: Final[Locator] = upload_container.locator("button:has-text('Browse files')").first
-        expect(upload_button).to_be_visible()
+        file_input: Final[Locator] = upload_container.locator("input[type='file']").first
 
         test_file_path: str = TestData.get_test_file_path(file_name)
-        with self.page.expect_file_chooser() as fc_info:
-            upload_button.click()
-        file_chooser: Final[FileChooser] = fc_info.value
-        file_chooser.set_files(test_file_path)
+        file_input.set_input_files(test_file_path)
 
         self.wait_for_ui_stabilization()
 
@@ -448,26 +444,18 @@ class StreamlitTestHelper:
         assert len(upload_containers) > 1, "Not enough file uploaders found (expected at least 2)"
 
         config_upload_container: Final[Locator] = upload_containers[0]
-        config_upload_button: Final[Locator] = config_upload_container.locator("button:has-text('Browse files')").first
-        expect(config_upload_button).to_be_visible()
+        config_file_input: Final[Locator] = config_upload_container.locator("input[type='file']").first
 
         config_file_path: str = TestData.get_test_file_path(config_file)
-        with self.page.expect_file_chooser() as fc_info:
-            config_upload_button.click()
-        config_file_chooser: Final[FileChooser] = fc_info.value
-        config_file_chooser.set_files(config_file_path)
+        config_file_input.set_input_files(config_file_path)
 
         self.wait_for_ui_stabilization()
 
         jinja_upload_container: Final[Locator] = upload_containers[1]
-        jinja_upload_button: Final[Locator] = jinja_upload_container.locator("button:has-text('Browse files')").first
-        expect(jinja_upload_button).to_be_visible()
+        jinja_file_input: Final[Locator] = jinja_upload_container.locator("input[type='file']").first
 
         jinja_file_path: str = TestData.get_test_file_path(template_file)
-        with self.page.expect_file_chooser() as fc_info:
-            jinja_upload_button.click()
-        template_file_chooser: Final[FileChooser] = fc_info.value
-        template_file_chooser.set_files(jinja_file_path)
+        jinja_file_input.set_input_files(jinja_file_path)
 
         self.wait_for_ui_stabilization()
 
@@ -574,14 +562,10 @@ class StreamlitTestHelper:
         upload_container: Final[Locator] = tab_panel.locator("div[data-testid='stFileUploader']").first
         expect(upload_container).to_be_visible()
 
-        upload_button: Final[Locator] = upload_container.locator("button:has-text('Browse files')").first
-        expect(upload_button).to_be_visible()
+        file_input: Final[Locator] = upload_container.locator("input[type='file']").first
 
         test_file_path: str = TestData.get_test_file_path(file_name)
-        with self.page.expect_file_chooser() as fc_info:
-            upload_button.click()
-        file_chooser: Final[FileChooser] = fc_info.value
-        file_chooser.set_files(test_file_path)
+        file_input.set_input_files(test_file_path)
 
         self.page.wait_for_load_state("networkidle")
         self.page.wait_for_timeout(1000)

@@ -6,7 +6,7 @@
   ],
   "settings": {
     "cSpell.ignorePaths": [
-      "poetry.lock",
+      "uv.lock",
       "package-lock.json",
       "node_modules",
       "vscode-extension",
@@ -44,7 +44,6 @@
       "pycache",
       "pydantic",
       "pyodide",
-      "pypoetry",
       "pytest",
       "pyyaml",
       "rcfile",
@@ -53,8 +52,7 @@
       "stlite",
       "streamlit",
       "USERPROFILE",
-      "venv",
-      "virtualenvs"
+      "venv"
     ],
     "editor.bracketPairColorization.enabled": true,
     "editor.codeActionsOnSave": {},
@@ -88,7 +86,7 @@
       "htmlcov/**.js": true,
       "node_modules": true,
       "package-lock.json": false,
-      "poetry.lock": false,
+      "uv.lock": false,
       "pytestdebug.log": true,
       "requirements.txt": false,
       "tests/**/.benchmarks": true,
@@ -121,7 +119,6 @@
       "${workspaceFolder}/tests/e2e"
     ],
     "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
-    "python.poetryPath": "poetry",
     "python.testing.pytestArgs": ["tests"],
     "python.testing.pytestEnabled": true,
     "python.testing.unittestEnabled": false,

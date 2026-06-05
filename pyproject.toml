@@ -1,57 +1,63 @@
-[build-system]
-build-backend = "poetry.core.masonry.api"
-
-requires = [
-  "poetry-core",
+[project]
+name = "command-ghostwriter"
+version = "0.0.0"
+requires-python = ">=3.11,<4.0"
+dependencies = [
+  "streamlit>=1.47.0,<2",
+  "jinja2>=3.1.6,<4",
+  "pyyaml>=6.0.1,<7",
+  "chardet>=5.2.0,<6",
+  "python-box>=7.2.0,<8",
+  # Pinned to the 2.11 series for migrate-not-upgrade parity: tests/unit/test_document_render.py
+  # asserts pydantic's error-doc URL, which embeds the minor version (errors.pydantic.dev/2.11/).
+  # Lift the <2.12 ceiling in a dedicated upgrade PR that also updates that fixture.
+  "pydantic>=2.11.7,<2.12",
+  "toml>=0.10.2,<0.11",
+  "markupsafe>=3.0.2,<4",
 ]
 
-[tool.poetry]
-package-mode = false
+[dependency-groups]
+dev = [
+  "mypy>=1.17.0,<2",
+  "pytest>=8.4.1,<9",
+  "pytest-cov>=6.2.1,<7",
+  "types-toml>=0.10.8.20240310,<0.11",
+  "pre-commit>=4.2.0,<5",
+  "lizard>=1.17.31,<2",
+  "types-pyyaml>=6.0.12.20250516,<7",
+  "pydeps>=3.0.1,<4",
+  "pytest-playwright>=0.7.0,<0.8",
+  "ruff>=0.12.3,<0.13",
+  "pandas-stubs>=2.3.0.250703,<3",
+  "mock>=5.2.0,<6",
+  "gitpython>=3.1.44,<4",
+  "packaging>=25.0,<26",
+  "pytest-xdist>=3.8.0,<4",
+  "pytest-mock>=3.14.1,<4",
+  "psutil>=7.0.0,<8",
+  "pytest-randomly>=3.16.0,<4",
+  "pytest-benchmark==5.1.0",
+  "pytest-clarity>=1.0.1,<2",
+  "pygal>=3.0.5,<4",
+  "pytest-timeout>=2.4.0,<3",
+  "pyre-check>=0.9.25,<0.10",
+  "pytest-item-dict>=1.1.2,<2",
+  "pytest-xml>=0.1.1,<0.2",
+  "data-to-xml>=1.0.9,<2",
+  "vulture>=2.14,<3",
+  "yamllint>=1.37.1,<2",
+  "types-psutil>=7.0.0.20250601,<8",
+  "types-requests>=2.32.4.20250611,<3",
+]
+# devcontainer 専用の対話デバッガ。CI では同期しない（uv sync --group local で追加）。
+local = [
+  "pudb>=2025.1,<2026",
+]
 
-[tool.poetry.dependencies]
-python = ">=3.11, <4.0"
-streamlit = "^1.47.0"
-jinja2 = "^3.1.6"
-pyyaml = "^6.0.1"
-chardet = "^5.2.0"
-python-box = "^7.2.0"
-pydantic = "^2.11.7"
-toml = "^0.10.2"
-markupsafe = "^3.0.2"
-
-[tool.poetry.group.dev.dependencies]
-mypy = "^1.17.0"
-pytest = "^8.4.1"
-pytest-cov = "^6.2.1"
-types-toml = "^0.10.8.20240310"
-pre-commit = "^4.2.0"
-lizard = "^1.17.31"
-poetry-types = "^0.6.0"
-types-pyyaml = "^6.0.12.20250516"
-pydeps = "^3.0.1"
-pytest-playwright = "^0.7.0"
-ruff = "^0.12.3"
-pandas-stubs = "^2.3.0.250703"
-mock = "^5.2.0"
-gitpython = "^3.1.44"
-packaging = "^25.0"
-pudb = "^2025.1"
-pytest-xdist = "^3.8.0"
-pytest-mock = "^3.14.1"
-psutil = "^7.0.0"
-pytest-randomly = "^3.16.0"
-pytest-benchmark = "5.1.0"
-pytest-clarity = "^1.0.1"
-pygal = "^3.0.5"
-pytest-timeout = "^2.4.0"
-pyre-check = "^0.9.25"
-pytest-item-dict = "^1.1.2"
-pytest-xml = "^0.1.1"
-data-to-xml = "^1.0.9"
-vulture = "^2.14"
-yamllint = "^1.37.1"
-types-psutil = "^7.0.0.20250601"
-types-requests = "^2.32.4.20250611"
+[tool.uv]
+package = false
+# flake.nix がこの値を読む。実装時点の本環境 uv 0.8.17 を初期 pin とする。
+required-version = "==0.8.17"
 
 [tool.ruff]
 target-version = "py312"
