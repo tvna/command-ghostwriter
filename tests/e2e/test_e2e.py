@@ -212,10 +212,18 @@ def test_ui_responsive_design(page: Page) -> None:
     page.reload()
     page.wait_for_load_state("networkidle")
 
-    # モバイルビューでの表示を確認
-    # ハンバーガーメニューが表示されることを確認
-    hamburger_button: Final[Locator] = page.locator("div[data-testid='stSidebarCollapsedControl']").first
-    expect(hamburger_button).to_be_visible()
+    # モバイルビュー(<= breakpoints.sm = 576px)ではサイドバーの折りたたみボタンが
+    # 常時表示される。アプリは initial_sidebar_state="expanded" のため、
+    # Streamlit 1.58 はビューポート幅では自動折りたたみせず、サイドバーは開いたまま。
+    # そこで折りたたみボタンを押してサイドバーを閉じ、レスポンシブな
+    # 折りたたみ/展開コントロールが機能することを確認する。
+    collapse_button: Final[Locator] = page.locator("div[data-testid='stSidebarCollapseButton']").first
+    expect(collapse_button).to_be_visible()
+    collapse_button.click()
+
+    # サイドバーが折りたたまれると、ヘッダーに展開(ハンバーガー)ボタンが表示される
+    expand_button: Final[Locator] = page.locator("button[data-testid='stExpandSidebarButton']").first
+    expect(expand_button).to_be_visible()
 
     # デスクトップビューに戻す
     page.set_viewport_size({"width": 1280, "height": 720})
