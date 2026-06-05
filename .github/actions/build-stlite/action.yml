@@ -1,8 +1,8 @@
 # Workflow description:
-# 1. Restore cached electron-builder dependencies based on OS and package-lock.json.
-# 2. Run `npm run dump` (likely related to dependency preparation or configuration).
+# 1. Restore cached electron-builder dependencies based on OS and bun.lock.
+# 2. Run `bun run dump` (likely related to dependency preparation or configuration).
 # 3. Set GITHUB_TOKEN and GH_TOKEN environment variables using the provided input.
-# 4. Run `npm run dist` to build the application distribution.
+# 4. Run `bun run dist` to build the application distribution.
 # 5. Upload the built application artifact (`.exe` for Windows, `.dmg` for macOS).
 #
 # Usage example:
@@ -43,7 +43,7 @@ runs:
           %USERPROFILE%\.electron-builder
           ~/AppData/Local/electron/Cache
           ~/AppData/Local/electron-builder/Cache
-        key: ${{ runner.os }}-node-electron-builder-${{ hashFiles('**/package-lock.json') }}
+        key: ${{ runner.os }}-node-electron-builder-${{ hashFiles('**/bun.lock') }}
 
     - name: Restore cache electron-builder (MacOS)
       if: runner.os == 'MacOS'
@@ -56,7 +56,7 @@ runs:
           ~/.electron-builder
           ~/Library/Caches/electron/
           ~/Library/Caches/electron-builder/
-        key: ${{ runner.os }}-node-electron-builder-${{ hashFiles('**/package-lock.json') }}
+        key: ${{ runner.os }}-node-electron-builder-${{ hashFiles('**/bun.lock') }}
 
     - name: Restore cache electron-builder (Linux)
       uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
@@ -67,17 +67,17 @@ runs:
           ~/.cache/electron-builder
           ~/.electron
           ~/.electron-builder
-        key: ${{ runner.os }}-node-electron-builder-${{ hashFiles('**/package-lock.json') }}
+        key: ${{ runner.os }}-node-electron-builder-${{ hashFiles('**/bun.lock') }}
 
     - name: Dump package
       shell: bash
       run: |
-        npm run dump
+        bun run dump
 
     - name: Build
       shell: bash
       run: |
-        npm run dist
+        bun run dist
       env:
         GITHUB_TOKEN: ${{ inputs.github-token }}
         GH_TOKEN: ${{ inputs.github-token }}

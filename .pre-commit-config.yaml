@@ -43,7 +43,7 @@ repos:
           - "--indent=4"
         description: "Run 'pretty-format-json' for JSON formatting"
         files: \.json$|\.code-workspace$
-        exclude: ^package\.json$|^package-lock\.json$
+        exclude: ^package\.json$
       - id: destroyed-symlinks
         description: "Run 'destroyed-symlinks' for checking destroyed symlinks"
 
@@ -67,21 +67,21 @@ repos:
         language: system
         types: ["yaml"]
         files: ^\.github/
-        entry: npx prettier --parser="yaml" ./.github --write
+        entry: bunx prettier --parser="yaml" ./.github --write
       - id: prettier-other-yaml
         name: prettier-other-yml
         description: Runs system-installed prettier to lint other yaml files
         language: system
         types: ["yaml"]
         files: ^\.*\.yml$
-        entry: npx prettier --parser="yaml" "*.(yml|yaml)" --write
+        entry: bunx prettier --parser="yaml" "*.(yml|yaml)" --write
       - id: prettier-code-workspace
         name: prettier-code-workspace
         description: Runs system-installed prettier to lint code-workspace files
         language: system
         types: ["json"]
         files: ^\.*\.code-workspace$
-        entry: npx prettier --write --parser json --plugin prettier-plugin-sort-json command-ghostwriter.code-workspace
+        entry: bunx prettier --write --parser json --plugin prettier-plugin-sort-json command-ghostwriter.code-workspace
 
   - repo: https://github.com/tox-dev/pyproject-fmt
     rev: v2.5.1
@@ -161,7 +161,7 @@ repos:
     hooks:
       - id: pytest_without_e2e
         name: pytest (without e2e)
-        entry: pytest -vv -n auto -m "unit or integration or workflow" --disable-warnings --benchmark-disable
+        entry: uv run pytest -vv -n auto -m "unit or integration or workflow" --disable-warnings --benchmark-disable
         language: system
         pass_filenames: false
         types: [python]
@@ -169,7 +169,7 @@ repos:
       - id: lizard_combined
         name: lizard (check CCN for production codes)
         entry: |
-          poetry run lizard -l python -x "./node_modules/*" -x "./.venv/*" -x "./build/*"  -x "./dist/*"  --CCN "10"
+          uv run lizard -l python -x "./node_modules/*" -x "./.venv/*" -x "./build/*"  -x "./dist/*"  --CCN "10"
         language: system
         pass_filenames: false
         types: [python]

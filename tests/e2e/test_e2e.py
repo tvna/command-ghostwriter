@@ -42,7 +42,7 @@ from typing import Final, List
 
 import pytest
 from _pytest.mark.structures import MarkDecorator
-from playwright.sync_api import FileChooser, Locator, Page, expect
+from playwright.sync_api import Locator, Page, expect
 from pytest_benchmark.fixture import BenchmarkFixture  # type: ignore[import-untyped]
 
 from .helpers import StreamlitTestHelper, TestData, texts
@@ -97,8 +97,8 @@ def test_ui_input_field(page: Page, benchmark: BenchmarkFixture) -> None:
 
     def _check_input_fields() -> None:
         # ファイルアップロードボタンを見つける
-        upload_button: Final[Locator] = page.locator("button:has-text('Browse files')").first
-        expect(upload_button).to_be_visible()
+        upload_container: Final[Locator] = page.locator("div[data-testid='stFileUploader']").first
+        expect(upload_container).to_be_visible()
 
         # CLIコマンド生成ボタンを見つける
         cli_button: Final[Locator] = page.locator(f"button:has-text('{texts.tab1.generate_text_button}')").first
@@ -212,10 +212,18 @@ def test_ui_responsive_design(page: Page) -> None:
     page.reload()
     page.wait_for_load_state("networkidle")
 
-    # モバイルビューでの表示を確認
-    # ハンバーガーメニューが表示されることを確認
-    hamburger_button: Final[Locator] = page.locator("div[data-testid='stSidebarCollapsedControl']").first
-    expect(hamburger_button).to_be_visible()
+    # モバイルビュー(<= breakpoints.sm = 576px)ではサイドバーの折りたたみボタンが
+    # 常時表示される。アプリは initial_sidebar_state="expanded" のため、
+    # Streamlit 1.58 はビューポート幅では自動折りたたみせず、サイドバーは開いたまま。
+    # そこで折りたたみボタンを押してサイドバーを閉じ、レスポンシブな
+    # 折りたたみ/展開コントロールが機能することを確認する。
+    collapse_button: Final[Locator] = page.locator("div[data-testid='stSidebarCollapseButton']").first
+    expect(collapse_button).to_be_visible()
+    collapse_button.click()
+
+    # サイドバーが折りたたまれると、ヘッダーに展開(ハンバーガー)ボタンが表示される
+    expand_button: Final[Locator] = page.locator("button[data-testid='stExpandSidebarButton']").first
+    expect(expand_button).to_be_visible()
 
     # デスクトップビューに戻す
     page.set_viewport_size({"width": 1280, "height": 720})
@@ -486,18 +494,14 @@ def test_file_upload_in_tab1(page: Page, benchmark: BenchmarkFixture) -> None:
     expect(upload_container).to_be_visible()
 
     # ファイルアップロードボタンを見つける
-    upload_button: Locator = page.locator("button:has-text('Browse files')").first
-    expect(upload_button).to_be_visible()
+    file_input: Final[Locator] = upload_container.locator("input[type='file']").first
 
     # テスト用のファイルパスを指定
     test_file_path: Final[str] = TestData.get_test_file_path("sample.txt")
 
     def _execute() -> None:
         # ファイルアップロード処理
-        with page.expect_file_chooser() as fc_info:
-            upload_button.click()
-        file_chooser: FileChooser = fc_info.value
-        file_chooser.set_files(test_file_path)
+        file_input.set_input_files(test_file_path)
 
         # アップロード後の処理を待機
         page.wait_for_load_state("networkidle")
@@ -543,18 +547,14 @@ def test_jinja_template_upload_in_tab1(page: Page, benchmark: BenchmarkFixture) 
     expect(upload_label).to_contain_text(texts.tab1.upload_template)
 
     # ファイルアップロードボタンを見つける
-    upload_button: Final[Locator] = jinja_upload_container.locator("button:has-text('Browse files')").first
-    expect(upload_button).to_be_visible()
+    file_input: Final[Locator] = jinja_upload_container.locator("input[type='file']").first
 
     # テスト用のファイルパスを指定
     test_file_path: Final[str] = TestData.get_test_file_path("sample.txt")
 
     def _execute() -> None:
         # ファイルアップロード処理
-        with page.expect_file_chooser() as fc_info:
-            upload_button.click()
-        file_chooser: FileChooser = fc_info.value
-        file_chooser.set_files(test_file_path)
+        file_input.set_input_files(test_file_path)
 
         # アップロード後の処理を待機
         page.wait_for_load_state("networkidle")
@@ -614,18 +614,14 @@ def test_file_upload_parametrized_in_tab1(
     assert upload_container.count() > 0, "File uploader element not found"
 
     # ファイルアップロードボタンを見つける
-    upload_button: Final[Locator] = upload_container.locator("button:has-text('Browse files')").first
-    expect(upload_button).to_be_visible()
+    file_input: Final[Locator] = upload_container.locator("input[type='file']").first
 
     # テスト用のファイルパスを準備
     test_file_path: Final[str] = TestData.get_test_file_path(file_name)
 
     def _execute() -> None:
         # Act: ファイルをアップロード
-        with page.expect_file_chooser() as fc_info:
-            upload_button.click()
-        file_chooser: FileChooser = fc_info.value
-        file_chooser.set_files(test_file_path)
+        file_input.set_input_files(test_file_path)
 
         # ページの読み込みを待機 - 待機時間を増やす
         page.wait_for_load_state("networkidle")

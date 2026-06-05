@@ -42,17 +42,17 @@ cd $env:PROGRAMDATA
 git clone https://github.com/tvna/streamlit-command-ghostwriter.git
 cd streamlit-command-ghostwriter
 
-(Invoke-WebRequest -Uri https://install.python-poetry.org -UseBasicParsing).Content | python -
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 
 [System.Environment]::SetEnvironmentVariable('path', $env:APPDATA + "\Python\Scripts;" + [System.Environment]::GetEnvironmentVariable('path', "User"),"User")
 
-poetry install
+uv sync
 ```
 
 3. 下記のコマンドでWebアプリを起動
 ```ps1
 cd $env:PROGRAMDATA\streamlit-command-ghostwriter
-poetry run streamlit app.py
+uv run streamlit run app.py
 ```
 
 まずはサンプルファイルをアップロードして、「CLIコマンド生成」をクリックした結果を確認してみてください。
@@ -262,6 +262,14 @@ tar -czf {{ file.name }}.tar.gz {{ file.path }}
 ## 開発者向けドキュメント
 
 開発に必要なコマンド集は[こちら](docs/runbooks/commands.md)を参照してください。
+
+### Dev Containers (エージェント開発環境)
+
+Claude / Codex の各エージェント向けに、ツールチェーンを nix flake で固定した build-on-open 方式の開発コンテナを用意しています。
+
+- VS Code の「Dev Containers: Reopen in Container」で、`.devcontainer/claude`（Claude 用）または `.devcontainer/codex`（Codex 用）を選択して起動します。
+- 初回起動時はベースイメージへの nix 導入とツールチェーンのビルドが走るため、起動完了まで時間がかかります。
+- Streamlit アプリは自動起動しません。コンテナ内で `uv run streamlit run app.py` を実行し、フォワードされたポート 8502 で確認してください。
 
 [streamlit-img]: https://img.shields.io/badge/-Streamlit-FF4B4B?style=flat&logo=streamlit&logoColor=white
 [streamlit-cloud-img]: https://static.streamlit.io/badges/streamlit_badge_black_white.svg

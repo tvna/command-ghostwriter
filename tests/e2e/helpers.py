@@ -36,7 +36,7 @@ import tempfile
 from typing import Dict, Final, List, Optional
 
 from box import Box
-from playwright.sync_api import FileChooser, Locator, Page, expect
+from playwright.sync_api import Locator, Page, expect
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 from i18n import LANGUAGES
@@ -258,10 +258,13 @@ show startup-config"""
         """
         content: Final[str] = cls._get_file_content(file_name)
 
-        fd: int
-        path: str
-        fd, path = tempfile.mkstemp(suffix=f"_{file_name}")
-        with os.fdopen(fd, "w") as f:
+        # Streamlit のアップローダはファイル名が長いと中央を "..." で省略表示するため、
+        # mkstemp の "tmpXXXXXX_<name>" 形式ではアップロード後の表示名に元のファイル名が
+        # 残らず、表示名の検証 (file_name in displayed_text) が失敗する。
+        # 一時ディレクトリ配下に元のファイル名そのままで作成し、basename を保持する。
+        tmp_dir: str = tempfile.mkdtemp()
+        path: str = os.path.join(tmp_dir, file_name)
+        with open(path, "w") as f:
             f.write(content)
 
         return path
@@ -349,14 +352,10 @@ class StreamlitTestHelper:
         upload_container: Final[Locator] = self.page.locator(upload_container_selector).first
         expect(upload_container).to_be_visible()
 
-        upload_button: Final[Locator] = upload_container.locator("button:has-text('Browse files')").first
-        expect(upload_button).to_be_visible()
+        file_input: Final[Locator] = upload_container.locator("input[type='file']").first
 
         test_file_path: str = TestData.get_test_file_path(file_name)
-        with self.page.expect_file_chooser() as fc_info:
-            upload_button.click()
-        file_chooser: Final[FileChooser] = fc_info.value
-        file_chooser.set_files(test_file_path)
+        file_input.set_input_files(test_file_path)
 
         self.wait_for_ui_stabilization()
 
@@ -444,38 +443,61 @@ class StreamlitTestHelper:
             - 各ファイルのアップロードを実行
             - アップロード後のファイル名表示を確認
         """
-        upload_containers: Final[List[Locator]] = self.page.locator("div[data-testid='stFileUploader']").all()
+        uploaders: Final[Locator] = self.page.locator("div[data-testid='stFileUploader']")
+        # webkit など描画の遅い環境では .all() 実行時に2つ目のアップローダがまだ
+        # 描画されておらず "Not enough file uploaders" となるフレーキーが発生するため、
+        # 2つ目が DOM に出現するまで待ってから取得する。
+        expect(uploaders.nth(1)).to_be_attached()
+        upload_containers: Final[List[Locator]] = uploaders.all()
         assert len(upload_containers) > 1, "Not enough file uploaders found (expected at least 2)"
 
         config_upload_container: Final[Locator] = upload_containers[0]
-        config_upload_button: Final[Locator] = config_upload_container.locator("button:has-text('Browse files')").first
-        expect(config_upload_button).to_be_visible()
+        config_file_input: Final[Locator] = config_upload_container.locator("input[type='file']").first
 
         config_file_path: str = TestData.get_test_file_path(config_file)
-        with self.page.expect_file_chooser() as fc_info:
-            config_upload_button.click()
-        config_file_chooser: Final[FileChooser] = fc_info.value
-        config_file_chooser.set_files(config_file_path)
+        config_file_input.set_input_files(config_file_path)
 
         self.wait_for_ui_stabilization()
 
         jinja_upload_container: Final[Locator] = upload_containers[1]
-        jinja_upload_button: Final[Locator] = jinja_upload_container.locator("button:has-text('Browse files')").first
-        expect(jinja_upload_button).to_be_visible()
+        jinja_file_input: Final[Locator] = jinja_upload_container.locator("input[type='file']").first
 
         jinja_file_path: str = TestData.get_test_file_path(template_file)
-        with self.page.expect_file_chooser() as fc_info:
-            jinja_upload_button.click()
-        template_file_chooser: Final[FileChooser] = fc_info.value
-        template_file_chooser.set_files(jinja_file_path)
+        jinja_file_input.set_input_files(jinja_file_path)
 
         self.wait_for_ui_stabilization()
 
-        config_text: Final[str] = config_upload_container.inner_text()
-        assert config_file in config_text, f"Config file name not displayed.\nExpected: {config_file}\nActual text: {config_text}"
+        config_name: Final[str] = self.get_uploaded_file_name(config_upload_container)
+        assert config_file == config_name, f"Config file name not displayed.\nExpected: {config_file}\nActual: {config_name}"
 
-        jinja_text = jinja_upload_container.inner_text()
-        assert template_file in jinja_text, f"Template file name not displayed.\nExpected: {template_file}\nActual text: {jinja_text}"
+        jinja_name: Final[str] = self.get_uploaded_file_name(jinja_upload_container)
+        assert template_file == jinja_name, f"Template file name not displayed.\nExpected: {template_file}\nActual: {jinja_name}"
+
+    def get_uploaded_file_name(self, upload_container: Locator) -> str:
+        """アップロード済みファイルチップから完全なファイル名を取得.
+
+        Args:
+            upload_container: ファイルアップローダー要素のLocator
+
+        Returns:
+            str: アップロードされたファイルの完全な名前
+
+        Raises:
+            AssertionError: ファイル名チップまたはtitle属性が存在しない場合
+
+        Note:
+            Streamlit 1.58のファイルアップローダーは表示テキストを中央省略する
+            (例: ``cisco_template.jinja2`` -> ``cisco...plate.jinja2``)。
+            このため可視テキストではなく、完全なファイル名を保持する
+            ``[data-testid='stFileChipName']`` の ``title`` 属性から読み取る。
+        """
+        name_chip: Final[Locator] = upload_container.locator("[data-testid='stFileChipName']").first
+        expect(name_chip).to_be_visible()
+
+        file_name: Final[Optional[str]] = name_chip.get_attribute("title")
+        assert file_name is not None, "Uploaded file chip is missing its title attribute"
+
+        return file_name
 
     def get_display_button(self, display_format: str) -> Locator:
         """表示形式に応じたボタンを取得.
@@ -574,14 +596,10 @@ class StreamlitTestHelper:
         upload_container: Final[Locator] = tab_panel.locator("div[data-testid='stFileUploader']").first
         expect(upload_container).to_be_visible()
 
-        upload_button: Final[Locator] = upload_container.locator("button:has-text('Browse files')").first
-        expect(upload_button).to_be_visible()
+        file_input: Final[Locator] = upload_container.locator("input[type='file']").first
 
         test_file_path: str = TestData.get_test_file_path(file_name)
-        with self.page.expect_file_chooser() as fc_info:
-            upload_button.click()
-        file_chooser: Final[FileChooser] = fc_info.value
-        file_chooser.set_files(test_file_path)
+        file_input.set_input_files(test_file_path)
 
         self.page.wait_for_load_state("networkidle")
         self.page.wait_for_timeout(1000)

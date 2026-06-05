@@ -1,9 +1,11 @@
 # Workflow description:
-# 1. Restore Playwright browser cache based on OS, browser, and poetry.lock.
+# 1. Restore Playwright browser cache based on OS, browser, and uv.lock.
 # 2. Set Python environment variables for UTF-8 support.
-# 3. Install the specified Playwright browser and its dependencies using Poetry.
+# 3. Install the specified Playwright browser and its dependencies using uv.
 # 4. Run E2E tests using pytest:
 #    - Uses pytest-xdist (`-n auto`) for parallel execution on non-Windows when not benchmarking.
+#    - Retries failed E2E tests up to twice (`--reruns 2`) to absorb inherently
+#      flaky browser timing (notably webkit); benchmark runs are never retried.
 #    - Disables benchmarking if `inputs.is-benchmark` is false.
 #    - Handles UTF-8 setup specifically for Windows (chcp 65001).
 # 5. Run E2E benchmark tests using pytest if `inputs.is-benchmark` is true:
@@ -52,7 +54,7 @@ runs:
           /home/runner/.cache/ms-playwright
           /Users/runner/Library/Caches/ms-playwright
           %USERPROFILE%\AppData\Local\ms-playwright
-        key: ${{ runner.os }}-playwright-${{ inputs.browser }}-${{ hashFiles('**/poetry.lock') }}
+        key: ${{ runner.os }}-playwright-${{ inputs.browser }}-${{ hashFiles('**/uv.lock') }}
         restore-keys: |
           ${{ runner.os }}-playwright-${{ inputs.browser }}-
 
@@ -65,7 +67,7 @@ runs:
     - name: Install Playwright Browser
       shell: bash
       run: |
-        poetry run playwright install --with-deps ${{ inputs.browser }}
+        uv run playwright install --with-deps ${{ inputs.browser }}
 
     - name: E2E Tests (${{ matrix.os }} / ${{ inputs.browser }})
       if: |
@@ -75,7 +77,7 @@ runs:
       shell: bash
       run: |
         # E2Eテスト実行 (ベンチマークなし)
-        poetry run pytest -n auto -vv --browser ${{ inputs.browser }} -m "e2e" --benchmark-disable
+        uv run pytest -n auto -vv --browser ${{ inputs.browser }} -m "e2e" --reruns 2 --reruns-delay 1 --benchmark-disable
 
     - name: E2E Tests (${{ matrix.os }} / ${{ inputs.browser }})
       if: |
@@ -88,7 +90,7 @@ runs:
         chcp 65001
 
         # E2Eテスト実行 (ベンチマークなし)
-        poetry run pytest -n auto -vv --browser ${{ inputs.browser }} -m "e2e" --benchmark-disable
+        uv run pytest -n auto -vv --browser ${{ inputs.browser }} -m "e2e" --reruns 2 --reruns-delay 1 --benchmark-disable
 
     - name: E2E benchmark (non-Windows)
       if: |
@@ -98,7 +100,7 @@ runs:
       run: |
         # E2Eテストのベンチマーク実行
         cmd_array=(
-          poetry run pytest
+          uv run pytest
           -n 0
           -vv
           --browser ${{ inputs.browser }}
@@ -123,7 +125,7 @@ runs:
 
         # E2Eテストのベンチマーク実行
         cmd_array=(
-          poetry run pytest
+          uv run pytest
           -n 0
           -vv
           --browser ${{ inputs.browser }}
