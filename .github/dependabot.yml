@@ -21,10 +21,10 @@ updates:
       timezone: "Asia/Tokyo"
     target-branch: develop
 
-  - package-ecosystem: npm
+  - package-ecosystem: bun
     directory: /
     groups:
-      npm:
+      bun:
         patterns:
           - "*"
     security-updates: true

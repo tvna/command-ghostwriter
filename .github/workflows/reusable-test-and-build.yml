@@ -383,13 +383,13 @@ jobs:
         with:
           node-version: ${{ env.GLOBAL_NODE_VERSION }}
 
-      - name: Run npm audit
+      - name: Run bun audit
         run: |
-          # npm auditを実行 (高リスクの脆弱性のみ失敗とする)
-          npm audit --production --audit-level=high || {
+          # bun auditを実行 (高リスクの脆弱性のみ失敗とする)
+          bun audit --prod --audit-level=high || {
             echo "::warning::High severity vulnerabilities found in production dependencies"
             echo "⚠️ High severity vulnerabilities found in production dependencies"
-            npm audit --production --audit-level=high
+            bun audit --prod --audit-level=high
           }
 
       # trivy-action のデフォルト導入経路 (setup-trivy -> contrib/install.sh) は

@@ -21,7 +21,7 @@
         "ccn": "uv run lizard -l python --CCN '10'",
         "zap": "docker run --rm -v $(pwd):/zap/wrk/:rw --add-host=host.docker.internal:host-gateway ghcr.io/zaproxy/zaproxy:stable zap-full-scan.py -t http://host.docker.internal:8501 -r report.html -d",
         "scan": "pre-commit run --all-files",
-        "commit": "pre-commit run && npx cz"
+        "commit": "pre-commit run && bunx cz"
     },
     "build": {
         "files": [
