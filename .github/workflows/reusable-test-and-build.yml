@@ -579,7 +579,10 @@ jobs:
           - os: ubuntu-latest
             browser: firefox
             marker: "e2e"
-          - os: ubuntu-latest
+          # webkit-on-ubuntu crashes at launch (TargetClosedError); run webkit
+          # on macOS (its native engine, proven stable) instead. chromium and
+          # firefox remain on ubuntu (fast, 1x). See sub-2 / #361.
+          - os: macos-latest
             browser: webkit
             marker: "e2e"
           - os: windows-latest
