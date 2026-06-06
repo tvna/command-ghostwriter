@@ -197,6 +197,19 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Guard against leftover E2E egress audit spike
+        run: |
+          # sub-2 (#361): the ubuntu E2E egress spike must never merge in audit
+          # mode. Every job must use the block env default; fail loudly if any
+          # harden-runner step in this reusable workflow hardcodes audit.
+          # Anchor to the YAML key position (line start + indent) so this guard
+          # does not match the literal audit string inside its own messages.
+          if grep -nE "^[[:space:]]*egress-policy:[[:space:]]*audit([[:space:]]|#|$)" .github/workflows/reusable-test-and-build.yml; then
+            echo "::error::reusable-test-and-build.yml pins a harden-runner egress policy to the audit mode; revert it to the block default (env.HARDEN_RUNNER_EGRESS_POLICY)."
+            exit 1
+          fi
+          echo "OK: every harden-runner egress policy resolves to the block default"
+
       - name: Lint yaml files by yamllint
         run: |
           CONFIG="${RUNNER_TEMP}/.yamllint.yml"
@@ -595,19 +608,28 @@ jobs:
       - name: Harden Runner
         uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
-          # NOTE: SPIKE (sub-2 / #361). ubuntu では harden-runner が実効化するため、
-          # まず audit で必要エンドポイントを実測する。後続タスクで block に戻す。
-          egress-policy: audit
+          # ubuntu の E2E では harden-runner が実効化する (macOS/Windows では no-op)。
+          # block を維持し、許可エンドポイントは audit insights (sub-2 / #361) で実測した
+          # 最小集合に限定する: python(uv), playwright CDN, apt ミラー(ubuntu/microsoft/
+          # google), actions cache, Streamlit。GH/harden 内部は block 時に既定許可。
+          egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: false
           allowed-endpoints: >
             ${{ env.EP_GITHUB_CORE }}
             ${{ env.EP_PYTHON }}
             ${{ env.EP_NODE }}
             ${{ env.EP_PLAYWRIGHT }}
+            codeload.github.com:443
+            storage.googleapis.com:443
             azure.archive.ubuntu.com:80
             archive.ubuntu.com:80
             security.ubuntu.com:80
             esm.ubuntu.com:443
+            motd.ubuntu.com:443
+            packages.microsoft.com:443
+            dl.google.com:443
+            checkip.amazonaws.com:443
+            data.streamlit.io:443
 
       - name: Check out git repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
