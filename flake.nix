@@ -123,7 +123,7 @@ EOF
           pkgs = import nixpkgs { inherit system; };
           agentPackages = mkPackages system;
           sharedPackages = with pkgs; [
-            bashInteractive cacert coreutils fd gh git jq nodejs_22 python311 ripgrep
+            bashInteractive bun cacert coreutils fd gh git jq nodejs_22 python311 ripgrep
             agentPackages.pinned-uv
           ];
           pythonQualityPackages = with pkgs; [ mypy ruff python311Packages.pytest-xdist ];
@@ -136,7 +136,7 @@ EOF
         in
         {
           default = mkAgentShell "shared" [ ];
-          claude = mkAgentShell "claude" [ agentPackages.claude-cli pkgs.nodePackages.npm ];
+          claude = mkAgentShell "claude" [ agentPackages.claude-cli ];
           codex = mkAgentShell "codex" [ agentPackages.bubblewrap agentPackages.codex-cli pkgs.nodePackages.pnpm ];
           network = pkgs.mkShell { packages = networkPackages; };
         };
