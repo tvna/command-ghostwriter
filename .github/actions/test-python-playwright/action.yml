@@ -40,6 +40,10 @@ inputs:
     description: "Whether to run benchmark tests"
     required: false
     default: "false"
+  test-marker:
+    description: "pytest marker expression for E2E selection"
+    required: false
+    default: "e2e"
 
 runs:
   using: "composite"
@@ -77,7 +81,7 @@ runs:
       shell: bash
       run: |
         # E2Eテスト実行 (ベンチマークなし)
-        uv run pytest -n auto -vv --browser ${{ inputs.browser }} -m "e2e" --reruns 2 --reruns-delay 1 --benchmark-disable
+        uv run pytest -n auto -vv --browser ${{ inputs.browser }} -m "${{ inputs.test-marker }}" --reruns 2 --reruns-delay 1 --benchmark-disable
 
     - name: E2E Tests (${{ matrix.os }} / ${{ inputs.browser }})
       if: |
@@ -90,7 +94,7 @@ runs:
         chcp 65001
 
         # E2Eテスト実行 (ベンチマークなし)
-        uv run pytest -n auto -vv --browser ${{ inputs.browser }} -m "e2e" --reruns 2 --reruns-delay 1 --benchmark-disable
+        uv run pytest -n auto -vv --browser ${{ inputs.browser }} -m "${{ inputs.test-marker }}" --reruns 2 --reruns-delay 1 --benchmark-disable
 
     - name: E2E benchmark (non-Windows)
       if: |
