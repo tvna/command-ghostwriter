@@ -158,6 +158,7 @@ markers = [
   "integration: mark a test as an integration test.",
   "e2e: mark a test as an end-to-end test",
   "benchmark: mark a test for benchmarking",
+  "smoke: mark a minimal subset run on Windows for OS-specific regression",
 ]
 
 [tool.coverage.run]

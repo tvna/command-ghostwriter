@@ -51,6 +51,7 @@ E2E: MarkDecorator = pytest.mark.e2e
 
 
 @E2E
+@pytest.mark.smoke
 def test_ui_app_title(page: Page, benchmark: BenchmarkFixture) -> None:
     """アプリケーションのタイトル表示をテスト.
 
@@ -414,6 +415,7 @@ def test_tab_navigation_parametrized(page: Page, tab_name: str, expected_element
             "cisco_template.jinja2",
             texts.tab1.generate_text_button,
             id="e2e_command_gen_with_cisco_config_to_file",
+            marks=pytest.mark.smoke,
         ),
         pytest.param(
             "cisco_config.toml",
@@ -469,6 +471,7 @@ def test_command_generation_parametrized_in_tab1(
 
 
 @E2E
+@pytest.mark.smoke
 def test_file_upload_in_tab1(page: Page, benchmark: BenchmarkFixture) -> None:
     """ファイルアップロード機能をテスト.
 
