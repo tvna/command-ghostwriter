@@ -152,6 +152,12 @@ addopts = [
   "--maxfail=10",
   "--durations=30",
   "--import-mode=importlib",
+  # ローカルも既定で並列実行 (pytest-randomly が順序非依存を担保)。
+  # benchmark 計測や pdb デバッグ時は `-n0` で並列を無効化すること。
+  "-n",
+  "auto",
+  "--dist",
+  "load",
 ]
 markers = [
   "unit: mark a test as a unit test.",
