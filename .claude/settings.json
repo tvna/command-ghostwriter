@@ -10,6 +10,16 @@
             "async": false
           }
         ]
+      },
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/git-identity-session-start.sh",
+            "async": false
+          }
+        ]
       }
     ]
   }
