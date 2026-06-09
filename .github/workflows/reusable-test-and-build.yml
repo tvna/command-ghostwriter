@@ -310,6 +310,10 @@ jobs:
         run: |
           uv run ruff check . -v
 
+      - name: Check pyproject.toml formatting
+        run: |
+          uv run pre-commit run pyproject-fmt --all-files
+
       - name: Run Vulture
         run: |
           uv run vulture
