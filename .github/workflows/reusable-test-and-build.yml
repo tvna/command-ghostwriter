@@ -489,7 +489,7 @@ jobs:
           # 通常のテスト実行 (カバレッジなし、ベンチマークなし)
           cmd_array=(
             uv run pytest -n auto
-            --dist loadfile
+            --dist load
             --durations=10
             --cache-clear
             --verbose -k 'not e2e'
@@ -543,7 +543,7 @@ jobs:
             --cov=i18n.py
             --cov-report=xml
             --cov-report=term
-            --dist loadfile
+            --dist load
             --junitxml=junit.xml
             -n auto
             -k "not e2e"
