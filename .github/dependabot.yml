@@ -34,10 +34,10 @@ updates:
       timezone: "Asia/Tokyo"
     target-branch: develop
 
-  - package-ecosystem: pip
+  - package-ecosystem: uv
     directory: /
     groups:
-      pip:
+      uv:
         patterns:
           - "*"
     security-updates: true
