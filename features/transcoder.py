@@ -1,11 +1,8 @@
 from io import BytesIO
-from typing import TYPE_CHECKING, ClassVar, Final, List, Optional
+from typing import ClassVar, Final, List, Optional
 
 import chardet
 from pydantic import BaseModel, PrivateAttr
-
-if TYPE_CHECKING:
-    from chardet.resultdict import ResultDict
 
 
 class TextTranscoder(BaseModel):
@@ -56,21 +53,24 @@ class TextTranscoder(BaseModel):
         import_file: Final[BytesIO] = self._import_file
         import_file.seek(0)
         raw_data: Final[bytes] = import_file.getvalue()
-        result: ResultDict = chardet.detect(raw_data)
+        result: Final[chardet.DetectionDict] = chardet.detect(raw_data)
         encoding: Final[Optional[str]] = result["encoding"]
 
         # 日本語に関連するエンコーディングを優先する
         if encoding in self.KNOWN_ENCODES:
             return encoding
 
-        # 他のエンコーディングを試す
+        # 対応エンコーディングを順に試す
         for enc in self.KNOWN_ENCODES:
             try:
                 raw_data.decode(enc)
                 return enc
             except (UnicodeDecodeError, LookupError):
                 continue
-        return encoding
+
+        # 対応エンコーディングのいずれでもデコードできない入力は非テキストとして扱う。
+        # chardetの低信頼度な推測(バージョン依存)をそのまま返さない。
+        return None
 
     def __convert_to_new_encode(self: "TextTranscoder", new_encode: str) -> Optional[BytesIO]:
         """

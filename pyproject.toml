@@ -6,7 +6,7 @@ dependencies = [
   "streamlit>=1.58.0,<2",
   "jinja2>=3.1.6,<4",
   "pyyaml>=6.0.3,<7",
-  "chardet>=5.2.0,<6",
+  "chardet>=7.4.3,<8",
   "python-box>=7.4.1,<8",
   # pydantic's error-doc URL embeds the minor version (errors.pydantic.dev/2.13/), asserted in
   # tests/unit/test_document_render.py. When bumping pydantic's minor version, update that fixture
