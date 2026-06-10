@@ -27,9 +27,9 @@ publish date <= 2026-06-03):
 | @commitlint/cz-commitlint | ^19.8.1 | ^21.0.2 | 2026-05-29 | |
 | @stlite/desktop | ^0.85.1 | ^0.101.0 | 2026-05-30 | build core, 0.x |
 | cross-env | ^7.0.3 | ^10.1.0 | 2025-09-29 | major +3 |
-| electron | ^37.2.3 | ^42.3.2 | 2026-06-02 | 42.4.0 too new |
-| electron-builder | ^26.0.12 | ^26.14.0 | 2026-06-02 | 26.15.2 too new |
-| prettier | ^3.6.2 | ^3.8.3 | 2026-04-15 | 3.8.4 too new |
+| electron | ^37.2.3 | 42.3.2 (exact) | 2026-06-02 | 42.4.0 too new |
+| electron-builder | ^26.0.12 | 26.14.0 (exact) | 2026-06-02 | 26.15.2 too new |
+| prettier | ^3.6.2 | 3.8.3 (exact) | 2026-04-15 | 3.8.4 too new |
 | prettier-plugin-sort-json | ^4.1.1 | ^4.2.0 | 2026-01-13 | |
 | rimraf | ^6.0.1 | ^6.1.3 | 2026-02-16 | |
 | commitizen | ^4.3.1 | ^4.3.1 | 2024-09-27 | already eligible-latest |
@@ -40,8 +40,14 @@ Cooldown-excluded (published within 7 days): electron 42.4.0, electron-builder
 ## Design (approved)
 
 ### A. devDependency bumps
-Apply the eligible targets above via `bun add -d <pkg>@<ver>` (caret ranges),
-which updates `package.json` and `bun.lock` together. commitizen is left as-is.
+Apply the eligible targets above via `bun add -d <pkg>@<ver>`, which updates
+`package.json` and `bun.lock` together. commitizen is left as-is.
+
+electron, electron-builder, and prettier are pinned EXACTLY (no caret), because
+their newest release is younger than the 7-day cooldown; a caret range would let
+`bun install` adopt the excluded version (e.g. `^42.3.2` permits 42.4.0). The
+remaining packages keep caret ranges, since their cooldown-eligible target is
+already the newest published version.
 
 ### B. bun-migration remnant cleanup
 - Remove `husky` and `lint-staged` from devDependencies. They are vestigial:
