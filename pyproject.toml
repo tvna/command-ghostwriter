@@ -6,11 +6,11 @@ dependencies = [
   "streamlit>=1.58.0,<2",
   "jinja2>=3.1.6,<4",
   "pyyaml>=6.0.3,<7",
-  "chardet>=7.4.3,<8",
+  "chardet>=5.2.0,<6",
   "python-box>=7.4.1,<8",
-  # Pinned to the 2.11 series for migrate-not-upgrade parity: tests/unit/test_document_render.py
-  # asserts pydantic's error-doc URL, which embeds the minor version (errors.pydantic.dev/2.11/).
-  # Lift the <2.12 ceiling in a dedicated upgrade PR that also updates that fixture.
+  # pydantic's error-doc URL embeds the minor version (errors.pydantic.dev/2.13/), asserted in
+  # tests/unit/test_document_render.py. When bumping pydantic's minor version, update that fixture
+  # in lockstep or the render error-message assertions break.
   "pydantic>=2.13.4,<2.14",
   "toml>=0.10.2,<0.11",
   "markupsafe>=3.0.3,<4",
