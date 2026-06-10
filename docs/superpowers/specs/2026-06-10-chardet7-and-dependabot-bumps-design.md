@@ -27,7 +27,7 @@ chardet 7. Exactly 11 tests fail, in three groups:
 | Empty (8 cases) | `b""` | None -> fallback -> `ASCII` | `utf-8` (conf 0.1, in KNOWN, short-circuits) | converted output identical (empty) |
 | high_ascii | `b"\x80\x81\x82\x83"` | None | `cp862` (conf 0.017) -> echoed by final fallback | 4 garbage bytes |
 | large_binary | `b"\xff"*1000` | `ISO-8859-1` | `Windows-1251` -> echoed by final fallback | pure binary noise |
-| music_symbol | `"Hello♪World"` utf-8 | mis-detected `Shift_JIS` (no-op round-trip) | correctly `utf-8`, converts note to `\x81\xf4` | chardet 7 is correct |
+| music_symbol | `"Hello♪World"` utf-8 | wrongly detected `Shift_JIS` (no-op round-trip) | correctly `utf-8`, converts note to `\x81\xf4` | chardet 7 is correct |
 
 `detect_encoding` trusts chardet only when it returns one of
 `KNOWN_ENCODES = ["ASCII", "Shift_JIS", "EUC-JP", "ISO-2022-JP", "utf-8"]`
