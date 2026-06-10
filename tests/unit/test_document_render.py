@@ -1299,13 +1299,13 @@ def create_template_file() -> Callable[[bytes, str], BytesIO]:
                 "Template security error: 1 validation error for RangeConfig\n"
                 "step\n"
                 "  Input should be greater than 0 [type=greater_than, input_value=0, input_type=int]\n"
-                "    For further information visit https://errors.pydantic.dev/2.11/v/greater_than"
+                "    For further information visit https://errors.pydantic.dev/2.13/v/greater_than"
             ),
             (
                 "Template security error: 1 validation error for RangeConfig\n"
                 "step\n"
                 "  Input should be greater than 0 [type=greater_than, input_value=0, input_type=int]\n"
-                "    For further information visit https://errors.pydantic.dev/2.11/v/greater_than"
+                "    For further information visit https://errors.pydantic.dev/2.13/v/greater_than"
             ),
             id="test_render_failure_invalid_range_step_zero_strict",
         ),
