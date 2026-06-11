@@ -112,11 +112,14 @@ jobs:
           curl --fail --location --silent --show-error -o apm.tar.gz "${url}"
           echo "${APM_SHA256}  apm.tar.gz" | sha256sum --check --strict
           mkdir -p "${RUNNER_TEMP}/apm"
-          tar -xzf apm.tar.gz -C "${RUNNER_TEMP}/apm"
+          # The archive nests everything under apm-linux-x86_64/; strip that
+          # leading component so the apm binary and its _internal/ sibling land
+          # directly in ${RUNNER_TEMP}/apm, which we add to PATH.
+          tar -xzf apm.tar.gz --strip-components=1 -C "${RUNNER_TEMP}/apm"
           echo "${RUNNER_TEMP}/apm" >> "${GITHUB_PATH}"
 
       - name: Redeploy superpowers skills from the pinned commit
-        run: "${RUNNER_TEMP}/apm/apm install"
+        run: apm install
 
       - name: Regenerate the integrity manifest
         run: python3 scripts/gen_superpowers_manifest.py
