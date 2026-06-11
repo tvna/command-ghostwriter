@@ -1,0 +1,134 @@
+# ============================================================
+# Workflow Information: verify-superpowers.yml
+# ============================================================
+#
+# 目的 (Purpose):
+# ---------------
+# committed superpowers スキル (.claude/skills/) の整合性を検証する。
+#  - manifest-check: コミット済みスキルが整合性マニフェスト
+#    (.claude/skills/.superpowers-manifest.sha256) と一致するかを検証
+#    (ローカル改変・マニフェスト更新忘れ・部分 checkout を検知)。
+#  - upstream-drift: apm.lock.yaml のピン留めコミットからスキルを再デプロイし、
+#    git diff が無いことを表明する (マニフェスト再生成で偽装した改変も捕捉)。
+#
+# 影響範囲 (Scope of Impact):
+# ---------------------------
+# - main / develop への PR・push で superpowers スキルの陳腐化を検証する。
+# - リポジトリへの書き込みは行わない (contents: read)。
+#
+# セキュリティ (Security):
+# ------------------------
+# - step-security/harden-runner でランナーを強化 (egress-policy: audit)。
+# - upstream-drift ジョブは apm リリース成果物を flake.nix にピン留めされた
+#   バージョン・sha256 で取得し検証する (供給網保護)。
+#
+# 関連 (Reference):
+# -----------------
+# - Issue #390
+# - 設計書 docs/superpowers/specs/2026-06-11-superpowers-drift-detection-design.md
+# ============================================================
+---
+name: Verify superpowers skills
+
+on:
+  pull_request:
+    branches:
+      - main
+      - develop
+    paths:
+      - .claude/skills/**
+      - apm.yml
+      - apm.lock.yaml
+      - scripts/gen_superpowers_manifest.py
+      - .github/workflows/verify-superpowers.yml
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - .claude/skills/**
+      - apm.yml
+      - apm.lock.yaml
+      - scripts/gen_superpowers_manifest.py
+      - .github/workflows/verify-superpowers.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-superpowers-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  HARDEN_RUNNER_EGRESS_POLICY: audit
+  # apm release pinned in flake.nix (apmVersion / apmNative.x86_64-linux.hash).
+  APM_VERSION: "0.12.1"
+  APM_ARCHIVE: apm-linux-x86_64
+  APM_SHA256: a0b896e8cbdd10441125e989aa19d180c62052eda7c8aa850feb367805d1256f
+
+jobs:
+  manifest-check:
+    name: Manifest consistency
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
+        with:
+          egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
+
+      - name: Check out Git repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python and uv
+        uses: ./.github/actions/setup-python
+        with:
+          python-version: ${{ vars.GLOBAL_PYTHON_VERSION }}
+
+      - name: Verify manifest matches committed skills
+        run: uv run python scripts/gen_superpowers_manifest.py --check
+
+  upstream-drift:
+    name: Drift from apm.lock pinned commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
+        with:
+          egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
+
+      - name: Check out Git repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+
+      - name: Download and verify apm release
+        run: |
+          set -euo pipefail
+          url="https://github.com/microsoft/apm/releases/download/v${APM_VERSION}/${APM_ARCHIVE}.tar.gz"
+          curl --fail --location --silent --show-error -o apm.tar.gz "${url}"
+          echo "${APM_SHA256}  apm.tar.gz" | sha256sum --check --strict
+          mkdir -p "${RUNNER_TEMP}/apm"
+          # The archive nests everything under apm-linux-x86_64/; strip that
+          # leading component so the apm binary and its _internal/ sibling land
+          # directly in ${RUNNER_TEMP}/apm, which we add to PATH.
+          tar -xzf apm.tar.gz --strip-components=1 -C "${RUNNER_TEMP}/apm"
+          echo "${RUNNER_TEMP}/apm" >> "${GITHUB_PATH}"
+
+      - name: Redeploy superpowers skills from the pinned commit
+        run: apm install
+
+      - name: Regenerate the integrity manifest
+        run: python3 scripts/gen_superpowers_manifest.py
+
+      - name: Assert committed skills match the pinned upstream commit
+        run: |
+          set -euo pipefail
+          if ! git diff --exit-code -- .claude/skills/; then
+            echo "::error::committed superpowers skills drifted from apm.lock pinned commit;"
+            echo "::error::run 'apm install' and 'python3 scripts/gen_superpowers_manifest.py', then commit."
+            exit 1
+          fi
