@@ -6,6 +6,7 @@ import hashlib
 import shutil
 import subprocess
 import tarfile
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -109,3 +110,24 @@ def test_no_arguments_prints_usage(tmp_path: Path) -> None:
     result = _run()
     assert result.returncode != 0
     assert "usage" in result.stderr.lower()
+
+
+@pytest.mark.unit
+def test_corrupt_archive_exits_3(tmp_path: Path) -> None:
+    bogus = tmp_path / "corrupt.tar.gz"
+    bogus.write_bytes(b"this is not a gzip stream")
+    result = _run(str(bogus))
+    assert result.returncode == 3
+    assert "failed to read" in result.stderr
+
+
+@pytest.mark.unit
+def test_zip_supported(tmp_path: Path) -> None:
+    src = tmp_path / "tool"
+    src.write_text("#!/bin/sh\n", encoding="utf-8")
+    archive = tmp_path / "release.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.write(src, arcname="tool-v1/tool")
+    result = _run(str(archive), "--expect-path", "tool-v1/tool")
+    assert result.returncode == 0, result.stderr
+    assert "tool-v1/tool" in result.stdout

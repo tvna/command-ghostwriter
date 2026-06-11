@@ -18,6 +18,13 @@
 #                   (exit non-zero when absent)
 #
 # Supported formats: .tar.gz / .tgz / .tar.xz / .zip
+#
+# Exit codes:
+#   0  inspected OK (and --expect-path member found, when given)
+#   1  --expect-path member not found
+#   2  usage error or unsupported archive extension
+#   3  archive exists but cannot be read (corrupt, truncated, or mislabeled)
+#   download and sha256 failures propagate the failing tool's nonzero status
 set -euo pipefail
 
 usage() {
@@ -66,19 +73,23 @@ if [ -n "${sha}" ]; then
 fi
 
 case "${archive}" in
-  *.tar.gz | *.tgz) listing="$(tar -tzf "${archive}")" ;;
-  *.tar.xz) listing="$(tar -tJf "${archive}")" ;;
-  *.zip) listing="$(python3 -c 'import sys, zipfile; print("\n".join(zipfile.ZipFile(sys.argv[1]).namelist()))' "${archive}")" ;;
+  *.tar.gz | *.tgz) list_cmd=(tar -tzf "${archive}") ;;
+  *.tar.xz) list_cmd=(tar -tJf "${archive}") ;;
+  *.zip) list_cmd=(python3 -c 'import sys, zipfile; print("\n".join(zipfile.ZipFile(sys.argv[1]).namelist()))' "${archive}") ;;
   *)
     echo "inspect_release_archive: unsupported archive extension: ${archive}" >&2
     exit 2
     ;;
 esac
+if ! listing="$("${list_cmd[@]}")"; then
+  echo "inspect_release_archive: ERROR: failed to read ${archive} (corrupt, truncated, or mislabeled)." >&2
+  exit 3
+fi
 
 echo "== top-level entries =="
 printf '%s\n' "${listing}" | cut -d/ -f1 | sort -u
 echo
-total="$(printf '%s\n' "${listing}" | wc -l)"
+total="$(printf '%s\n' "${listing}" | grep -c . || true)"
 echo "== first 40 of ${total} members =="
 printf '%s\n' "${listing}" | head -40
 
