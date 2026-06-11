@@ -31,6 +31,19 @@
             aarch64-linux = { archive = "apm-linux-arm64"; hash = "sha256-NkplG444MzHPCumW09V7fxZLON40VjSuCP5xFMT546c="; };
             x86_64-linux = { archive = "apm-linux-x86_64"; hash = "sha256-oLiW6MvdEEQRJemJqhnRgMYgUu2nyKqFD+s2eAXRJW8="; };
           }.${system};
+          actionlintVersion = "1.7.12";
+          # NOTE: asset filenames embed the version; flake_pin.py asserts that
+          # consistency on every resolve, so a version bump that forgets the
+          # asset line fails loud.
+          actionlintNative = {
+            aarch64-linux = { asset = "actionlint_1.7.12_linux_arm64.tar.gz"; hash = "sha256-Ml6XG2upv6UEZy4pvpPCSYHuscB1dtcw6ffIgFr/8MY="; };
+            x86_64-linux = { asset = "actionlint_1.7.12_linux_amd64.tar.gz"; hash = "sha256-isqNuW8blHcPGw1ytt3cseu4EjyzcSUwsIzDh7NJo9g="; };
+          }.${system};
+          shellcheckVersion = "0.11.0";
+          shellcheckNative = {
+            aarch64-linux = { asset = "shellcheck-v0.11.0.linux.aarch64.tar.xz"; hash = "sha256-ErMxwdLba56xPPymQwaxsVeobraduDAj4mHqp+fBRYg="; };
+            x86_64-linux = { asset = "shellcheck-v0.11.0.linux.x86_64.tar.xz"; hash = "sha256-jDvhKwXVwXegTCnjx4zomshvFZVoHKsUm2W5fE4icZg="; };
+          }.${system};
           uvNative = {
             aarch64-linux = { target = "aarch64-unknown-linux-gnu"; hash = "sha256-miDWWxEHcLuqLuie1265Y9jGpIC56+9YTqnfKuhbTw8="; };
             x86_64-linux = { target = "x86_64-unknown-linux-gnu"; hash = "sha256-kgy8qtUUzBhWNPbw3Ncd9ej07kRW1ECiLg+MDxQqggM="; };
@@ -111,9 +124,48 @@ EOF
               runHook postInstall
             '';
           };
+          actionlint-cli = pkgs.stdenvNoCC.mkDerivation {
+            pname = "actionlint";
+            version = actionlintVersion;
+            src = pkgs.fetchurl {
+              url = "https://github.com/rhysd/actionlint/releases/download/v${actionlintVersion}/${actionlintNative.asset}";
+              hash = actionlintNative.hash;
+            };
+            # The tarball is flat (no enclosing directory): the bare
+            # `actionlint` binary sits at the top level next to docs/ and man/.
+            # Verified with scripts/inspect_release_archive.sh (#392 action 1).
+            sourceRoot = ".";
+            dontBuild = true;
+            dontStrip = true;
+            dontPatchELF = true;
+            installPhase = ''
+              runHook preInstall
+              install -Dm755 actionlint $out/bin/actionlint
+              runHook postInstall
+            '';
+          };
+          shellcheck-cli = pkgs.stdenvNoCC.mkDerivation {
+            pname = "shellcheck-bin";
+            version = shellcheckVersion;
+            src = pkgs.fetchurl {
+              url = "https://github.com/koalaman/shellcheck/releases/download/v${shellcheckVersion}/${shellcheckNative.asset}";
+              hash = shellcheckNative.hash;
+            };
+            # The archive nests everything under shellcheck-v<version>/, which
+            # stdenv auto-detects as sourceRoot. Verified with
+            # scripts/inspect_release_archive.sh (#392 action 1).
+            dontBuild = true;
+            dontStrip = true;
+            dontPatchELF = true;
+            installPhase = ''
+              runHook preInstall
+              install -Dm755 shellcheck $out/bin/shellcheck
+              runHook postInstall
+            '';
+          };
         in
         {
-          inherit claude-cli codex-cli pinned-uv apm-cli;
+          inherit claude-cli codex-cli pinned-uv apm-cli actionlint-cli shellcheck-cli;
           bubblewrap = pkgs.bubblewrap;
           gh-cli = pkgs.gh;
           python-runtime = pkgs.python311;
@@ -124,7 +176,7 @@ EOF
           agentPackages = mkPackages system;
           sharedPackages = with pkgs; [
             bashInteractive cacert coreutils fd gh git jq nodejs_22 python311 ripgrep
-            agentPackages.pinned-uv
+            agentPackages.pinned-uv agentPackages.actionlint-cli agentPackages.shellcheck-cli
           ];
           pythonQualityPackages = with pkgs; [ mypy ruff python311Packages.pytest-xdist ];
           networkPackages = with pkgs; [ dnsutils iproute2 iptables ];
