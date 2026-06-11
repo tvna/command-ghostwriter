@@ -99,6 +99,27 @@ def test_sri_to_hex_roundtrip() -> None:
 
 
 @pytest.mark.unit
+def test_sri_invalid_base64_fails_loud() -> None:
+    mod = _load_module()
+    with pytest.raises(mod.PinError, match="invalid base64"):
+        mod.sri_to_hex("sha256-!!!notbase64!!!")
+
+
+@pytest.mark.unit
+def test_sri_wrong_digest_length_fails_loud() -> None:
+    mod = _load_module()
+    with pytest.raises(mod.PinError, match="must be 32 bytes"):
+        mod.sri_to_hex("sha256-aGVsbG8=")
+
+
+@pytest.mark.unit
+def test_cli_missing_flake_exits_2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    mod = _load_module()
+    monkeypatch.setattr(mod, "FLAKE_PATH", tmp_path / "no-such-flake.nix")
+    assert mod.main(["resolve", "--tool", "actionlint", "--system", "x86_64-linux"]) == 2
+
+
+@pytest.mark.unit
 def test_cli_resolves_real_flake() -> None:
     """Deterministic consistency gate between the real flake.nix and the reader."""
     for tool in ("actionlint", "shellcheck"):
@@ -124,3 +145,4 @@ def test_cli_unknown_tool_rejected() -> None:
         check=False,
     )
     assert result.returncode != 0
+    assert "invalid choice" in result.stderr

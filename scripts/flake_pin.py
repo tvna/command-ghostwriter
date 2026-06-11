@@ -76,6 +76,9 @@ def read_pin(flake_text: str, tool: str, system: str) -> tuple[str, str, str]:
         raise PinError(f"{tool}Native has no '{system}' entry with asset/hash")
     asset, sri = entry_match.groups()
 
+    # Substring semantics: a prefix version (e.g. "1.7.1" vs asset "...1.7.12...")
+    # would pass; accepted looseness to keep the reader decoupled from each
+    # tool's asset-naming convention. The hash check still catches any drift.
     if version not in asset:
         raise PinError(f"{tool} pin is inconsistent: version {version!r} does not appear in asset {asset!r}")
     return version, asset, sri_to_hex(sri)
