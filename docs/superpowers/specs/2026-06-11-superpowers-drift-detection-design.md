@@ -106,18 +106,21 @@ commit 時点でドリフトを止める決定的ゲート。
 - **Job A（安価・apm 不要）**: `uv run python scripts/gen_superpowers_manifest.py --check`。
   マニフェスト整合を PR/push で検証。
 - **Job B（upstream ドリフトゲート）**:
-  1. `nix build .#apm-cli` で apm を取得（flake にピン留め済み）
-  2. `apm install`（apm.lock のピン留めコミットからスキルを再デプロイ）
-  3. `uv run python scripts/gen_superpowers_manifest.py`（マニフェスト再生成）
+  1. apm リリース成果物（`apm-linux-x86_64.tar.gz`）を `flake.nix` がピン留めした
+     バージョン（0.12.1）・sha256 で取得・検証して展開（nix を CI に新規導入せず、
+     供給網保護を維持）
+  2. `apm install`（apm.lock のピン留めコミットからスキルを再デプロイ。
+     microsoft/apm の README で確認済みのデプロイコマンド）
+  3. `python3 scripts/gen_superpowers_manifest.py`（マニフェスト再生成・stdlib のみ）
   4. `git diff --exit-code -- .claude/skills/`（差分が出たら fail）
 
   「committed スキル ↔ upstream ピン留めコミット」を保証し、マニフェスト再生成で
   偽装した改変も捕捉する。
 
-  > **未確定点（プラン段階で確定）**: スキルを再デプロイする正確な apm コマンド
-  > （`apm install` 想定。`apm compile` は CLAUDE.md 生成）。実装プランの検証ステップで
-  > 実コマンドを確定する。本作業環境に apm は無いため、Job B の実起動検証は nix/apm
-  > 対応の CI ランナー上でのみ可能（本環境では静的検証に留める）。
+  > **検証の限界**: 本作業環境に apm は無いため、Job B の実起動（`apm install` の実挙動）
+  > は CI ランナー上でのみ検証可能。本環境では成果物（スクリプト・フック・テスト・CI
+  > yaml）の静的検証に留める。apm には `apm audit`（drift 検知）もあるが、出力仕様に
+  > 依存しない決定的な install→`git diff` 方式を採用する。
 
 ### C5. テスト（`tests/unit/`、参照の「全スクリプトにテスト」思想）
 

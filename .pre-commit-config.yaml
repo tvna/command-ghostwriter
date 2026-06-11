@@ -82,6 +82,13 @@ repos:
         types: ["json"]
         files: ^\.*\.code-workspace$
         entry: npx prettier --write --parser json --plugin prettier-plugin-sort-json command-ghostwriter.code-workspace
+      - id: superpowers-manifest-drift
+        name: superpowers manifest drift
+        description: "Verify committed superpowers skills match their integrity manifest"
+        language: system
+        pass_filenames: false
+        files: ^\.claude/skills/.*|^apm\.lock\.yaml$
+        entry: uv run python scripts/gen_superpowers_manifest.py --check
 
   - repo: https://github.com/tox-dev/pyproject-fmt
     rev: v2.5.1
