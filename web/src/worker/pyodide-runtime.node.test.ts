@@ -44,4 +44,16 @@ describe("features/ render parity in Pyodide (Node)", () => {
     expect(result.templateError).toBeNull();
     expect(result.output).toBe("Hello world x3");
   });
+
+  it("surfaces a config parse error in configError, not output", async () => {
+    const result = await generate(pyodide, {
+      configText: "id,value\n1,2,3\n", // a data row with more fields than the header -> loud CSV error
+      configName: "config.csv",
+      templateText: "{% for r in csv_rows %}{{ r.id }}\n{% endfor %}",
+      templateName: "template.j2",
+      settings: DEFAULT_SETTINGS,
+    });
+    expect(result.output).toBeNull();
+    expect(result.configError).toContain("Failed to parse CSV");
+  });
 });

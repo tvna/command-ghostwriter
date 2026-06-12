@@ -23,9 +23,16 @@
 # loudly; never leave a half-provisioned distribution behind.
 set -euo pipefail
 
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "error: python3 is required to vendor Pyodide wheels (registers chardet in pyodide-lock.json)" >&2
+  exit 1
+fi
+
 PYODIDE_VERSION="0.26.4"
 RELEASE_TARBALL="pyodide-${PYODIDE_VERSION}.tar.bz2"
 RELEASE_URL="https://github.com/pyodide/pyodide/releases/download/${PYODIDE_VERSION}/${RELEASE_TARBALL}"
+# sha256 of the release tarball, verified via scripts/inspect_release_archive.sh (Refs CLAUDE.local.md "Release-archive preflight").
+PYODIDE_SHA256="f6ee209650babf1669f1a9560a5f89f66c0d38aacc2d5b8cd8b4dd6a7537cba9"
 
 # Pure-python chardet wheel pinned to match the repo (chardet>=5.2,<6) and uv.lock.
 CHARDET_WHEEL="chardet-5.2.0-py3-none-any.whl"
@@ -35,8 +42,6 @@ CHARDET_SHA256="e1cf59446890a00105fe7b7912492ea04b6e6f06d4b742b2c788469e34c82970
 # Wheels to pull out of the release tarball (paths inside the `pyodide/` member).
 # Exact filenames are pinned by node_modules/pyodide/pyodide-lock.json.
 RELEASE_WHEELS=(
-  "micropip-0.6.0-py3-none-any.whl"
-  "packaging-23.2-py3-none-any.whl"
   "Jinja2-3.1.3-py3-none-any.whl"
   "MarkupSafe-2.1.5-cp312-cp312-pyodide_2024_0_wasm32.whl"
   "PyYAML-6.0.1-cp312-cp312-pyodide_2024_0_wasm32.whl"
@@ -67,9 +72,16 @@ if [ "${have_all_release_wheels}" -eq 0 ]; then
   tmp="$(mktemp -d)"
   trap 'rm -rf "${tmp}"' EXIT
   curl -fsSL -m 600 -o "${tmp}/${RELEASE_TARBALL}" "${RELEASE_URL}"
+  actual_tar_sha="$(sha256sum "${tmp}/${RELEASE_TARBALL}" | cut -d' ' -f1)"
+  if [ "${actual_tar_sha}" != "${PYODIDE_SHA256}" ]; then
+    echo "error: ${RELEASE_TARBALL} sha256 mismatch: ${actual_tar_sha} != ${PYODIDE_SHA256}" >&2
+    rm -f "${tmp}/${RELEASE_TARBALL}"
+    exit 1
+  fi
   members=()
   for whl in "${RELEASE_WHEELS[@]}"; do members+=("pyodide/${whl}"); done
-  # Single top-level dir `pyodide/`; --strip-components=1 lands wheels directly.
+  # Verified via scripts/inspect_release_archive.sh: single top-level dir `pyodide/`,
+  # wheels are flat members `pyodide/<wheel>.whl`; --strip-components=1 lands them in dist_dir.
   tar -xjf "${tmp}/${RELEASE_TARBALL}" -C "${dist_dir}" --strip-components=1 "${members[@]}"
   for whl in "${RELEASE_WHEELS[@]}"; do
     [ -f "${dist_dir}/${whl}" ] || { echo "error: ${whl} missing after extract" >&2; exit 1; }

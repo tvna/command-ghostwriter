@@ -9,7 +9,6 @@ export interface PyodideLike {
   };
   loadPackage(names: string[]): Promise<void>;
   runPythonAsync(code: string): Promise<unknown>;
-  globals: { get(name: string): unknown };
 }
 
 export type LoadPyodideFn = (opts: { indexURL: string }) => Promise<PyodideLike>;
@@ -56,8 +55,9 @@ export async function generate(
   pyodide: PyodideLike,
   request: GenerateRequest,
 ): Promise<GenerateResult> {
-  // Embed the request as a valid Python string literal (JSON escapes are a subset
-  // of Python's), then json.loads it inside Python -- no quote/backtick injection.
+  // Double JSON-encode: the inner encodes the request, the outer turns that into a
+  // valid Python string literal (JSON and Python share \uXXXX escapes, so non-ASCII
+  // and quotes are safe). json.loads() inside Python decodes it -- no code injection.
   const pyPayloadLiteral = JSON.stringify(JSON.stringify(request));
   const code = [
     "import json",

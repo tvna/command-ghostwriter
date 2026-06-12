@@ -8,7 +8,7 @@ const raw = import.meta.glob("../../../features/**/*.py", {
 
 export const FEATURES_SOURCES: Record<string, string> = Object.fromEntries(
   Object.entries(raw).map(([key, source]) => {
-    const idx = key.lastIndexOf("features/");
-    return [key.slice(idx), source];
+    const idx = key.lastIndexOf("/features/");
+    return [key.slice(idx + 1), source];
   }),
 );

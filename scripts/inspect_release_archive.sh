@@ -17,7 +17,7 @@
 #   --expect-path   assert this exact member path exists in the archive
 #                   (exit non-zero when absent)
 #
-# Supported formats: .tar.gz / .tgz / .tar.xz / .zip
+# Supported formats: .tar.gz / .tgz / .tar.xz / .tar.bz2 / .tbz2 / .zip
 #
 # Exit codes:
 #   0  inspected OK (and --expect-path member found, when given)
@@ -75,6 +75,7 @@ fi
 case "${archive}" in
   *.tar.gz | *.tgz) list_cmd=(tar -tzf "${archive}") ;;
   *.tar.xz) list_cmd=(tar -tJf "${archive}") ;;
+  *.tar.bz2 | *.tbz2) list_cmd=(tar -tjf "${archive}") ;;
   *.zip) list_cmd=(python3 -c 'import sys, zipfile; print("\n".join(zipfile.ZipFile(sys.argv[1]).namelist()))' "${archive}") ;;
   *)
     echo "inspect_release_archive: unsupported archive extension: ${archive}" >&2
