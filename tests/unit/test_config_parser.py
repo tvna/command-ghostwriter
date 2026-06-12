@@ -18,12 +18,12 @@ The tests cover:
 """
 
 import datetime
+import math
 import pprint
 import typing
 from io import BytesIO
 from typing import Any, Dict, Final, List, Optional, Union
 
-import numpy as np
 import pytest
 from _pytest.mark.structures import MarkDecorator
 
@@ -97,9 +97,9 @@ def _assert_csv_values_equal(p_val: Union[str, int, float, None], e_val: Union[s
         row_idx: The 0-based index of the CSV row being checked (for error reporting).
         key: The column name (key) of the value being checked (for error reporting).
     """
-    if isinstance(e_val, float) and np.isnan(e_val):
+    if isinstance(e_val, float) and math.isnan(e_val):
         assert isinstance(p_val, float), f"CSV row {row_idx}, key '{key}' NaN check: Type mismatch: Got {type(p_val)}, Expected float"
-        assert np.isnan(p_val), f"CSV row {row_idx}, key '{key}' NaN check: Value mismatch: Got {p_val}, Expected NaN"
+        assert math.isnan(p_val), f"CSV row {row_idx}, key '{key}' NaN check: Value mismatch: Got {p_val}, Expected NaN"
     elif isinstance(p_val, float) and isinstance(e_val, int) and p_val == float(e_val):
         # Treat as equal if float representation matches int
         pass
@@ -836,7 +836,7 @@ def test_parse_toml_or_yaml(
             SHOULD_NOT_FILL_NAN,
             DEFAULT_FILL_VALUE,  # Default csv_rows_name, no NaN fill
             NO_EXPECTED_INITIAL_ERROR,
-            {"csv_rows": [{"col1": "val1", "col2": np.nan}, {"col1": "val2", "col2": "val3"}]},
+            {"csv_rows": [{"col1": "val1", "col2": float("nan")}, {"col1": "val2", "col2": "val3"}]},
             NO_EXPECTED_RUNTIME_ERROR,
             id="csv_success_nan_no_fill",
         ),
@@ -916,9 +916,9 @@ def test_parse_toml_or_yaml(
             NO_EXPECTED_INITIAL_ERROR,
             {
                 "csv_rows": [
-                    {"col_a": float(1.0), "col_b": "alpha", "col_c": ""},
+                    {"col_a": 1, "col_b": "alpha", "col_c": ""},
                     {"col_a": "", "col_b": "beta", "col_c": "gamma"},
-                    {"col_a": float(3.0), "col_b": "", "col_c": "delta"},
+                    {"col_a": 3, "col_b": "", "col_c": "delta"},
                 ]
             },
             NO_EXPECTED_RUNTIME_ERROR,
@@ -933,9 +933,9 @@ def test_parse_toml_or_yaml(
             NO_EXPECTED_INITIAL_ERROR,
             {
                 "csv_rows": [
-                    {"id": 1, "value": 100.0, "category": "A"},
+                    {"id": 1, "value": 100, "category": "A"},
                     {"id": 2, "value": "N/A", "category": "B"},
-                    {"id": 3, "value": 300.0, "category": "C"},
+                    {"id": 3, "value": 300, "category": "C"},
                 ]
             },
             NO_EXPECTED_RUNTIME_ERROR,
@@ -953,15 +953,48 @@ def test_parse_toml_or_yaml(
             id="csv_success_whitespace_in_header_data",
         ),
         pytest.param(
-            b"col1,col2\nval1,val2,val3\nval4,val5",  # Row 1 has too many columns
+            b"col1,col2\nnan,val2",  # literal "nan" preserved as string (pandas coerced to NaN)
+            "literal_nan.csv",
+            DEFAULT_CSV_ROWS_NAME,
+            SHOULD_NOT_FILL_NAN,
+            DEFAULT_FILL_VALUE,
+            NO_EXPECTED_INITIAL_ERROR,
+            {"csv_rows": [{"col1": "nan", "col2": "val2"}]},
+            NO_EXPECTED_RUNTIME_ERROR,
+            id="csv_success_literal_nan_string",
+        ),
+        pytest.param(
+            b"col1,col2\nNA,val2",  # literal "NA" preserved as string (pandas coerced to NaN)
+            "literal_na.csv",
+            DEFAULT_CSV_ROWS_NAME,
+            SHOULD_NOT_FILL_NAN,
+            DEFAULT_FILL_VALUE,
+            NO_EXPECTED_INITIAL_ERROR,
+            {"csv_rows": [{"col1": "NA", "col2": "val2"}]},
+            NO_EXPECTED_RUNTIME_ERROR,
+            id="csv_success_literal_na_string",
+        ),
+        pytest.param(
+            b"col1,col2\nNULL,val2",  # literal "NULL" preserved as string (pandas coerced to NaN)
+            "literal_null.csv",
+            DEFAULT_CSV_ROWS_NAME,
+            SHOULD_NOT_FILL_NAN,
+            DEFAULT_FILL_VALUE,
+            NO_EXPECTED_INITIAL_ERROR,
+            {"csv_rows": [{"col1": "NULL", "col2": "val2"}]},
+            NO_EXPECTED_RUNTIME_ERROR,
+            id="csv_success_literal_null_string",
+        ),
+        pytest.param(
+            b"col1,col2\nval1,val2,val3\nval4,val5",  # Row 1 has too many columns -> loud error
             "mismatched_cols.csv",
             DEFAULT_CSV_ROWS_NAME,
             SHOULD_NOT_FILL_NAN,
             DEFAULT_FILL_VALUE,
             NO_EXPECTED_INITIAL_ERROR,
-            {"csv_rows": [{"col1": "val2", "col2": "val3"}, {"col1": "val5", "col2": float("nan")}]},
-            NO_EXPECTED_RUNTIME_ERROR,
-            id="csv_success_mismatched_columns",
+            NO_EXPECTED_DICT,
+            "Failed to parse CSV: row 1 has more fields than the header.",
+            id="csv_failure_mismatched_columns",
         ),
         pytest.param(
             b'col1,col2\nval1"bad,val2',  # Quote character appearing *inside* an unquoted field
@@ -1037,7 +1070,7 @@ def test_parse_toml_or_yaml(
             DEFAULT_FILL_VALUE,
             NO_EXPECTED_INITIAL_ERROR,
             NO_EXPECTED_DICT,
-            "Error tokenizing data. C error: EOF inside string starting at row 2",
+            "Failed to parse CSV: unterminated quoted field.",
             id="csv_failure_unclosed_quote",
         ),
         pytest.param(
