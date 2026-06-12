@@ -96,7 +96,12 @@ env:
     api.github.com:443
     github.com:443
     release-assets.githubusercontent.com:443
-  EP_GITHUB_OBJECTS: objects.githubusercontent.com:443
+  # release-assets.githubusercontent.com: GitHub release-asset downloads now
+  # redirect here (observed 2026-06; egress-policy is block, so an unlisted
+  # redirect target kills the download). Refs #393.
+  EP_GITHUB_OBJECTS: >-
+    objects.githubusercontent.com:443
+    release-assets.githubusercontent.com:443
   EP_GITHUB_RAW: raw.githubusercontent.com:443
   EP_PYTHON: >-
     files.pythonhosted.org:443
@@ -218,15 +223,42 @@ jobs:
           fi
           yamllint --strict --format github --config-file "${CONFIG}" ./.github/
 
-      - name: Download and run actionlint
+      - name: Install pinned actionlint and shellcheck
         run: |
-          # バイナリのダウンロードとインストール
-          curl -sSLo actionlint.bash https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash
-          # ダウンロードしたバッシュスクリプトに実行権限を与えて実行
-          chmod +x actionlint.bash
-          ./actionlint.bash
-          # actionlintを実行
-          ./actionlint -color
+          set -euo pipefail
+          # flake.nix is the single source of truth for both pins (#393).
+          # Both binaries are pinned explicitly: actionlint silently skips its SC*
+          # rules (e.g. SC2086) when no shellcheck binary is on PATH,
+          # and the runner-bundled binary is unpinned.
+          lint_bin="${RUNNER_TEMP}/lint-bin"
+          mkdir -p "${lint_bin}"
+
+          pin="$(python3 scripts/flake_pin.py resolve --tool actionlint --system x86_64-linux)"
+          al_version="$(printf '%s\n' "${pin}" | sed -n '1p')"
+          al_asset="$(printf '%s\n' "${pin}" | sed -n '2p')"
+          al_sha="$(printf '%s\n' "${pin}" | sed -n '3p')"
+          curl --fail --location --silent --show-error -o actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${al_version}/${al_asset}"
+          echo "${al_sha}  actionlint.tar.gz" | sha256sum --check --strict
+          # Flat archive: the bare 'actionlint' binary sits at the top level
+          # (verified with scripts/inspect_release_archive.sh).
+          tar -xzf actionlint.tar.gz -C "${lint_bin}" actionlint
+
+          pin="$(python3 scripts/flake_pin.py resolve --tool shellcheck --system x86_64-linux)"
+          sc_version="$(printf '%s\n' "${pin}" | sed -n '1p')"
+          sc_asset="$(printf '%s\n' "${pin}" | sed -n '2p')"
+          sc_sha="$(printf '%s\n' "${pin}" | sed -n '3p')"
+          curl --fail --location --silent --show-error -o shellcheck.tar.xz \
+            "https://github.com/koalaman/shellcheck/releases/download/v${sc_version}/${sc_asset}"
+          echo "${sc_sha}  shellcheck.tar.xz" | sha256sum --check --strict
+          # Nested archive: everything sits under shellcheck-v<version>/
+          # (verified with scripts/inspect_release_archive.sh).
+          tar -xJf shellcheck.tar.xz -C "${lint_bin}" --strip-components=1 "shellcheck-v${sc_version}/shellcheck"
+
+          echo "${lint_bin}" >> "${GITHUB_PATH}"
+
+      - name: Run actionlint
+        run: actionlint -color
 
       - name: Check typos
         uses: crate-ci/typos@392b78fe18a52790c53f42456e46124f77346842 # v1.34.0
