@@ -19,6 +19,7 @@ export interface GenerateResult {
   output: string | null;
   configError: string | null;
   templateError: string | null;
+  configDebug: string;
 }
 
 export const DEFAULT_SETTINGS: GenerateSettings = {

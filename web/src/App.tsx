@@ -42,7 +42,7 @@ export function App() {
       if (msg.kind === "ready") setReady(true);
       else if (msg.kind === "result") setResult(msg.result);
       else if (msg.kind === "error")
-        setResult({ output: null, configError: msg.message, templateError: null });
+        setResult({ output: null, configError: msg.message, templateError: null, configDebug: "" });
     };
     worker.postMessage({ kind: "init" });
     return () => worker.terminate();
@@ -82,8 +82,9 @@ export function App() {
       <div role="group" aria-label="preview mode">
         <button type="button" aria-pressed={previewMode === "text"} onClick={() => setPreviewMode("text")}>{t.previewText}</button>
         <button type="button" aria-pressed={previewMode === "markdown"} onClick={() => setPreviewMode("markdown")}>{t.previewMarkdown}</button>
+        <button type="button" aria-pressed={previewMode === "config"} onClick={() => setPreviewMode("config")}>{t.previewConfig}</button>
       </div>
-      <Preview output={viewOutput(result)} mode={previewMode} />
+      <Preview output={previewMode === "config" ? (result?.configDebug ?? "") : viewOutput(result)} mode={previewMode} />
       <DownloadBar output={viewOutput(result)} />
     </main>
   );
