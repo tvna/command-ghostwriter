@@ -1144,3 +1144,53 @@ def test_parse_csv(
     assert parser.error_message == expected_parse_error, (
         f"Final error message mismatch\nGot: {parser.error_message}\nExpected: {expected_parse_error}"
     )
+
+
+@UNIT
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("1", 1),
+        ("3", 3),
+        ("100", 100),
+        ("0", 0),
+        ("-5", -5),
+        ("007", "007"),       # 先頭ゼロは保持(float経由で 7.0 に化けない)
+        ("1.0", 1.0),
+        ("1.50", "1.50"),     # 末尾ゼロ付き小数リテラルは保持
+        ("1e3", "1e3"),       # 指数表記文字列は保持
+        ("3.14", 3.14),
+        ("abc", "abc"),
+        (" 1 ", " 1 "),       # 空白付きは文字列
+        ("nan", "nan"),    # IEEE special: keep as string, float('nan') is the empty-cell sentinel
+        ("inf", "inf"),    # IEEE special: keep as string
+        ("-inf", "-inf"),  # IEEE special: keep as string
+    ],
+)
+def test_infer_scalar(raw: str, expected: Union[str, int, float]) -> None:
+    from features.config_parser import _infer_scalar
+
+    result = _infer_scalar(raw)
+    assert result == expected
+    assert type(result) is type(expected)
+
+
+@UNIT
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ('a,b\n1,2', False),
+        ('col1,"col,2"\nval1,"v,al2"', False),   # 正しく閉じたクォート
+        ('a,b,c\ncat,foo,bar\ndog,foo,"baz', True),  # 末尾の未終端クォート
+        ('col1,col2\nval1"bad,val2', False),     # フィールド途中の " はリテラル(クォート開始ではない)
+        ('x\n"a""b"', False),                     # エスケープされた "" を含む正常クォート
+        ('x\n"unterminated', True),
+        ("", False),     # empty input: not unterminated
+        ('"', True),     # lone opening quote at EOF
+        ('""', False),   # empty quoted field, properly closed
+    ],
+)
+def test_has_unterminated_quote(raw: str, expected: bool) -> None:
+    from features.config_parser import _has_unterminated_quote
+
+    assert _has_unterminated_quote(raw) is expected

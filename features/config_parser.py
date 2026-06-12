@@ -82,6 +82,7 @@ with open('data.csv', 'rb') as f:
 ```
 """
 
+import math
 import pprint
 import sys
 import tomllib
@@ -102,6 +103,59 @@ JSONDict: TypeAlias = Dict[str, JSONValue]
 CSVRow: TypeAlias = Dict[str, JSONScalarValue]
 # Keep CSVData specific as List[CSVRow]
 CSVData: TypeAlias = List[CSVRow]
+
+
+def _infer_scalar(value: str) -> JSONScalarValue:
+    """CSVセル文字列を int/float/str に推論する(往復チェック必須)。
+
+    str(int(v)) == v なら int、次に str(float(v)) == v なら float、それ以外は str。
+    float側の往復チェックが要点で、これが無いと "007" が float経由で 7.0 に化ける。
+    IEEE特殊値("nan"/"inf"/"-inf")は文字列のまま保持する(空セル番兵 float('nan') と
+    衝突させない / JSON非互換を避ける)。
+    """
+    try:
+        if str(int(value)) == value:
+            return int(value)
+    except ValueError:
+        pass
+    try:
+        parsed_float = float(value)
+        if not (math.isnan(parsed_float) or math.isinf(parsed_float)) and str(parsed_float) == value:
+            return parsed_float
+    except ValueError:
+        pass
+    return value
+
+
+def _has_unterminated_quote(data: str) -> bool:
+    """data がクォート途中で終端しているなら True を返す。
+
+    stdlib csv は未終端クォートを黙って受理するが pandas は拒否していた。loud な
+    拒否契約を保つため明示検出する。クォートはフィールド先頭(レコード先頭または
+    区切り直後)でのみ開始し、それ以外の位置の " はリテラル文字として扱う。
+    """
+    in_quotes = False
+    at_field_start = True
+    i = 0
+    n = len(data)
+    while i < n:
+        ch = data[i]
+        if in_quotes:
+            if ch == '"':
+                if i + 1 < n and data[i + 1] == '"':
+                    i += 2
+                    continue
+                in_quotes = False
+                at_field_start = False
+        elif ch == '"' and at_field_start:
+            in_quotes = True
+            at_field_start = False
+        elif ch in (",", "\n", "\r"):
+            at_field_start = True
+        else:
+            at_field_start = False
+        i += 1
+    return in_quotes
 
 
 class ConfigParser(BaseModel):
