@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import GenerateWorker from "./worker/generate.worker?worker";
 import type { WorkerOutbound, GenerateResult } from "./worker/types";
 import { DEFAULT_SETTINGS } from "./worker/types";
+import { Editor } from "./components/Editor";
 
 const DEBOUNCE_MS = 250;
 
@@ -66,8 +67,8 @@ export function App() {
     <main>
       <h1>Command Ghostwriter</h1>
       <p>{status}</p>
-      <textarea aria-label="config" value={config} onChange={(e) => setConfig(e.target.value)} />
-      <textarea aria-label="template" value={template} onChange={(e) => setTemplate(e.target.value)} />
+      <Editor ariaLabel="config" value={config} language="yaml" onChange={setConfig} />
+      <Editor ariaLabel="template" value={template} language="plain" onChange={setTemplate} />
       {error !== null && <div role="alert">{error}</div>}
       <pre>{viewOutput(result)}</pre>
     </main>
