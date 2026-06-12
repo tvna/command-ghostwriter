@@ -17,8 +17,11 @@
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@codemirror/lang-json": "^6.0.1",
+    "@codemirror/lang-yaml": "^6.1.2",
     "@playwright/test": "^1.56.1",
     "@testing-library/react": "^16.0.1",
+    "@uiw/react-codemirror": "^4.23.7",
     "@types/node": "^22.19.21",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
