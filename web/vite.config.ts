@@ -1,7 +1,7 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { createRequire } from "node:module";
-import { cpSync, existsSync } from "node:fs";
+import { cpSync, rmSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
 const require = createRequire(import.meta.url);
@@ -13,9 +13,10 @@ function vendorPyodide() {
     name: "vendor-pyodide",
     buildStart() {
       const dest = resolve(__dirname, "public/pyodide");
-      if (!existsSync(dest)) {
-        cpSync(pyodideDir, dest, { recursive: true });
-      }
+      // Always refresh from the (postinstall-vendored, wheel-populated) node_modules/pyodide
+      // so the browser can loadPackage offline. A stale dest would silently lack wheels.
+      rmSync(dest, { recursive: true, force: true });
+      cpSync(pyodideDir, dest, { recursive: true });
     },
   };
 }
