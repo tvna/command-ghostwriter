@@ -1217,6 +1217,7 @@ def test_parse_csv(
         ("3.14", 3.14),
         ("abc", "abc"),
         (" 1 ", " 1 "),       # 空白付きは文字列
+        ("+5", "+5"),         # 明示符号付きは文字列(str(int("+5"))=="5"!="+5"): pandasは 5 にcoerceしていた
         ("nan", "nan"),    # IEEE special: keep as string, float('nan') is the empty-cell sentinel
         ("inf", "inf"),    # IEEE special: keep as string
         ("-inf", "-inf"),  # IEEE special: keep as string
@@ -1267,3 +1268,17 @@ def test_csv_render_layer_parity() -> None:
     rendered = template.render(**parser.parsed_dict)
 
     assert rendered == "1:100\n2:N/A\n3:300\n"  # not "1:100.0" / "3:300.0"
+
+
+@UNIT
+def test_csv_duplicate_header_last_wins() -> None:
+    """重複ヘッダ列は last-wins(後勝ち)で固定する。
+
+    pandas は `a`/`a.1` にリネームしていたが、stdlib 実装は dict キー衝突で後列が
+    前列を上書きする。設計spec の未決事項(loud化の余地)に対し、現挙動を明示固定する。
+    """
+    config_file = BytesIO(b"a,a\n1,2")
+    config_file.name = "dup_header.csv"
+    parser = ConfigParser(config_file=config_file)
+    assert parser.parse() is True
+    assert parser.parsed_dict == {"csv_rows": [{"a": 2}]}
