@@ -96,12 +96,7 @@ env:
     api.github.com:443
     github.com:443
     release-assets.githubusercontent.com:443
-  # release-assets.githubusercontent.com: GitHub release-asset downloads now
-  # redirect here (observed 2026-06; egress-policy is block, so an unlisted
-  # redirect target kills the download). Refs #393.
-  EP_GITHUB_OBJECTS: >-
-    objects.githubusercontent.com:443
-    release-assets.githubusercontent.com:443
+  EP_GITHUB_OBJECTS: objects.githubusercontent.com:443
   EP_GITHUB_RAW: raw.githubusercontent.com:443
   EP_PYTHON: >-
     files.pythonhosted.org:443
