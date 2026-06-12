@@ -5,6 +5,17 @@ import { DEFAULT_SETTINGS } from "./worker/types";
 
 const DEBOUNCE_MS = 250;
 
+function viewError(result: GenerateResult | null): string | null {
+  if (result === null) return null;
+  if (result.configError !== null) return result.configError;
+  return result.templateError;
+}
+
+function viewOutput(result: GenerateResult | null): string {
+  if (result === null) return "";
+  return result.output ?? "";
+}
+
 export function App() {
   const workerRef = useRef<Worker | null>(null);
   const idRef = useRef(0);
@@ -48,16 +59,17 @@ export function App() {
     return () => clearTimeout(handle);
   }, [config, template, ready]);
 
-  const error = result?.configError ?? result?.templateError ?? null;
+  const error = viewError(result);
+  const status = ready ? "ready" : "loading Pyodide...";
 
   return (
     <main>
       <h1>Command Ghostwriter</h1>
-      <p>{ready ? "ready" : "loading Pyodide..."}</p>
+      <p>{status}</p>
       <textarea aria-label="config" value={config} onChange={(e) => setConfig(e.target.value)} />
       <textarea aria-label="template" value={template} onChange={(e) => setTemplate(e.target.value)} />
-      {error && <div role="alert">{error}</div>}
-      <pre>{result?.output ?? ""}</pre>
+      {error !== null && <div role="alert">{error}</div>}
+      <pre>{viewOutput(result)}</pre>
     </main>
   );
 }
