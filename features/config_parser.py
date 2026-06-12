@@ -9,7 +9,7 @@
 クラス階層:
 - ConfigParser: メインのパースクラス (Pydanticモデル)
   - FileValidator: ファイルサイズの検証
-  - pandas: CSVデータの処理
+  - csv (stdlib): CSVデータの処理
 
 検証プロセス:
 1. 入力検証
@@ -40,7 +40,7 @@
   - PyYAMLによる安全なパース
   - 辞書形式の検証
 - CSV (.csv)
-  - pandasによるパース
+  - stdlib csv によるパース
   - NaN値の柔軟な処理
   - カスタム行名の設定
 
@@ -51,7 +51,7 @@
 - MemoryError: メモリ制限超過
 - YAMLError: YAML構文エラー
 - TOMLDecodeError: TOML構文エラー
-- pandas.errors: CSVパースエラー
+- ValueError: CSVパースエラー
 
 メモリ管理:
 - ファイルサイズ制限: 30MB
@@ -82,13 +82,14 @@ with open('data.csv', 'rb') as f:
 ```
 """
 
+import csv
+import math
 import pprint
 import sys
 import tomllib
 from io import BytesIO, StringIO
 from typing import ClassVar, Dict, Final, List, Optional, TypeAlias, Union, cast
 
-import pandas as pd
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
@@ -102,6 +103,93 @@ JSONDict: TypeAlias = Dict[str, JSONValue]
 CSVRow: TypeAlias = Dict[str, JSONScalarValue]
 # Keep CSVData specific as List[CSVRow]
 CSVData: TypeAlias = List[CSVRow]
+
+
+def _infer_scalar(value: str) -> JSONScalarValue:
+    """CSVセル文字列を int/float/str に推論する(往復チェック必須)。
+
+    str(int(v)) == v なら int、次に str(float(v)) == v なら float、それ以外は str。
+    float側の往復チェックが要点で、これが無いと "007" が float経由で 7.0 に化ける。
+    IEEE特殊値("nan"/"inf"/"-inf")は文字列のまま保持する(空セル番兵 float('nan') と
+    衝突させない / JSON非互換を避ける)。
+    """
+    try:
+        if str(int(value)) == value:
+            return int(value)
+    except ValueError:
+        pass
+    try:
+        parsed_float = float(value)
+        if not (math.isnan(parsed_float) or math.isinf(parsed_float)) and str(parsed_float) == value:
+            return parsed_float
+    except ValueError:
+        pass
+    return value
+
+
+def _has_unterminated_quote(data: str) -> bool:
+    """data がクォート途中で終端しているなら True を返す。
+
+    stdlib csv は未終端クォートを黙って受理するが、loud な
+    拒否契約を保つため明示検出する。クォートはフィールド先頭(レコード先頭または
+    区切り直後)でのみ開始し、それ以外の位置の " はリテラル文字として扱う。
+    """
+    in_quotes = False
+    at_field_start = True
+    i = 0
+    n = len(data)
+    while i < n:
+        ch = data[i]
+        if in_quotes:
+            if ch == '"':
+                if i + 1 < n and data[i + 1] == '"':
+                    i += 2
+                    continue
+                in_quotes = False
+                at_field_start = False
+        elif ch == '"' and at_field_start:
+            in_quotes = True
+            at_field_start = False
+        elif ch in (",", "\n", "\r"):
+            at_field_start = True
+        else:
+            at_field_start = False
+        i += 1
+    return in_quotes
+
+
+def _coerce_cell(cell: str, fill_value: Optional[str]) -> JSONScalarValue:
+    """空セルは補完値[無ければ float('nan')]、それ以外はセル単位推論を適用する。"""
+    if cell == "":
+        return fill_value if fill_value is not None else float("nan")
+    return _infer_scalar(cell)
+
+
+def _build_csv_row(header: List[str], raw_row: List[str], index: int, fill_value: Optional[str]) -> CSVRow:
+    """1データ行を {列名: 値} に変換する。短い行はパッド、列超過は loud エラー。"""
+    if len(raw_row) > len(header):
+        raise ValueError(f"Failed to parse CSV: row {index + 1} has more fields than the header.")
+    cells = raw_row + [""] * (len(header) - len(raw_row))
+    return {column: _coerce_cell(cell, fill_value) for column, cell in zip(header, cells, strict=True)}
+
+
+def _read_csv_table(config_data: str) -> tuple[List[str], List[List[str]]]:
+    """CSVテキストを (ヘッダ, データ行群) に分解する。pandasが拒否していた入力をloud化する。
+
+    Raises:
+        ValueError: NULLバイト/未終端クォート/カラム無し[空・空白のみ]/データ行無し。
+    """
+    if "\x00" in config_data:
+        raise ValueError("Failed to parse CSV: Null byte detected in input data.")
+    if _has_unterminated_quote(config_data):
+        raise ValueError("Failed to parse CSV: unterminated quoted field.")
+
+    rows: List[List[str]] = [row for row in csv.reader(StringIO(config_data)) if row]
+    if not rows or all(cell.strip() == "" for cell in rows[0]):
+        raise ValueError("No columns to parse from file")
+    if len(rows) < 2:
+        raise ValueError("CSV file must contain at least one data row.")
+    return rows[0], rows[1:]
 
 
 class ConfigParser(BaseModel):
@@ -119,7 +207,7 @@ class ConfigParser(BaseModel):
     2. パース処理
        - TOML: tomllibによる厳密なパース
        - YAML: safe_loadによる安全なパース
-       - CSV: pandasによる高度なデータ処理
+       - CSV: stdlib csv によるパースとセル単位型推論
          - NaN値の柔軟な処理
          - カスタム行名の設定
          - 型変換の自動処理
@@ -152,7 +240,7 @@ class ConfigParser(BaseModel):
     - MemoryError: メモリ制限超過
     - YAMLError: YAML構文エラー
     - TOMLDecodeError: TOML構文エラー
-    - pandas.errors: CSVパースエラー
+    - ValueError: CSVパースエラー
     """
 
     # Constants for size limits as class variables
@@ -217,9 +305,6 @@ class ConfigParser(BaseModel):
             tomllib.TOMLDecodeError,
             yaml.MarkedYAMLError,
             yaml.reader.ReaderError,
-            pd.errors.DtypeWarning,
-            pd.errors.EmptyDataError,
-            pd.errors.ParserError,
             SyntaxError,
             TypeError,
             ValueError,
@@ -259,72 +344,21 @@ class ConfigParser(BaseModel):
         return {}
 
     def _parse_csv_data(self, config_data: str) -> JSONDict:
-        """CSVデータをパースします。
-
-        Returns:
-            パースされたCSVデータを含む辞書
+        """CSVテキストを stdlib csv で {csv_rows_name: [{col: value}, ...]} にパースする。
 
         Raises:
-            ValueError: CSV行名が1文字未満の場合、設定データがNoneの場合、またはCSV内容が不正な場合
-            pd.errors.ParserError: CSVのパースに失敗した場合
+            ValueError: NULLバイト/未終端クォート/カラム無し/データ行無し/
+                ヘッダより列数が多い行 のいずれかで送出。
         """
-        # --- Check for null bytes before parsing ---
-        if "\x00" in config_data:
-            raise pd.errors.ParserError("Failed to parse CSV: Null byte detected in input data.")
-        # --- End Check ---
+        header, body = _read_csv_table(config_data)
 
-        try:
-            # 1. Attempt to read CSV
-            csv_data: pd.DataFrame = pd.read_csv(StringIO(config_data), index_col=None, low_memory=False)
+        # 補完値: 有効かつ非None のときだけ採用。無効/None のとき空セルは float('nan')。
+        fill_value: Final[Optional[str]] = (
+            self._fill_nan_with if (self._is_enable_fill_nan and self._fill_nan_with is not None) else None
+        )
 
-            # 2. Handle NaN filling if enabled
-            if self._is_enable_fill_nan:
-                csv_data = self._handle_csv_nan_values(csv_data)
-
-            # 3. Convert DataFrame rows to a list of dictionaries
-            # Cast the result of the list comprehension to CSVData to satisfy the type checker
-            mapped_list: CSVData = cast("CSVData", [row.to_dict() for _, row in csv_data.iterrows()])
-
-            # 4. Early exit for header-only files (columns exist, but no data rows)
-            if not mapped_list and csv_data.columns.size > 0:
-                raise ValueError("CSV file must contain at least one data row.")
-
-            # 5. Return the successful result
-            # Cast mapped_list to JSONValue to satisfy the dict item type check
-            # due to list invariance (List[CSVRow] vs List[JSONValue]).
-            return {self.csv_rows_name: cast("JSONValue", mapped_list)}
-
-        # 6. Exception Handling (slightly adjusted comments/structure)
-        except (pd.errors.ParserError, pd.errors.EmptyDataError) as e:
-            # Re-raise specific pandas parsing/empty errors
-            raise e from e
-        except ValueError as e:
-            # Re-raise our specific ValueError (header-only check)
-            raise e from e
-        except Exception as e:
-            # Wrap any other unexpected exceptions during pandas processing in ParserError
-            raise pd.errors.ParserError(f"Failed to process CSV data due to an unexpected error: {e!s}") from e
-
-    def _handle_csv_nan_values(self, csv_data: pd.DataFrame) -> pd.DataFrame:
-        """CSVデータのNaN値を処理します。
-
-        Args:
-            csv_data: 処理するCSVデータ
-
-        Returns:
-            NaN値が処理されたCSVデータ
-        """
-        # 数値列に文字列を設定する場合の警告を回避するため、
-        # 文字列値で置換する前に全ての列をオブジェクト型に変換
-        if self._fill_nan_with is not None and isinstance(self._fill_nan_with, str):
-            # 数値列を含む可能性のある全ての列をオブジェクト型に変換
-            for col in csv_data.columns:
-                if pd.api.types.is_numeric_dtype(csv_data[col]):
-                    csv_data[col] = csv_data[col].astype("object")
-
-        # NaN値を置換
-        csv_data.fillna(value=self._fill_nan_with, inplace=True)
-        return csv_data
+        mapped_list: CSVData = [_build_csv_row(header, raw_row, index, fill_value) for index, raw_row in enumerate(body)]
+        return {self.csv_rows_name: cast("JSONValue", mapped_list)}
 
     def _validate_memory_size(self, obj: Union[JSONDict, str]) -> bool:
         """メモリサイズのバリデーションを行います。
