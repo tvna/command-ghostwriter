@@ -16,3 +16,12 @@ is overwritten on every regeneration.
   of opening a new retrospective issue, so the audit trail stays in one place
   and the retro chain stays bounded. Only a genuinely new (non-follow-up) merge
   opens its own retrospective issue.
+
+## Release-archive preflight
+
+- Before authoring any extraction logic for a release artifact (tar.gz, zip,
+  etc.), run `scripts/inspect_release_archive.sh <pinned-url> --sha256 <hex>
+  [--expect-path <member>]` and encode the observed layout (nesting,
+  `--strip-components`, member paths) in the code and its comments. Never
+  write extraction paths from assumption; the apm nested-directory failure on
+  PR #391 (exit 127) is the bug class this prevents. Refs #392, #393.
