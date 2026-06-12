@@ -5,3 +5,4 @@ public/pyodide
 test-results
 playwright-report
 *.local
+*.tsbuildinfo
