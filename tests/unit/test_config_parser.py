@@ -1263,9 +1263,11 @@ def test_csv_render_layer_parity() -> None:
     parser.enable_fill_nan = True
     parser.fill_nan_with = "N/A"
     assert parser.parse() is True
+    parsed = parser.parsed_dict
+    assert parsed is not None
 
     template = Environment().from_string("{% for r in csv_rows %}{{ r.id }}:{{ r.value }}\n{% endfor %}")  # noqa: S701
-    rendered = template.render(**parser.parsed_dict)
+    rendered = template.render(**parsed)
 
     assert rendered == "1:100\n2:N/A\n3:300\n"  # not "1:100.0" / "3:300.0"
 
