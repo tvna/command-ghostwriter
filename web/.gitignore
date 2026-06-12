@@ -1,0 +1,7 @@
+node_modules
+dist
+dist-ssr
+public/pyodide
+test-results
+playwright-report
+*.local
