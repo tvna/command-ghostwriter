@@ -82,17 +82,18 @@
 
 ### 破壊的変更の扱い[判定基準＝Jinjaレンダリング結果の差分]
 
-破壊的変更か否かは「**同じCSV + 同じテンプレートで最終レンダリング出力が変わるか**」の一点で判定する[中間dict/dtypeは出力が同一なら無関係]。既存12成功フィクスチャを正準テンプレートに通して**実測**した結果、破壊面は以下5件に確定した[残り成功9件はレンダリング完全一致、失敗系のnull-byte/empty/header-onlyはパリティ維持]。
+破壊的変更か否かは「**同じCSV + 同じテンプレートで最終レンダリング出力が変わるか**」の一点で判定する[中間dict/dtypeは出力が同一なら無関係]。破壊面は以下6件に確定した[#1-#5は既存12成功フィクスチャの正準テンプレート実測、#6は実装レビューで追加判明。残り成功9件はレンダリング完全一致、失敗系のnull-byte/empty/header-onlyはパリティ維持]。
 
-| # | フィクスチャ | 現行pandas出力 | 新stdlib出力 | 種別 |
+| # | フィクスチャ/入力 | 現行pandas出力 | 新stdlib出力 | 種別 |
 | --- | --- | --- | --- | --- |
 | 1 | `csv_success_multi_nan_fill_empty_string` | `1.0` / `3.0` | `1` / `3` | 値変化[float昇格の廃止・改善方向] |
 | 2 | `csv_success_numeric_nan_fill_na` | `100.0` / `300.0` | `100` / `300` | 値変化[同上] |
 | 3 | `csv_success_mismatched_columns` | index昇格した歪な行 | loudパースエラー | 受理->拒否[loud化・意図通り] |
 | 4 | `csv_failure_unclosed_quote` | `EOF inside string`で拒否 | 黙って受理 | 拒否->受理[要ハードニング/上記] |
 | 5 | `csv_failure_whitespace_only` | `No columns to parse`で拒否 | 黙って受理 | 拒否->受理[要ハードニング/上記] |
+| 6 | セル値 `nan`/`NA`/`N/A`/`NULL`/`None` 等 | NaN化->レンダリングで `nan` | リテラル文字列を保持[`NA`等] | 値変化[na_values黙示コア廃止・改善方向] |
 
-#1・#2は数値列に空セルを含むときpandasが列ごとfloatへ昇格する挙動が消える差分で、`1.0`->`1`[ポート番号・件数・ID等で望ましい]。pre-1.0[v0.0.0]のため破壊的変更を許容し、README/CHANGELOGに上表を明記する。#1・#2は期待値書換[`numpy`依存除去]、#3はerror化、#4・#5はパーサのloudnessハードニングで対処する。
+#1・#2は数値列に空セルを含むときpandasが列ごとfloatへ昇格する挙動が消える差分で、`1.0`->`1`[ポート番号・件数・ID等で望ましい]。#6はpandasの `na_values` 既定[`nan`/`NA`/`N/A`/`NULL`/`None`/`null` 等の文字列を黙ってNaN化]を廃止し、ユーザが書いた文字列をそのまま保持する[例: セル `NA` は pandas で `nan` とレンダリングされるが、stdlibでは `NA`]。フィクスチャに該当値が無く実測5件には現れなかったが、レビューで判明し回帰テスト[`csv_success_literal_nan_string`/`_na_string`/`_null_string`]で固定した。いずれもpandas固有の驚き挙動を除く改善方向。pre-1.0[v0.0.0]のため破壊的変更を許容し、README/CHANGELOGに上表を明記する。#1・#2・#6は期待値で固定、#3はerror化、#4・#5はパーサのloudnessハードニングで対処する。
 
 ### 行数バランス [standards: 純度を伴う規模]
 
