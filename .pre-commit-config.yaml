@@ -1,7 +1,7 @@
 # See https://pre-commit.com for more information
 # See https://pre-commit.com/hooks.html for more hooks
 minimum_pre_commit_version: "3.7.1" # pyproject.tomlと一致させる
-default_install_hook_types: [pre-commit, commit-msg]
+default_install_hook_types: [pre-commit, commit-msg, pre-push]
 default_stages: [pre-commit]
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -180,4 +180,13 @@ repos:
         language: system
         pass_filenames: false
         types: [python]
+        verbose: true
+      - id: ci-parity
+        name: CI-parity gate (ruff/mypy/all-language lizard/web tsc+vitest)
+        description: "Mirror CI's fast blocking checks before push so repairs don't slip through (refs #403)."
+        entry: bash scripts/ci-parity.sh
+        language: system
+        stages: [pre-push]
+        pass_filenames: false
+        always_run: true
         verbose: true
