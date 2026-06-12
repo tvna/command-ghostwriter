@@ -56,4 +56,16 @@ describe("features/ render parity in Pyodide (Node)", () => {
     expect(result.output).toBeNull();
     expect(result.configError).toContain("Failed to parse CSV");
   });
+
+  it("surfaces a template error in templateError, not output", async () => {
+    const result = await generate(pyodide, {
+      configText: 'name = "x"\n',
+      configName: "config.toml",
+      templateText: "{% for %}", // invalid jinja syntax
+      templateName: "template.j2",
+      settings: DEFAULT_SETTINGS,
+    });
+    expect(result.output).toBeNull();
+    expect(result.templateError).not.toBeNull();
+  });
 });
