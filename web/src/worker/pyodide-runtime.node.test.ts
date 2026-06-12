@@ -68,4 +68,16 @@ describe("features/ render parity in Pyodide (Node)", () => {
     expect(result.output).toBeNull();
     expect(result.templateError).not.toBeNull();
   });
+
+  it("returns the parsed config as a JSON configDebug string", async () => {
+    const result = await generate(pyodide, {
+      configText: 'name = "world"\ncount = 3\n',
+      configName: "config.toml",
+      templateText: "x",
+      templateName: "template.j2",
+      settings: DEFAULT_SETTINGS,
+    });
+    expect(result.configDebug).toContain('"name": "world"');
+    expect(result.configDebug).toContain('"count": 3');
+  });
 });

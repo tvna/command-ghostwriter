@@ -4,6 +4,7 @@ export const t = {
   ready: "準備完了",
   previewText: "テキスト",
   previewMarkdown: "Markdown",
+  previewConfig: "設定デバッグ",
   settingsTitle: "詳細設定",
   csvRowsName: "CSV行の変数名",
   enableFillNan: "CSVの欠損値を指定文字で埋める",

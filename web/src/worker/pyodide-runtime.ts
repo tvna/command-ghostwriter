@@ -71,7 +71,8 @@ export async function generate(
     "template_file.name = req['templateName']",
     "core = AppCore('config load failed', 'template load failed')",
     "core.load_config_file(config_file, s['csvRowsName'], s['enableAutoTranscoding'], s['enableFillNan'], s['fillNanWith']).load_template_file(template_file, s['enableAutoTranscoding']).apply(s['formatType'], s['isStrictUndefined'])",
-    "json.dumps({'output': core.formatted_text, 'configError': core.config_error_message, 'templateError': core.template_error_message})",
+    "config_debug = json.dumps(core.config_dict, indent=2, ensure_ascii=False, default=str) if core.config_dict is not None else ''",
+    "json.dumps({'output': core.formatted_text, 'configError': core.config_error_message, 'templateError': core.template_error_message, 'configDebug': config_debug})",
   ].join("\n");
   const resultJson = (await pyodide.runPythonAsync(code)) as string;
   return JSON.parse(resultJson) as GenerateResult;
