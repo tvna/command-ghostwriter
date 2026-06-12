@@ -1,0 +1,16 @@
+export const t = {
+  appTitle: "Command Ghostwriter",
+  loading: "Pyodideを読み込み中...",
+  ready: "準備完了",
+  previewText: "テキスト",
+  previewMarkdown: "Markdown",
+  settingsTitle: "詳細設定",
+  csvRowsName: "CSV行の変数名",
+  enableFillNan: "CSVの欠損値を指定文字で埋める",
+  fillNanWith: "欠損値の変換文字",
+  formatType: "出力フォーマット",
+  isStrictUndefined: "テンプレートの変数チェック厳格化",
+  enableAutoTranscoding: "UTF-8以外の文字コードを自動判定",
+  appendTimestamp: "タイムスタンプ付与",
+  download: "ダウンロード",
+} as const;
