@@ -5,6 +5,7 @@ import { DEFAULT_SETTINGS } from "./worker/types";
 import { Editor } from "./components/Editor";
 import { Preview, type PreviewMode } from "./components/Preview";
 import { SettingsDrawer } from "./components/SettingsDrawer";
+import { SampleMenu } from "./components/SampleMenu";
 
 const DEBOUNCE_MS = 250;
 
@@ -71,6 +72,7 @@ export function App() {
     <main>
       <h1>Command Ghostwriter</h1>
       <p>{status}</p>
+      <SampleMenu onLoad={(c, t) => { setConfig(c); setTemplate(t); }} />
       <Editor ariaLabel="config" value={config} language="yaml" onChange={setConfig} />
       <Editor ariaLabel="template" value={template} language="plain" onChange={setTemplate} />
       {error !== null && <div role="alert">{error}</div>}
