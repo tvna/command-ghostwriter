@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { downloadFilename, triggerDownload } from "../download";
+import { t } from "../i18n";
 
 interface DownloadBarProps {
   output: string;
@@ -23,9 +24,9 @@ export function DownloadBar({ output }: DownloadBarProps) {
       </select>
       <label>
         <input aria-label="appendTimestamp" type="checkbox" checked={appendTimestamp} onChange={(e) => setAppendTimestamp(e.target.checked)} />
-        タイムスタンプ付与
+        {t.appendTimestamp}
       </label>
-      <button type="button" disabled={output.length === 0} onClick={handleDownload}>ダウンロード</button>
+      <button type="button" disabled={output.length === 0} onClick={handleDownload}>{t.download}</button>
     </div>
   );
 }

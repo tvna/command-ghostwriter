@@ -1,4 +1,5 @@
 import type { GenerateSettings } from "../worker/types";
+import { t } from "../i18n";
 
 const FORMAT_TYPE_LABELS: Record<number, string> = {
   0: "フォーマット指定無し",
@@ -20,21 +21,21 @@ export function SettingsDrawer({ settings, onChange }: SettingsDrawerProps) {
 
   return (
     <details>
-      <summary>詳細設定</summary>
+      <summary>{t.settingsTitle}</summary>
       <label>
-        CSV行の変数名
+        {t.csvRowsName}
         <input aria-label="csvRowsName" type="text" value={settings.csvRowsName} onChange={(e) => set("csvRowsName", e.target.value)} />
       </label>
       <label>
         <input aria-label="enableFillNan" type="checkbox" checked={settings.enableFillNan} onChange={(e) => set("enableFillNan", e.target.checked)} />
-        CSVの欠損値を指定文字で埋める
+        {t.enableFillNan}
       </label>
       <label>
-        欠損値の変換文字
+        {t.fillNanWith}
         <input aria-label="fillNanWith" type="text" value={settings.fillNanWith} onChange={(e) => set("fillNanWith", e.target.value)} />
       </label>
       <label>
-        出力フォーマット
+        {t.formatType}
         <select aria-label="formatType" value={settings.formatType} onChange={(e) => set("formatType", Number(e.target.value))}>
           {[0, 1, 2, 3, 4].map((n) => (
             <option key={n} value={n}>{FORMAT_TYPE_LABELS[n]}</option>
@@ -43,11 +44,11 @@ export function SettingsDrawer({ settings, onChange }: SettingsDrawerProps) {
       </label>
       <label>
         <input aria-label="isStrictUndefined" type="checkbox" checked={settings.isStrictUndefined} onChange={(e) => set("isStrictUndefined", e.target.checked)} />
-        テンプレートの変数チェック厳格化
+        {t.isStrictUndefined}
       </label>
       <label>
         <input aria-label="enableAutoTranscoding" type="checkbox" checked={settings.enableAutoTranscoding} onChange={(e) => set("enableAutoTranscoding", e.target.checked)} />
-        UTF-8以外の文字コードを自動判定
+        {t.enableAutoTranscoding}
       </label>
     </details>
   );

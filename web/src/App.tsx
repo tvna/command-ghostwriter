@@ -7,6 +7,7 @@ import { Preview, type PreviewMode } from "./components/Preview";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { SampleMenu } from "./components/SampleMenu";
 import { DownloadBar } from "./components/DownloadBar";
+import { t } from "./i18n";
 
 const DEBOUNCE_MS = 250;
 
@@ -67,11 +68,11 @@ export function App() {
   }, [config, template, ready, settings]);
 
   const error = viewError(result);
-  const status = ready ? "ready" : "loading Pyodide...";
+  const status = ready ? t.ready : t.loading;
 
   return (
     <main>
-      <h1>Command Ghostwriter</h1>
+      <h1>{t.appTitle}</h1>
       <p>{status}</p>
       <SampleMenu onLoad={(c, t) => { setConfig(c); setTemplate(t); }} />
       <Editor ariaLabel="config" value={config} language="yaml" onChange={setConfig} />
@@ -79,8 +80,8 @@ export function App() {
       {error !== null && <div role="alert">{error}</div>}
       <SettingsDrawer settings={settings} onChange={setSettings} />
       <div role="group" aria-label="preview mode">
-        <button type="button" aria-pressed={previewMode === "text"} onClick={() => setPreviewMode("text")}>Text</button>
-        <button type="button" aria-pressed={previewMode === "markdown"} onClick={() => setPreviewMode("markdown")}>Markdown</button>
+        <button type="button" aria-pressed={previewMode === "text"} onClick={() => setPreviewMode("text")}>{t.previewText}</button>
+        <button type="button" aria-pressed={previewMode === "markdown"} onClick={() => setPreviewMode("markdown")}>{t.previewMarkdown}</button>
       </div>
       <Preview output={viewOutput(result)} mode={previewMode} />
       <DownloadBar output={viewOutput(result)} />
