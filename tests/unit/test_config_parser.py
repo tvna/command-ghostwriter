@@ -953,7 +953,7 @@ def test_parse_toml_or_yaml(
             id="csv_success_whitespace_in_header_data",
         ),
         pytest.param(
-            b"col1,col2\nnan,val2",  # literal "nan" preserved as string (pandas coerced to NaN)
+            b"col1,col2\nnan,val2",  # literal "nan" preserved as string (stdlib csv keeps as-is)
             "literal_nan.csv",
             DEFAULT_CSV_ROWS_NAME,
             SHOULD_NOT_FILL_NAN,
@@ -964,7 +964,7 @@ def test_parse_toml_or_yaml(
             id="csv_success_literal_nan_string",
         ),
         pytest.param(
-            b"col1,col2\nNA,val2",  # literal "NA" preserved as string (pandas coerced to NaN)
+            b"col1,col2\nNA,val2",  # literal "NA" preserved as string (stdlib csv keeps as-is)
             "literal_na.csv",
             DEFAULT_CSV_ROWS_NAME,
             SHOULD_NOT_FILL_NAN,
@@ -975,7 +975,7 @@ def test_parse_toml_or_yaml(
             id="csv_success_literal_na_string",
         ),
         pytest.param(
-            b"col1,col2\nNULL,val2",  # literal "NULL" preserved as string (pandas coerced to NaN)
+            b"col1,col2\nNULL,val2",  # literal "NULL" preserved as string (stdlib csv keeps as-is)
             "literal_null.csv",
             DEFAULT_CSV_ROWS_NAME,
             SHOULD_NOT_FILL_NAN,
@@ -1015,7 +1015,7 @@ def test_parse_toml_or_yaml(
             DEFAULT_FILL_VALUE,
             NO_EXPECTED_INITIAL_ERROR,
             NO_EXPECTED_DICT,
-            "No columns to parse from file",  # Error message might vary slightly based on pandas version
+            "No columns to parse from file",  # Error message for empty input
             id="csv_failure_empty_file",
         ),
         pytest.param(
@@ -1134,10 +1134,10 @@ def test_parse_csv(
     This parameterized test covers various CSV-specific scenarios:
     - Basic CSV structure with headers and data.
     - Handling of empty files or files with only headers.
-    - Parsing values with different delimiters (implicitly handled by pandas sniffing).
+    - Parsing values with different delimiters (stdlib csv default dialect).
     - Correctly parsing quoted fields containing commas or newlines.
     - Handling of Not a Number (NaN) values:
-        - Recognizing empty fields as NaN (using `numpy.nan`).
+        - Recognizing empty fields as NaN (using `float("nan")`).
         - Optionally filling NaN values with a specified string (`enable_fill_nan`, `fill_nan_with`).
     - Using a custom key name for the list of CSV rows (`csv_rows_name`).
     - Large file handling (within size limits).

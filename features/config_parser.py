@@ -9,7 +9,7 @@
 クラス階層:
 - ConfigParser: メインのパースクラス (Pydanticモデル)
   - FileValidator: ファイルサイズの検証
-  - pandas: CSVデータの処理
+  - csv (stdlib): CSVデータの処理
 
 検証プロセス:
 1. 入力検証
@@ -40,7 +40,7 @@
   - PyYAMLによる安全なパース
   - 辞書形式の検証
 - CSV (.csv)
-  - pandasによるパース
+  - stdlib csv によるパース
   - NaN値の柔軟な処理
   - カスタム行名の設定
 
@@ -51,7 +51,7 @@
 - MemoryError: メモリ制限超過
 - YAMLError: YAML構文エラー
 - TOMLDecodeError: TOML構文エラー
-- pandas.errors: CSVパースエラー
+- ValueError: CSVパースエラー
 
 メモリ管理:
 - ファイルサイズ制限: 30MB
@@ -130,7 +130,7 @@ def _infer_scalar(value: str) -> JSONScalarValue:
 def _has_unterminated_quote(data: str) -> bool:
     """data がクォート途中で終端しているなら True を返す。
 
-    stdlib csv は未終端クォートを黙って受理するが pandas は拒否していた。loud な
+    stdlib csv は未終端クォートを黙って受理するが、loud な
     拒否契約を保つため明示検出する。クォートはフィールド先頭(レコード先頭または
     区切り直後)でのみ開始し、それ以外の位置の " はリテラル文字として扱う。
     """
@@ -173,7 +173,7 @@ class ConfigParser(BaseModel):
     2. パース処理
        - TOML: tomllibによる厳密なパース
        - YAML: safe_loadによる安全なパース
-       - CSV: pandasによる高度なデータ処理
+       - CSV: stdlib csv によるパースとセル単位型推論
          - NaN値の柔軟な処理
          - カスタム行名の設定
          - 型変換の自動処理
@@ -206,7 +206,7 @@ class ConfigParser(BaseModel):
     - MemoryError: メモリ制限超過
     - YAMLError: YAML構文エラー
     - TOMLDecodeError: TOML構文エラー
-    - pandas.errors: CSVパースエラー
+    - ValueError: CSVパースエラー
     """
 
     # Constants for size limits as class variables
@@ -316,7 +316,7 @@ class ConfigParser(BaseModel):
             ValueError: NULLバイト/未終端クォート/カラム無し/データ行無し/
                 ヘッダより列数が多い行 のいずれかで送出。
         """
-        # 明示チェック(loud)。pandas が拒否していた入力を stdlib でも拒否する。
+        # 明示チェック(loud)。stdlib csv が黙って受理する入力を明示的に拒否する。
         if "\x00" in config_data:
             raise ValueError("Failed to parse CSV: Null byte detected in input data.")
         if _has_unterminated_quote(config_data):
