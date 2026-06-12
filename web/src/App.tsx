@@ -3,7 +3,8 @@ import GenerateWorker from "./worker/generate.worker?worker";
 import type { WorkerOutbound, GenerateResult, GenerateSettings } from "./worker/types";
 import { DEFAULT_SETTINGS } from "./worker/types";
 import { Editor } from "./components/Editor";
-import { Preview, type PreviewMode } from "./components/Preview";
+import { Preview } from "./components/Preview";
+import { ConfigDebug } from "./components/ConfigDebug";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { SampleMenu } from "./components/SampleMenu";
 import { DownloadBar } from "./components/DownloadBar";
@@ -32,7 +33,7 @@ export function App() {
     "{% for r in csv_rows %}{{ r.id }}:{{ r.value }}\n{% endfor %}",
   );
   const [result, setResult] = useState<GenerateResult | null>(null);
-  const [previewMode, setPreviewMode] = useState<PreviewMode>("text");
+  const [previewMode, setPreviewMode] = useState<"text" | "markdown" | "config">("text");
   const [settings, setSettings] = useState<GenerateSettings>(DEFAULT_SETTINGS);
 
   useEffect(() => {
@@ -86,7 +87,11 @@ export function App() {
         <button type="button" aria-pressed={previewMode === "markdown"} onClick={() => setPreviewMode("markdown")}>{t.previewMarkdown}</button>
         <button type="button" aria-pressed={previewMode === "config"} onClick={() => setPreviewMode("config")}>{t.previewConfig}</button>
       </div>
-      <Preview output={previewMode === "config" ? (result?.configDebug ?? "") : viewOutput(result)} mode={previewMode} />
+      {previewMode === "config" ? (
+        <ConfigDebug json={result?.configDebug ?? ""} />
+      ) : (
+        <Preview output={viewOutput(result)} mode={previewMode} />
+      )}
       <DownloadBar output={viewOutput(result)} />
     </main>
   );

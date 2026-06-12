@@ -21,8 +21,4 @@ describe("Preview", () => {
     expect(container.innerHTML).not.toContain("onerror");
   });
 
-  it("config mode shows the debug string in a pre", () => {
-    render(<Preview output={'{"a": 1}'} mode="config" />);
-    expect(screen.getByTestId("config-debug").textContent).toBe('{"a": 1}');
-  });
 });
