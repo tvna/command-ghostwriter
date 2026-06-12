@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import GenerateWorker from "./worker/generate.worker?worker";
-import type { WorkerOutbound, GenerateResult } from "./worker/types";
+import type { WorkerOutbound, GenerateResult, GenerateSettings } from "./worker/types";
 import { DEFAULT_SETTINGS } from "./worker/types";
 import { Editor } from "./components/Editor";
 import { Preview, type PreviewMode } from "./components/Preview";
+import { SettingsDrawer } from "./components/SettingsDrawer";
 
 const DEBOUNCE_MS = 250;
 
@@ -28,6 +29,7 @@ export function App() {
   );
   const [result, setResult] = useState<GenerateResult | null>(null);
   const [previewMode, setPreviewMode] = useState<PreviewMode>("text");
+  const [settings, setSettings] = useState<GenerateSettings>(DEFAULT_SETTINGS);
 
   useEffect(() => {
     const worker = new GenerateWorker();
@@ -55,12 +57,12 @@ export function App() {
           configName: "config.csv",
           templateText: template,
           templateName: "template.j2",
-          settings: DEFAULT_SETTINGS,
+          settings,
         },
       });
     }, DEBOUNCE_MS);
     return () => clearTimeout(handle);
-  }, [config, template, ready]);
+  }, [config, template, ready, settings]);
 
   const error = viewError(result);
   const status = ready ? "ready" : "loading Pyodide...";
@@ -72,6 +74,7 @@ export function App() {
       <Editor ariaLabel="config" value={config} language="yaml" onChange={setConfig} />
       <Editor ariaLabel="template" value={template} language="plain" onChange={setTemplate} />
       {error !== null && <div role="alert">{error}</div>}
+      <SettingsDrawer settings={settings} onChange={setSettings} />
       <div role="group" aria-label="preview mode">
         <button type="button" aria-pressed={previewMode === "text"} onClick={() => setPreviewMode("text")}>Text</button>
         <button type="button" aria-pressed={previewMode === "markdown"} onClick={() => setPreviewMode("markdown")}>Markdown</button>
