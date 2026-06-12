@@ -158,6 +158,40 @@ def _has_unterminated_quote(data: str) -> bool:
     return in_quotes
 
 
+def _coerce_cell(cell: str, fill_value: Optional[str]) -> JSONScalarValue:
+    """空セルは補完値[無ければ float('nan')]、それ以外はセル単位推論を適用する。"""
+    if cell == "":
+        return fill_value if fill_value is not None else float("nan")
+    return _infer_scalar(cell)
+
+
+def _build_csv_row(header: List[str], raw_row: List[str], index: int, fill_value: Optional[str]) -> CSVRow:
+    """1データ行を {列名: 値} に変換する。短い行はパッド、列超過は loud エラー。"""
+    if len(raw_row) > len(header):
+        raise ValueError(f"Failed to parse CSV: row {index + 1} has more fields than the header.")
+    cells = raw_row + [""] * (len(header) - len(raw_row))
+    return {column: _coerce_cell(cell, fill_value) for column, cell in zip(header, cells, strict=True)}
+
+
+def _read_csv_table(config_data: str) -> tuple[List[str], List[List[str]]]:
+    """CSVテキストを (ヘッダ, データ行群) に分解する。pandasが拒否していた入力をloud化する。
+
+    Raises:
+        ValueError: NULLバイト/未終端クォート/カラム無し[空・空白のみ]/データ行無し。
+    """
+    if "\x00" in config_data:
+        raise ValueError("Failed to parse CSV: Null byte detected in input data.")
+    if _has_unterminated_quote(config_data):
+        raise ValueError("Failed to parse CSV: unterminated quoted field.")
+
+    rows: List[List[str]] = [row for row in csv.reader(StringIO(config_data)) if row]
+    if not rows or all(cell.strip() == "" for cell in rows[0]):
+        raise ValueError("No columns to parse from file")
+    if len(rows) < 2:
+        raise ValueError("CSV file must contain at least one data row.")
+    return rows[0], rows[1:]
+
+
 class ConfigParser(BaseModel):
     """設定ファイルのパースを行うクラス。
 
@@ -316,39 +350,14 @@ class ConfigParser(BaseModel):
             ValueError: NULLバイト/未終端クォート/カラム無し/データ行無し/
                 ヘッダより列数が多い行 のいずれかで送出。
         """
-        # 明示チェック(loud)。stdlib csv が黙って受理する入力を明示的に拒否する。
-        if "\x00" in config_data:
-            raise ValueError("Failed to parse CSV: Null byte detected in input data.")
-        if _has_unterminated_quote(config_data):
-            raise ValueError("Failed to parse CSV: unterminated quoted field.")
-
-        rows: List[List[str]] = [row for row in csv.reader(StringIO(config_data)) if row]
-        if not rows or all(cell.strip() == "" for cell in rows[0]):
-            raise ValueError("No columns to parse from file")
-
-        header: Final[List[str]] = rows[0]
-        body: Final[List[List[str]]] = rows[1:]
-        if not body:
-            raise ValueError("CSV file must contain at least one data row.")
+        header, body = _read_csv_table(config_data)
 
         # 補完値: 有効かつ非None のときだけ採用。無効/None のとき空セルは float('nan')。
         fill_value: Final[Optional[str]] = (
             self._fill_nan_with if (self._is_enable_fill_nan and self._fill_nan_with is not None) else None
         )
 
-        mapped_list: CSVData = []
-        for index, raw_row in enumerate(body):
-            if len(raw_row) > len(header):
-                raise ValueError(f"Failed to parse CSV: row {index + 1} has more fields than the header.")
-            cells = raw_row + [""] * (len(header) - len(raw_row))
-            row_dict: CSVRow = {}
-            for column, cell in zip(header, cells, strict=True):
-                if cell == "":
-                    row_dict[column] = fill_value if fill_value is not None else float("nan")
-                else:
-                    row_dict[column] = _infer_scalar(cell)
-            mapped_list.append(row_dict)
-
+        mapped_list: CSVData = [_build_csv_row(header, raw_row, index, fill_value) for index, raw_row in enumerate(body)]
         return {self.csv_rows_name: cast("JSONValue", mapped_list)}
 
     def _validate_memory_size(self, obj: Union[JSONDict, str]) -> bool:
