@@ -6,6 +6,7 @@ import { Editor } from "./components/Editor";
 import { Preview, type PreviewMode } from "./components/Preview";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { SampleMenu } from "./components/SampleMenu";
+import { DownloadBar } from "./components/DownloadBar";
 
 const DEBOUNCE_MS = 250;
 
@@ -82,6 +83,7 @@ export function App() {
         <button type="button" aria-pressed={previewMode === "markdown"} onClick={() => setPreviewMode("markdown")}>Markdown</button>
       </div>
       <Preview output={viewOutput(result)} mode={previewMode} />
+      <DownloadBar output={viewOutput(result)} />
     </main>
   );
 }
