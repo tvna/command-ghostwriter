@@ -3,6 +3,7 @@ import GenerateWorker from "./worker/generate.worker?worker";
 import type { WorkerOutbound, GenerateResult } from "./worker/types";
 import { DEFAULT_SETTINGS } from "./worker/types";
 import { Editor } from "./components/Editor";
+import { Preview, type PreviewMode } from "./components/Preview";
 
 const DEBOUNCE_MS = 250;
 
@@ -26,6 +27,7 @@ export function App() {
     "{% for r in csv_rows %}{{ r.id }}:{{ r.value }}\n{% endfor %}",
   );
   const [result, setResult] = useState<GenerateResult | null>(null);
+  const [previewMode, setPreviewMode] = useState<PreviewMode>("text");
 
   useEffect(() => {
     const worker = new GenerateWorker();
@@ -70,7 +72,11 @@ export function App() {
       <Editor ariaLabel="config" value={config} language="yaml" onChange={setConfig} />
       <Editor ariaLabel="template" value={template} language="plain" onChange={setTemplate} />
       {error !== null && <div role="alert">{error}</div>}
-      <pre>{viewOutput(result)}</pre>
+      <div role="group" aria-label="preview mode">
+        <button type="button" aria-pressed={previewMode === "text"} onClick={() => setPreviewMode("text")}>Text</button>
+        <button type="button" aria-pressed={previewMode === "markdown"} onClick={() => setPreviewMode("markdown")}>Markdown</button>
+      </div>
+      <Preview output={viewOutput(result)} mode={previewMode} />
     </main>
   );
 }
