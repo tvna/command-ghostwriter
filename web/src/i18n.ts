@@ -14,4 +14,8 @@ export const t = {
   enableAutoTranscoding: "UTF-8以外の文字コードを自動判定",
   appendTimestamp: "タイムスタンプ付与",
   download: "ダウンロード",
+  howTo: "使い方",
+  howToDialog: "使い方の説明",
+  howToText: "設定定義ファイル(toml/yaml/csv)とJinjaテンプレートを各エディタに入力すると、リアルタイムにコマンドが生成されます。サンプルから読み込むこともできます。",
+  close: "閉じる",
 } as const;
