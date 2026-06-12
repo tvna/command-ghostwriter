@@ -1095,6 +1095,28 @@ def test_parse_toml_or_yaml(
             "No columns to parse from file",
             id="csv_failure_whitespace_only",
         ),
+        pytest.param(
+            b"a,b\n1,x\n,y",  # int column with a blank must NOT float-promote
+            "int_blank.csv",
+            DEFAULT_CSV_ROWS_NAME,
+            SHOULD_NOT_FILL_NAN,
+            DEFAULT_FILL_VALUE,
+            NO_EXPECTED_INITIAL_ERROR,
+            {"csv_rows": [{"a": 1, "b": "x"}, {"a": float("nan"), "b": "y"}]},
+            NO_EXPECTED_RUNTIME_ERROR,
+            id="csv_success_int_with_blank_no_promotion",
+        ),
+        pytest.param(
+            b"code\n007",  # leading zeros preserved as string
+            "code.csv",
+            DEFAULT_CSV_ROWS_NAME,
+            SHOULD_NOT_FILL_NAN,
+            DEFAULT_FILL_VALUE,
+            NO_EXPECTED_INITIAL_ERROR,
+            {"csv_rows": [{"code": "007"}]},
+            NO_EXPECTED_RUNTIME_ERROR,
+            id="csv_success_preserve_leading_zero",
+        ),
     ],
 )
 def test_parse_csv(
@@ -1227,3 +1249,21 @@ def test_has_unterminated_quote(raw: str, expected: bool) -> None:
     from features.config_parser import _has_unterminated_quote
 
     assert _has_unterminated_quote(raw) is expected
+
+
+@UNIT
+def test_csv_render_layer_parity() -> None:
+    """数値列に空セルがある CSV の Jinja レンダリング結果が float 昇格を含まないことを固定する。"""
+    from jinja2 import Environment
+
+    config_file = BytesIO(b"id,value\n1,100\n2,\n3,300")
+    config_file.name = "render.csv"
+    parser = ConfigParser(config_file=config_file)
+    parser.enable_fill_nan = True
+    parser.fill_nan_with = "N/A"
+    assert parser.parse() is True
+
+    template = Environment().from_string("{% for r in csv_rows %}{{ r.id }}:{{ r.value }}\n{% endfor %}")  # noqa: S701
+    rendered = template.render(**parser.parsed_dict)
+
+    assert rendered == "1:100\n2:N/A\n3:300\n"  # not "1:100.0" / "3:300.0"
