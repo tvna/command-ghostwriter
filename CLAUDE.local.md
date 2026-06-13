@@ -25,3 +25,15 @@ is overwritten on every regeneration.
   `--strip-components`, member paths) in the code and its comments. Never
   write extraction paths from assumption; the apm nested-directory failure on
   PR #391 (exit 127) is the bug class this prevents. Refs #392, #393.
+
+## CLAUDE.md is sourced from the master repo
+
+- `CLAUDE.md` is synced from the master repository
+  [`tvna/claude-md`](https://github.com/tvna/claude-md) by
+  `.github/workflows/sync-claude-md.yml` (weekly + manual), landing via a
+  review PR. The master is the source of truth.
+- Do **not** run `apm compile` to regenerate `CLAUDE.md` locally; the sync
+  workflow is its sole owner. The local `.apm/instructions/` source is vestigial
+  for `CLAUDE.md` (it still drives superpowers skill deployment). Removing it and
+  regenerating `apm.lock.yaml` is deferred to a follow-up in an apm-capable
+  environment. Refs #427.
