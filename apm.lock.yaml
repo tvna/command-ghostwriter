@@ -1,5 +1,5 @@
 lockfile_version: '1'
-generated_at: '2026-06-04T04:14:20.069325+00:00'
+generated_at: '2026-06-13T05:28:20.075927+00:00'
 apm_version: 0.12.1
 dependencies:
 - repo_url: obra/superpowers
@@ -23,7 +23,3 @@ dependencies:
   - .claude/skills/writing-plans
   - .claude/skills/writing-skills
   content_hash: sha256:fb4f87bfef928a6d68f5d5aaa29e3eba011961c5f03bbf171c3c348d8d161abb
-local_deployed_files:
-- .claude/rules/master.md
-local_deployed_file_hashes:
-  .claude/rules/master.md: sha256:227baa56018c80b17c731dc304dac2cdcf65f03dd854896f4b37dbb8155a3d97
