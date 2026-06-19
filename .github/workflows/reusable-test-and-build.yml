@@ -141,7 +141,7 @@ jobs:
             ${{ env.EP_PYTHON }}
 
       - name: Check out git repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Setup Python and restore cache
         uses: ./.github/actions/setup-python
@@ -167,7 +167,7 @@ jobs:
             ${{ env.EP_NODE }}
 
       - name: Check out git repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Setup Node.js
         uses: ./.github/actions/setup-node
@@ -193,7 +193,7 @@ jobs:
             ${{ env.EP_GITHUB_RAW }}
 
       - name: Check out git repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 1
 
@@ -265,7 +265,7 @@ jobs:
             ${{ env.EP_GITHUB_RAW }}
 
       - name: Check out git repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: ALL_FETCH_DEPTH
 
@@ -308,7 +308,7 @@ jobs:
             ${{ env.EP_PYTHON }}
 
       - name: Check out git repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Setup Python and restore cache
         uses: ./.github/actions/setup-python
@@ -384,7 +384,7 @@ jobs:
             check.trivy.dev:443
 
       - name: Check out git repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Setup Python and restore cache
         uses: ./.github/actions/setup-python
@@ -488,7 +488,7 @@ jobs:
             ${{ env.EP_PYTHON }}
 
       - name: Check out git repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 1
 
@@ -536,7 +536,7 @@ jobs:
             storage.googleapis.com:443
 
       - name: Check out git repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 1
 
@@ -632,7 +632,7 @@ jobs:
             data.streamlit.io:443
 
       - name: Check out git repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 1
 
@@ -683,7 +683,7 @@ jobs:
             webhooks.fivetran.com:443
 
       - name: Check out git repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 1
 
@@ -742,7 +742,7 @@ jobs:
             ${{ env.EP_PYTHON }}
 
       - name: Check out git repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 1
 
@@ -814,7 +814,7 @@ jobs:
           allowed-endpoints: |+
 
       - name: Check out git repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 1
 
