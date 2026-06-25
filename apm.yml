@@ -6,3 +6,4 @@ target:
 dependencies:
   apm:
   - obra/superpowers#f2cbfbefebbfef77321e4c9abc9e949826bea9d7
+  - mattpocock/skills#5d78bd0903420f97c791f834201e550c765699f8
