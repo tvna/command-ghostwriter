@@ -15,10 +15,14 @@
 # - CLAUDE.md 変更をトリガにする CI は無いため GITHUB_TOKEN のみで足りる (PAT 不要)。
 # - リポジトリ設定で "Allow GitHub Actions to create and approve pull requests"
 #   を有効化しておくこと。
+# - create-pull-request の sign-commits: true により、ローカル git commit ではなく
+#   GitHub API 経由でコミットを作成し、GITHUB_TOKEN のままで Verified 署名済みコミット
+#   とする (新規 GitHub App / secret は不要)。未設定だと署名必須ブランチ保護で
+#   PR が `mergeable_state: blocked` のままマージ不能になる (PR #464 で発生)。
 #
 # 関連 (Reference):
 # -----------------
-# - Issue #427
+# - Issue #427, #467
 # - 設計書 docs/superpowers/specs/2026-06-13-claude-md-master-sync-design.md
 # ============================================================
 ---
@@ -71,6 +75,7 @@ jobs:
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          sign-commits: true
           base: main
           branch: chore/sync-claude-md
           delete-branch: true
@@ -82,4 +87,4 @@ jobs:
 
             Source of truth is `tvna/claude-md`. Review required; do not auto-merge.
 
-            Refs #427
+            Refs #427, #467
