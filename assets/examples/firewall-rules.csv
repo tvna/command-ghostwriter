@@ -1,0 +1,5 @@
+zone,action,source,protocol,port,comment
+public,accept,0.0.0.0/0,tcp,443,HTTPS を全ホストに許可
+public,accept,203.0.113.0/24,tcp,22,SSH を保守ネットワークからのみ許可
+internal,accept,10.0.2.0/24,tcp,3306,MySQL をアプリ層サブネットから許可
+dmz,reject,198.51.100.0/24,tcp,8080,旧API ポートを拒否(reject で明示応答)
