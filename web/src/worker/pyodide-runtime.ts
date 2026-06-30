@@ -41,10 +41,23 @@ export async function bootstrapRuntime(
 
   await pyodide.runPythonAsync(
     [
-      "import sys",
+      "import sys, json",
       'if "/" not in sys.path:',
       '    sys.path.insert(0, "/")',
-      "import features.core  # fail loudly here if a dep or import is missing",
+      "from io import BytesIO",
+      "from features.core import AppCore  # fail loudly here if a dep or import is missing",
+      "",
+      "def _cg_generate(payload):",
+      "    req = json.loads(payload)",
+      "    s = req['settings']",
+      "    config_file = BytesIO(req['configText'].encode('utf-8'))",
+      "    config_file.name = req['configName']",
+      "    template_file = BytesIO(req['templateText'].encode('utf-8'))",
+      "    template_file.name = req['templateName']",
+      "    core = AppCore('config load failed', 'template load failed')",
+      "    core.load_config_file(config_file, s['csvRowsName'], s['enableAutoTranscoding'], s['enableFillNan'], s['fillNanWith']).load_template_file(template_file, s['enableAutoTranscoding']).apply(s['formatType'], s['isStrictUndefined'])",
+      "    config_debug = json.dumps(core.config_dict, indent=2, ensure_ascii=False, default=str) if core.config_dict is not None else ''",
+      "    return json.dumps({'output': core.formatted_text, 'configError': core.config_error_message, 'templateError': core.template_error_message, 'configDebug': config_debug})",
     ].join("\n"),
   );
 
@@ -55,25 +68,11 @@ export async function generate(
   pyodide: PyodideLike,
   request: GenerateRequest,
 ): Promise<GenerateResult> {
-  // Double JSON-encode: the inner encodes the request, the outer turns that into a
-  // valid Python string literal (JSON and Python share \uXXXX escapes, so non-ASCII
-  // and quotes are safe). json.loads() inside Python decodes it -- no code injection.
+  // Double JSON-encode: inner encodes the request, outer makes it a Python string
+  // literal. Calls the resident _cg_generate(payload) compiled once at bootstrap.
   const pyPayloadLiteral = JSON.stringify(JSON.stringify(request));
-  const code = [
-    "import json",
-    "from io import BytesIO",
-    "from features.core import AppCore",
-    `req = json.loads(${pyPayloadLiteral})`,
-    "s = req['settings']",
-    "config_file = BytesIO(req['configText'].encode('utf-8'))",
-    "config_file.name = req['configName']",
-    "template_file = BytesIO(req['templateText'].encode('utf-8'))",
-    "template_file.name = req['templateName']",
-    "core = AppCore('config load failed', 'template load failed')",
-    "core.load_config_file(config_file, s['csvRowsName'], s['enableAutoTranscoding'], s['enableFillNan'], s['fillNanWith']).load_template_file(template_file, s['enableAutoTranscoding']).apply(s['formatType'], s['isStrictUndefined'])",
-    "config_debug = json.dumps(core.config_dict, indent=2, ensure_ascii=False, default=str) if core.config_dict is not None else ''",
-    "json.dumps({'output': core.formatted_text, 'configError': core.config_error_message, 'templateError': core.template_error_message, 'configDebug': config_debug})",
-  ].join("\n");
-  const resultJson = (await pyodide.runPythonAsync(code)) as string;
+  const resultJson = (await pyodide.runPythonAsync(
+    `_cg_generate(${pyPayloadLiteral})`,
+  )) as string;
   return JSON.parse(resultJson) as GenerateResult;
 }
