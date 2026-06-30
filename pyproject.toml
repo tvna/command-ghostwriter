@@ -18,7 +18,6 @@ dependencies = [
   "pydantic>=2.11.7,<2.12",
   "python-box>=7.2,<8",
   "pyyaml>=6.0.1,<7",
-  "streamlit>=1.47,<2",
   "toml>=0.10.2,<0.11",
 ]
 
@@ -42,7 +41,6 @@ dev = [
   "pytest-cov>=6.2.1,<7",
   "pytest-item-dict>=1.1.2,<2",
   "pytest-mock>=3.14.1,<4",
-  "pytest-playwright>=0.7,<0.8",
   "pytest-randomly>=3.16,<4",
   "pytest-rerunfailures>=15,<16",
   "pytest-timeout>=2.4,<3",
