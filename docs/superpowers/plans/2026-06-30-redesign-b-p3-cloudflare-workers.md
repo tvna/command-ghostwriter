@@ -1,3 +1,5 @@
+> Retired: see #472
+
 # Redesign B — P3 Cloudflare Workers ミラー[静的配信]Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
