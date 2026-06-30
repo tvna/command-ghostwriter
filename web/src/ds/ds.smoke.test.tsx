@@ -47,6 +47,20 @@ describe("DS primitives smoke", () => {
     expect(screen.getByText("アップロード")).toBeTruthy();
   });
 
+  it("FileUploader exposes a native file input and reports selected files", () => {
+    const onFile = vi.fn();
+    const { container } = render(<FileUploader label="アップロード" accept=".toml,.yaml,.csv" onFile={onFile} />);
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement | null;
+    expect(input).toBeTruthy();
+    expect(input?.getAttribute("accept")).toBe(".toml,.yaml,.csv");
+
+    const file = new File(["hostname = \"router-001\""], "config.toml", { type: "application/toml" });
+    fireEvent.change(input as HTMLInputElement, { target: { files: [file] } });
+
+    expect(onFile).toHaveBeenCalledTimes(1);
+    expect(onFile).toHaveBeenCalledWith(file);
+  });
+
   it("Divider renders an hr element", () => {
     const { container } = render(<Divider variant="rainbow" />);
     expect(container.querySelector("hr")).toBeTruthy();

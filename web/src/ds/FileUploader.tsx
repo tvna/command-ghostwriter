@@ -8,23 +8,38 @@ import React from 'react';
 export interface FileUploaderProps {
   label?: React.ReactNode;
   accept?: string;
+  acceptLabel?: string;
   maxSize?: string;
   fileName?: string | null;
   fileSize?: string;
   onBrowse?: () => void;
+  onFile?: (file: File) => void;
   style?: React.CSSProperties;
 }
 
 export function FileUploader({
   label,
   accept = '',
+  acceptLabel,
   maxSize = '30MB',
   fileName = null,
   fileSize = '',
   onBrowse,
+  onFile,
   style,
 }: FileUploaderProps) {
   const [hover, setHover] = React.useState(false);
+  const inputRef = React.useRef<HTMLInputElement>(null);
+  const handleBrowse = () => {
+    inputRef.current?.click();
+    onBrowse?.();
+  };
+  const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.currentTarget.files?.[0];
+    if (file) onFile?.(file);
+    event.currentTarget.value = '';
+  };
+
   return (
     <div style={{ fontFamily: 'var(--font-sans)', ...style }}>
       {label && (
@@ -54,12 +69,11 @@ export function FileUploader({
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 'var(--text-sm)', color: 'var(--text-body)' }}>Drag and drop file here</div>
           <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', marginTop: 2 }}>
-            Limit {maxSize} per file{accept ? ` · ${accept}` : ''}
+            Limit {maxSize} per file{(acceptLabel || accept) ? ` · ${acceptLabel || accept}` : ''}
           </div>
         </div>
         <button
           type="button"
-          onClick={onBrowse}
           style={{
             fontFamily: 'var(--font-sans)',
             fontSize: 'var(--text-sm)',
@@ -72,9 +86,19 @@ export function FileUploader({
             cursor: 'pointer',
             whiteSpace: 'nowrap',
           }}
+          onClick={handleBrowse}
         >
           Browse files
         </button>
+        <input
+          ref={inputRef}
+          type="file"
+          accept={accept}
+          onChange={handleFileChange}
+          style={{ display: 'none' }}
+          aria-hidden="true"
+          tabIndex={-1}
+        />
       </div>
 
       {fileName && (
