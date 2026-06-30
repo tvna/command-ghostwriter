@@ -128,9 +128,6 @@ lint.per-file-ignores."tests/*" = [
   "S307",  # Use of assert detected
   "S603",  # `subprocess` call: check for execution of untrusted input
 ]
-lint.per-file-ignores."tests/e2e/conftest.py" = [
-  "S404",
-]
 lint.per-file-ignores."tests/workflow/*" = [
   "S105", # Possible hardcoded password assigned to: "{}"
 ]
@@ -230,10 +227,8 @@ warmup_iterations = 10000
 
 [tool.vulture]
 paths = [
-  "app.py",
   "features",
   "tests",
-  "tests/e2e",
   "tests/unit",
 ]
 make_whitelist = true
