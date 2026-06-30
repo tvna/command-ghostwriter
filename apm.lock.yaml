@@ -1,5 +1,5 @@
 lockfile_version: '1'
-generated_at: '2026-06-13T05:28:20.075927+00:00'
+generated_at: '2026-06-30T03:24:45.421058+00:00'
 apm_version: 0.12.1
 dependencies:
 - repo_url: obra/superpowers
@@ -28,13 +28,4 @@ dependencies:
   resolved_commit: 4f1ff6d449e285da3ae25ad65183d3ee46e23463
   resolved_ref: 4f1ff6d449e285da3ae25ad65183d3ee46e23463
   package_type: marketplace_plugin
-  deployed_files:
-  - .claude/skills/adaptive-coaching
-  - .claude/skills/architecture-tradeoff
-  - .claude/skills/clairvoyance
-  - .claude/skills/decision-coaching
-  - .claude/skills/human-harness
-  - .claude/skills/review-verdict
-  - .claude/skills/session-handoff
-  - .claude/skills/using-clairvoyance
-  content_hash: sha256:30a62edc2f68ed6d2bad009d7a195646f022edd9ecdadc4d698fd9b5bcbf44fa
+  content_hash: sha256:293a698d1f160388f3a75c5adb69b32970a5b45fc1f4b1daea52be6b90702812
