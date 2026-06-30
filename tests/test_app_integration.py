@@ -1,6 +1,7 @@
 import json
+import os
 from io import BytesIO
-from typing import Any, Dict, Final, Optional
+from typing import Any, Dict, Final, Optional, Tuple
 
 import pytest
 import toml
@@ -11,7 +12,14 @@ from streamlit.testing.v1 import AppTest
 INTEGRATION: MarkDecorator = pytest.mark.integration
 
 # Constants for UI element counts and messages
-BASE_TEXT_AREA_COUNT: Final[int] = 6
+# app.py's show_tab4() renders exactly one st.text_area per sample file under
+# assets/examples (filtered by these extensions). Deriving the base count from
+# the directory keeps it correct as library/sample templates are added or
+# removed (e.g. the Redesign B templates materialized there) instead of drifting
+# from a hard-coded literal.
+_SAMPLE_DIR: Final[str] = "./assets/examples"
+_SAMPLE_EXTS: Final[Tuple[str, ...]] = (".toml", ".yml", ".yaml", ".csv", ".j2", ".jinja2")
+BASE_TEXT_AREA_COUNT: Final[int] = sum(1 for _f in os.listdir(_SAMPLE_DIR) if _f.endswith(_SAMPLE_EXTS))
 BASE_MARKDOWN_COUNT: Final[int] = 2
 RENDERED_MARKDOWN_COUNT: Final[int] = BASE_MARKDOWN_COUNT + 1
 RENDERED_TEXT_AREA_COUNT: Final[int] = 1
