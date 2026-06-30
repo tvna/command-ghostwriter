@@ -24,10 +24,10 @@
   "remoteEnv": {
     "AGENT_CONTAINER": "claude"
   },
-  "forwardPorts": [8502],
+  "forwardPorts": [5173],
   "portsAttributes": {
-    "8502": {
-      "label": "Streamlit",
+    "5173": {
+      "label": "Web (Vite)",
       "onAutoForward": "silent"
     }
   },

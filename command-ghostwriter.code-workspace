@@ -49,8 +49,6 @@
       "rcfile",
       "remarkablemark",
       "selectbox",
-      "stlite",
-      "streamlit",
       "USERPROFILE",
       "venv"
     ],
@@ -73,7 +71,6 @@
       ".pyre": true,
       ".pyre_configuration": false,
       ".pre-commit-config.yaml": false,
-      ".streamlit": true,
       ".venv": true,
       ".watchmanconfig": true,
       ".yamllint.yml": true,
