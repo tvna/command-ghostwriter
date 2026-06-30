@@ -38,6 +38,24 @@ function splitError(pane: "data" | "tpl", message: string): GenError {
   return { pane, line, title: title.trim() || "解析エラー", detail: rest.join(": ").trim() || message };
 }
 
+export function shapeResult(
+  raw: { output: string | null; configError: string | null; templateError: string | null; configDebug: string } | null,
+  dataText: string,
+  format: Format,
+  tplText: string,
+): GenResult {
+  if (raw === null) return EMPTY;
+  const vars = extractVars(tplText);
+  if (raw.configError) {
+    return { ...EMPTY, ok: false, vars, error: splitError("data", raw.configError), suggest: suggestFormat(dataText, format) };
+  }
+  if (raw.templateError) {
+    return { ...EMPTY, ok: false, vars, error: splitError("tpl", raw.templateError) };
+  }
+  const { keys, interfaces } = countConfig(raw.configDebug);
+  return { ok: true, error: null, suggest: null, vars, output: raw.output ?? "", json: raw.configDebug, interfaces, keys };
+}
+
 export function useGenerate(
   dataText: string,
   format: Format,
@@ -89,16 +107,5 @@ export function useGenerate(
   }, [ready, memoKey, dataText, format, tplText, settings]);
 
   // Shape the worker result into what the Editor consumes.
-  return useMemo<GenResult>(() => {
-    if (raw === null) return EMPTY;
-    const vars = extractVars(tplText);
-    if (raw.configError) {
-      return { ...EMPTY, ok: false, vars, error: splitError("data", raw.configError), suggest: suggestFormat(dataText, format) };
-    }
-    if (raw.templateError) {
-      return { ...EMPTY, ok: false, vars, error: splitError("tpl", raw.templateError) };
-    }
-    const { keys, interfaces } = countConfig(raw.configDebug);
-    return { ok: true, error: null, suggest: null, vars, output: raw.output ?? "", json: raw.configDebug, interfaces, keys };
-  }, [raw, tplText, dataText, format]);
+  return useMemo<GenResult>(() => shapeResult(raw, dataText, format, tplText), [raw, tplText, dataText, format]);
 }
