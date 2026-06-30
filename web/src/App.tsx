@@ -23,6 +23,20 @@ function routeFromHash(): Route {
   return { view: "empty", initial: null };
 }
 
+// Map the current hash route to a Vercel Analytics (route, path) pair. This app
+// navigates only via location.hash/hashchange, which never triggers the History
+// API, so <Analytics>'s default auto-tracking would miss every in-app navigation.
+// Passing changing route/path props makes it emit a pageview per navigation;
+// `route` groups dynamic template ids so per-template paths don't explode.
+function analyticsLocation(): { route: string; path: string } {
+  const h = (location.hash || "").replace(/^#\/?/, "");
+  if (h === "library") return { route: "/library", path: "/library" };
+  if (h === "new") return { route: "/new", path: "/new" };
+  const m = h.match(/^t\/(.+)$/);
+  if (m) return { route: "/t/[id]", path: "/t/" + m[1] };
+  return { route: "/", path: "/" };
+}
+
 const DEFAULT_DOWNLOAD: DownloadOptions = { enc: "UTF-8", fname: "command", ts: true, ext: "txt" };
 
 export function App() {
@@ -57,10 +71,11 @@ export function App() {
       <EmptyState onStart={() => openEditor(null)} onLibrary={() => go("#/library")} />
     );
 
+  const analytics = analyticsLocation();
   return (
     <>
       {content}
-      <Analytics />
+      <Analytics route={analytics.route} path={analytics.path} />
     </>
   );
 }
