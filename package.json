@@ -1,7 +1,6 @@
 {
     "name": "command_ghostwriter",
     "version": "0.4.4",
-    "main": "./build/electron/main.js",
     "description": "This application is designed for infrastratcture engineers who want to automatically generate commands in template to configure servers, routers, and switches",
     "license": "MIT",
     "author": {
@@ -9,73 +8,19 @@
         "email": "tsubasa.nagano@icloud.com"
     },
     "scripts": {
-        "dump": "dump-stlite-desktop-artifacts",
-        "serve": "cross-env NODE_ENV=production electron .",
-        "pack": "electron-builder --dir",
-        "dist": "electron-builder",
-        "postinstall": "electron-builder install-app-deps",
         "lint": "uv run ruff check . --fix && uv run mypy .",
         "test": "uv run pytest -vv -n auto --cov=. --cov-report=html --cov-report=xml --cov-report=term --dist loadfile --durations=10 -k 'not e2e' --benchmark-disable",
-        "e2e": "uv run pytest -vv -n auto --dist loadfile --durations=10 -k 'e2e' --benchmark-disable",
-        "benchmark": "uv run pytest -vv -n 0 -m 'e2e' --benchmark-columns=min,max,mean,stddev,median,ops --benchmark-sort=mean",
         "ccn": "uv run lizard -l python --CCN '10'",
-        "zap": "docker run --rm -v $(pwd):/zap/wrk/:rw --add-host=host.docker.internal:host-gateway ghcr.io/zaproxy/zaproxy:stable zap-full-scan.py -t http://host.docker.internal:8501 -r report.html -d",
         "scan": "pre-commit run --all-files",
         "commit": "pre-commit run"
-    },
-    "build": {
-        "files": [
-            "build/**/*"
-        ],
-        "productName": "Command Ghostwriter",
-        "artifactName": "command-ghostwriter.${ext}",
-        "directories": {
-            "buildResources": "assets"
-        },
-        "mac": {
-            "target": "dmg",
-            "icon": "assets/icon.png"
-        },
-        "win": {
-            "target": "portable",
-            "icon": "assets/icon.ico"
-        }
     },
     "devDependencies": {
         "@commitlint/cli": "^19.8.1",
         "@commitlint/config-conventional": "^19.8.1",
-        "@stlite/desktop": "^0.85.1",
-        "cross-env": "^7.0.3",
-        "electron": "^42.3.3",
-        "electron-builder": "^26.0.12",
         "husky": "^9.1.7",
         "lint-staged": "^16.1.2",
         "prettier": "^3.6.2",
-        "prettier-plugin-sort-json": "^4.1.1",
-        "rimraf": "^6.0.1"
-    },
-    "stlite": {
-        "desktop": {
-            "files": [
-                "app.py",
-                "i18n.py",
-                ".streamlit/*",
-                "features/*.py",
-                "assets/examples",
-                "assets/images"
-            ],
-            "nodeJsWorker": false,
-            "entrypoint": "app.py",
-            "embed": true,
-            "dependencies": [
-                "pyyaml",
-                "jinja2",
-                "chardet",
-                "toml",
-                "python-box",
-                "pydantic"
-            ]
-        }
+        "prettier-plugin-sort-json": "^4.1.1"
     },
     "hooks": {
         "pre-commit": "lint-staged"
