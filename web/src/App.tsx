@@ -75,7 +75,7 @@ export function App() {
   return (
     <main>
       <h1>{t.appTitle}</h1>
-      <HowToModal />
+      <HowToModal open={false} onClose={() => {}} />
       <p>{status}</p>
       <SampleMenu onLoad={(c, t) => { setConfig(c); setTemplate(t); }} />
       <Editor ariaLabel="config" value={config} language="yaml" onChange={setConfig} />
