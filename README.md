@@ -1,8 +1,9 @@
 <div align="center">
 
-[![build status][build-img]][build-link]
+[![Vercel][vercel-img]][vercel-link]
 [![codecov][codecov-img]][codecov-link]
 [![License: MIT][license-img]][license-link]
+[![Ask DeepWiki][deepwiki-img]][deepwiki-link]
 
 </div>
 
@@ -264,9 +265,11 @@ Claude / Codex の各エージェント向けに、ツールチェーンを nix 
 - 初回起動時はベースイメージへの nix 導入とツールチェーンのビルドが走るため、起動完了まで時間がかかります。
 - Web UI は自動起動しません。コンテナ内で `cd web && npm run dev` を実行し、フォワードされた Vite ポート（デフォルト: 5173）で確認してください。
 
-[build-link]: https://github.com/tvna/command-ghostwriter/actions/workflows/test-and-build-on-merged.yml
-[build-img]: https://github.com/tvna/command-ghostwriter/actions/workflows/test-and-build-on-merged.yml/badge.svg?branch=main&event=push
+[vercel-link]: https://vercelbadge.vercel.app/api/tvna/command-ghostwriter
+[vercel-img]: https://vercelbadge.vercel.app/api/tvna/command-ghostwriter
 [codecov-link]: https://codecov.io/gh/tvna/command-ghostwriter
 [codecov-img]: https://codecov.io/gh/tvna/command-ghostwriter/graph/badge.svg?token=I2LDXQHXB5
 [license-link]: https://github.com/tvna/command-ghostwriter/blob/main/LICENSE
 [license-img]: https://img.shields.io/badge/license-MIT-blue
+[deepwiki-link]: https://deepwiki.com/tvna/command-ghostwriter
+[deepwiki-img]: https://deepwiki.com/badge.svg
