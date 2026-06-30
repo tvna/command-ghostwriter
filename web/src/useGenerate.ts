@@ -73,10 +73,17 @@ export function useGenerate(
     workerRef.current = worker;
     worker.onmessage = (e: MessageEvent<WorkerOutbound>) => {
       const msg = e.data;
+      // Discard results/errors from superseded requests: only the latest
+      // dispatched id (idRef.current) is current, so an out-of-order reply for
+      // an older generation can't overwrite fresh state. id === null marks an
+      // infra/bootstrap error not tied to a request, so it is always surfaced.
       if (msg.kind === "ready") setReady(true);
-      else if (msg.kind === "result") setRaw(msg.result);
-      else if (msg.kind === "error")
-        setRaw({ output: "", configError: msg.message, templateError: null, configDebug: "" });
+      else if (msg.kind === "result") {
+        if (msg.id === idRef.current) setRaw(msg.result);
+      } else if (msg.kind === "error") {
+        if (msg.id === null || msg.id === idRef.current)
+          setRaw({ output: "", configError: msg.message, templateError: null, configDebug: "" });
+      }
     };
     worker.postMessage({ kind: "init" });
     return () => worker.terminate();
