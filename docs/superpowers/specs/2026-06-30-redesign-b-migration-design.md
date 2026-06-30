@@ -31,6 +31,8 @@
 | 切り替え | **ビッグバン[1PR]切替** | 静的SPAでサーバ状態が無く、Vercelプレビューで本番同等の事前検証が可能。切戻しは前デプロイをPromote |
 | CF Workers | **今回スコープに含める[別PR]** | 将来のミラー稼働をプランに含める |
 | フォント | **Source Sans 3 / Source Code Pro を self-host[woff2]** | `web/` のCDN非依存方針に合わせる |
+| レンダエンジン | **本物のPyodide/Jinja2を継続**[デザインのモックJSは破棄] | `features/` は `SandboxedEnvironment`+`jinja2.ext.do`+独自 `CustomUndefined`+`format_type`後処理に依存。忠実互換のJSパッケージは無く[Nunjucksも非互換]、移植はテスト済み中核の放棄になる |
+| JSパッケージ管理 | **npm 継続** | CI/Vercel/CF/devcontainer が npm で統一。bun化はUX移行と別軸のガバナンス判断として分離[必要なら別Issue] |
 
 ## デザイン元の構成と「正」の所在[事実]
 
