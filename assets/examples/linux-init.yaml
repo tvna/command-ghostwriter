@@ -1,0 +1,17 @@
+hostname: web-prod-01
+timezone: Asia/Tokyo
+users:
+  - name: ops
+    groups: sudo
+    pubkey: "ssh-ed25519 AAAA..."
+packages:
+  - curl
+  - vim
+  - fail2ban
+sshd:
+  permit_root_login: false
+  password_auth: false
+firewall:
+  - 22/tcp
+  - 80/tcp
+  - 443/tcp

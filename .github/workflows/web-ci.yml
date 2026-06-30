@@ -1,0 +1,103 @@
+# ============================================================
+# Workflow Information: web-ci.yml
+# ============================================================
+#
+# 目的 (Purpose):
+# ---------------
+# web/ フロントエンドのテストスイートを CI に組み込む。
+#  - web-test: npm ci (postinstall で Pyodide ホイールをベンダリング)、
+#    npm run build、npx vitest run (Pyodide キーストーンゲート) を実行する。
+#    このジョブは PR ごとに必須ブロッキングゲートとして機能する。
+#  - web-e2e: Playwright ブラウザ E2E テストを実行する (現時点では非ブロッキング)。
+#
+# 影響範囲 (Scope of Impact):
+# ---------------------------
+# - web/**、features/**、または本ワークフロー自体が変更された PR・push で動作する。
+# - リポジトリへの書き込みは行わない (contents: read)。
+#
+# セキュリティ (Security):
+# ------------------------
+# - step-security/harden-runner でランナーを強化。
+# - egress-policy: audit を使用 (postinstall が GitHub Releases + PyPI へのアクセスを必要とするため)。
+#
+# 関連 (Reference):
+# -----------------
+# - Issue #398
+# ============================================================
+---
+name: Web CI
+
+on:
+  pull_request:
+    paths:
+      - "web/**"
+      - "features/**"
+      - ".github/workflows/web-ci.yml"
+  push:
+    branches:
+      - "claude/**"
+    paths:
+      - "web/**"
+      - "features/**"
+      - ".github/workflows/web-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  web-test:
+    name: Web Vitest (Pyodide keystone)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
+        with:
+          egress-policy: audit
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Setup Node
+        uses: actions/setup-node@b39b52d1213e96004bfcb1c61a8a6fa8ab84f3e8 # v4.0.1
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install (vendors Pyodide wheels via postinstall) and build
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+      - name: Vitest keystone (features/ render parity in Pyodide)
+        working-directory: web
+        run: npx vitest run
+
+  web-e2e:
+    name: Web Playwright e2e (browser proof, non-blocking)
+    runs-on: ubuntu-latest
+    # Non-blocking for now: the Playwright browser CDN (cdn.playwright.dev) may be
+    # egress-restricted. Promote to a hard gate once that endpoint is confirmed
+    # reachable/allowlisted in CI. Refs #398.
+    continue-on-error: true
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
+        with:
+          egress-policy: audit
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Setup Node
+        uses: actions/setup-node@b39b52d1213e96004bfcb1c61a8a6fa8ab84f3e8 # v4.0.1
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install and build
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+      - name: Install chromium
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+      - name: Playwright e2e
+        working-directory: web
+        run: npx playwright test

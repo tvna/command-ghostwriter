@@ -1,0 +1,37 @@
+{
+  "site_package_search_strategy": "pep561",
+  "source_directories": [
+    ".",
+    "features"
+  ],
+  "search_path": [
+    "features",
+    ".venv/bin",
+    ".venv/lib/python*/site-packages",
+    ".venv/lib/pyre_check"
+  ],
+  "exclude": [
+    ".*\/.cursor\/.*",
+    ".*\/.devcontainer\/.*",
+    ".*\/.github\/.*",
+    ".*\/.venv\/.*",
+    ".*\/assets\/.*",
+    ".*\/build\/.*",
+    ".*\/dist\/.*",
+    ".*\/docs\/.*",
+    ".*\/htmlcov\/.*",
+    ".*\/node_modules\/.*",
+    ".*\/site-packages\/altair\/.*",
+    ".*\/site-packages\/narwhals\/.*",
+    ".*\/tests\/.*"
+  ],
+  "extensions": [
+    ".py",
+    ".pyi"
+  ],
+  "strict": true,
+  "ignore_all_errors": [
+    ".venv/lib/python*/site-packages/altair",
+    ".venv/lib/python*/site-packages/narwhals"
+  ]
+}

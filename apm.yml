@@ -1,0 +1,9 @@
+name: command-ghostwriter
+version: 1.0.0
+description: Agent instructions for command-ghostwriter, compiled for Claude.
+target:
+- claude
+dependencies:
+  apm:
+  - obra/superpowers#f2cbfbefebbfef77321e4c9abc9e949826bea9d7
+  - tvna/clairvoyance#ee9279242fccc0dbbb7bc4064295f74ca336f4de

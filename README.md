@@ -1,9 +1,9 @@
 <div align="center">
 
-[![streamlit][streamlit-img]](https://streamlit.io/)
-[![build status][build-img]][build-link]
+[![Vercel][vercel-img]][vercel-link]
 [![codecov][codecov-img]][codecov-link]
 [![License: MIT][license-img]][license-link]
+[![Ask DeepWiki][deepwiki-img]][deepwiki-link]
 
 </div>
 
@@ -26,106 +26,54 @@
 
 ## Quick start
 
-### Windows (amd64)
-1. 実行環境のセットアップ (Python, Git)
+### アプリを使う（インストール不要）
 
-```ps1
-# chocolateyを使う場合
-Set-ExecutionPolicy Bypass -Scope Process -Force; iex ((New-Object System.Net.WebClient).DownloadString('https://chocolatey.org/install.ps1'))
-choco install python312
-choco install git
+ブラウザで https://command-ghostwriter.vercel.app/ を開いてください。インストール不要でそのまま利用できます。
+
+まずは「サンプルで試す」を選んでください。設定定義ファイルとJinjaテンプレートがエディタに読み込まれ、生成結果がライブプレビューに表示されます（生成ボタンの操作は不要で、編集に追従して自動生成されます）。「テンプレートライブラリ」から選ぶ、または自分の設定定義ファイルとJinjaテンプレートを読み込むこともできます。
+
+### ローカルで開発する
+
+Web UI（React + Pyodide）をローカルで動かす場合:
+
+```bash
+git clone https://github.com/tvna/command-ghostwriter.git
+cd command-ghostwriter
+cd web
+npm install
+npm run dev   # Vite 開発サーバー (デフォルト: http://localhost:5173)
 ```
 
-2. Webアプリ本体のセットアップ
-```ps1
-cd $env:PROGRAMDATA
-git clone https://github.com/tvna/streamlit-command-ghostwriter.git
-cd streamlit-command-ghostwriter
+Pythonコア（`features/` 配下）のテストを実行する場合:
 
-(Invoke-WebRequest -Uri https://install.python-poetry.org -UseBasicParsing).Content | python -
-
-[System.Environment]::SetEnvironmentVariable('path', $env:APPDATA + "\Python\Scripts;" + [System.Environment]::GetEnvironmentVariable('path', "User"),"User")
-
-poetry install
+```bash
+uv sync
+uv run pytest -k 'not e2e'
 ```
-
-3. 下記のコマンドでWebアプリを起動
-```ps1
-cd $env:PROGRAMDATA\streamlit-command-ghostwriter
-poetry run streamlit app.py
-```
-
-まずはサンプルファイルをアップロードして、「CLIコマンド生成」をクリックした結果を確認してみてください。
 
 ## 使い方の流れ
 
 ```mermaid
-graph LR
-    %% Initial State
-    P1[既存のコマンド<br>または手順書] --> P2{テンプレート化<br>が必要?}
-
-    %% Template Path
-    subgraph PreparationTemplate ["テンプレート化"]
-        direction TB
-        PT1[変数部分の<br>特定と抽出]
-        PT2[設定定義ファイル<br>作成]
-        PT3[Jinjaテンプレート<br>作成]
-
-        PT1 --> PT2
-        PT1 --> PT3
-    end
-
-    %% Main Flow
-    subgraph Input ["入力"]
-        direction TB
-        B1[設定定義ファイル<br>アップロード]
-        B2[テンプレート<br>アップロード]
-    end
-
-    C1[実行可能な<br>CLIコマンド]
-
-    %% Connections for Template Path
-    P2 -->|Yes| PT1
-    PT2 --> B1
-    PT3 --> B2
-    B1 & B2 --> C1
-
-    %% Connections for Direct Path
-    P2 -->|No| C1
-
-    %% Styles - Semantic Colors
-    %% 入力系: 青系統
-    style P1 fill:#E3F2FD,stroke:#1565C0,color:#0D47A1
-    style P2 fill:#E3F2FD,stroke:#1565C0,color:#0D47A1
-
-    %% サブグラフ内のノード: 白背景・黒文字
-    style PT1 fill:#FFFFFF,stroke:#424242,color:#000000
-    style PT2 fill:#FFFFFF,stroke:#424242,color:#000000
-    style PT3 fill:#FFFFFF,stroke:#424242,color:#000000
-    style B1 fill:#FFFFFF,stroke:#424242,color:#000000
-    style B2 fill:#FFFFFF,stroke:#424242,color:#000000
-
-    %% 出力系: 赤系統
-    style C1 fill:#FFEBEE,stroke:#C62828,color:#B71C1C
-
-    %% サブグラフのスタイル
-    style PreparationTemplate fill:#FFF3E0,stroke:#E65100
-    style Input fill:#E8F5E9,stroke:#2E7D32
-
-    %% Link Styles - Flow based colors
-    linkStyle default stroke:#9E9E9E,stroke-width:2px
-    %% 判断フロー
-    linkStyle 0,1 stroke:#1565C0,stroke-width:2px
-    %% 準備フロー
-    linkStyle 2,3 stroke:#F57C00,stroke-width:2px
-    %% ファイルフロー
-    linkStyle 4,5 stroke:#2E7D32,stroke-width:2px
-    %% 直接パス
-    linkStyle 6 stroke:#C62828,stroke-width:2px
-
-    %% Subgraph Styles
-    classDef subgraphStyle fill:none,stroke-width:2px
-    class PreparationTemplate,Input subgraphStyle
+---
+config:
+  theme: neo-dark
+  look: neo
+---
+sequenceDiagram
+    participant senior as テンプレート<br>作成者
+    participant colabolation as ファイル<br>サーバ
+    participant junior as 利用者
+    participant ghostwriter as Command<br>ghostwriter
+    colabolation->>senior: 過去のコマンド履歴<br>または手順書を用意
+    senior->>senior: 変数部分の特定と抽出
+    senior->>colabolation: 設定定義ファイル<br>フォーマットの作成<br>(toml/yaml/csv)
+    senior->>colabolation: Jinjaテンプレート作成
+    senior->>colabolation: 利用時のルール整備
+    junior-->>colabolation: 設定定義ファイル<br>フォーマットと<br>Jinjaテンプレートの取得
+    junior->>junior: 設定定義ファイルに<br>シナリオに基づく<br>パラメーターを記入
+    junior->>ghostwriter: 設定定義ファイルの<br>アップロード
+    junior->>ghostwriter: Jinjaテンプレートの<br>アップロード
+    ghostwriter-->>junior: 実行可能な<br>CLIコマンドを提供
 ```
 
 ## テンプレート化の手順
@@ -307,14 +255,21 @@ tar -czf {{ file.name }}.tar.gz {{ file.path }}
 
 ## 開発者向けドキュメント
 
-開発に必要なコマンド集は[こちら](assets/docs/commands.md)を参照してください。
+開発に必要なコマンド集は[こちら](docs/runbooks/commands.md)を参照してください。
 
-[streamlit-img]: https://img.shields.io/badge/-Streamlit-FF4B4B?style=flat&logo=streamlit&logoColor=white
-[streamlit-cloud-img]: https://static.streamlit.io/badges/streamlit_badge_black_white.svg
-[streamlit-cloud-link]: https://command-ghostwriter.streamlit.app/
-[build-link]: https://github.com/tvna/streamlit-command-ghostwriter/actions/workflows/test-develop-branch.yml
-[build-img]: https://github.com/tvna/streamlit-command-ghostwriter/actions/workflows/test-develop-branch.yml/badge.svg?branch=develop
-[codecov-link]: https://codecov.io/gh/tvna/streamlit-command-ghostwriter
-[codecov-img]: https://codecov.io/gh/tvna/streamlit-command-ghostwriter/graph/badge.svg?token=I2LDXQHXB5
-[license-link]: https://github.com/tvna/streamlit-command-ghostwriter/blob/main/LICENSE
+### Dev Containers (エージェント開発環境)
+
+Claude / Codex の各エージェント向けに、ツールチェーンを nix flake で固定した build-on-open 方式の開発コンテナを用意しています。
+
+- VS Code の「Dev Containers: Reopen in Container」で、`.devcontainer/claude`（Claude 用）または `.devcontainer/codex`（Codex 用）を選択して起動します。
+- 初回起動時はベースイメージへの nix 導入とツールチェーンのビルドが走るため、起動完了まで時間がかかります。
+- Web UI は自動起動しません。コンテナ内で `cd web && npm run dev` を実行し、フォワードされた Vite ポート（デフォルト: 5173）で確認してください。
+
+[vercel-link]: https://vercelbadge.vercel.app/api/tvna/command-ghostwriter
+[vercel-img]: https://vercelbadge.vercel.app/api/tvna/command-ghostwriter
+[codecov-link]: https://codecov.io/gh/tvna/command-ghostwriter
+[codecov-img]: https://codecov.io/gh/tvna/command-ghostwriter/graph/badge.svg?token=I2LDXQHXB5
+[license-link]: https://github.com/tvna/command-ghostwriter/blob/main/LICENSE
 [license-img]: https://img.shields.io/badge/license-MIT-blue
+[deepwiki-link]: https://deepwiki.com/tvna/command-ghostwriter
+[deepwiki-img]: https://deepwiki.com/badge.svg

@@ -1,60 +1,28 @@
-name: 'Setup Python Environment'
-description: 'Setup Python with Poetry and cache pip dependencies'
+---
+name: "Setup Python Environment"
+description: "Setup Python and install dependencies with uv"
 inputs:
   python-version:
-    description: 'Python version to use'
-    required: true
-  runner-os:
-    description: 'Operating system'
+    description: "Python version to use"
     required: true
 
 runs:
   using: "composite"
   steps:
+    - name: Install uv
+      uses: astral-sh/setup-uv@v6
+      with:
+        # Keep in lockstep with [tool.uv].required-version in pyproject.toml.
+        # That pin is exact (==) because flake.nix asserts the "==" form, so the
+        # installed uv must match exactly or every uv command fails the gate.
+        version: "0.8.17"
+        enable-cache: true
+        cache-dependency-glob: "uv.lock"
+
     - name: Set up Python ${{ inputs.python-version }}
-      uses: actions/setup-python@19e4675e06535f6b54e894da5c1f044400bb4996 # v5.1.0
-      with:
-        python-version: ${{ inputs.python-version }}
-
-    # 非Windows環境用のキャッシュ復元
-    - name: Restore cache pip dependencies (without Windows)
-      uses: actions/cache@v4.2.2
-      if: inputs.runner-os != 'Windows'
-      with:
-        path: |
-          ~/.cache/pypoetry
-          ~/.cache/pip
-          .venv
-          %LOCALAPPDATA%\pypoetry\Cache
-          %USERPROFILE%\.cache\pypoetry
-        key: ${{ inputs.runner-os }}-python${{ inputs.python-version }}-poetry-${{ hashFiles('**/poetry.lock') }}
-        restore-keys: |
-          ${{ inputs.runner-os }}-python${{ inputs.python-version }}-poetry
-
-    # Windowsのみキャッシュ障害に備えてリトライロジックを追加
-    - name: Restore cache pip dependencies (Windows with retry)
-      uses: actions/cache@v4.2.2
-      id: pip-cache-windows
-      if: inputs.runner-os == 'Windows'
-      with:
-        path: |
-          ~/.cache/pypoetry
-          ~/.cache/pip
-          .venv
-          %LOCALAPPDATA%\pypoetry\Cache
-          %USERPROFILE%\.cache\pypoetry
-        key: ${{ inputs.runner-os }}-python${{ inputs.python-version }}-poetry-${{ hashFiles('**/poetry.lock') }}
-        restore-keys: |
-          ${{ inputs.runner-os }}-python${{ inputs.python-version }}-poetry
-      continue-on-error: true
-
-    - name: Bootstrap poetry
+      run: uv python install ${{ inputs.python-version }}
       shell: bash
-      run: |
-        pipx install poetry
-        poetry config virtualenvs.in-project false
 
     - name: Install dependencies
+      run: uv sync --locked
       shell: bash
-      run: |
-        poetry install --no-interaction --no-root --only main,dev

@@ -1,7 +1,6 @@
 {
     "name": "command_ghostwriter",
-    "version": "0.3.6",
-    "main": "./build/electron/main.js",
+    "version": "0.4.4",
     "description": "This application is designed for infrastratcture engineers who want to automatically generate commands in template to configure servers, routers, and switches",
     "license": "MIT",
     "author": {
@@ -9,77 +8,24 @@
         "email": "tsubasa.nagano@icloud.com"
     },
     "scripts": {
-        "dump": "dump-stlite-desktop-artifacts",
-        "serve": "cross-env NODE_ENV=production electron .",
-        "pack": "electron-builder --dir",
-        "dist": "electron-builder",
-        "postinstall": "electron-builder install-app-deps",
-        "lint": "poetry run ruff check . --fix && poetry run mypy .",
-        "test": "poetry run pytest -vv -n auto --cov=. --cov-report=html --cov-report=term --dist loadfile --durations=10 --cache-clear --maxfail=5 -k 'not e2e' --benchmark-disable",
-        "coverage": "poetry run pytest -vv -n auto --cov=app.py --cov=features --cov=i18n --cov=scripts --cov-report=html -k 'not e2e' --benchmark-disable",
-        "benchmark": "poetry run pytest -vv -n 0 -m 'e2e' --benchmark-columns=min,max,mean,stddev,median,ops --benchmark-sort=mean",
-        "lizard": "poetry run lizard -l python --CCN '10'",
+        "lint": "uv run ruff check . --fix && uv run mypy .",
+        "test": "uv run pytest -vv -n auto --cov=. --cov-report=html --cov-report=xml --cov-report=term --dist loadfile --durations=10 -k 'not e2e' --benchmark-disable",
+        "ccn": "uv run lizard -l python --CCN '10'",
         "scan": "pre-commit run --all-files",
-        "commit": "pre-commit run && npx cz"
-    },
-    "build": {
-        "files": [
-            "build/**/*"
-        ],
-        "productName": "CommandGhostwriter",
-        "directories": {
-            "buildResources": "assets"
-        },
-        "mac": {
-            "target": "dmg",
-            "icon": "assets/icon.png"
-        },
-        "win": {
-            "target": "portable",
-            "icon": "assets/icon.ico"
-        }
+        "commit": "pre-commit run"
     },
     "devDependencies": {
-        "@commitlint/cli": "^19.3.0",
-        "@commitlint/config-conventional": "^19.2.2",
-        "@commitlint/cz-commitlint": "^19.2.0",
-        "@stlite/desktop": "^0.58.6",
-        "commitizen": "^4.3.0",
-        "cross-env": "^7.0.3",
-        "electron": "^31.1.0",
-        "electron-builder": "^24.13.3",
-        "husky": "^9.0.11",
-        "lint-staged": "^15.2.7",
-        "rimraf": "^5.0.7"
-    },
-    "stlite": {
-        "desktop": {
-            "files": [
-                "app.py",
-                "i18n.py",
-                ".streamlit/*",
-                "features/*.py",
-                "assets/examples"
-            ],
-            "nodeJsWorker": false,
-            "entrypoint": "app.py",
-            "embed": true,
-            "dependencies": [
-                "pyyaml",
-                "jinja2",
-                "chardet",
-                "toml",
-                "python-box",
-                "pydantic"
-            ]
-        }
-    },
-    "config": {
-        "commitizen": {
-            "path": "@commitlint/cz-commitlint"
-        }
+        "@commitlint/cli": "^19.8.1",
+        "@commitlint/config-conventional": "^19.8.1",
+        "husky": "^9.1.7",
+        "lint-staged": "^16.1.2",
+        "prettier": "^3.6.2",
+        "prettier-plugin-sort-json": "^4.1.1"
     },
     "hooks": {
         "pre-commit": "lint-staged"
+    },
+    "overrides": {
+        "tmp": "^0.2.6"
     }
 }

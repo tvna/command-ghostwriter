@@ -14,8 +14,8 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -50,6 +50,7 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 cover/
+junit.xml
 
 # Translations
 *.mo
@@ -94,12 +95,12 @@ ipython_config.py
 #   install all needed dependencies.
 #Pipfile.lock
 
-# poetry
-#   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
+# uv
+#   It is generally recommended to include uv.lock in version control.
 #   This is especially recommended for binary packages to ensure reproducibility, and is more
 #   commonly ignored for libraries.
-#   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
-#poetry.lock
+#   https://docs.astral.sh/uv/concepts/projects/sync/#checking-the-lockfile-into-version-control
+#uv.lock
 
 # pdm
 #   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
@@ -164,9 +165,32 @@ github_output.txt
 # pytest benchmark
 .benchmarks/
 
+# requirements.txt
+requirements.txt
+
+# sarif
+sarif.json
+
+# .commit-log.txt
+.commit-log.txt
+
+# AST, S-Expression
+docs/ast
+docs/s-exp
+
 # PyCharm
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+
+# APM dependencies
+apm_modules/
+
+# APM-regenerated local Claude state. The superpowers skills under
+# .claude/skills/, the repo-owned .claude/hooks/, and .claude/settings.json
+# are committed; the entries below are local/regenerable artifacts.
+.claude/rules/
+.claude/settings.local.json
