@@ -1,5 +1,5 @@
 lockfile_version: '1'
-generated_at: '2026-06-13T05:28:20.075927+00:00'
+generated_at: '2026-06-30T06:41:30.693579+00:00'
 apm_version: 0.12.1
 dependencies:
 - repo_url: obra/superpowers
@@ -23,3 +23,18 @@ dependencies:
   - .claude/skills/writing-plans
   - .claude/skills/writing-skills
   content_hash: sha256:fb4f87bfef928a6d68f5d5aaa29e3eba011961c5f03bbf171c3c348d8d161abb
+- repo_url: tvna/clairvoyance
+  host: github.com
+  resolved_commit: ee9279242fccc0dbbb7bc4064295f74ca336f4de
+  resolved_ref: ee9279242fccc0dbbb7bc4064295f74ca336f4de
+  package_type: marketplace_plugin
+  deployed_files:
+  - .claude/skills/adaptive-coaching
+  - .claude/skills/architecture-tradeoff
+  - .claude/skills/clairvoyance
+  - .claude/skills/decision-coaching
+  - .claude/skills/human-harness
+  - .claude/skills/review-verdict
+  - .claude/skills/session-handoff
+  - .claude/skills/using-clairvoyance
+  content_hash: sha256:023db737bae7109de1b6b1c773212c9c1d33edece6b21ae3df4f3291ba58e436
