@@ -29,6 +29,10 @@ def test_release_workflow_runs_on_schedule_and_manual_dispatch_only() -> None:
     assert "pull_request" not in workflow[True]
 
 
+def test_develop_to_main_version_pr_workflow_is_retired() -> None:
+    assert not (ROOT / ".github" / "workflows" / "create-pr-to-main.yml").exists()
+
+
 def test_release_workflow_requires_baseline_tag_and_release_token_fallback() -> None:
     workflow = load_workflow()
     steps = workflow["jobs"]["release"]["steps"]
