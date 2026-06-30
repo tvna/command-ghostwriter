@@ -1,0 +1,35 @@
+/* ============================================================
+   Command Ghostwriter — base element styles
+   Minimal resets + sensible defaults so cards/kits inherit the
+   brand without extra wiring. Scoped to opt-in where it could
+   collide; element defaults are kept gentle.
+   ============================================================ */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  color: var(--text-body);
+  background: var(--surface-app);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+code, kbd, pre, samp { font-family: var(--font-code); }
+
+/* Brand utility: the rainbow rule used under subheaders */
+.cg-rainbow-divider {
+  height: var(--divider-height);
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--cg-rainbow);
+}
+
+/* Selection uses the brand red */
+::selection { background: rgba(255, 75, 75, 0.32); color: var(--cg-text); }
+
+/* Focus-visible ring */
+:focus-visible { outline: none; box-shadow: var(--shadow-focus); }

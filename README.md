@@ -1,6 +1,5 @@
 <div align="center">
 
-[![streamlit][streamlit-img]](https://streamlit.io/)
 [![build status][build-img]][build-link]
 [![codecov][codecov-img]][codecov-link]
 [![License: MIT][license-img]][license-link]
@@ -26,36 +25,30 @@
 
 ## Quick start
 
-### Windows (amd64)
-1. 実行環境のセットアップ (Python, Git)
+### アプリを使う（インストール不要）
 
-```ps1
-# chocolateyを使う場合
-Set-ExecutionPolicy Bypass -Scope Process -Force; iex ((New-Object System.Net.WebClient).DownloadString('https://chocolatey.org/install.ps1'))
-choco install python312
-choco install git
+ブラウザで https://command-ghostwriter.vercel.app/ を開いてください。インストール不要でそのまま利用できます。
+
+まずは「サンプルで試す」を選んでください。設定定義ファイルとJinjaテンプレートがエディタに読み込まれ、生成結果がライブプレビューに表示されます（生成ボタンの操作は不要で、編集に追従して自動生成されます）。「テンプレートライブラリ」から選ぶ、または自分の設定定義ファイルとJinjaテンプレートを読み込むこともできます。
+
+### ローカルで開発する
+
+Web UI（React + Pyodide）をローカルで動かす場合:
+
+```bash
+git clone https://github.com/tvna/command-ghostwriter.git
+cd command-ghostwriter
+cd web
+npm install
+npm run dev   # Vite 開発サーバー (デフォルト: http://localhost:5173)
 ```
 
-2. Webアプリ本体のセットアップ
-```ps1
-cd $env:PROGRAMDATA
-git clone https://github.com/tvna/streamlit-command-ghostwriter.git
-cd streamlit-command-ghostwriter
+Pythonコア（`features/` 配下）のテストを実行する場合:
 
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-
-[System.Environment]::SetEnvironmentVariable('path', $env:APPDATA + "\Python\Scripts;" + [System.Environment]::GetEnvironmentVariable('path', "User"),"User")
-
+```bash
 uv sync
+uv run pytest -k 'not e2e'
 ```
-
-3. 下記のコマンドでWebアプリを起動
-```ps1
-cd $env:PROGRAMDATA\streamlit-command-ghostwriter
-uv run streamlit run app.py
-```
-
-まずはサンプルファイルをアップロードして、「CLIコマンド生成」をクリックした結果を確認してみてください。
 
 ## 使い方の流れ
 
@@ -269,14 +262,11 @@ Claude / Codex の各エージェント向けに、ツールチェーンを nix 
 
 - VS Code の「Dev Containers: Reopen in Container」で、`.devcontainer/claude`（Claude 用）または `.devcontainer/codex`（Codex 用）を選択して起動します。
 - 初回起動時はベースイメージへの nix 導入とツールチェーンのビルドが走るため、起動完了まで時間がかかります。
-- Streamlit アプリは自動起動しません。コンテナ内で `uv run streamlit run app.py` を実行し、フォワードされたポート 8502 で確認してください。
+- Web UI は自動起動しません。コンテナ内で `cd web && npm run dev` を実行し、フォワードされた Vite ポート（デフォルト: 5173）で確認してください。
 
-[streamlit-img]: https://img.shields.io/badge/-Streamlit-FF4B4B?style=flat&logo=streamlit&logoColor=white
-[streamlit-cloud-img]: https://static.streamlit.io/badges/streamlit_badge_black_white.svg
-[streamlit-cloud-link]: https://command-ghostwriter.streamlit.app/
 [build-link]: https://github.com/tvna/command-ghostwriter/actions/workflows/test-and-build-on-merged.yml
 [build-img]: https://github.com/tvna/command-ghostwriter/actions/workflows/test-and-build-on-merged.yml/badge.svg?branch=main&event=push
 [codecov-link]: https://codecov.io/gh/tvna/command-ghostwriter
 [codecov-img]: https://codecov.io/gh/tvna/command-ghostwriter/graph/badge.svg?token=I2LDXQHXB5
-[license-link]: https://github.com/tvna/streamlit-command-ghostwriter/blob/main/LICENSE
+[license-link]: https://github.com/tvna/command-ghostwriter/blob/main/LICENSE
 [license-img]: https://img.shields.io/badge/license-MIT-blue
