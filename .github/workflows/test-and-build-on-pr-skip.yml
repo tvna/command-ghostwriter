@@ -58,6 +58,7 @@ on:
       - synchronize
       - reopened
       - edited
+  workflow_dispatch: {}
 
 permissions: {}
 
