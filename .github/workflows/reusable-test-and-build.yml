@@ -569,9 +569,7 @@ jobs:
           cmd_array=(
             uv run pytest
             --benchmark-disable
-            --cov=app.py
             --cov=features
-            --cov=i18n.py
             --cov-report=xml
             --cov-report=term
             --dist load
@@ -593,130 +591,6 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           verbose: true
-
-  test-e2e:
-    name: E2E Tests (${{ matrix.os }} & ${{ matrix.browser }})
-    needs: small-unit-test
-    permissions:
-      contents: read
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - macos-latest
-          - windows-latest
-        browser:
-          - chromium
-          - firefox
-          - webkit
-        exclude:
-          # WindowsとWebkitの組み合わせを除外
-          - os: windows-latest
-            browser: webkit
-      max-parallel: 10
-    timeout-minutes: 15
-
-    steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
-        with:
-          egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
-          disable-sudo: false
-          # NOTE: harden-runner is a no-op on macOS/Windows runners, so this list
-          # is advisory today; it documents the intended egress (incl. the current
-          # Playwright CDN) for a possible future Ubuntu E2E run.
-          allowed-endpoints: >
-            ${{ env.EP_GITHUB_CORE }}
-            ${{ env.EP_PYTHON }}
-            ${{ env.EP_NODE }}
-            ${{ env.EP_PLAYWRIGHT }}
-
-      - name: Check out git repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          fetch-depth: 1
-
-      - name: Setup Python and restore cache
-        uses: ./.github/actions/setup-python
-        with:
-          python-version: ${{ env.GLOBAL_PYTHON_VERSION }}
-
-      - name: Run E2E Tests (Playwright)
-        uses: ./.github/actions/test-python-playwright
-        with:
-          browser: ${{ matrix.browser }}
-
-  zap_scan:
-    name: Scan HTTP by ZAP (DAST Tool)
-    needs: small-unit-test
-    permissions:
-      actions: read
-      contents: read
-      issues: write
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-
-    steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
-        with:
-          egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
-          disable-sudo: true
-          allowed-endpoints: >
-            ${{ env.EP_GITHUB_CORE }}
-            ${{ env.EP_GITHUB_OBJECTS }}
-            ${{ env.EP_GITHUB_RAW }}
-            ${{ env.EP_PYTHON }}
-            cfu.zaproxy.org:443
-            checkip.amazonaws.com:80
-            content-signature-2.cdn.mozilla.net:443
-            data.streamlit.io:443
-            firefox-settings-attachments.cdn.mozilla.net:443
-            firefox.settings.services.mozilla.com:443
-            ghcr.io:443
-            news.zaproxy.org:443
-            pkg-containers.githubusercontent.com:443
-            r10.o.lencr.org:80
-            r11.o.lencr.org:80
-            tel.zaproxy.org:443
-            webhooks.fivetran.com:443
-
-      - name: Check out git repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          fetch-depth: 1
-
-      - name: Setup Python and restore cache
-        uses: ./.github/actions/setup-python
-        with:
-          python-version: ${{ env.GLOBAL_PYTHON_VERSION }}
-
-      - name: Run Streamlit app in background
-        run: |
-          uv run streamlit run app.py &
-          # Wait a bit for the app to start
-          sleep 10
-
-      - name: ZAP Scan
-        uses: zaproxy/action-full-scan@v0.12.0
-        continue-on-error: true
-        with:
-          fail_action: true
-          token: ${{ secrets.GITHUB_TOKEN }}
-          docker_name: "ghcr.io/zaproxy/zaproxy:stable"
-          target: "http://localhost:8501"
-          rules_file_name: ".zap/rules.tsv"
-          cmd_options: "-a -d"
-
-      - name: Append ZAP Report to Summary
-        if: always() # Run even if ZAP scan fails due to finding issues
-        run: |
-          if [[ -f "report_md.md" ]]; then
-            cat report_md.md >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "⚠️ ZAP report file (report_md.md) not found." >> "$GITHUB_STEP_SUMMARY"
-          fi
 
   # ============================================================
   # ANALYSIS GROUP
@@ -765,13 +639,6 @@ jobs:
           )
           "${cmd_array[@]}"
 
-      - name: Show AST (app.py)
-        run: |
-          python <<EOF
-          import ast
-          print(ast.dump(ast.parse(open("app.py").read()), indent=2))
-          EOF
-
       - name: Show AST (features/*.py)
         run: |
           python <<EOF
@@ -787,48 +654,6 @@ jobs:
           EOF
 
   # ============================================================
-  # BUILD GROUP
-  # ============================================================
-
-  build-desktop:
-    name: Build desktop app (${{ matrix.os }})
-    needs: small-unit-test
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
-    permissions:
-      contents: read
-      security-events: write
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os:
-          - macos-latest
-          - windows-latest
-    timeout-minutes: 15
-
-    steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
-        with:
-          egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
-          disable-sudo: true
-          allowed-endpoints: |+
-
-      - name: Check out git repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          fetch-depth: 1
-
-      - name: Setup Node.js and cache
-        uses: ./.github/actions/setup-node
-        with:
-          node-version: ${{ env.GLOBAL_NODE_VERSION }}
-
-      - name: Build by stlite
-        uses: ./.github/actions/build-stlite
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-  # ============================================================
   # WORKFLOW SUMMARY
   # ============================================================
 
@@ -836,11 +661,8 @@ jobs:
     name: ${{ inputs.workflow_summary_name }}
     if: always()
     needs:
-      - build-desktop
       - test-coverage
-      - test-e2e
       - analysis-code-ccn
-      - zap_scan
     outputs:
       build_succeeded: ${{ steps.set-result.outputs.build_succeeded }}
     permissions:
