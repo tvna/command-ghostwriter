@@ -1,0 +1,26 @@
+<!-- @dsCard group="Colors" viewport="700x150" name="Semantic states" subtitle="Streamlit alert palette — success, warning, error, info" -->
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><link rel="stylesheet" href="../styles.css">
+<style>
+  body { margin: 0; padding: 18px; background: var(--cg-bg); }
+  .row { display: flex; gap: 10px; }
+  .sw { flex: 1; border-radius: var(--radius-md); padding: 10px 12px; min-height: 86px;
+        display: flex; flex-direction: column; justify-content: space-between; }
+  .dot { width: 16px; height: 16px; border-radius: 50%; }
+  .name { font-family: var(--font-sans); font-size: 12px; font-weight: 600; color: var(--cg-text); }
+  .hex  { font-family: var(--font-mono); font-size: 11px; color: var(--cg-text-muted); }
+</style></head>
+<body>
+  <div class="row">
+    <div class="sw" style="background: var(--cg-success-bg); border:1px solid var(--cg-success-border);">
+      <span class="dot" style="background:var(--cg-success)"></span><span class="name">success</span><span class="hex">#21C354</span></div>
+    <div class="sw" style="background: var(--cg-warning-bg); border:1px solid var(--cg-warning-border);">
+      <span class="dot" style="background:var(--cg-warning)"></span><span class="name">warning</span><span class="hex">#FFBD45</span></div>
+    <div class="sw" style="background: var(--cg-error-bg); border:1px solid var(--cg-error-border);">
+      <span class="dot" style="background:var(--cg-error)"></span><span class="name">error</span><span class="hex">#FF4B4B</span></div>
+    <div class="sw" style="background: var(--cg-info-bg); border:1px solid var(--cg-info-border);">
+      <span class="dot" style="background:var(--cg-info)"></span><span class="name">info</span><span class="hex">#5AB9F0</span></div>
+  </div>
+</body>
+</html>

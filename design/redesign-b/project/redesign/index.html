@@ -1,0 +1,113 @@
+<!-- @dsCard group="Redesign (B)" viewport="1440x860" name="コマンド生成 — 空状態 → エディタ" subtitle="初回オンボーディング: 2ファイルの概念提示とワンクリック投入。エディタへ地続き" -->
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Command ghostwriter — 2ペイン・エディタ (Redesign B)</title>
+  <link rel="icon" href="../assets/brand/logo-mark.svg">
+  <link rel="stylesheet" href="../styles.css">
+  <style>
+    html, body { margin: 0; background: var(--cg-bg); }
+    html { overflow: auto; }
+    #root { min-height: 100vh; }
+
+    /* ---- tasteful, workplace-safe "haunting" for the empty state ---- */
+    @keyframes cg-bob   { 0%,100% { transform: translateY(0) } 50% { transform: translateY(-9px) } }
+    @keyframes cg-glow  { 0%,100% { opacity: .30; transform: scale(1) } 50% { opacity: .55; transform: scale(1.06) } }
+    @keyframes cg-drift { 0% { transform: translate(0,0) rotate(0deg) } 50% { transform: translate(26px,-18px) rotate(2deg) } 100% { transform: translate(0,0) rotate(0deg) } }
+    @keyframes cg-rise  {
+      0%   { transform: translateY(30px) translateX(0)   scale(.9); opacity: 0 }
+      12%  { opacity: var(--cg-o, .5) }
+      50%  { transform: translateY(-70px) translateX(18px) scale(1); }
+      88%  { opacity: var(--cg-o, .5) }
+      100% { transform: translateY(-150px) translateX(-8px) scale(.92); opacity: 0 }
+    }
+    @keyframes cg-flicker {
+      0%,6%,10%,14%,40%,44%,68%,72%,100% { opacity: .95 }
+      7%,11%,41%,69% { opacity: .08 }
+      9% { opacity: 1 }
+      13% { opacity: .5 }
+      55% { opacity: .22 }
+      85%,87% { opacity: .3 }
+    }
+    @keyframes cg-mist { 0%,100% { opacity: .26; transform: translateX(-16px) scaleY(1) } 50% { opacity: .46; transform: translateX(16px) scaleY(1.12) } }
+    @keyframes cg-creep { 0% { transform: translateX(-40px) } 100% { transform: translateX(40px) } }
+    @keyframes cg-sway  { 0%,100% { transform: translateX(-16px) rotate(-3deg) } 50% { transform: translateX(16px) rotate(3deg) } }
+    @keyframes cg-twirl { 0% { transform: rotate(0deg) } 100% { transform: rotate(360deg) } }
+    @keyframes cg-fade  { 0%,100% { opacity: .04 } 45% { opacity: .17 } 55% { opacity: .09 } }
+    @keyframes cg-drift2 { 0% { transform: translate(0,0) } 100% { transform: translate(-34px,-46px) } }
+
+    .cg-bob     { animation: cg-bob 4.2s ease-in-out infinite; }
+    .cg-glow    { animation: cg-glow 5s ease-in-out infinite; }
+    .cg-drift   { animation: cg-drift 22s ease-in-out infinite; }
+    .cg-ghost   { animation: cg-rise var(--cg-d, 16s) linear infinite; animation-delay: var(--cg-delay, 0s); }
+    .cg-flicker { animation: cg-flicker 5s steps(1, end) infinite; }
+    .cg-mist    { animation: cg-mist 7s ease-in-out infinite; }
+    .cg-creep   { animation: cg-creep 16s ease-in-out infinite alternate; }
+    .cg-sway    { animation: cg-sway 13s ease-in-out infinite; }
+    .cg-twirl   { animation: cg-twirl 64s linear infinite; }
+    .cg-fade    { animation: cg-fade 9s ease-in-out infinite; }
+    .cg-drift2  { animation: cg-drift2 26s ease-in-out infinite alternate; }
+
+    @media (prefers-reduced-motion: reduce) {
+      .cg-bob, .cg-glow, .cg-drift, .cg-ghost, .cg-flicker, .cg-mist, .cg-creep, .cg-sway, .cg-twirl, .cg-fade, .cg-drift2 { animation: none !important; }
+      .cg-ghost { opacity: var(--cg-o, .4) !important; }
+    }
+  </style>
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+  <script src="../_ds_bundle.js"></script>
+  <script src="data.js"></script>
+  <script src="engine.js"></script>
+  <script src="templates.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel" src="Icon.jsx"></script>
+  <script type="text/babel" src="CodeView.jsx"></script>
+  <script type="text/babel" src="SettingsModal.jsx"></script>
+  <script type="text/babel" src="EmptyState.jsx"></script>
+  <script type="text/babel" src="Library.jsx"></script>
+  <script type="text/babel" src="Editor.jsx"></script>
+  <script type="text/babel">
+    // ---- hash-based routing so back/forward + reload restore the screen ----
+    //   #/            → empty (start)
+    //   #/library     → template library
+    //   #/new         → editor, blank (sample)
+    //   #/t/<id>      → editor seeded with a template
+    function routeFromHash() {
+      const h = (location.hash || '').replace(/^#\/?/, '');
+      if (h === 'library') return { view: 'library', initial: null };
+      if (h === 'new') return { view: 'editor', initial: null };
+      const m = h.match(/^t\/(.+)$/);
+      if (m) {
+        const id = decodeURIComponent(m[1]);
+        const tpl = (window.CGTemplates || []).find((t) => t.id === id) || null;
+        return { view: 'editor', initial: tpl };
+      }
+      return { view: 'empty', initial: null };
+    }
+
+    function App() {
+      const [route, setRoute] = React.useState(routeFromHash);
+      React.useEffect(() => {
+        const on = () => setRoute(routeFromHash());
+        window.addEventListener('hashchange', on);
+        return () => window.removeEventListener('hashchange', on);
+      }, []);
+      const go = (hash) => { location.hash = hash; };           // pushes a history entry
+      const back = () => { history.back(); };
+      const openEditor = (tpl) => go(tpl ? '#/t/' + encodeURIComponent(tpl.id) : '#/new');
+
+      if (route.view === 'editor')
+        return <window.Editor key={route.initial ? route.initial.id : 'blank'} initial={route.initial} onBack={back} />;
+      if (route.view === 'library')
+        return <window.Library onOpen={openEditor} onClose={back} />;
+      return <window.EmptyState onStart={() => openEditor(null)} onLibrary={() => go('#/library')} />;
+    }
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>

@@ -1,0 +1,47 @@
+<!-- @dsCard group="Components" viewport="700x250" name="Core — Button, Badge, Card, Divider" subtitle="Action, status, surface, and the rainbow rule" -->
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><link rel="stylesheet" href="../../styles.css">
+<style>body{margin:0;padding:22px;background:var(--cg-bg);font-family:var(--font-sans)}
+.grp{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:16px}
+.lbl{font-family:var(--font-mono);font-size:10px;color:var(--cg-text-faint);width:100%;margin-bottom:2px}</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="../../_ds_bundle.js"></script>
+</head>
+<body><div id="root"></div>
+<script type="text/babel">
+const { Button, Badge, Card, Divider } = window.CommandGhostwriterDesignSystem_0d5f31;
+function Demo() {
+  return (
+    <div>
+      <div className="grp"><span className="lbl">Button — variants & sizes</span>
+        <Button variant="primary" icon="📝">CLIコマンド生成</Button>
+        <Button variant="secondary">Markdown生成</Button>
+        <Button variant="ghost">キャンセル</Button>
+        <Button variant="primary" size="sm">sm</Button>
+        <Button variant="primary" disabled>disabled</Button>
+      </div>
+      <div className="grp"><span className="lbl">Badge — tones</span>
+        <Badge tone="brand">TOML</Badge>
+        <Badge tone="success">解析成功</Badge>
+        <Badge tone="warning">注意</Badge>
+        <Badge tone="error">失敗</Badge>
+        <Badge tone="info">情報</Badge>
+        <Badge>neutral</Badge>
+      </div>
+      <div className="grp"><span className="lbl">Card + Divider</span>
+        <Card style={{flex:1}}>
+          <strong style={{color:'var(--cg-text)'}}>設定デバッグ</strong>
+          <Divider variant="rainbow" />
+          <span style={{fontSize:13,color:'var(--cg-text-muted)'}}>構文解析による設定デバッグ</span>
+        </Card>
+      </div>
+    </div>
+  );
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<Demo/>);
+</script>
+</body>
+</html>

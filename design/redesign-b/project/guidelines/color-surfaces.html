@@ -1,0 +1,22 @@
+<!-- @dsCard group="Colors" viewport="700x150" name="Dark surfaces" subtitle="Default theme — app, raised, sunken wells" -->
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><link rel="stylesheet" href="../styles.css">
+<style>
+  body { margin: 0; padding: 18px; background: #000; }
+  .row { display: flex; gap: 10px; }
+  .sw { flex: 1; border-radius: var(--radius-md); padding: 12px; min-height: 86px;
+        display: flex; flex-direction: column; justify-content: space-between;
+        border: 1px solid var(--cg-border); }
+  .name { font-family: var(--font-sans); font-size: 12px; font-weight: 600; color: var(--cg-text); }
+  .hex  { font-family: var(--font-mono); font-size: 12px; color: var(--cg-text-muted); }
+</style></head>
+<body>
+  <div class="row">
+    <div class="sw" style="background: var(--cg-bg);"><span class="name">bg</span><span class="hex">#0E1117</span></div>
+    <div class="sw" style="background: var(--cg-bg-secondary);"><span class="name">secondary</span><span class="hex">#262730</span></div>
+    <div class="sw" style="background: var(--cg-bg-tertiary);"><span class="name">tertiary</span><span class="hex">#31333F</span></div>
+    <div class="sw" style="background: var(--cg-bg-code);"><span class="name">code well</span><span class="hex">#1A1C24</span></div>
+  </div>
+</body>
+</html>

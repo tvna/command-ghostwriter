@@ -1,0 +1,15 @@
+/* Command Ghostwriter — Webfonts
+   Streamlit's stack: Source Sans 3 (UI/body) + Source Code Pro (code/CLI output).
+   Loaded from Google Fonts. If you need self-hosted binaries, swap these @font-face
+   src URLs for local woff2 files under /assets/fonts. */
+
+@import url('https://fonts.googleapis.com/css2?family=Source+Sans+3:ital,wght@0,400;0,600;0,700;1,400&family=Source+Code+Pro:wght@400;500;600&display=swap');
+
+/* Explicit @font-face mirrors so the compiler can resolve the webfonts.
+   These point at Google's hosted woff2 endpoints. */
+@font-face {
+  font-family: 'Source Sans 3 Fallback';
+  font-style: normal;
+  font-weight: 400;
+  src: local('Source Sans 3'), local('Source Sans Pro'), local('Arial');
+}

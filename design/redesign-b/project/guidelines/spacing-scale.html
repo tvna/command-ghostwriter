@@ -1,0 +1,24 @@
+<!-- @dsCard group="Spacing" viewport="700x150" name="Spacing scale" subtitle="4px base rhythm — gaps and container padding" -->
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><link rel="stylesheet" href="../styles.css">
+<style>
+  body { margin: 0; padding: 20px 22px; background: var(--cg-bg); font-family: var(--font-sans); }
+  .row { display: flex; align-items: flex-end; gap: 18px; }
+  .item { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .bar { background: var(--cg-red); border-radius: 2px; width: 100%; }
+  .t  { font-family: var(--font-mono); font-size: 10px; color: var(--cg-text-muted); }
+  .px { font-family: var(--font-mono); font-size: 10px; color: var(--cg-text-faint); }
+</style></head>
+<body>
+  <div class="row">
+    <div class="item" style="width:24px"><div class="bar" style="height:8px"></div><span class="t">2</span><span class="px">8</span></div>
+    <div class="item" style="width:30px"><div class="bar" style="height:12px"></div><span class="t">3</span><span class="px">12</span></div>
+    <div class="item" style="width:36px"><div class="bar" style="height:16px"></div><span class="t">4</span><span class="px">16</span></div>
+    <div class="item" style="width:44px"><div class="bar" style="height:24px"></div><span class="t">6</span><span class="px">24</span></div>
+    <div class="item" style="width:52px"><div class="bar" style="height:32px"></div><span class="t">8</span><span class="px">32</span></div>
+    <div class="item" style="width:60px"><div class="bar" style="height:48px"></div><span class="t">12</span><span class="px">48</span></div>
+    <div class="item" style="width:72px"><div class="bar" style="height:64px"></div><span class="t">16</span><span class="px">64</span></div>
+  </div>
+</body>
+</html>

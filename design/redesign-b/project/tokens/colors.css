@@ -1,0 +1,105 @@
+/* ============================================================
+   Command Ghostwriter — Color tokens
+   Built on Streamlit's palette. Dark theme is the brand default
+   (.streamlit/config.toml → base = "dark"); a light scope is
+   provided for surfaces that need it.
+   ============================================================ */
+
+:root {
+  /* --- Brand --------------------------------------------------- */
+  --cg-red:            #FF4B4B;   /* Streamlit primary — the signature red */
+  --cg-red-hover:      #FF6C6C;   /* lighter on hover (dark surfaces)       */
+  --cg-red-active:     #FF2B2B;   /* deeper on press                        */
+  --cg-red-tint:       #FF8C8C;
+
+  /* Ghost mascot accents (irasutoya illustration) */
+  --cg-ghost-outline:  #AEC7D6;   /* pale blue ghost edge */
+  --cg-pencil-green:   #2E8B57;   /* the writing pencil   */
+  --cg-desk-wood:      #D2A24C;   /* wooden desk          */
+
+  /* --- Dark theme surfaces (default) --------------------------- */
+  --cg-bg:             #0E1117;   /* app background        */
+  --cg-bg-secondary:   #262730;   /* sidebar, inputs, cards */
+  --cg-bg-tertiary:    #31333F;   /* hovered / nested      */
+  --cg-bg-code:        #1A1C24;   /* code & textarea wells */
+
+  /* --- Text ---------------------------------------------------- */
+  --cg-text:           #FAFAFA;   /* primary text on dark  */
+  --cg-text-muted:     #A3A8B8;   /* secondary / captions  */
+  --cg-text-faint:     #6E7280;   /* disabled / hints      */
+  --cg-text-inverse:   #31333F;   /* text on light/red     */
+
+  /* --- Borders & lines ----------------------------------------- */
+  --cg-border:         #3A3C49;   /* default 1px borders   */
+  --cg-border-strong:  #4A4D5E;
+  --cg-border-input:   #4A4D5E;
+
+  /* --- Semantic (Streamlit alert palette) ---------------------- */
+  --cg-success:        #21C354;
+  --cg-success-bg:     rgba(33, 195, 84, 0.12);
+  --cg-success-border: rgba(33, 195, 84, 0.30);
+
+  --cg-warning:        #FFBD45;
+  --cg-warning-bg:     rgba(255, 189, 69, 0.12);
+  --cg-warning-border: rgba(255, 189, 69, 0.30);
+
+  --cg-error:          #FF4B4B;
+  --cg-error-bg:       rgba(255, 75, 75, 0.12);
+  --cg-error-border:   rgba(255, 75, 75, 0.30);
+
+  --cg-info:           #5AB9F0;
+  --cg-info-bg:        rgba(90, 185, 240, 0.12);
+  --cg-info-border:    rgba(90, 185, 240, 0.30);
+
+  /* --- Rainbow divider (Streamlit divider="rainbow") ----------- */
+  --cg-rainbow: linear-gradient(
+    90deg,
+    #FF4B4B 0%, #FF8700 20%, #FFD000 40%,
+    #21C354 60%, #5AB9F0 80%, #A24BFF 100%
+  ); /* @kind color */
+
+  /* --- Semantic aliases (use these in components) -------------- */
+  --surface-app:       var(--cg-bg);
+  --surface-raised:    var(--cg-bg-secondary);
+  --surface-sunken:    var(--cg-bg-code);
+  --surface-hover:     var(--cg-bg-tertiary);
+
+  --text-body:         var(--cg-text);
+  --text-secondary:    var(--cg-text-muted);
+  --text-disabled:     var(--cg-text-faint);
+
+  --border-default:    var(--cg-border);
+  --border-focus:      var(--cg-red);
+
+  --accent:            var(--cg-red);
+  --accent-hover:      var(--cg-red-hover);
+  --accent-active:     var(--cg-red-active);
+  --accent-contrast:   #FFFFFF;
+}
+
+/* ---- Light scope -------------------------------------------------
+   Apply .cg-light to any subtree that should render on white
+   (Streamlit's light base). Surfaces flip; brand red stays. */
+.cg-light {
+  --surface-app:       #FFFFFF;
+  --surface-raised:    #F0F2F6;
+  --surface-sunken:    #F0F2F6;
+  --surface-hover:     #E6E9EF;
+
+  --cg-bg:             #FFFFFF;
+  --cg-bg-secondary:   #F0F2F6;
+  --cg-bg-tertiary:    #E6E9EF;
+  --cg-bg-code:        #F0F2F6;
+
+  --text-body:         #31333F;
+  --text-secondary:    #5B5E6B;
+  --text-disabled:     #A3A8B8;
+
+  --cg-text:           #31333F;
+  --cg-text-muted:     #5B5E6B;
+  --cg-text-inverse:   #FFFFFF;
+
+  --border-default:    #D5D9E0;
+  --cg-border:         #D5D9E0;
+  --cg-border-input:   #C9CDD6;
+}

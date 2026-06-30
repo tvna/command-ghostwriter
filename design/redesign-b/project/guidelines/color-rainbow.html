@@ -1,0 +1,24 @@
+<!-- @dsCard group="Colors" viewport="700x140" name="Rainbow divider & mascot accents" subtitle="The st.divider rainbow plus ghost illustration hues" -->
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><link rel="stylesheet" href="../styles.css">
+<style>
+  body { margin: 0; padding: 18px; background: var(--cg-bg); font-family: var(--font-sans); }
+  .rainbow { height: 6px; border-radius: 999px; background: var(--cg-rainbow); }
+  .lbl { font-size: 11px; color: var(--cg-text-muted); margin: 6px 0 16px; font-family: var(--font-mono); }
+  .row { display: flex; gap: 10px; }
+  .sw { flex: 1; border-radius: var(--radius-md); padding: 10px 12px; min-height: 54px;
+        display: flex; flex-direction: column; justify-content: flex-end; border:1px solid var(--cg-border); }
+  .name { font-size: 11px; font-weight: 600; color: var(--cg-text); }
+  .hex  { font-family: var(--font-mono); font-size: 10px; color: var(--cg-text-muted); }
+</style></head>
+<body>
+  <div class="rainbow"></div>
+  <div class="lbl">--cg-rainbow — divider="rainbow"</div>
+  <div class="row">
+    <div class="sw" style="background:var(--cg-ghost-outline)"><span class="name" style="color:#1a1c24">ghost-outline</span><span class="hex" style="color:#33414b">#AEC7D6</span></div>
+    <div class="sw" style="background:var(--cg-pencil-green)"><span class="name">pencil-green</span><span class="hex" style="color:rgba(255,255,255,.8)">#2E8B57</span></div>
+    <div class="sw" style="background:var(--cg-desk-wood)"><span class="name" style="color:#3a2a10">desk-wood</span><span class="hex" style="color:#5c4418">#D2A24C</span></div>
+  </div>
+</body>
+</html>

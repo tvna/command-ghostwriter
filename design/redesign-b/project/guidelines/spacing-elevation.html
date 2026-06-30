@@ -1,0 +1,21 @@
+<!-- @dsCard group="Spacing" viewport="700x160" name="Elevation" subtitle="Subtle shadows + the red focus ring" -->
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><link rel="stylesheet" href="../styles.css">
+<style>
+  body { margin: 0; padding: 24px 22px; background: var(--cg-bg); font-family: var(--font-sans); }
+  .row { display: flex; gap: 26px; align-items: center; }
+  .item { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+  .box { width: 84px; height: 56px; background: var(--cg-bg-secondary);
+         border-radius: var(--radius-md); border: 1px solid var(--cg-border); }
+  .t  { font-family: var(--font-mono); font-size: 11px; color: var(--cg-text-muted); }
+</style></head>
+<body>
+  <div class="row">
+    <div class="item"><div class="box" style="box-shadow:var(--shadow-sm)"></div><span class="t">sm</span></div>
+    <div class="item"><div class="box" style="box-shadow:var(--shadow-md)"></div><span class="t">md</span></div>
+    <div class="item"><div class="box" style="box-shadow:var(--shadow-lg)"></div><span class="t">lg</span></div>
+    <div class="item"><div class="box" style="box-shadow:var(--shadow-focus)"></div><span class="t">focus ring</span></div>
+  </div>
+</body>
+</html>

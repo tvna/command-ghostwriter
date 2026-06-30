@@ -1,0 +1,21 @@
+<!-- @dsCard group="Spacing" viewport="700x150" name="Corner radius" subtitle="0.5rem default on inputs, buttons, cards" -->
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><link rel="stylesheet" href="../styles.css">
+<style>
+  body { margin: 0; padding: 20px 22px; background: var(--cg-bg); font-family: var(--font-sans); }
+  .row { display: flex; gap: 20px; align-items: center; }
+  .item { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+  .box { width: 76px; height: 56px; background: var(--cg-bg-secondary);
+         border: 1px solid var(--cg-border-strong); }
+  .t  { font-family: var(--font-mono); font-size: 11px; color: var(--cg-text-muted); }
+</style></head>
+<body>
+  <div class="row">
+    <div class="item"><div class="box" style="border-radius:var(--radius-sm)"></div><span class="t">sm · 4px</span></div>
+    <div class="item"><div class="box" style="border-radius:var(--radius-md)"></div><span class="t">md · 8px</span></div>
+    <div class="item"><div class="box" style="border-radius:var(--radius-lg)"></div><span class="t">lg · 12px</span></div>
+    <div class="item"><div class="box" style="border-radius:var(--radius-pill);width:96px"></div><span class="t">pill</span></div>
+  </div>
+</body>
+</html>
