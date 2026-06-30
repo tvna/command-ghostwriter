@@ -1,6 +1,7 @@
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { Button, FileUploader, Badge } from '../ds';
 import { Icon } from './Icon';
+import { HowToModal } from './HowToModal';
 import type { Style } from '../styles/css';
 import logoMark from '../assets/brand/logo-mark.svg';
 
@@ -99,6 +100,7 @@ export interface EmptyStateProps {
 }
 
 export function EmptyState({ onStart, onLibrary }: EmptyStateProps) {
+  const [howto, setHowto] = useState(false);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: 'var(--cg-bg)', fontFamily: 'var(--font-sans)', color: 'var(--cg-text)', position: 'relative', overflow: 'hidden' }}>
 
@@ -109,7 +111,7 @@ export function EmptyState({ onStart, onLibrary }: EmptyStateProps) {
           <span style={{ fontWeight: 700, fontSize: 'var(--text-md)', whiteSpace: 'nowrap' }}>Command ghostwriter</span>
         </div>
         <div style={{ flex: 1 }} />
-        <a href="#" onClick={(e) => e.preventDefault()} style={{ color: 'var(--cg-text-muted)', textDecoration: 'none', fontSize: 'var(--text-sm)' }}>使い方</a>
+        <a href="#" onClick={(e) => { e.preventDefault(); setHowto(true); }} style={{ color: 'var(--cg-text-muted)', textDecoration: 'none', fontSize: 'var(--text-sm)' }}>使い方</a>
       </header>
 
       {/* ===== haunting atmosphere (behind content) ===== */}
@@ -217,6 +219,8 @@ export function EmptyState({ onStart, onLibrary }: EmptyStateProps) {
 
         </div>
       </div>
+
+      <HowToModal open={howto} onClose={() => setHowto(false)} />
     </div>
   );
 }
