@@ -11,9 +11,10 @@
 # は、そのワークフロー自体が起動しない限り永久に "Expected" のまま
 # 報告されず、PR がマージ不可能になってしまいます。
 # このワークフローは `test-and-build-on-pr.yml` の `paths-ignore` と
-# 同じパス一覧にのみトリガーされ、同名のステータスチェックを
-# 即座に success として報告することで、ドキュメントのみの変更でも
-# PR をマージ可能にします。
+# 同じパス一覧にのみトリガーされます。必須チェックのコンテキスト名
+# "<job_id> / <name>" を再現するため、`reusable-skip-summary.yml` を
+# 呼び出し、同名のステータスチェックを即座に success として報告する
+# ことで、ドキュメントのみの変更でも PR をマージ可能にします。
 #
 # ワークフローの影響範囲 (Scope of Impact):
 # ---------------------------------------
@@ -64,9 +65,6 @@ permissions: {}
 
 jobs:
   test-and-build:
-    name: "Workflow summary [Test & Build (on pull request)]"
-    runs-on: ubuntu-latest
-    timeout-minutes: 1
-    steps:
-      - name: Report as skipped (docs/asset-only change)
-        run: echo "test-and-build-on-pr.yml is skipped for this change (paths-ignore match); reporting success to satisfy the required status check."
+    uses: ./.github/workflows/reusable-skip-summary.yml
+    with:
+      workflow_summary_name: "Workflow summary [Test & Build (on pull request)]"
