@@ -1,7 +1,7 @@
 import type { Template, TemplateCategory, TemplateOutput } from "./types";
 import type { Format } from "./format";
 
-const raw = import.meta.glob("../../../assets/examples/*.{toml,yaml,j2}", {
+const raw = import.meta.glob("../../../assets/examples/*.{toml,yaml,csv,j2}", {
   query: "?raw",
   eager: true,
   import: "default",
@@ -31,6 +31,7 @@ const META: Meta[] = [
   { id: "dns-zone", name: "DNS ゾーンファイル初期化", desc: "$ORIGIN / $TTL / SOA / NS / MX / A / 各種 TXT を含むゾーンを、登録・反映手順書（Markdown）として生成。", category: "dns", format: "toml", output: "markdown", updated: "2026-06-30", live: true },
   { id: "incident-campus", name: "キャンパスネットワーク障害対応", desc: "症状・影響範囲・切り分けステップ・エスカレーションから Markdown 手順書を生成。", category: "runbook", format: "yaml", output: "markdown", updated: "2026-06-18", live: true },
   { id: "incident-proxy", name: "プロキシ環境のWebサービス接続不能", desc: "プロキシ設定・確認コマンド・判断分岐から Markdown 切り分け手順書を生成。", category: "runbook", format: "yaml", output: "markdown", updated: "2026-06-15", live: true },
+  { id: "firewall-rules", name: "firewalld ルール一括投入", desc: "CSV の 1 行 1 ルールから、Rocky Linux 標準の firewalld rich rule 投入手順書（Markdown）を生成。", category: "network", format: "csv", output: "markdown", updated: "2026-06-30", live: true },
 ];
 
 export const CGTemplates: Template[] = META.map((m) => ({
