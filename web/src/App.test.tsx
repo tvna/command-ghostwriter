@@ -1,45 +1,27 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
-import { App } from "./App";
+import { render, screen } from "@testing-library/react";
 
-const postMessage = vi.fn();
-let onmessage: ((e: MessageEvent) => void) | null = null;
-
+// jsdom has no real Worker; mock the worker module so mount doesn't crash.
 vi.mock("./worker/generate.worker?worker", () => ({
   default: class {
-    postMessage = postMessage;
-    set onmessage(fn: (e: MessageEvent) => void) {
-      onmessage = fn;
-    }
+    onmessage: ((e: MessageEvent) => void) | null = null;
+    postMessage() {}
     terminate() {}
   },
 }));
 
-describe("App harness", () => {
-  beforeEach(() => {
-    postMessage.mockClear();
-    onmessage = null;
-  });
+import { App } from "./App";
 
-  it("sends init on mount and shows output from a result message", async () => {
+describe("App shell", () => {
+  beforeEach(() => { location.hash = ""; });
+  it("renders the empty state at #/", () => {
     render(<App />);
-    await waitFor(() => expect(postMessage).toHaveBeenCalledWith({ kind: "init" }));
-
-    onmessage?.({ data: { kind: "ready" } } as MessageEvent);
-    onmessage?.({
-      data: { kind: "result", id: 1, result: { output: "HELLO", configError: null, templateError: null } },
-    } as MessageEvent);
-
-    await waitFor(() => expect(screen.getByText("HELLO")).toBeTruthy());
+    expect(screen.getAllByText(/サンプルで試す/).length).toBeGreaterThan(0);
   });
-
-  it("shows an error banner when result carries configError", async () => {
+  it("renders the editor at #/new", () => {
+    location.hash = "#/new";
     render(<App />);
-    onmessage?.({ data: { kind: "ready" } } as MessageEvent);
-    onmessage?.({
-      data: { kind: "result", id: 1, result: { output: null, configError: "bad csv", templateError: null } },
-    } as MessageEvent);
-    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("bad csv"));
+    expect(screen.getByText("Command ghostwriter")).toBeTruthy();
   });
 });

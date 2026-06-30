@@ -1,0 +1,11 @@
+{
+  // Assets-only Worker: no server code, just serve web/dist as a static SPA.
+  // Mirror of the Vercel deployment; same dist/, same self-hosted Pyodide.
+  "name": "command-ghostwriter",
+  "compatibility_date": "2026-06-01",
+  "assets": {
+    "directory": "./dist",
+    // Hash-routed SPA: unknown paths fall back to index.html so reload/back work.
+    "not_found_handling": "single-page-application"
+  }
+}

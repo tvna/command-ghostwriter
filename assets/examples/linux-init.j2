@@ -1,0 +1,46 @@
+# Linux 初期セットアップ手順 — {{ hostname }}
+
+新規ホスト **{{ hostname }}** の初期化手順です。root 権限（sudo）で上から順に実行してください。
+
+## 1. ホスト名とタイムゾーン
+
+```bash
+hostnamectl set-hostname {{ hostname }}
+timedatectl set-timezone {{ timezone }}
+```
+
+## 2. 作業ユーザーを作成する
+
+公開鍵認証用に SSH 鍵を配置します。
+
+```bash
+{% for u in users %}useradd -m -s /bin/bash -G {{ u.groups }} {{ u.name }}
+install -d -m 700 /home/{{ u.name }}/.ssh
+echo "{{ u.pubkey }}" > /home/{{ u.name }}/.ssh/authorized_keys
+{% endfor %}```
+
+## 3. パッケージを導入する
+
+```bash
+apt-get update
+apt-get install -y {{ packages | join(' ') }}
+```
+
+## 4. SSH を堅牢化する
+
+root ログインとパスワード認証を無効化し、設定を反映します。
+
+```bash
+sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+systemctl reload sshd
+```
+
+> パスワード認証を切る前に、鍵での SSH ログインができることを必ず確認してください。
+
+## 5. ファイアウォールを有効化する
+
+```bash
+{% for port in firewall %}ufw allow {{ port }}
+{% endfor %}ufw --force enable
+```

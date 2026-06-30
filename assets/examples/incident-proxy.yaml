@@ -1,0 +1,16 @@
+title: 社内プロキシ経由で特定SaaSに接続できない
+proxy: "http://proxy.corp.local:8080"
+no_proxy: ".corp.local,127.0.0.1"
+steps:
+  - check: 環境変数 http_proxy/https_proxy が設定されているか
+    cmd: "env | grep -i proxy"
+    branch: 未設定なら export して再試行
+  - check: プロキシまでの到達性
+    cmd: "curl -x $http_proxy -I https://example-saas.com"
+    branch: 407 ならプロキシ認証情報を確認
+  - check: 宛先がプロキシ除外に含まれていないか
+    cmd: "echo $no_proxy"
+    branch: 除外に含まれる場合は直結経路を確認
+  - check: TLS/証明書の検査
+    cmd: "openssl s_client -connect example-saas.com:443 -proxy proxy.corp.local:8080"
+    branch: 証明書エラーなら社内CAを導入

@@ -1,98 +1,56 @@
-import { useEffect, useRef, useState } from "react";
-import GenerateWorker from "./worker/generate.worker?worker";
-import type { WorkerOutbound, GenerateResult, GenerateSettings } from "./worker/types";
-import { DEFAULT_SETTINGS } from "./worker/types";
+import React from "react";
+import { EmptyState } from "./components/EmptyState";
+import { Library } from "./components/Library";
 import { Editor } from "./components/Editor";
-import { Preview } from "./components/Preview";
-import { ConfigDebug } from "./components/ConfigDebug";
-import { SettingsDrawer } from "./components/SettingsDrawer";
-import { SampleMenu } from "./components/SampleMenu";
-import { DownloadBar } from "./components/DownloadBar";
-import { HowToModal } from "./components/HowToModal";
-import { t } from "./i18n";
+import { CGTemplates } from "./lib/templates";
+import type { Template } from "./lib/types";
+import type { DownloadOptions } from "./components/SettingsModal";
+import { DEFAULT_SETTINGS, type GenerateSettings } from "./worker/types";
 
-const DEBOUNCE_MS = 250;
+type Route = { view: "empty" | "library" | "editor"; initial: Template | null };
 
-function viewError(result: GenerateResult | null): string | null {
-  if (result === null) return null;
-  if (result.configError !== null) return result.configError;
-  return result.templateError;
+function routeFromHash(): Route {
+  const h = (location.hash || "").replace(/^#\/?/, "");
+  if (h === "library") return { view: "library", initial: null };
+  if (h === "new") return { view: "editor", initial: null };
+  const m = h.match(/^t\/(.+)$/);
+  if (m) {
+    const id = decodeURIComponent(m[1]);
+    const tpl = CGTemplates.find((t) => t.id === id) || null;
+    return { view: "editor", initial: tpl };
+  }
+  return { view: "empty", initial: null };
 }
 
-function viewOutput(result: GenerateResult | null): string {
-  if (result === null) return "";
-  return result.output ?? "";
-}
+const DEFAULT_DOWNLOAD: DownloadOptions = { enc: "UTF-8", fname: "command", ts: true, ext: "txt" };
 
 export function App() {
-  const workerRef = useRef<Worker | null>(null);
-  const idRef = useRef(0);
-  const [ready, setReady] = useState(false);
-  const [config, setConfig] = useState("id,value\n1,100\n2,N/A\n3,300\n");
-  const [template, setTemplate] = useState(
-    "{% for r in csv_rows %}{{ r.id }}:{{ r.value }}\n{% endfor %}",
-  );
-  const [result, setResult] = useState<GenerateResult | null>(null);
-  const [previewMode, setPreviewMode] = useState<"text" | "markdown" | "config">("text");
-  const [settings, setSettings] = useState<GenerateSettings>(DEFAULT_SETTINGS);
+  const [route, setRoute] = React.useState<Route>(routeFromHash);
+  const [settings, setSettings] = React.useState<GenerateSettings>(DEFAULT_SETTINGS);
+  const [download, setDownload] = React.useState<DownloadOptions>(DEFAULT_DOWNLOAD);
 
-  useEffect(() => {
-    const worker = new GenerateWorker();
-    workerRef.current = worker;
-    worker.onmessage = (e: MessageEvent<WorkerOutbound>) => {
-      const msg = e.data;
-      if (msg.kind === "ready") setReady(true);
-      else if (msg.kind === "result") setResult(msg.result);
-      else if (msg.kind === "error")
-        setResult({ output: null, configError: msg.message, templateError: null, configDebug: "" });
-    };
-    worker.postMessage({ kind: "init" });
-    return () => worker.terminate();
+  React.useEffect(() => {
+    const on = () => setRoute(routeFromHash());
+    window.addEventListener("hashchange", on);
+    return () => window.removeEventListener("hashchange", on);
   }, []);
 
-  useEffect(() => {
-    if (!ready) return;
-    const handle = setTimeout(() => {
-      const id = ++idRef.current;
-      workerRef.current?.postMessage({
-        kind: "generate",
-        id,
-        request: {
-          configText: config,
-          configName: "config.csv",
-          templateText: template,
-          templateName: "template.j2",
-          settings,
-        },
-      });
-    }, DEBOUNCE_MS);
-    return () => clearTimeout(handle);
-  }, [config, template, ready, settings]);
+  const go = (hash: string) => { location.hash = hash; };
+  const back = () => history.back();
+  const openEditor = (tpl: Template | null) => go(tpl ? "#/t/" + encodeURIComponent(tpl.id) : "#/new");
 
-  const error = viewError(result);
-  const status = ready ? t.ready : t.loading;
-
-  return (
-    <main>
-      <h1>{t.appTitle}</h1>
-      <HowToModal />
-      <p>{status}</p>
-      <SampleMenu onLoad={(c, t) => { setConfig(c); setTemplate(t); }} />
-      <Editor ariaLabel="config" value={config} language="yaml" onChange={setConfig} />
-      <Editor ariaLabel="template" value={template} language="plain" onChange={setTemplate} />
-      {error !== null && <div role="alert">{error}</div>}
-      <SettingsDrawer settings={settings} onChange={setSettings} />
-      <div role="group" aria-label="preview mode">
-        <button type="button" aria-pressed={previewMode === "text"} onClick={() => setPreviewMode("text")}>{t.previewText}</button>
-        <button type="button" aria-pressed={previewMode === "markdown"} onClick={() => setPreviewMode("markdown")}>{t.previewMarkdown}</button>
-        <button type="button" aria-pressed={previewMode === "config"} onClick={() => setPreviewMode("config")}>{t.previewConfig}</button>
-      </div>
-      {previewMode === "config" ? (
-        <ConfigDebug json={result?.configDebug ?? ""} />
-      ) : (
-        <Preview output={viewOutput(result)} mode={previewMode} />
-      )}
-      <DownloadBar output={viewOutput(result)} />
-    </main>
-  );
+  if (route.view === "editor")
+    return (
+      <Editor
+        key={route.initial ? route.initial.id : "blank"}
+        initial={route.initial}
+        onBack={back}
+        settings={settings}
+        onSettings={setSettings}
+        download={download}
+        onDownload={setDownload}
+      />
+    );
+  if (route.view === "library") return <Library onOpen={openEditor} onClose={back} />;
+  return <EmptyState onStart={() => openEditor(null)} onLibrary={() => go("#/library")} />;
 }
