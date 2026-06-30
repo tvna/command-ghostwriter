@@ -102,8 +102,7 @@ export function HowToModal({ open, onClose }: HowToModalProps) {
               <Code label="① 設定定義ファイル（TOML）">{`hostname = "rtx-01"
 vlans = [10, 20, 30]`}</Code>
               <Code label="② Jinjaテンプレート（.j2）">{`hostname {{ hostname }}
-{% for v in vlans %}
-vlan {{ v }}
+{% for v in vlans %}vlan {{ v }}
 {% endfor %}`}</Code>
             </div>
             <Code label="→ 生成される結果">{`hostname rtx-01
