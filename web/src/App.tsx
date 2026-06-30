@@ -1,4 +1,5 @@
 import React from "react";
+import { Analytics } from "@vercel/analytics/react";
 import { EmptyState } from "./components/EmptyState";
 import { Library } from "./components/Library";
 import { Editor } from "./components/Editor";
@@ -39,8 +40,8 @@ export function App() {
   const back = () => history.back();
   const openEditor = (tpl: Template | null) => go(tpl ? "#/t/" + encodeURIComponent(tpl.id) : "#/new");
 
-  if (route.view === "editor")
-    return (
+  const content =
+    route.view === "editor" ? (
       <Editor
         key={route.initial ? route.initial.id : "blank"}
         initial={route.initial}
@@ -50,7 +51,16 @@ export function App() {
         download={download}
         onDownload={setDownload}
       />
+    ) : route.view === "library" ? (
+      <Library onOpen={openEditor} onClose={back} />
+    ) : (
+      <EmptyState onStart={() => openEditor(null)} onLibrary={() => go("#/library")} />
     );
-  if (route.view === "library") return <Library onOpen={openEditor} onClose={back} />;
-  return <EmptyState onStart={() => openEditor(null)} onLibrary={() => go("#/library")} />;
+
+  return (
+    <>
+      {content}
+      <Analytics />
+    </>
+  );
 }
