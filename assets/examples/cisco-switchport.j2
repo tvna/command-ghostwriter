@@ -1,0 +1,45 @@
+# スイッチポート設定手順 — {{ global.hostname }}
+
+対象スイッチ **{{ global.hostname }}** に VLAN {{ global.vlans | join(', ') }} を構成し、各ポートを設定します。作業は現地またはコンソール接続で実施してください。
+
+## 1. 設定モードへ入る
+
+特権 EXEC モードから設定モードへ移行します。
+
+```bash
+enable
+configure terminal
+hostname {{ global.hostname }}
+```
+
+## 2. VLAN を作成する
+
+利用する VLAN をまとめて定義します。
+
+```bash
+vlan {{ global.vlans | join(',') }}
+```
+
+## 3. 各インターフェースを設定する
+{% for name, intf in interfaces.items() %}
+**{{ name }}** — {{ intf.description }}
+
+```bash
+interface {{ name }}
+ description {{ intf.description }}
+{% if intf.mode == "access" %}
+ switchport mode access
+ switchport access vlan {{ intf.access_vlan }}
+{% else %}
+ switchport mode trunk
+{% endif %}
+```
+{% endfor %}
+## 4. 設定を保存する
+
+動作を確認し、問題なければ起動コンフィグへ保存します。
+
+```bash
+end
+write memory
+```
