@@ -12,6 +12,16 @@
         ]
       },
       {
+        "matcher": "startup|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/clairvoyance-session-start.sh",
+            "async": false
+          }
+        ]
+      },
+      {
         "matcher": "startup|resume|clear|compact",
         "hooks": [
           {
