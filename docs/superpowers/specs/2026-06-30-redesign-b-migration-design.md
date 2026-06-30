@@ -117,13 +117,43 @@
 - Playwright `e2e/render-parity.spec.ts` を**回帰ガード**として維持: 既知の入力[config + template]に対し**実Pyodide出力が現行と一致**することを確認[Python-in-browser の健全性証明]。
 - **ビッグバンPRのマージ前ゲート**: ① 全テスト緑[Vitest + Playwright + `features/` のCPythonテスト]、② **Vercelプレビューデプロイで実機確認**[空状態 -> サンプル投入 -> 実生成 -> ダウンロード]。本番[main]は無停止、切戻しは前デプロイのPromoteで即時。
 
+## 性能[振る舞い中立]
+
+**原則**: 「振る舞いを変えない」は機械的に担保する — 下記すべては **render-parity テスト[既知入力で実Pyodide出力が一致するキーストーンゲート]が緑のまま通ること**を採用条件とする。各タスクの completion check はこのゲートに紐付ける。
+
+コストは2箇所に集中する: **(A) 初回Pyodideロード[支配的]**、**(B) キーストロークごとの再計算**。
+
+### Tier 1[完全に振る舞い中立・移行プランに同梱]
+
+| 技術 | 効く所 | 内容 | 取込先 |
+| --- | --- | --- | --- |
+| オンボーディング中のワーカー温め | A | `init` をマウント即時に投げ、CPython初期化の数秒を空状態画面で隠す[リデザイン固有の待ち時間活用] | P-Redesign-2 |
+| Python生成関数の事前コンパイル常駐 | B | 現 `generate()` は毎回オーケストレーションコードを `runPythonAsync` で再コンパイル[`pyodide-runtime.ts`]。bootstrap時に `_cg_generate(payload)` を一度 def し、以後はペイロード呼び出しのみ | P-Redesign-2 |
+| 入力メモ化 | B | `(data, format, template, settings)` が前回と同一なら worker 呼び出しをスキップ | P-Redesign-2 |
+| Brotli圧縮 + immutableキャッシュ | A | `.wasm`/`.whl` を Brotli/gzip 配信 + content-hash付き `Cache-Control: immutable`[Vercel/CF双方] | P-Redesign-2/3 |
+| preloadヒント | A | `pyodide.asm.wasm` と主要wheelを `<link rel="preload">` / streaming compile で先読み | P-Redesign-2 |
+| CFエッジキャッシュ | A | ミラー自体が近接エッジから初回資産を配信し世界規模で初回ロード短縮 | P-Redesign-3 |
+| メインバンドル縮小 | A | CodeMirror削除[決定済]+ Pyodideワーカーのコード分割で TTI 短縮 | P-Redesign-1/2 |
+
+### Tier 2[中立の見込みだが要検証 / 別Issue #442 の性能トラック]
+
+| 技術 | 内容 | 注意 |
+| --- | --- | --- |
+| Pyodideバージョン更新 | 現 `0.26.4` → 0.27/0.28系[起動が速く・小さい傾向] | 出力同一の見込み[speculation]。render-parity で必ず確認 |
+| メモリスナップショット | Pyodide snapshot で再訪時の初期化をスキップ | experimental。要検証 |
+| パッケージ集合の最小化/遅延ロード | `features/` が実importするwheelだけを正確にロード | 依存解決の取りこぼし確認 |
+| parse/render分離キャッシュ | テンプレだけ変更時は解析済みconfig再利用 / データだけ変更時はコンパイル済みテンプレ再利用 | コードパスが変わり出力一致検証が重い。優先度低 |
+
+採らないもの: エンジンのJS化[Nunjucks等。振る舞いが変わる] / bun[別ガバナンス判断、npm継続で決定済]。
+
 ## PR分割[Issue #441 のフェーズ]
 
 各作業前にIssue/サブタスクを起票し、番号を全コミット/PRに記載する[CLAUDE.md §3]。
 
-- **P-Redesign-1[基盤]**: デザイントークン・`ds/` 原子・SVGアイコン・self-hostフォントを `web/src` へ取り込む。挙動変更なし[視覚回帰の土台のみ]。
-- **P-Redesign-2[ビッグバン切替]**: `App` をハッシュルーティングの 空状態/Library/Editor シェルへ置換、`useGenerate` でPyodideワーカーへ配線、templates/data をTS化、6テンプレを `assets/examples` 実ファイル化、エンコードDL + HowTo を救済、Vitestを書き直し、Playwright回帰を維持。
-- **P-Redesign-3[CF Workers ミラー]**: `wrangler` 静的配信設定[同一 `dist/`、SPAフォールバック]、ネイティブGit連携デプロイ[GH Actions + トークンは代替]、Cloudflare deploy runbook 追加。
+- **P-Redesign-1[基盤]**: デザイントークン・`ds/` 原子・SVGアイコン・self-hostフォントを `web/src` へ取り込む。挙動変更なし[視覚回帰の土台のみ]。Tier 1: バンドル縮小[コード分割の素地]。
+- **P-Redesign-2[ビッグバン切替]**: `App` をハッシュルーティングの 空状態/Library/Editor シェルへ置換、`useGenerate` でPyodideワーカーへ配線、templates/data をTS化、6テンプレを `assets/examples` 実ファイル化、エンコードDL + HowTo を救済、Vitestを書き直し、Playwright回帰を維持。Tier 1: ワーカー温め / 生成関数常駐 / 入力メモ化 / preload / バンドル縮小[各々 render-parity 緑で担保]。
+- **P-Redesign-3[CF Workers ミラー]**: `wrangler` 静的配信設定[同一 `dist/`、SPAフォールバック]、ネイティブGit連携デプロイ[GH Actions + トークンは代替]、Cloudflare deploy runbook 追加。Tier 1: Brotli圧縮 + immutableキャッシュ / エッジキャッシュ。
+- **別Issue #442[性能トラック]**: Tier 2[Pyodide更新・スナップショット・パッケージ最小化・parse/render分離]を render-parity ゲート前提で評価。UX移行とは分離。
 
 ## 想定する非互換と注意点
 
