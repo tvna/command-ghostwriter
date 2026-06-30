@@ -6,3 +6,4 @@ target:
 dependencies:
   apm:
   - obra/superpowers#f2cbfbefebbfef77321e4c9abc9e949826bea9d7
+  - tvna/clairvoyance#4f1ff6d449e285da3ae25ad65183d3ee46e23463
