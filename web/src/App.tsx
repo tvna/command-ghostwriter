@@ -78,8 +78,8 @@ export function App() {
       <HowToModal open={false} onClose={() => {}} />
       <p>{status}</p>
       <SampleMenu onLoad={(c, t) => { setConfig(c); setTemplate(t); }} />
-      <Editor ariaLabel="config" value={config} language="yaml" onChange={setConfig} />
-      <Editor ariaLabel="template" value={template} language="plain" onChange={setTemplate} />
+      {/* TODO(Task 9): replace with new App shell that passes correct EditorProps */}
+      <Editor settings={settings} onSettings={setSettings} download={{ enc: 'UTF-8', fname: 'output', ts: false, ext: 'txt' }} onDownload={() => {}} />
       {error !== null && <div role="alert">{error}</div>}
       <SettingsDrawer settings={settings} onChange={setSettings} />
       <div role="group" aria-label="preview mode">
