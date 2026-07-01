@@ -147,6 +147,7 @@ export function App() {
   return (
     <>
       {content}
+      {/* Keep Analytics here so hash-route pageviews use the route-aware props. */}
       <Analytics route={analytics.route} path={analytics.path} />
     </>
   );
