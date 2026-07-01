@@ -1,10 +1,13 @@
 import React from "react";
 import { Analytics } from "@vercel/analytics/react";
+import Encoding from "encoding-japanese";
 import { EmptyState } from "./components/EmptyState";
 import { Library } from "./components/Library";
 import { Editor } from "./components/Editor";
 import { CGTemplates } from "./lib/templates";
 import type { Template } from "./lib/types";
+import { CG } from "./lib/data";
+import type { Format } from "./lib/format";
 import type { DownloadOptions } from "./components/SettingsModal";
 import { DEFAULT_SETTINGS, type GenerateSettings } from "./worker/types";
 
@@ -39,10 +42,56 @@ function analyticsLocation(): { route: string; path: string } {
 
 const DEFAULT_DOWNLOAD: DownloadOptions = { enc: "UTF-8", fname: "command", ts: true, ext: "txt" };
 
+function formatFromFileName(name: string): Format {
+  const ext = name.split(".").pop()?.toLowerCase();
+  if (ext === "yaml" || ext === "yml") return "yaml";
+  if (ext === "csv") return "csv";
+  return "toml";
+}
+
+function uploadedTemplate(file: File, content: string, kind: "config" | "template"): Template {
+  const isConfig = kind === "config";
+  return {
+    id: `uploaded-${kind}`,
+    name: file.name,
+    desc: "アップロードしたファイルから作成した一時ドキュメント。",
+    category: "network",
+    format: isConfig ? formatFromFileName(file.name) : "toml",
+    output: "markdown",
+    updated: new Date().toISOString().slice(0, 10),
+    live: true,
+    data: isConfig ? content : CG.configToml,
+    template: isConfig ? CG.templateJ2 : content,
+  };
+}
+
+function readFileText(file: File): Promise<string> {
+  const decodeBytes = (buffer: ArrayBuffer): string => {
+    const bytes = new Uint8Array(buffer);
+    const detected = Encoding.detect(bytes, ["UTF8", "SJIS", "EUCJP", "JIS", "UTF16"]) || "UTF8";
+    const unicode = Encoding.convert(bytes, { to: "UNICODE", from: detected });
+    return Encoding.codeToString(unicode);
+  };
+  if ("arrayBuffer" in file && typeof file.arrayBuffer === "function") {
+    return file.arrayBuffer().then(decodeBytes);
+  }
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (reader.result instanceof ArrayBuffer) resolve(decodeBytes(reader.result));
+      else resolve(String(reader.result || ""));
+    };
+    reader.onerror = () => reject(reader.error || new Error(`Failed to read ${file.name}`));
+    reader.readAsArrayBuffer(file);
+  });
+}
+
 export function App() {
   const [route, setRoute] = React.useState<Route>(routeFromHash);
   const [settings, setSettings] = React.useState<GenerateSettings>(DEFAULT_SETTINGS);
   const [download, setDownload] = React.useState<DownloadOptions>(DEFAULT_DOWNLOAD);
+  const [draftTemplate, setDraftTemplate] = React.useState<Template | null>(null);
+  const [uploadError, setUploadError] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     const on = () => setRoute(routeFromHash());
@@ -52,13 +101,29 @@ export function App() {
 
   const go = (hash: string) => { location.hash = hash; };
   const back = () => history.back();
-  const openEditor = (tpl: Template | null) => go(tpl ? "#/t/" + encodeURIComponent(tpl.id) : "#/new");
+  const openEditor = (tpl: Template | null) => {
+    setDraftTemplate(null);
+    setUploadError(null);
+    go(tpl ? "#/t/" + encodeURIComponent(tpl.id) : "#/new");
+  };
+  const openUploadedFile = async (file: File, kind: "config" | "template") => {
+    try {
+      const content = await readFileText(file);
+      setUploadError(null);
+      setDraftTemplate(uploadedTemplate(file, content, kind));
+      go("#/new");
+    } catch {
+      setUploadError(`${file.name} を読み込めませんでした。別のファイルを選択してください。`);
+    }
+  };
+
+  const editorInitial = route.initial || draftTemplate;
 
   const content =
     route.view === "editor" ? (
       <Editor
-        key={route.initial ? route.initial.id : "blank"}
-        initial={route.initial}
+        key={editorInitial ? `${editorInitial.id}:${editorInitial.name}` : "blank"}
+        initial={editorInitial}
         onBack={back}
         settings={settings}
         onSettings={setSettings}
@@ -68,7 +133,14 @@ export function App() {
     ) : route.view === "library" ? (
       <Library onOpen={openEditor} onClose={back} />
     ) : (
-      <EmptyState onStart={() => openEditor(null)} onLibrary={() => go("#/library")} />
+      <EmptyState
+        onStart={() => openEditor(null)}
+        onLibrary={() => go("#/library")}
+        onConfigFile={(file) => void openUploadedFile(file, "config")}
+        onTemplateFile={(file) => void openUploadedFile(file, "template")}
+        onUploadError={setUploadError}
+        uploadError={uploadError}
+      />
     );
 
   const analytics = analyticsLocation();

@@ -9,7 +9,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def load_workflow() -> dict[str, Any]:
+def load_workflow() -> dict[Any, Any]:
     with (ROOT / ".github" / "workflows" / "release.yml").open(encoding="utf-8") as workflow_file:
         return yaml.safe_load(workflow_file)
 

@@ -97,9 +97,13 @@ function Op({ children, accent }: { children: ReactNode; accent?: boolean }) {
 export interface EmptyStateProps {
   onStart: (mode?: string) => void;
   onLibrary?: () => void;
+  onConfigFile?: (file: File) => void;
+  onTemplateFile?: (file: File) => void;
+  onUploadError?: (message: string) => void;
+  uploadError?: string | null;
 }
 
-export function EmptyState({ onStart, onLibrary }: EmptyStateProps) {
+export function EmptyState({ onStart, onLibrary, onConfigFile, onTemplateFile, onUploadError, uploadError }: EmptyStateProps) {
   const [howto, setHowto] = useState(false);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: 'var(--cg-bg)', fontFamily: 'var(--font-sans)', color: 'var(--cg-text)', position: 'relative', overflow: 'hidden' }}>
@@ -205,9 +209,27 @@ export function EmptyState({ onStart, onLibrary }: EmptyStateProps) {
 
             {/* uploads */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-              <FileUploader label="① 設定定義ファイル" accept="TOML, YAML, CSV" onBrowse={() => onStart('upload')} />
-              <FileUploader label="② Jinjaテンプレート" accept="J2, JINJA2" onBrowse={() => onStart('upload')} />
+              <FileUploader
+                label="① 設定定義ファイル"
+                accept=".toml,.yaml,.yml,.csv"
+                acceptLabel="TOML, YAML, CSV"
+                onFile={onConfigFile}
+                onError={onUploadError}
+              />
+              <FileUploader
+                label="② Jinjaテンプレート"
+                accept=".j2,.jinja2"
+                acceptLabel="J2, JINJA2"
+                onFile={onTemplateFile}
+                onError={onUploadError}
+              />
             </div>
+
+            {uploadError && (
+              <div role="alert" style={{ marginTop: 12, padding: '10px 12px', border: '1px solid var(--cg-error-border)', borderRadius: 'var(--radius-md)', background: 'var(--cg-error-bg)', color: 'var(--cg-red-tint)', fontSize: 'var(--text-sm)' }}>
+                {uploadError}
+              </div>
+            )}
 
             {/* library link */}
             <div style={{ marginTop: 18, textAlign: 'center' }}>
