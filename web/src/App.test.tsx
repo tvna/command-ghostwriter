@@ -28,6 +28,7 @@ describe("App shell", () => {
     const { container } = render(<App />);
     const inputs = container.querySelectorAll('input[type="file"]');
     expect(inputs.length).toBeGreaterThanOrEqual(2);
+    expect(inputs[0].getAttribute("accept")).toBe(".toml,.yaml,.yml,.csv");
 
     const file = new File(["hostname = \"router-001\""], "router.toml", { type: "application/toml" });
     fireEvent.change(inputs[0], { target: { files: [file] } });
@@ -35,5 +36,29 @@ describe("App shell", () => {
     await waitFor(() => {
       expect(screen.getByDisplayValue("hostname = \"router-001\"")).toBeTruthy();
     });
+  });
+  it("loads a selected Jinja template file from the empty state into the editor", async () => {
+    const { container } = render(<App />);
+    const inputs = container.querySelectorAll('input[type="file"]');
+    expect(inputs.length).toBeGreaterThanOrEqual(2);
+    expect(inputs[1].getAttribute("accept")).toBe(".j2,.jinja2");
+
+    const file = new File(["interface {{ name }}"], "interface.j2", { type: "text/plain" });
+    fireEvent.change(inputs[1], { target: { files: [file] } });
+
+    await waitFor(() => {
+      fireEvent.click(screen.getByRole("button", { name: "テンプレート" }));
+      expect(screen.getByDisplayValue("interface {{ name }}")).toBeTruthy();
+    });
+  });
+  it("shows an inline error when an upload cannot be read", async () => {
+    const { container } = render(<App />);
+    const inputs = container.querySelectorAll('input[type="file"]');
+    const file = new File([""], "broken.toml", { type: "application/toml" });
+    Object.defineProperty(file, "text", { value: () => Promise.reject(new Error("read failed")) });
+
+    fireEvent.change(inputs[0], { target: { files: [file] } });
+
+    expect((await screen.findByRole("alert")).textContent).toBe("broken.toml を読み込めませんでした。別のファイルを選択してください。");
   });
 });

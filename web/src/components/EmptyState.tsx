@@ -99,9 +99,10 @@ export interface EmptyStateProps {
   onLibrary?: () => void;
   onConfigFile?: (file: File) => void;
   onTemplateFile?: (file: File) => void;
+  uploadError?: string | null;
 }
 
-export function EmptyState({ onStart, onLibrary, onConfigFile, onTemplateFile }: EmptyStateProps) {
+export function EmptyState({ onStart, onLibrary, onConfigFile, onTemplateFile, uploadError }: EmptyStateProps) {
   const [howto, setHowto] = useState(false);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: 'var(--cg-bg)', fontFamily: 'var(--font-sans)', color: 'var(--cg-text)', position: 'relative', overflow: 'hidden' }}>
@@ -220,6 +221,12 @@ export function EmptyState({ onStart, onLibrary, onConfigFile, onTemplateFile }:
                 onFile={onTemplateFile}
               />
             </div>
+
+            {uploadError && (
+              <div role="alert" style={{ marginTop: 12, padding: '10px 12px', border: '1px solid var(--cg-error-border)', borderRadius: 'var(--radius-md)', background: 'var(--cg-error-bg)', color: 'var(--cg-red-tint)', fontSize: 'var(--text-sm)' }}>
+                {uploadError}
+              </div>
+            )}
 
             {/* library link */}
             <div style={{ marginTop: 18, textAlign: 'center' }}>

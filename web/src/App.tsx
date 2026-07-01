@@ -79,6 +79,7 @@ export function App() {
   const [settings, setSettings] = React.useState<GenerateSettings>(DEFAULT_SETTINGS);
   const [download, setDownload] = React.useState<DownloadOptions>(DEFAULT_DOWNLOAD);
   const [draftTemplate, setDraftTemplate] = React.useState<Template | null>(null);
+  const [uploadError, setUploadError] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     const on = () => setRoute(routeFromHash());
@@ -90,12 +91,18 @@ export function App() {
   const back = () => history.back();
   const openEditor = (tpl: Template | null) => {
     setDraftTemplate(null);
+    setUploadError(null);
     go(tpl ? "#/t/" + encodeURIComponent(tpl.id) : "#/new");
   };
   const openUploadedFile = async (file: File, kind: "config" | "template") => {
-    const content = await readFileText(file);
-    setDraftTemplate(uploadedTemplate(file, content, kind));
-    go("#/new");
+    try {
+      const content = await readFileText(file);
+      setUploadError(null);
+      setDraftTemplate(uploadedTemplate(file, content, kind));
+      go("#/new");
+    } catch {
+      setUploadError(`${file.name} を読み込めませんでした。別のファイルを選択してください。`);
+    }
   };
 
   const editorInitial = route.initial || draftTemplate;
@@ -119,6 +126,7 @@ export function App() {
         onLibrary={() => go("#/library")}
         onConfigFile={(file) => void openUploadedFile(file, "config")}
         onTemplateFile={(file) => void openUploadedFile(file, "template")}
+        uploadError={uploadError}
       />
     );
 
