@@ -1,5 +1,6 @@
 import React from "react";
 import { Analytics } from "@vercel/analytics/react";
+import Encoding from "encoding-japanese";
 import { EmptyState } from "./components/EmptyState";
 import { Library } from "./components/Library";
 import { Editor } from "./components/Editor";
@@ -65,12 +66,23 @@ function uploadedTemplate(file: File, content: string, kind: "config" | "templat
 }
 
 function readFileText(file: File): Promise<string> {
-  if ("text" in file && typeof file.text === "function") return file.text();
+  const decodeBytes = (buffer: ArrayBuffer): string => {
+    const bytes = new Uint8Array(buffer);
+    const detected = Encoding.detect(bytes, ["UTF8", "SJIS", "EUCJP", "JIS", "UTF16"]) || "UTF8";
+    const unicode = Encoding.convert(bytes, { to: "UNICODE", from: detected });
+    return Encoding.codeToString(unicode);
+  };
+  if ("arrayBuffer" in file && typeof file.arrayBuffer === "function") {
+    return file.arrayBuffer().then(decodeBytes);
+  }
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onload = () => {
+      if (reader.result instanceof ArrayBuffer) resolve(decodeBytes(reader.result));
+      else resolve(String(reader.result || ""));
+    };
     reader.onerror = () => reject(reader.error || new Error(`Failed to read ${file.name}`));
-    reader.readAsText(file);
+    reader.readAsArrayBuffer(file);
   });
 }
 
@@ -126,6 +138,7 @@ export function App() {
         onLibrary={() => go("#/library")}
         onConfigFile={(file) => void openUploadedFile(file, "config")}
         onTemplateFile={(file) => void openUploadedFile(file, "template")}
+        onUploadError={setUploadError}
         uploadError={uploadError}
       />
     );

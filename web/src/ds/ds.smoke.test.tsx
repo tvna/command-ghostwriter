@@ -61,6 +61,19 @@ describe("DS primitives smoke", () => {
     expect(onFile).toHaveBeenCalledWith(file);
   });
 
+  it("FileUploader rejects files over its byte limit before reporting them", () => {
+    const onFile = vi.fn();
+    const onError = vi.fn();
+    const { container } = render(<FileUploader label="アップロード" maxBytes={4} onFile={onFile} onError={onError} />);
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const file = new File(["12345"], "large.toml", { type: "application/toml" });
+
+    fireEvent.change(input, { target: { files: [file] } });
+
+    expect(onFile).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledWith("large.toml は30MB以下のファイルを選択してください。");
+  });
+
   it("Divider renders an hr element", () => {
     const { container } = render(<Divider variant="rainbow" />);
     expect(container.querySelector("hr")).toBeTruthy();

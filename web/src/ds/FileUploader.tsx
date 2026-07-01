@@ -10,10 +10,12 @@ export interface FileUploaderProps {
   accept?: string;
   acceptLabel?: string;
   maxSize?: string;
+  maxBytes?: number;
   fileName?: string | null;
   fileSize?: string;
   onBrowse?: () => void;
   onFile?: (file: File) => void;
+  onError?: (message: string) => void;
   style?: React.CSSProperties;
 }
 
@@ -22,10 +24,12 @@ export function FileUploader({
   accept = '',
   acceptLabel,
   maxSize = '30MB',
+  maxBytes = 30 * 1024 * 1024,
   fileName = null,
   fileSize = '',
   onBrowse,
   onFile,
+  onError,
   style,
 }: FileUploaderProps) {
   const [hover, setHover] = React.useState(false);
@@ -36,7 +40,11 @@ export function FileUploader({
   };
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.currentTarget.files?.[0];
-    if (file) onFile?.(file);
+    if (file && file.size > maxBytes) {
+      onError?.(`${file.name} は${maxSize}以下のファイルを選択してください。`);
+    } else if (file) {
+      onFile?.(file);
+    }
     event.currentTarget.value = '';
   };
 

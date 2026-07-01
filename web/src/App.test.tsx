@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import Encoding from "encoding-japanese";
 
 // jsdom has no real Worker; mock the worker module so mount doesn't crash.
 vi.mock("./worker/generate.worker?worker", () => ({
@@ -37,6 +38,19 @@ describe("App shell", () => {
       expect(screen.getByDisplayValue("hostname = \"router-001\"")).toBeTruthy();
     });
   });
+  it("decodes uploaded Shift_JIS config files before opening the editor", async () => {
+    const { container } = render(<App />);
+    const inputs = container.querySelectorAll('input[type="file"]');
+    const codes = Encoding.stringToCode("hostname = \"東京\"");
+    const sjis = new Uint8Array(Encoding.convert(codes, { to: "SJIS", from: "UNICODE" }));
+    const file = new File([sjis], "router.toml", { type: "application/toml" });
+
+    fireEvent.change(inputs[0], { target: { files: [file] } });
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("hostname = \"東京\"")).toBeTruthy();
+    });
+  });
   it("loads a selected Jinja template file from the empty state into the editor", async () => {
     const { container } = render(<App />);
     const inputs = container.querySelectorAll('input[type="file"]');
@@ -55,7 +69,7 @@ describe("App shell", () => {
     const { container } = render(<App />);
     const inputs = container.querySelectorAll('input[type="file"]');
     const file = new File([""], "broken.toml", { type: "application/toml" });
-    Object.defineProperty(file, "text", { value: () => Promise.reject(new Error("read failed")) });
+    Object.defineProperty(file, "arrayBuffer", { value: () => Promise.reject(new Error("read failed")) });
 
     fireEvent.change(inputs[0], { target: { files: [file] } });
 

@@ -99,10 +99,11 @@ export interface EmptyStateProps {
   onLibrary?: () => void;
   onConfigFile?: (file: File) => void;
   onTemplateFile?: (file: File) => void;
+  onUploadError?: (message: string) => void;
   uploadError?: string | null;
 }
 
-export function EmptyState({ onStart, onLibrary, onConfigFile, onTemplateFile, uploadError }: EmptyStateProps) {
+export function EmptyState({ onStart, onLibrary, onConfigFile, onTemplateFile, onUploadError, uploadError }: EmptyStateProps) {
   const [howto, setHowto] = useState(false);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: 'var(--cg-bg)', fontFamily: 'var(--font-sans)', color: 'var(--cg-text)', position: 'relative', overflow: 'hidden' }}>
@@ -213,12 +214,14 @@ export function EmptyState({ onStart, onLibrary, onConfigFile, onTemplateFile, u
                 accept=".toml,.yaml,.yml,.csv"
                 acceptLabel="TOML, YAML, CSV"
                 onFile={onConfigFile}
+                onError={onUploadError}
               />
               <FileUploader
                 label="② Jinjaテンプレート"
                 accept=".j2,.jinja2"
                 acceptLabel="J2, JINJA2"
                 onFile={onTemplateFile}
+                onError={onUploadError}
               />
             </div>
 
