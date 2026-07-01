@@ -6,12 +6,12 @@ import { Library } from "./components/Library";
 import { Editor } from "./components/Editor";
 import { CGTemplates } from "./lib/templates";
 import type { Template } from "./lib/types";
-import { CG } from "./lib/data";
 import type { Format } from "./lib/format";
 import type { DownloadOptions } from "./components/SettingsModal";
 import { DEFAULT_SETTINGS, type GenerateSettings } from "./worker/types";
 
 type Route = { view: "empty" | "library" | "editor"; initial: Template | null };
+type UploadedPart = { file: File; content: string };
 
 function routeFromHash(): Route {
   const h = (location.hash || "").replace(/^#\/?/, "");
@@ -49,19 +49,18 @@ function formatFromFileName(name: string): Format {
   return "toml";
 }
 
-function uploadedTemplate(file: File, content: string, kind: "config" | "template"): Template {
-  const isConfig = kind === "config";
+function uploadedTemplate(config: UploadedPart, template: UploadedPart): Template {
   return {
-    id: `uploaded-${kind}`,
-    name: file.name,
-    desc: "アップロードしたファイルから作成した一時ドキュメント。",
+    id: "uploaded-files",
+    name: `${config.file.name} + ${template.file.name}`,
+    desc: "アップロードした2つのファイルから作成した一時ドキュメント。",
     category: "network",
-    format: isConfig ? formatFromFileName(file.name) : "toml",
+    format: formatFromFileName(config.file.name),
     output: "markdown",
     updated: new Date().toISOString().slice(0, 10),
     live: true,
-    data: isConfig ? content : CG.configToml,
-    template: isConfig ? CG.templateJ2 : content,
+    data: config.content,
+    template: template.content,
   };
 }
 
@@ -92,6 +91,9 @@ export function App() {
   const [download, setDownload] = React.useState<DownloadOptions>(DEFAULT_DOWNLOAD);
   const [draftTemplate, setDraftTemplate] = React.useState<Template | null>(null);
   const [uploadError, setUploadError] = React.useState<string | null>(null);
+  const [uploadedConfig, setUploadedConfig] = React.useState<UploadedPart | null>(null);
+  const [uploadedJinjaTemplate, setUploadedJinjaTemplate] = React.useState<UploadedPart | null>(null);
+  const uploadVersionRef = React.useRef<Record<"config" | "template", number>>({ config: 0, template: 0 });
 
   React.useEffect(() => {
     const on = () => setRoute(routeFromHash());
@@ -102,20 +104,46 @@ export function App() {
   const go = (hash: string) => { location.hash = hash; };
   const back = () => history.back();
   const openEditor = (tpl: Template | null) => {
+    uploadVersionRef.current.config += 1;
+    uploadVersionRef.current.template += 1;
     setDraftTemplate(null);
     setUploadError(null);
+    setUploadedConfig(null);
+    setUploadedJinjaTemplate(null);
     go(tpl ? "#/t/" + encodeURIComponent(tpl.id) : "#/new");
   };
   const openUploadedFile = async (file: File, kind: "config" | "template") => {
+    const uploadVersion = uploadVersionRef.current[kind] + 1;
+    uploadVersionRef.current[kind] = uploadVersion;
     try {
       const content = await readFileText(file);
+      if (uploadVersionRef.current[kind] !== uploadVersion) return;
       setUploadError(null);
-      setDraftTemplate(uploadedTemplate(file, content, kind));
-      go("#/new");
+      const uploaded = { file, content };
+      if (kind === "config") setUploadedConfig(uploaded);
+      else setUploadedJinjaTemplate(uploaded);
     } catch {
+      if (uploadVersionRef.current[kind] !== uploadVersion) return;
+      if (kind === "config") setUploadedConfig(null);
+      else setUploadedJinjaTemplate(null);
       setUploadError(`${file.name} を読み込めませんでした。別のファイルを選択してください。`);
     }
   };
+  const handleUploadError = (kind: "config" | "template", message: string) => {
+    uploadVersionRef.current[kind] += 1;
+    if (kind === "config") setUploadedConfig(null);
+    else setUploadedJinjaTemplate(null);
+    setUploadError(message);
+  };
+
+  React.useEffect(() => {
+    if (route.view !== "empty" || !uploadedConfig || !uploadedJinjaTemplate) return;
+    setDraftTemplate(uploadedTemplate(uploadedConfig, uploadedJinjaTemplate));
+    setUploadedConfig(null);
+    setUploadedJinjaTemplate(null);
+    setUploadError(null);
+    go("#/new");
+  }, [route.view, uploadedConfig, uploadedJinjaTemplate]);
 
   const editorInitial = route.initial || draftTemplate;
 
@@ -138,8 +166,11 @@ export function App() {
         onLibrary={() => go("#/library")}
         onConfigFile={(file) => void openUploadedFile(file, "config")}
         onTemplateFile={(file) => void openUploadedFile(file, "template")}
-        onUploadError={setUploadError}
+        onConfigUploadError={(message) => handleUploadError("config", message)}
+        onTemplateUploadError={(message) => handleUploadError("template", message)}
         uploadError={uploadError}
+        configFileName={uploadedConfig?.file.name || null}
+        templateFileName={uploadedJinjaTemplate?.file.name || null}
       />
     );
 

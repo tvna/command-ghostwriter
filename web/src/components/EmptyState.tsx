@@ -100,11 +100,28 @@ export interface EmptyStateProps {
   onConfigFile?: (file: File) => void;
   onTemplateFile?: (file: File) => void;
   onUploadError?: (message: string) => void;
+  onConfigUploadError?: (message: string) => void;
+  onTemplateUploadError?: (message: string) => void;
   uploadError?: string | null;
+  configFileName?: string | null;
+  templateFileName?: string | null;
 }
 
-export function EmptyState({ onStart, onLibrary, onConfigFile, onTemplateFile, onUploadError, uploadError }: EmptyStateProps) {
+export function EmptyState({
+  onStart,
+  onLibrary,
+  onConfigFile,
+  onTemplateFile,
+  onUploadError,
+  onConfigUploadError,
+  onTemplateUploadError,
+  uploadError,
+  configFileName,
+  templateFileName,
+}: EmptyStateProps) {
   const [howto, setHowto] = useState(false);
+  const reportConfigUploadError = onConfigUploadError || onUploadError;
+  const reportTemplateUploadError = onTemplateUploadError || onUploadError;
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: 'var(--cg-bg)', fontFamily: 'var(--font-sans)', color: 'var(--cg-text)', position: 'relative', overflow: 'hidden' }}>
 
@@ -214,14 +231,16 @@ export function EmptyState({ onStart, onLibrary, onConfigFile, onTemplateFile, o
                 accept=".toml,.yaml,.yml,.csv"
                 acceptLabel="TOML, YAML, CSV"
                 onFile={onConfigFile}
-                onError={onUploadError}
+                onError={reportConfigUploadError}
+                fileName={configFileName}
               />
               <FileUploader
                 label="② Jinjaテンプレート"
                 accept=".j2,.jinja2"
                 acceptLabel="J2, JINJA2"
                 onFile={onTemplateFile}
-                onError={onUploadError}
+                onError={reportTemplateUploadError}
+                fileName={templateFileName}
               />
             </div>
 
