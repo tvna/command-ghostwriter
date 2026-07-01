@@ -119,4 +119,24 @@ describe("App shell", () => {
 
     expect((await screen.findByRole("alert")).textContent).toBe("broken.toml を読み込めませんでした。別のファイルを選択してください。");
   });
+  it("preserves one upload slot's error when the other slot succeeds later", async () => {
+    const { container } = render(<App />);
+    const inputs = container.querySelectorAll('input[type="file"]');
+    let rejectConfig: ((error: Error) => void) | undefined;
+    const config = new File([""], "broken.toml", { type: "application/toml" });
+    Object.defineProperty(config, "arrayBuffer", {
+      value: () => new Promise<ArrayBuffer>((_, reject) => { rejectConfig = reject; }),
+    });
+    const template = new File(["hostname {{ hostname }}"], "command.j2", { type: "text/plain" });
+
+    fireEvent.change(inputs[0], { target: { files: [config] } });
+    fireEvent.change(inputs[1], { target: { files: [template] } });
+    rejectConfig?.(new Error("read failed"));
+
+    expect((await screen.findByRole("alert")).textContent).toBe("broken.toml を読み込めませんでした。別のファイルを選択してください。");
+    await waitFor(() => {
+      expect(screen.getByText("command.j2")).toBeTruthy();
+    });
+    expect(screen.getByRole("alert").textContent).toBe("broken.toml を読み込めませんでした。別のファイルを選択してください。");
+  });
 });

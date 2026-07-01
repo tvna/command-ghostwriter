@@ -12,6 +12,7 @@ import { DEFAULT_SETTINGS, type GenerateSettings } from "./worker/types";
 
 type Route = { view: "empty" | "library" | "editor"; initial: Template | null };
 type UploadedPart = { file: File; content: string };
+type UploadKind = "config" | "template";
 
 function routeFromHash(): Route {
   const h = (location.hash || "").replace(/^#\/?/, "");
@@ -90,10 +91,10 @@ export function App() {
   const [settings, setSettings] = React.useState<GenerateSettings>(DEFAULT_SETTINGS);
   const [download, setDownload] = React.useState<DownloadOptions>(DEFAULT_DOWNLOAD);
   const [draftTemplate, setDraftTemplate] = React.useState<Template | null>(null);
-  const [uploadError, setUploadError] = React.useState<string | null>(null);
+  const [uploadErrors, setUploadErrors] = React.useState<Record<UploadKind, string | null>>({ config: null, template: null });
   const [uploadedConfig, setUploadedConfig] = React.useState<UploadedPart | null>(null);
   const [uploadedJinjaTemplate, setUploadedJinjaTemplate] = React.useState<UploadedPart | null>(null);
-  const uploadVersionRef = React.useRef<Record<"config" | "template", number>>({ config: 0, template: 0 });
+  const uploadVersionRef = React.useRef<Record<UploadKind, number>>({ config: 0, template: 0 });
 
   React.useEffect(() => {
     const on = () => setRoute(routeFromHash());
@@ -107,18 +108,18 @@ export function App() {
     uploadVersionRef.current.config += 1;
     uploadVersionRef.current.template += 1;
     setDraftTemplate(null);
-    setUploadError(null);
+    setUploadErrors({ config: null, template: null });
     setUploadedConfig(null);
     setUploadedJinjaTemplate(null);
     go(tpl ? "#/t/" + encodeURIComponent(tpl.id) : "#/new");
   };
-  const openUploadedFile = async (file: File, kind: "config" | "template") => {
+  const openUploadedFile = async (file: File, kind: UploadKind) => {
     const uploadVersion = uploadVersionRef.current[kind] + 1;
     uploadVersionRef.current[kind] = uploadVersion;
     try {
       const content = await readFileText(file);
       if (uploadVersionRef.current[kind] !== uploadVersion) return;
-      setUploadError(null);
+      setUploadErrors((current) => ({ ...current, [kind]: null }));
       const uploaded = { file, content };
       if (kind === "config") setUploadedConfig(uploaded);
       else setUploadedJinjaTemplate(uploaded);
@@ -126,14 +127,17 @@ export function App() {
       if (uploadVersionRef.current[kind] !== uploadVersion) return;
       if (kind === "config") setUploadedConfig(null);
       else setUploadedJinjaTemplate(null);
-      setUploadError(`${file.name} を読み込めませんでした。別のファイルを選択してください。`);
+      setUploadErrors((current) => ({
+        ...current,
+        [kind]: `${file.name} を読み込めませんでした。別のファイルを選択してください。`,
+      }));
     }
   };
-  const handleUploadError = (kind: "config" | "template", message: string) => {
+  const handleUploadError = (kind: UploadKind, message: string) => {
     uploadVersionRef.current[kind] += 1;
     if (kind === "config") setUploadedConfig(null);
     else setUploadedJinjaTemplate(null);
-    setUploadError(message);
+    setUploadErrors((current) => ({ ...current, [kind]: message }));
   };
 
   React.useEffect(() => {
@@ -141,7 +145,7 @@ export function App() {
     setDraftTemplate(uploadedTemplate(uploadedConfig, uploadedJinjaTemplate));
     setUploadedConfig(null);
     setUploadedJinjaTemplate(null);
-    setUploadError(null);
+    setUploadErrors({ config: null, template: null });
     go("#/new");
   }, [route.view, uploadedConfig, uploadedJinjaTemplate]);
 
@@ -168,7 +172,7 @@ export function App() {
         onTemplateFile={(file) => void openUploadedFile(file, "template")}
         onConfigUploadError={(message) => handleUploadError("config", message)}
         onTemplateUploadError={(message) => handleUploadError("template", message)}
-        uploadError={uploadError}
+        uploadError={uploadErrors.config || uploadErrors.template}
         configFileName={uploadedConfig?.file.name || null}
         templateFileName={uploadedJinjaTemplate?.file.name || null}
       />
