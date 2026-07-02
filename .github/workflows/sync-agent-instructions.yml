@@ -1,17 +1,21 @@
 # ============================================================
-# Workflow Information: sync-claude-md.yml
+# Workflow Information: sync-agent-instructions.yml
 # ============================================================
 #
 # 目的 (Purpose):
 # ---------------
-# エージェント指示の正本リポジトリ tvna/claude-md の CLAUDE.md を取得し、
-# 本リポジトリの CLAUDE.md (コミット済み実ファイル) へ追従させる。
-# 差分があれば PR を作成/更新する (レビュー必須・自動マージしない)。
+# エージェント指示を上流から追従させる2つの独立したジョブを持つ。
+#  - sync-claude-md: 正本リポジトリ tvna/claude-md の CLAUDE.md を取得し、
+#    本リポジトリの CLAUDE.md (コミット済み実ファイル) へ追従させる。
+#  - sync-apm-skills: apm.yml にピン留めした obra/superpowers /
+#    tvna/clairvoyance の上流コミットを検知し、pin 更新・再デプロイ・
+#    マニフェスト再生成を行う。
+# いずれも差分があれば PR を作成/更新する (レビュー必須・自動マージしない)。
 #
 # 方式の根拠 (Rationale):
 # -----------------------
 # - submodule + symlink は web 環境の fresh clone で壊れる (submodule は親clone
-#   に含まれない) ため、コミット済み実ファイルとして同期する。
+#   に含まれない) ため、CLAUDE.md はコミット済み実ファイルとして同期する。
 # - CLAUDE.md 変更をトリガにする CI は無いため GITHUB_TOKEN のみで足りる (PAT 不要)。
 # - リポジトリ設定で "Allow GitHub Actions to create and approve pull requests"
 #   を有効化しておくこと。
@@ -19,14 +23,22 @@
 #   GitHub API 経由でコミットを作成し、GITHUB_TOKEN のままで Verified 署名済みコミット
 #   とする (新規 GitHub App / secret は不要)。未設定だと署名必須ブランチ保護で
 #   PR が `mergeable_state: blocked` のままマージ不能になる (PR #464 で発生)。
+# - sync-apm-skills は上流の既定ブランチ最新コミットを REST API やフル checkout
+#   ではなく `git ls-remote <url> HEAD` で取得する (GitHub API のレート制限を回避)。
+# - apm.yml の2依存が同時に更新されていても PR は1本にまとめる
+#   (依存ごとに別PRを作らない)。
+# - apm CLI 本体のバージョン (0.12.1) は verify-superpowers.yml の
+#   upstream-drift ジョブと同じ値を使う。apm 本体のバージョンアップは
+#   別スコープ (#446)。
 #
 # 関連 (Reference):
 # -----------------
-# - Issue #427, #467
+# - Issue #427, #467 (CLAUDE.md 同期), #480 (apm スキル上流追従), #446 (apm バージョンアップ, 別スコープ)
 # - 設計書 docs/superpowers/specs/2026-06-13-claude-md-master-sync-design.md
+# - 設計書 docs/superpowers/specs/2026-07-02-sync-apm-skills-upstream-update-design.md
 # ============================================================
 ---
-name: Sync CLAUDE.md from master
+name: Sync agent instructions
 
 on:
   schedule:
@@ -37,11 +49,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: sync-claude-md-${{ github.ref }}
+  group: sync-agent-instructions-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  sync:
+  sync-claude-md:
     name: Sync CLAUDE.md from tvna/claude-md
     runs-on: ubuntu-latest
     timeout-minutes: 5
