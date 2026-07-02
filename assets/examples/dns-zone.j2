@@ -1,0 +1,62 @@
+# DNS ゾーンファイル初期化手順 — {{ origin }}
+
+権威 DNS サーバー（BIND）に **{{ origin }}** のゾーンを初期化します。SOA / NS / MX / A と送信者認証 TXT（SPF・DKIM・DMARC）を含みます。
+
+## 1. ゾーンファイルを作成する
+
+`/var/named/db.{{ origin }}` として以下を保存します。レコードを更新したら SOA の serial も必ず進めてください。
+
+```dns
+$ORIGIN {{ origin }}
+$TTL {{ ttl }}
+;
+; ----- SOA -----
+@       IN SOA {{ soa.primary_ns }} {{ soa.admin }} (
+                {{ soa.serial }}    ; serial
+                {{ soa.refresh }}   ; refresh
+                {{ soa.retry }}     ; retry
+                {{ soa.expire }}    ; expire
+                {{ soa.minimum }} ) ; minimum
+;
+; ----- NS -----
+{% for ns in nameservers %}@       IN NS   {{ ns }}
+{% endfor %};
+; ----- MX -----
+{% for r in mx %}@       IN MX   {{ r.priority }} {{ r.host }}
+{% endfor %};
+; ----- A -----
+{% for r in a %}{{ r.name }}     IN A    {{ r.ip }}
+{% endfor %};
+; ----- TXT (sender authentication) -----
+@       IN TXT  "v=spf1 {% for inc in spf.includes %}include:{{ inc }} {% endfor %}{{ spf.all }}"
+{{ dkim.selector }}._domainkey IN TXT "{{ dkim.public_key }}"
+_dmarc  IN TXT  "v=DMARC1; p={{ dmarc.policy }}; rua={{ dmarc.rua }}; pct={{ dmarc.pct }}"
+```
+
+## 2. named.conf にゾーンを登録する
+
+```bash
+cat >> /etc/named.conf <<'EOF'
+zone "{{ origin }}" IN {
+    type master;
+    file "/var/named/db.{{ origin }}";
+};
+EOF
+```
+
+## 3. 構文チェックと反映
+
+ゾーンと設定を検証し、問題がなければ named をリロードします。
+
+```bash
+named-checkzone {{ origin }} /var/named/db.{{ origin }}
+named-checkconf
+rndc reload {{ origin }}
+```
+
+## 4. 反引き確認
+
+```bash
+dig @{{ soa.primary_ns }} {{ origin }} SOA +short
+dig @{{ soa.primary_ns }} {{ origin }} MX +short
+```

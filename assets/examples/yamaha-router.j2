@@ -1,0 +1,50 @@
+# YAMAHA RTX 初期構築手順
+
+RTX 系ルータに PPPoE 接続・IP フィルタ・NAT を設定します。コンソール接続のうえ administrator モードで実施してください。
+
+## 1. LAN 側インターフェース
+
+内部ネットワークのアドレスを設定します。
+
+```bash
+ip lan1 address {{ lan1.ip_address }}
+```
+
+## 2. PPPoE 接続を構成する
+
+プロバイダの認証情報で WAN 側（lan2）の PPPoE セッションを設定します。
+
+```bash
+pp select 1
+ description {{ pp1.description }}
+ pppoe use lan2
+ pp auth accept pap chap
+ pp auth myname {{ pp1.auth_account }} {{ pp1.auth_password }}
+ ppp lcp mru on {{ pp1.mtu }}
+ ip pp mtu {{ pp1.mtu }}
+{% for f in filters %} ip filter {{ f.id }} {{ f.action }} * * {{ f.proto }}
+{% endfor %} pp enable 1
+```
+
+## 3. 経路を設定する
+
+デフォルトルートを PPPoE セッション向けに設定します。
+
+```bash
+{% for r in static_routes %}ip route {{ r.network }} gateway {{ r.gateway }}
+{% endfor %}```
+
+## 4. NAT（IPマスカレード）
+
+内部ネットワークを WAN 側へ NAT します。
+
+```bash
+nat descriptor type 1000 {{ nat.type }}
+nat descriptor address inner 1000 {{ nat.inner }}
+```
+
+## 5. 保存して再起動確認
+
+```bash
+save
+```

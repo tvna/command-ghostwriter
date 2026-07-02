@@ -1,0 +1,39 @@
+# ============================================================
+# Workflow Information: reusable-skip-summary.yml
+# ============================================================
+#
+# ワークフローの目的 (Purpose):
+# -----------------------------
+# `test-and-build-on-pr-skip.yml` から呼び出される再利用可能ワークフロー。
+# 必須ステータスチェックのコンテキスト名は、呼び出し元ジョブIDと
+# 呼び出し先ジョブの `name` を "<job_id> / <name>" の形式で結合した
+# ものになる (reusable-test-and-build.yml の `workflow-summary` ジョブと
+# 同じ命名規則)。本体のテスト・ビルドを一切実行せずに、その命名規則だけを
+# 再現して同名のチェックを success として報告する。
+#
+# 参考URL (Reference URLs):
+# -------------------------
+# - GitHub Actions Documentation - Reusable workflows:
+#   https://docs.github.com/en/actions/using-workflows/reusing-workflows
+#
+# ============================================================
+---
+name: Skip summary - dispatch
+
+on:
+  workflow_call:
+    inputs:
+      workflow_summary_name:
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  workflow-summary:
+    name: ${{ inputs.workflow_summary_name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Report as skipped (docs/asset-only change)
+        run: echo "test-and-build-on-pr.yml is skipped for this change (paths-ignore match); reporting success to satisfy the required status check."

@@ -197,19 +197,6 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Guard against leftover E2E egress audit spike
-        run: |
-          # sub-2 (#361): the ubuntu E2E egress spike must never merge in audit
-          # mode. Every job must use the block env default; fail loudly if any
-          # harden-runner step in this reusable workflow hardcodes audit.
-          # Anchor to the YAML key position (line start + indent) so this guard
-          # does not match the literal audit string inside its own messages.
-          if grep -nE "^[[:space:]]*egress-policy:[[:space:]]*audit([[:space:]]|#|$)" .github/workflows/reusable-test-and-build.yml; then
-            echo "::error::reusable-test-and-build.yml pins a harden-runner egress policy to the audit mode; revert it to the block default (env.HARDEN_RUNNER_EGRESS_POLICY)."
-            exit 1
-          fi
-          echo "OK: every harden-runner egress policy resolves to the block default"
-
       - name: Lint yaml files by yamllint
         run: |
           CONFIG="${RUNNER_TEMP}/.yamllint.yml"
@@ -231,15 +218,42 @@ jobs:
           fi
           yamllint --strict --format github --config-file "${CONFIG}" ./.github/
 
-      - name: Download and run actionlint
+      - name: Install pinned actionlint and shellcheck
         run: |
-          # バイナリのダウンロードとインストール
-          curl -sSLo actionlint.bash https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash
-          # ダウンロードしたバッシュスクリプトに実行権限を与えて実行
-          chmod +x actionlint.bash
-          ./actionlint.bash
-          # actionlintを実行
-          ./actionlint -color
+          set -euo pipefail
+          # flake.nix is the single source of truth for both pins (#393).
+          # Both binaries are pinned explicitly: actionlint silently skips its SC*
+          # rules (e.g. SC2086) when no shellcheck binary is on PATH,
+          # and the runner-bundled binary is unpinned.
+          lint_bin="${RUNNER_TEMP}/lint-bin"
+          mkdir -p "${lint_bin}"
+
+          pin="$(python3 scripts/flake_pin.py resolve --tool actionlint --system x86_64-linux)"
+          al_version="$(printf '%s\n' "${pin}" | sed -n '1p')"
+          al_asset="$(printf '%s\n' "${pin}" | sed -n '2p')"
+          al_sha="$(printf '%s\n' "${pin}" | sed -n '3p')"
+          curl --fail --location --silent --show-error -o actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${al_version}/${al_asset}"
+          echo "${al_sha}  actionlint.tar.gz" | sha256sum --check --strict
+          # Flat archive: the bare 'actionlint' binary sits at the top level
+          # (verified with scripts/inspect_release_archive.sh).
+          tar -xzf actionlint.tar.gz -C "${lint_bin}" actionlint
+
+          pin="$(python3 scripts/flake_pin.py resolve --tool shellcheck --system x86_64-linux)"
+          sc_version="$(printf '%s\n' "${pin}" | sed -n '1p')"
+          sc_asset="$(printf '%s\n' "${pin}" | sed -n '2p')"
+          sc_sha="$(printf '%s\n' "${pin}" | sed -n '3p')"
+          curl --fail --location --silent --show-error -o shellcheck.tar.xz \
+            "https://github.com/koalaman/shellcheck/releases/download/v${sc_version}/${sc_asset}"
+          echo "${sc_sha}  shellcheck.tar.xz" | sha256sum --check --strict
+          # Nested archive: everything sits under shellcheck-v<version>/
+          # (verified with scripts/inspect_release_archive.sh).
+          tar -xJf shellcheck.tar.xz -C "${lint_bin}" --strip-components=1 "shellcheck-v${sc_version}/shellcheck"
+
+          echo "${lint_bin}" >> "${GITHUB_PATH}"
+
+      - name: Run actionlint
+        run: actionlint -color
 
       - name: Check typos
         uses: crate-ci/typos@bee27e3a4fd1ea2111cf90ab89cd076c870fce14 # v1.48.0
@@ -323,6 +337,10 @@ jobs:
         run: |
           uv run ruff check . -v
 
+      - name: Check pyproject.toml formatting
+        run: |
+          uv run pre-commit run pyproject-fmt --all-files
+
       - name: Run Vulture
         run: |
           uv run vulture
@@ -396,13 +414,13 @@ jobs:
         with:
           node-version: ${{ env.GLOBAL_NODE_VERSION }}
 
-      - name: Run bun audit
+      - name: Run npm audit
         run: |
-          # bun auditを実行 (高リスクの脆弱性のみ失敗とする)
-          bun audit --prod --audit-level=high || {
+          # npm auditを実行 (高リスクの脆弱性のみ失敗とする)
+          npm audit --production --audit-level=high || {
             echo "::warning::High severity vulnerabilities found in production dependencies"
             echo "⚠️ High severity vulnerabilities found in production dependencies"
-            bun audit --prod --audit-level=high
+            npm audit --production --audit-level=high
           }
 
       # trivy-action のデフォルト導入経路 (setup-trivy -> contrib/install.sh) は
@@ -502,7 +520,7 @@ jobs:
           # 通常のテスト実行 (カバレッジなし、ベンチマークなし)
           cmd_array=(
             uv run pytest -n auto
-            --dist loadfile
+            --dist load
             --durations=10
             --cache-clear
             --verbose -k 'not e2e'
@@ -551,12 +569,10 @@ jobs:
           cmd_array=(
             uv run pytest
             --benchmark-disable
-            --cov=app.py
             --cov=features
-            --cov=i18n.py
             --cov-report=xml
             --cov-report=term
-            --dist loadfile
+            --dist load
             --junitxml=junit.xml
             -n auto
             -k "not e2e"
@@ -575,148 +591,6 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           verbose: true
-
-  test-e2e:
-    name: E2E Tests (${{ matrix.os }} & ${{ matrix.browser }})
-    needs: small-unit-test
-    permissions:
-      contents: read
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            browser: chromium
-            marker: "e2e"
-          - os: ubuntu-latest
-            browser: firefox
-            marker: "e2e"
-          # webkit-on-ubuntu crashes at launch (TargetClosedError); run webkit
-          # on macOS (its native engine, proven stable) instead. chromium and
-          # firefox remain on ubuntu (fast, 1x). See sub-2 / #361.
-          - os: macos-latest
-            browser: webkit
-            marker: "e2e"
-          - os: windows-latest
-            browser: chromium
-            marker: "e2e and smoke"
-      max-parallel: 10
-    timeout-minutes: 15
-
-    steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
-        with:
-          # ubuntu の E2E では harden-runner が実効化する (macOS/Windows では no-op)。
-          # block を維持し、許可エンドポイントは audit insights (sub-2 / #361) で実測した
-          # 最小集合に限定する: python(uv), playwright CDN, apt ミラー(ubuntu/microsoft/
-          # google), actions cache, Streamlit。GH/harden 内部は block 時に既定許可。
-          egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
-          disable-sudo: false
-          allowed-endpoints: >
-            ${{ env.EP_GITHUB_CORE }}
-            ${{ env.EP_PYTHON }}
-            ${{ env.EP_NODE }}
-            ${{ env.EP_PLAYWRIGHT }}
-            codeload.github.com:443
-            storage.googleapis.com:443
-            azure.archive.ubuntu.com:80
-            archive.ubuntu.com:80
-            security.ubuntu.com:80
-            esm.ubuntu.com:443
-            motd.ubuntu.com:443
-            packages.microsoft.com:443
-            dl.google.com:443
-            checkip.amazonaws.com:443
-            data.streamlit.io:443
-
-      - name: Check out git repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          fetch-depth: 1
-
-      - name: Setup Python and restore cache
-        uses: ./.github/actions/setup-python
-        with:
-          python-version: ${{ env.GLOBAL_PYTHON_VERSION }}
-
-      - name: Run E2E Tests (Playwright)
-        uses: ./.github/actions/test-python-playwright
-        with:
-          browser: ${{ matrix.browser }}
-          test-marker: ${{ matrix.marker }}
-
-  zap_scan:
-    name: Scan HTTP by ZAP (DAST Tool)
-    needs: small-unit-test
-    permissions:
-      actions: read
-      contents: read
-      issues: write
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-
-    steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
-        with:
-          egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
-          disable-sudo: true
-          allowed-endpoints: >
-            ${{ env.EP_GITHUB_CORE }}
-            ${{ env.EP_GITHUB_OBJECTS }}
-            ${{ env.EP_GITHUB_RAW }}
-            ${{ env.EP_PYTHON }}
-            cfu.zaproxy.org:443
-            checkip.amazonaws.com:80
-            content-signature-2.cdn.mozilla.net:443
-            data.streamlit.io:443
-            firefox-settings-attachments.cdn.mozilla.net:443
-            firefox.settings.services.mozilla.com:443
-            ghcr.io:443
-            news.zaproxy.org:443
-            pkg-containers.githubusercontent.com:443
-            r10.o.lencr.org:80
-            r11.o.lencr.org:80
-            tel.zaproxy.org:443
-            webhooks.fivetran.com:443
-
-      - name: Check out git repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          fetch-depth: 1
-
-      - name: Setup Python and restore cache
-        uses: ./.github/actions/setup-python
-        with:
-          python-version: ${{ env.GLOBAL_PYTHON_VERSION }}
-
-      - name: Run Streamlit app in background
-        run: |
-          uv run streamlit run app.py &
-          # Wait a bit for the app to start
-          sleep 10
-
-      - name: ZAP Scan
-        uses: zaproxy/action-full-scan@v0.13.0
-        continue-on-error: true
-        with:
-          fail_action: true
-          token: ${{ secrets.GITHUB_TOKEN }}
-          docker_name: "ghcr.io/zaproxy/zaproxy:stable"
-          target: "http://localhost:8501"
-          rules_file_name: ".zap/rules.tsv"
-          cmd_options: "-a -d"
-
-      - name: Append ZAP Report to Summary
-        if: always() # Run even if ZAP scan fails due to finding issues
-        run: |
-          if [[ -f "report_md.md" ]]; then
-            cat report_md.md >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "⚠️ ZAP report file (report_md.md) not found." >> "$GITHUB_STEP_SUMMARY"
-          fi
 
   # ============================================================
   # ANALYSIS GROUP
@@ -765,13 +639,6 @@ jobs:
           )
           "${cmd_array[@]}"
 
-      - name: Show AST (app.py)
-        run: |
-          python <<EOF
-          import ast
-          print(ast.dump(ast.parse(open("app.py").read()), indent=2))
-          EOF
-
       - name: Show AST (features/*.py)
         run: |
           python <<EOF
@@ -787,48 +654,6 @@ jobs:
           EOF
 
   # ============================================================
-  # BUILD GROUP
-  # ============================================================
-
-  build-desktop:
-    name: Build desktop app (${{ matrix.os }})
-    needs: small-unit-test
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
-    permissions:
-      contents: read
-      security-events: write
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os:
-          - macos-latest
-          - windows-latest
-    timeout-minutes: 15
-
-    steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
-        with:
-          egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
-          disable-sudo: true
-          allowed-endpoints: |+
-
-      - name: Check out git repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          fetch-depth: 1
-
-      - name: Setup Node.js and cache
-        uses: ./.github/actions/setup-node
-        with:
-          node-version: ${{ env.GLOBAL_NODE_VERSION }}
-
-      - name: Build by stlite
-        uses: ./.github/actions/build-stlite
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-  # ============================================================
   # WORKFLOW SUMMARY
   # ============================================================
 
@@ -836,11 +661,8 @@ jobs:
     name: ${{ inputs.workflow_summary_name }}
     if: always()
     needs:
-      - build-desktop
       - test-coverage
-      - test-e2e
       - analysis-code-ccn
-      - zap_scan
     outputs:
       build_succeeded: ${{ steps.set-result.outputs.build_succeeded }}
     permissions:

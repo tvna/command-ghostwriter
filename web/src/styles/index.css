@@ -1,0 +1,67 @@
+/* ============================================================
+   Command Ghostwriter — Redesign B, global entry point.
+   Imports the design-system tokens, then layers the app-shell
+   rules and the workplace-safe "haunting" animations used by
+   the empty state.
+   ============================================================ */
+
+@import url('./tokens/fonts.css');
+@import url('./tokens/colors.css');
+@import url('./tokens/typography.css');
+@import url('./tokens/spacing.css');
+@import url('./tokens/base.css');
+
+html,
+body {
+  margin: 0;
+  background: var(--cg-bg);
+}
+html {
+  overflow: auto;
+}
+#root {
+  min-height: 100vh;
+}
+
+/* ---- tasteful, workplace-safe "haunting" for the empty state ---- */
+@keyframes cg-bob   { 0%,100% { transform: translateY(0) } 50% { transform: translateY(-9px) } }
+@keyframes cg-glow  { 0%,100% { opacity: .30; transform: scale(1) } 50% { opacity: .55; transform: scale(1.06) } }
+@keyframes cg-drift { 0% { transform: translate(0,0) rotate(0deg) } 50% { transform: translate(26px,-18px) rotate(2deg) } 100% { transform: translate(0,0) rotate(0deg) } }
+@keyframes cg-rise  {
+  0%   { transform: translateY(30px) translateX(0)   scale(.9); opacity: 0 }
+  12%  { opacity: var(--cg-o, .5) }
+  50%  { transform: translateY(-70px) translateX(18px) scale(1); }
+  88%  { opacity: var(--cg-o, .5) }
+  100% { transform: translateY(-150px) translateX(-8px) scale(.92); opacity: 0 }
+}
+@keyframes cg-flicker {
+  0%,6%,10%,14%,40%,44%,68%,72%,100% { opacity: .95 }
+  7%,11%,41%,69% { opacity: .08 }
+  9% { opacity: 1 }
+  13% { opacity: .5 }
+  55% { opacity: .22 }
+  85%,87% { opacity: .3 }
+}
+@keyframes cg-mist { 0%,100% { opacity: .26; transform: translateX(-16px) scaleY(1) } 50% { opacity: .46; transform: translateX(16px) scaleY(1.12) } }
+@keyframes cg-creep { 0% { transform: translateX(-40px) } 100% { transform: translateX(40px) } }
+@keyframes cg-sway  { 0%,100% { transform: translateX(-16px) rotate(-3deg) } 50% { transform: translateX(16px) rotate(3deg) } }
+@keyframes cg-twirl { 0% { transform: rotate(0deg) } 100% { transform: rotate(360deg) } }
+@keyframes cg-fade  { 0%,100% { opacity: .04 } 45% { opacity: .17 } 55% { opacity: .09 } }
+@keyframes cg-drift2 { 0% { transform: translate(0,0) } 100% { transform: translate(-34px,-46px) } }
+
+.cg-bob     { animation: cg-bob 4.2s ease-in-out infinite; }
+.cg-glow    { animation: cg-glow 5s ease-in-out infinite; }
+.cg-drift   { animation: cg-drift 22s ease-in-out infinite; }
+.cg-ghost   { animation: cg-rise var(--cg-d, 16s) linear infinite; animation-delay: var(--cg-delay, 0s); }
+.cg-flicker { animation: cg-flicker 5s steps(1, end) infinite; }
+.cg-mist    { animation: cg-mist 7s ease-in-out infinite; }
+.cg-creep   { animation: cg-creep 16s ease-in-out infinite alternate; }
+.cg-sway    { animation: cg-sway 13s ease-in-out infinite; }
+.cg-twirl   { animation: cg-twirl 64s linear infinite; }
+.cg-fade    { animation: cg-fade 9s ease-in-out infinite; }
+.cg-drift2  { animation: cg-drift2 26s ease-in-out infinite alternate; }
+
+@media (prefers-reduced-motion: reduce) {
+  .cg-bob, .cg-glow, .cg-drift, .cg-ghost, .cg-flicker, .cg-mist, .cg-creep, .cg-sway, .cg-twirl, .cg-fade, .cg-drift2 { animation: none !important; }
+  .cg-ghost { opacity: var(--cg-o, .4) !important; }
+}
