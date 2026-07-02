@@ -40,8 +40,8 @@ Web UI（React + Pyodide）をローカルで動かす場合:
 git clone https://github.com/tvna/command-ghostwriter.git
 cd command-ghostwriter
 cd web
-npm install
-npm run dev   # Vite 開発サーバー (デフォルト: http://localhost:5173)
+bun install
+bun run dev   # Vite 開発サーバー (デフォルト: http://localhost:5173)
 ```
 
 Pythonコア（`features/` 配下）のテストを実行する場合:
@@ -263,7 +263,7 @@ Claude / Codex の各エージェント向けに、ツールチェーンを nix 
 
 - VS Code の「Dev Containers: Reopen in Container」で、`.devcontainer/claude`（Claude 用）または `.devcontainer/codex`（Codex 用）を選択して起動します。
 - 初回起動時はベースイメージへの nix 導入とツールチェーンのビルドが走るため、起動完了まで時間がかかります。
-- Web UI は自動起動しません。コンテナ内で `cd web && npm run dev` を実行し、フォワードされた Vite ポート（デフォルト: 5173）で確認してください。
+- Web UI は自動起動しません。コンテナ内で `cd web && bun run dev` を実行し、フォワードされた Vite ポート（デフォルト: 5173）で確認してください。
 
 [vercel-link]: https://vercelbadge.vercel.app/api/tvna/command-ghostwriter
 [vercel-img]: https://vercelbadge.vercel.app/api/tvna/command-ghostwriter

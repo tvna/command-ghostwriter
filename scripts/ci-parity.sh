@@ -55,11 +55,11 @@ run "lizard CCN<=10 (all languages)" uv run lizard \
 
 # --- Web gates (mirror the web-ci Pyodide keystone job) ---
 if [ -d web/node_modules ]; then
-  run "web tsc" bash -c 'cd web && npx tsc -b --noEmit'
-  run "web vitest (whole project)" bash -c 'cd web && npx vitest run'
+  run "web tsc" bash -c 'cd web && bunx tsc -b --noEmit'
+  run "web vitest (whole project)" bash -c 'cd web && bunx vitest run'
 else
   echo "" >&2
-  echo "FAIL: web gates -- web/node_modules is missing. Run 'cd web && npm ci' first." >&2
+  echo "FAIL: web gates -- web/node_modules is missing. Run 'cd web && bun install' first." >&2
   fail=1
 fi
 

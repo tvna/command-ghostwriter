@@ -77,35 +77,18 @@ def test_release_config_updates_package_manifest_and_changelog() -> None:
     assert [
         "@semantic-release/git",
         {
-            "assets": ["package.json", "package-lock.json", "CHANGELOG.md"],
+            "assets": ["package.json", "CHANGELOG.md"],
             "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}",
         },
     ] in config["plugins"]
 
 
-def test_apply_version_updates_package_json_and_lockfile(tmp_path: Path) -> None:
+def test_apply_version_updates_package_json(tmp_path: Path) -> None:
     node = shutil.which("node")
     assert node is not None
 
     package_json = tmp_path / "package.json"
-    package_lock_json = tmp_path / "package-lock.json"
     package_json.write_text(json.dumps({"name": "command_ghostwriter", "version": "0.3.6"}), encoding="utf-8")
-    package_lock_json.write_text(
-        json.dumps(
-            {
-                "name": "command_ghostwriter",
-                "version": "0.3.6",
-                "packages": {
-                    "": {
-                        "name": "command_ghostwriter",
-                        "version": "0.3.6",
-                    },
-                    "node_modules/example": {"version": "1.0.0"},
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
 
     result = subprocess.run(
         [node, str(ROOT / "scripts" / "apply_version.mjs"), "0.4.0"],
@@ -117,7 +100,3 @@ def test_apply_version_updates_package_json_and_lockfile(tmp_path: Path) -> None
 
     assert result.returncode == 0, result.stderr
     assert json.loads(package_json.read_text(encoding="utf-8"))["version"] == "0.4.0"
-    lock_data = json.loads(package_lock_json.read_text(encoding="utf-8"))
-    assert lock_data["version"] == "0.4.0"
-    assert lock_data["packages"][""]["version"] == "0.4.0"
-    assert lock_data["packages"]["node_modules/example"]["version"] == "1.0.0"
