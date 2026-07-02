@@ -5,6 +5,11 @@
 # package ecosystems to update and where the package manifests are located.
 # Please see the documentation for all configuration options:
 # https://docs.github.com/ja/code-security/dependabot/working-with-dependabot/dependabot-options-reference
+#
+# NOTE: develop ブランチはリタイア済み。Dependabot はデフォルトブランチ (main)
+# を対象とする (target-branch を指定しない = デフォルトブランチ)。
+# `security-updates` は dependabot.yml の有効キーではないため削除した
+# (セキュリティ更新はリポジトリ設定側で有効化する)。Refs #367。
 ---
 version: 2
 updates:
@@ -14,12 +19,10 @@ updates:
       github-actions:
         patterns:
           - "*"
-    security-updates: true
     schedule:
       interval: daily
       time: "18:00"
       timezone: "Asia/Tokyo"
-    target-branch: develop
 
   - package-ecosystem: npm
     directory: /
@@ -27,12 +30,10 @@ updates:
       npm:
         patterns:
           - "*"
-    security-updates: true
     schedule:
       interval: daily
       time: "19:00"
       timezone: "Asia/Tokyo"
-    target-branch: develop
 
   - package-ecosystem: pip
     directory: /
@@ -40,12 +41,10 @@ updates:
       pip:
         patterns:
           - "*"
-    security-updates: true
     schedule:
       interval: daily
       time: "20:00"
       timezone: "Asia/Tokyo"
-    target-branch: develop
 
   - package-ecosystem: devcontainers
     directory: /
@@ -53,9 +52,7 @@ updates:
       devcontainers:
         patterns:
           - "*"
-    security-updates: true
     schedule:
       interval: daily
       time: "21:00"
       timezone: "Asia/Tokyo"
-    target-branch: develop
