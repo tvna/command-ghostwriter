@@ -9,7 +9,7 @@
 ```bash
 # 依存パッケージのインストールと、開発ブランチに切り替え
 uv sync
-npm install
+bun install
 git checkout develop
 
 # pre-commit hooks のインストール
@@ -29,17 +29,17 @@ uv generate-shell-completion zsh > $(brew --prefix)/share/zsh-completions/_uv
 uv run streamlit run app.py
 
 # リンター&コードフォーマット実行
-npm run lint
+bun run lint
 
 # テスト系
-npm run test
-npm run coverage
-npm run benchmark
+bun run test
+bun run coverage
+bun run benchmark
 uv run pytest --pdb
 uv run pudb app.py
 
 # コードの複雑さ解析
-npm run scan
+bun run scan
 
 ```
 
@@ -74,10 +74,10 @@ uv run pytest -vv -n auto --browser webkit -m "benchmark" --benchmark-disable
 
 ```bash
 # pre-commit hooks の手動実行
-npm run scan
+bun run scan
 
 # コミットメッセージの作成
-npm run commit
+bun run commit
 
 # タグの確認
 git tag
@@ -321,9 +321,9 @@ BREAKING CHANGE: ValidationErrorの戻り値の型が変更されました
 ```bash
 # 依存関係の更新
 uv lock --upgrade && uv sync
-npm update
+bun update
 
 # キャッシュのクリーンアップ
 uv cache clean
-npm cache clean --force
+bun pm cache rm
 ```

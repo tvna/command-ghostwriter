@@ -39,9 +39,11 @@ Pull Request を作成     -> Vercel が自動でプレビューデプロイ + P
 3. ビルド設定[フロントが `web/` サブディレクトリに入る前提]:
    - **Root Directory**: `web`
    - **Framework Preset**: `Vite`
-   - **Build Command**: `npm run build`[= `vite build`]
+   - **Build Command**: `bun run build`[= `vite build`]
    - **Output Directory**: `dist`
-   - **Install Command**: `npm ci`[lockfile固定]
+   - **Install Command**: `bun install --frozen-lockfile`[lockfile固定]
+
+> **重要 [#353 npm→bun移行に伴う手動対応]**: 本プロジェクトはJavaScriptパッケージ管理をnpmからbunへ移行した[`web/package-lock.json`を`web/bun.lock`に置換]。Vercelダッシュボードで Install Command / Build Command が上記の`npm`版で**明示固定**されている場合、`package-lock.json`が存在しなくなることでビルドが失敗する。**マージ前に Vercel ダッシュボード > Project Settings > Build & Development Settings で Install Command を `bun install --frozen-lockfile`、Build Command を `bun run build` に更新するか、明示上書きを削除して bun.lock 検出による自動判定に任せること。** この変更はダッシュボード側の設定であり、Gitリポジトリ経由では反映されない。
 4. **Environment Variables**: 本アプリはブラウザ内完結のため**不要**[サーバ秘密を持たない]。
    - 将来サーバ機能を足さない限り、ここに秘密値を追加しないこと。
 5. **Deploy** を押す。初回ビルドが走り、本番URL[例: `command-ghostwriter.vercel.app`]が払い出される。

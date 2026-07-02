@@ -23,17 +23,11 @@ updates:
       timezone: "Asia/Tokyo"
     target-branch: develop
 
-  - package-ecosystem: npm
-    directory: /
-    groups:
-      npm:
-        patterns:
-          - "*"
-    schedule:
-      interval: daily
-      time: "19:00"
-      timezone: "Asia/Tokyo"
-    target-branch: develop
+  # NOTE: JavaScriptパッケージ管理をnpmからbunへ移行(#353)したため、`npm`エコシステムの
+  # 対象ファイル(package-lock.json)は存在しない。`package-ecosystem: bun`は
+  # Dependabotがサポートしない値でスキーマ検証に失敗するため使用できない(#367で確認済み)。
+  # bunがサポートされるまでJS依存のDependabot自動更新は一時停止し、`bun update`を手動/別途の
+  # 仕組みで運用する。
 
   - package-ecosystem: pip
     directory: /

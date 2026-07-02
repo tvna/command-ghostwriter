@@ -18,25 +18,9 @@ async function writeJson(path, data) {
 }
 
 const packageJsonPath = resolve("package.json");
-const packageLockPath = resolve("package-lock.json");
 
 const packageJson = await readJson(packageJsonPath);
 packageJson.version = version;
 await writeJson(packageJsonPath, packageJson);
-
-try {
-  const packageLock = await readJson(packageLockPath);
-  packageLock.version = version;
-
-  if (packageLock.packages?.[""]) {
-    packageLock.packages[""].version = version;
-  }
-
-  await writeJson(packageLockPath, packageLock);
-} catch (error) {
-  if (error.code !== "ENOENT") {
-    throw error;
-  }
-}
 
 console.log(`Applied version ${version}`);

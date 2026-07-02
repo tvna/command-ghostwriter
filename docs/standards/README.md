@@ -11,4 +11,4 @@
 - [python-security.md](./python-security.md): 製品コードと依存ライブラリのセキュリティリスクチェックおよび脆弱性対策の規約を定める。
 - [ci-cd.md](./ci-cd.md): GitHub Actionsの基本ルール、ワークフロー、composite actionの規約を定める。
 - [local-development.md](./local-development.md): git、gitignore、pre-commit、commitlintによるローカル開発環境の規約を定める。
-- [package-management.md](./package-management.md): poetryおよびnpmによる依存パッケージ管理の規約を定める。
+- [package-management.md](./package-management.md): poetryおよびbunによる依存パッケージ管理の規約を定める。
