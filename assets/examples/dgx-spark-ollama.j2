@@ -22,11 +22,13 @@ sudo apt-get update && sudo apt-get upgrade -y
 
 ## 3. ファイアウォールを有効化する（LAN 限定公開）
 
+SSH は LAN 全体から、API は許可するクライアント単位で開けます。
+
 ```bash
 sudo ufw default deny incoming
 sudo ufw allow from {{ lan_subnet }} to any port 22 proto tcp
-sudo ufw allow from {{ lan_subnet }} to any port {{ ollama.port }} proto tcp
-sudo ufw --force enable
+{% for c in clients %}sudo ufw allow from {{ c.ip }} to any port {{ ollama.port }} proto tcp   # {{ c.name }}
+{% endfor %}sudo ufw --force enable
 ```
 
 ## 4. GPU を確認する
@@ -45,7 +47,7 @@ curl -fsSL https://ollama.com/install.sh | sh
 
 ## 6. LAN 内 API 公開の設定（systemd オーバーライド）
 
-既定ではループバックのみ待ち受けるため、LAN 内クライアントから使えるように上書きします。
+既定ではループバックのみ待ち受けるため、LAN 内クライアントから使えるように上書きします。インストーラがサービスを起動済みのため、設定反映には再起動が必要です（enable はインストーラが実施済み）。
 
 ```bash
 sudo mkdir -p /etc/systemd/system/ollama.service.d
@@ -55,7 +57,7 @@ Environment="OLLAMA_HOST=0.0.0.0:{{ ollama.port }}"
 Environment="OLLAMA_KEEP_ALIVE={{ ollama.keep_alive }}"
 EOF
 sudo systemctl daemon-reload
-sudo systemctl enable --now ollama
+sudo systemctl restart ollama
 ```
 
 ## 7. モデルを取得する

@@ -31,11 +31,13 @@ AskUserQuestion がインフラエラーで応答不能だったため、以下�
 既存の慣例（`<id>.<format>` + `<id>.j2` のペア、kebab-case id）に従う。
 
 - `dgx-spark-ollama.yaml` / `dgx-spark-ollama.j2`
-  - データ: ホスト名・タイムゾーン・LANサブネット・SSH方針・ollama設定（bind/port/keep_alive・モデル一覧）・接続クライアント
-  - 手順書: DGX OS初期設定（ホスト名/TZ/apt更新）→ SSH堅牢化 → ufw（default deny + LAN限定許可）→ ollamaインストール → systemdオーバーライドでLAN公開 → モデルpull → GPU/API動作確認
+  - データ: ホスト名・タイムゾーン・LANサブネット・SSH方針・ollama設定（port/keep_alive・モデル一覧）・接続クライアント（APIを許可する端末のIP）
+  - 手順書: DGX OS初期設定（ホスト名/TZ/apt更新）→ SSH堅牢化 → ufw（default deny + SSHはLAN、APIは許可クライアントIP単位）→ ollamaインストール → systemdオーバーライド+再起動でLAN公開 → モデルpull → GPU/API動作確認
 - `zero-trust-access.yaml` / `zero-trust-access.j2`
-  - データ: サイト名・CA情報・保護対象サービス（例: ollama API）・クライアント（人/端末）・SSH証明書ポリシー・許可ポート
-  - 手順書: ゼロトラスト方針の宣言（default deny・場所でなく証明書で認証・短命クレデンシャル）→ step-ca 初期化 → Caddy で mTLS 終端しupstreamへ → クライアント証明書発行（端末ごと）→ SSH証明書化（パスワード/静的鍵の無効化）→ fail2ban・監査ログ → 検証（証明書なしアクセスが拒否されること）
+  - データ: サイト名・CA情報・保護対象サービス（例: ollama API）・クライアント（端末ごとの証明書有効期限）・SSH証明書ポリシー・許可ポート。エンジンは常時 autoescape=True のため、シェルのクォートや `&` を含むコマンドはデータではなくテンプレート本文に置く（平文経路の閉鎖コマンドはこの制約により本文リテラル）
+  - 手順書: ゼロトラスト方針の宣言（default deny・場所でなく証明書で認証・短命クレデンシャル）→ CA構築（systemd常駐・パスワードファイル）→ 各サービスホスト共通準備（step CLI導入、公式リポジトリからCaddy 2.8+導入、CA登録）→ サーバ証明書発行とmTLS終端（ホスト単位でCaddyfile集約）→ 平文直接経路の閉鎖 → クライアント証明書発行（--not-after で短命化）→ SSH証明書化（TrustedUserCAKeys設定 → 証明書ログイン確認 → パスワード/静的鍵の無効化、の順でロックアウト防止）→ fail2ban・監査ログ（journald）→ default denyファイアウォール（CAホストは発行用8443も許可）→ 検証（証明書なし拒否・証明書あり成功・平文経路閉鎖の3点）
+
+初回実装に対する /code-review（8角度・全件検証）で、生成手順書の運用バグ10件（SSHロックアウト、mTLSゲートウェイ構築失敗、平文経路残存等）が確定し、上記はその修正を織り込んだ最終形である。
 
 ### 2. Web UI 登録
 
