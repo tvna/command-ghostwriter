@@ -7,6 +7,12 @@ services:
     host: dgx-spark-01
     upstream: 127.0.0.1:11434
     fqdn: llm.ai-lab.internal
+# dgx-spark-ollamaテンプレートで開けた平文経路のufw許可 (クライアントIP/ポートを合わせること)
+plaintext_allows:
+  - from: 192.168.10.21
+    port: 11434
+  - from: 192.168.10.31
+    port: 11434
 clients:
   - user: sato-taro
     device: laptop-0042

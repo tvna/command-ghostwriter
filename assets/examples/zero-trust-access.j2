@@ -13,9 +13,10 @@ AIマシンの API / SSH を、ネットワークの場所ではなく証明書�
 CA は systemd サービスとして常駐させます。フォアグラウンド起動では SSH 切断や再起動で CA が停止し、証明書の発行・更新が止まります。
 
 ```bash
-wget https://dl.smallstep.com/cli/docs-ca-install/latest/step-cli_amd64.deb
-wget https://dl.smallstep.com/certificates/docs-ca-install/latest/step-ca_amd64.deb
-sudo dpkg -i step-cli_amd64.deb step-ca_amd64.deb
+ARCH=$(dpkg --print-architecture)   # amd64 / arm64 を自動判別
+wget https://dl.smallstep.com/cli/docs-ca-install/latest/step-cli_${ARCH}.deb
+wget https://dl.smallstep.com/certificates/docs-ca-install/latest/step-ca_${ARCH}.deb
+sudo dpkg -i step-cli_${ARCH}.deb step-ca_${ARCH}.deb
 sudo useradd --system --home /etc/step-ca --shell /usr/sbin/nologin step
 sudo install -d -m 700 -o step /etc/step-ca
 sudo install -m 600 -o step /dev/null /etc/step-ca/password.txt
@@ -48,8 +49,9 @@ sudo STEPPATH=/etc/step-ca step certificate fingerprint /etc/step-ca/certs/root_
 step CLI と Caddy を導入し、CA に登録します。Caddy は `trust_pool` ディレクティブ（2.8 以降）を使うため、ディストリのパッケージ（Ubuntu 24.04 は 2.6 系）ではなく公式リポジトリから導入します。
 
 ```bash
-wget https://dl.smallstep.com/cli/docs-ca-install/latest/step-cli_amd64.deb
-sudo dpkg -i step-cli_amd64.deb
+ARCH=$(dpkg --print-architecture)   # DGX Spark (GB10) は arm64
+wget https://dl.smallstep.com/cli/docs-ca-install/latest/step-cli_${ARCH}.deb
+sudo dpkg -i step-cli_${ARCH}.deb
 sudo apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
@@ -95,10 +97,11 @@ mTLS ゲートウェイ経由以外の経路が残るとゼロトラストは成
 sudo sed -i 's|^Environment="OLLAMA_HOST=.*|Environment="OLLAMA_HOST=127.0.0.1:11434"|' /etc/systemd/system/ollama.service.d/override.conf
 sudo systemctl daemon-reload
 sudo systemctl restart ollama
-sudo ufw status numbered   # 11434 の allow ルール番号を確認
-sudo ufw delete allow from 192.168.10.21 to any port 11434 proto tcp
-sudo ufw delete allow from 192.168.10.31 to any port 11434 proto tcp
+{% for a in plaintext_allows %}sudo ufw delete allow from {{ a.from }} to any port {{ a.port }} proto tcp
+{% endfor %}sudo ufw status numbered   # 平文経路の allow ルールが残っていないことを確認
 ```
+
+> `plaintext_allows` は dgx-spark-ollama テンプレートで開けたクライアント IP・ポートと一致させてください。ここが一致しないと mTLS を迂回する平文経路が残ります。
 
 ## 5. クライアント証明書を発行する
 
