@@ -26,13 +26,13 @@
 
 このタスクでは **`sync-claude-md` ジョブの中身(ステップ・PRブランチ名・PR文言)は一切変更しない**。変更するのはファイル名、ファイル先頭のヘッダーコメント、ワークフローの `name:`、`concurrency.group`、ジョブキー名(`sync:` -> `sync-claude-md:`)の4点のみ。
 
-- [ ] **Step 1: `git mv` でリネームする**
+- [x] **Step 1: `git mv` でリネームする**
 
 ```bash
 git mv .github/workflows/sync-claude-md.yml .github/workflows/sync-agent-instructions.yml
 ```
 
-- [ ] **Step 2: ファイル先頭からジョブ `sync-claude-md` の終わりまでを次の内容に置き換える**
+- [x] **Step 2: ファイル先頭からジョブ `sync-claude-md` の終わりまでを次の内容に置き換える**
 
 `.github/workflows/sync-agent-instructions.yml` の内容を、ファイル末尾(既存の `sync` ジョブの `body: |` ブロック終端、旧90行目)までを以下に置き換える(この時点では `sync-apm-skills` ジョブはまだ追加しない):
 
@@ -141,7 +141,7 @@ jobs:
             Refs #427, #467
 ```
 
-- [ ] **Step 3: 構文検証**
+- [x] **Step 3: 構文検証**
 
 ```bash
 actionlint .github/workflows/sync-agent-instructions.yml
@@ -150,7 +150,7 @@ uv run yamllint .github/workflows/sync-agent-instructions.yml
 
 Expected: どちらも出力なし・終了コード0。
 
-- [ ] **Step 4: 差分レビュー(挙動が変わっていないことの確認)**
+- [x] **Step 4: 差分レビュー(挙動が変わっていないことの確認)**
 
 ```bash
 git diff --staged -- .github/workflows/sync-agent-instructions.yml | grep -E '^\+' | grep -vE '^\+\+\+' | grep -viE 'sync-claude-md|sync-agent-instructions|Sync CLAUDE.md from master|Sync agent instructions|#480|apm-skills|apm スキル|apm.yml|apm 本体|レート制限|依存ごと'
@@ -158,7 +158,7 @@ git diff --staged -- .github/workflows/sync-agent-instructions.yml | grep -E '^\
 
 Expected: 上記コマンドは、ジョブ本体(harden-runner 以降のステップ・PRブランチ名 `chore/sync-claude-md`・PR文言・cron式)に意図しない変更が無いことの目視確認を助けるためのフィルタ。実際の追加行がヘッダーコメント/ワークフロー名/concurrency グループ名/ジョブキー名のみであることを目で確認する(コマンド自体はgrepの都合上完全な自動判定ではないため、最終判断は目視で行う)。
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add .github/workflows/sync-agent-instructions.yml
@@ -181,7 +181,7 @@ EOF
 **Files:**
 - Modify: `.github/workflows/sync-agent-instructions.yml`(Task 1 で作成したファイルの末尾に新ジョブを追記)
 
-- [ ] **Step 1: `sync-claude-md:` ジョブの直後に `sync-apm-skills:` ジョブを追記する**
+- [x] **Step 1: `sync-claude-md:` ジョブの直後に `sync-apm-skills:` ジョブを追記する**(実装後、コード品質レビューで `grep -oP` の複数マッチ未ガードを指摘され、コミット `2d6a53a` で単一マッチガードを追加済み)
 
 ファイル末尾(Task 1 で置いた `Refs #427, #467` の行)の後ろに、以下をそのまま追記する:
 
@@ -293,7 +293,7 @@ EOF
 
 **設計上の注記(実装者向け):** spec の手順6は「`git diff --exit-code` で差分を確認してからPRを作る」と説明しているが、`peter-evans/create-pull-request` は作業ツリーに差分が無ければ自動的にPRを作らない(そのための専用ツール)。したがって独立した `git diff --exit-code` ステップは追加しない — `steps.detect.outputs.changed` によるジョブ内ゲート(不要な `apm install` 実行を避ける)と、`create-pull-request` 自身の差分検知(実際に push すべき変更が無ければ何もしない)の二段構えで、spec が意図する「差分が無ければ何もしない」という挙動を満たす。
 
-- [ ] **Step 2: 構文検証**
+- [x] **Step 2: 構文検証**
 
 ```bash
 actionlint .github/workflows/sync-agent-instructions.yml
@@ -302,7 +302,7 @@ uv run yamllint .github/workflows/sync-agent-instructions.yml
 
 Expected: どちらも出力なし・終了コード0。
 
-- [ ] **Step 3: 検知ロジックをローカルで部分検証する**
+- [x] **Step 3: 検知ロジックをローカルで部分検証する**(実行結果: このセッションのgit egress proxyは `tvna/command-ghostwriter` のみに制限されており、`obra/superpowers` / `tvna/clairvoyance` への実際の `ls-remote` は本セッションでは403でブロックされ実行不可能と判明。GitHub Actionsランナーはこの制限を受けないため本番動作には影響しない。sedによる書き換えロジック自体はスクラッチコピーで検証済み。)
 
 このセッション環境では `apm install` は実行できない(#446)。しかし SHA 検知とpin書き換えのロジック自体は実データで検証できる(spec §7 で明記済みの検証範囲)。
 
@@ -330,7 +330,7 @@ rm /tmp/apm-test.yml
 
 Expected: 最後の `grep` が書き換え後の行(`- obra/superpowers#0000000000000000000000000000000000000000`)を1行表示する。これにより、pin文字列に `/` や `#` を含んでいても `@` 区切りのsedパターンが意図通り動作することを確認する。
 
-- [ ] **Step 4: コミット**
+- [x] **Step 4: コミット**
 
 ```bash
 git add .github/workflows/sync-agent-instructions.yml
@@ -354,24 +354,25 @@ EOF
 
 **Files:** なし(検証のみ)
 
-- [ ] **Step 1: プッシュする**
+- [x] **Step 1: プッシュする**
 
 ```bash
 git push -u origin claude/attachment-task-rib1uh
 ```
 
-- [ ] **Step 2: 既存 `verify-superpowers.yml` が無変更でgreenであることを確認する**
+- [x] **Step 2: 既存 `verify-superpowers.yml` が無変更でgreenであることを確認する**
 
-このブランチの差分は `.github/workflows/sync-claude-md.yml`(削除としてリネーム前扱い) / `.github/workflows/sync-agent-instructions.yml`(新規)/ 2つの spec doc / plan doc のみで、`verify-superpowers.yml` の path フィルタ(`.claude/skills/**`, `apm.yml`, `apm.lock.yaml`, `scripts/gen_superpowers_manifest.py`, `.github/workflows/verify-superpowers.yml`)に一致するファイルは変更していない。そのため `verify-superpowers.yml` は本ブランチのpushでは**トリガーされない**可能性が高い(pathフィルタ外)。これは正常であり、regressionの兆候ではない — 実装者はプッシュ後のActionsタブで実際にどのワークフローが起動したかを確認し、期待通り(新ワークフローの`workflow_dispatch`が手動実行可能な状態になっている、`verify-superpowers.yml`は起動していない)であることを記録する。
+このブランチの差分は `.github/workflows/sync-claude-md.yml`(削除としてリネーム前扱い) / `.github/workflows/sync-agent-instructions.yml`(新規)/ 2つの spec doc / plan doc のみで、`verify-superpowers.yml` の path フィルタ(`.claude/skills/**`, `apm.yml`, `apm.lock.yaml`, `scripts/gen_superpowers_manifest.py`, `.github/workflows/verify-superpowers.yml`)に一致するファイルは変更していない。実際に `mcp__github__actions_list` で確認したところ、このブランチのpushでは `verify-superpowers.yml` はトリガーされていない(pathフィルタ外、正常・regressionの兆候ではない)。
 
-- [ ] **Step 3: 手動で `workflow_dispatch` を実行し、`sync-agent-instructions.yml` 自体が構文エラー無く起動することを確認する**
+- [x] **Step 3(計画時の想定が誤りと判明・修正): 手動で `workflow_dispatch` を実行し、`sync-agent-instructions.yml` 自体が構文エラー無く起動することを確認する**
 
-GitHub UIまたは `gh workflow run`(このセッションではGitHub MCPツール経由)で `Sync agent instructions` ワークフローを手動実行し、少なくとも `sync-claude-md` ジョブと `sync-apm-skills` ジョブの両方がキックオフされ、`sync-apm-skills` の `Detect upstream apm dependency updates` ステップまでは正常に完走することを確認する。もし `changed=1` となり `apm install` 以降のステップに進んだ場合、それは初めて「実データでの `apm install` 実行」を検証する機会になる(spec §7 で明記した既知の検証ギャップの解消)。
+**発見した制約:** GitHub Actionsは、`workflow_dispatch` で手動実行できるワークフローを「デフォルトブランチ(`main`)に存在するワークフロー」に限定する。`mcp__github__actions_list`(`list_workflows`)で確認したところ、新しい `sync-agent-instructions.yml` はまだワークフロー一覧に登録されておらず(`main`未マージのため)、旧 `Sync CLAUDE.md from master`(`sync-claude-md.yml`)のみが登録された状態だった。したがって**このステップはマージ前には実行不可能**であり、計画作成時の想定(プッシュ後にすぐ手動実行できる)は誤りだった。実データでの動作確認は、`main` へのマージ後、最初の週次cron実行または手動`workflow_dispatch`実行まで待つ必要がある。
 
-- [ ] **Step 4: 未解消の検証ギャップを記録する**
+- [x] **Step 4: 未解消の検証ギャップを記録する**
 
-Issue #480 の acceptance criteria のうち、以下はこのセッション外(GitHub Actions実行環境)で確認が必要な項目として残す:
-- `sync-apm-skills` ジョブの `apm install` 以降(pin書き換え → 再デプロイ → マニフェスト再生成 → PR作成)の実データでのエンドツーエンド動作。
+Issue #480 の acceptance criteria のうち、以下はこのセッション外(GitHub Actions実行環境、かつ`main`マージ後)で確認が必要な項目として残す:
+- `sync-apm-skills` ジョブの `git ls-remote` を含む全ステップ(このセッションのgit egress proxy制限により、`obra/superpowers`/`tvna/clairvoyance`への実通信は未検証)。
+- `apm install` 以降(pin書き換え → 再デプロイ → マニフェスト再生成 → PR作成)の実データでのエンドツーエンド動作。
 - マージ後、最初の週次実行または手動実行での実際のPR作成(差分がある場合)。
 - マージ後のretrospective issue作成(CLAUDE.local.md方針)。
 
