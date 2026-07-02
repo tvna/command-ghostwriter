@@ -4,14 +4,14 @@
 #
 # ワークフローの目的 (Purpose):
 # -----------------------------
-# main または develop ブランチに対する Pull Request (オープン、同期、再オープン、編集)
+# main ブランチに対する Pull Request (オープン、同期、再オープン、編集)
 # をトリガーとして実行されます。PR のコードに対してテスト、ビルド、ベンチマーク、
 # および追加のセキュリティチェック (OSS Scorecards, Dependency Review) を実行します。
 # Dependabot による PR の場合、テストが成功すれば自動的に承認します。
 #
 # ワークフローの影響範囲 (Scope of Impact):
 # ---------------------------------------
-# - main および develop ブランチへのマージ前のコード品質を検証します。
+# - main ブランチへのマージ前のコード品質を検証します。
 # - Pull Request にテスト結果、ベンチマーク結果、セキュリティレビュー結果をコメントとして投稿する可能性があります。
 # - Dependabot PR を自動承認することがあります。
 # - OpenSSF Scorecards の結果を Security タブにアップロードします。
@@ -45,7 +45,6 @@ on:
   pull_request:
     branches:
       - main
-      - develop
     paths-ignore:
       - .cursor/**
       - .devcontainer/**
