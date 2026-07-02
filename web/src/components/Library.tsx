@@ -15,6 +15,7 @@ const CATS: { id: TemplateCategory | 'all'; label: string; icon: string }[] = [
   { id: 'server',  label: 'サーバ / Linux',  icon: 'server' },
   { id: 'dns',     label: 'DNS',            icon: 'ethernet-port' },
   { id: 'runbook', label: '手順書',          icon: 'config-file' },
+  { id: 'ai',      label: 'AIインフラ',       icon: 'terminal' },
 ];
 const FMT_TONE: Record<Format, 'brand' | 'info' | 'warning'> = { toml: 'brand', yaml: 'info', csv: 'warning' };
 const OUT_LABEL: Record<TemplateOutput, string> = { cli: 'CLI', config: 'config', markdown: 'Markdown' };

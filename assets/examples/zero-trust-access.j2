@@ -1,0 +1,188 @@
+# ゼロトラストアクセス基盤 構築手順 — {{ site }}
+
+AIマシンの API / SSH を、ネットワークの場所ではなく証明書による本人性で保護する構築手順です。商用利用可能な OSS（Smallstep step-ca / Caddy、いずれも Apache-2.0）のみで構成し、IaC は使わず CLI で完結します。
+
+方針:
+
+- **default deny**: 許可した宛先ポート以外はすべて拒否し、平文の直接経路は明示的に閉じる
+- **場所を信用しない**: LAN 内からのアクセスも mTLS クライアント証明書を要求する
+- **短命クレデンシャル**: SSH は有効期限 {{ ssh.user_cert_validity }} の証明書に置き換える
+
+## 1. プライベート CA を構築する（{{ ca.host }}）
+
+CA は systemd サービスとして常駐させます。フォアグラウンド起動では SSH 切断や再起動で CA が停止し、証明書の発行・更新が止まります。
+
+```bash
+ARCH=$(dpkg --print-architecture)   # amd64 / arm64 を自動判別
+wget https://dl.smallstep.com/cli/docs-ca-install/latest/step-cli_${ARCH}.deb
+wget https://dl.smallstep.com/certificates/docs-ca-install/latest/step-ca_${ARCH}.deb
+sudo dpkg -i step-cli_${ARCH}.deb step-ca_${ARCH}.deb
+sudo useradd --system --home /etc/step-ca --shell /usr/sbin/nologin step
+sudo install -d -m 700 -o step /etc/step-ca
+sudo install -m 600 -o step /dev/null /etc/step-ca/password.txt
+openssl rand -base64 24 | sudo tee /etc/step-ca/password.txt >/dev/null
+sudo STEPPATH=/etc/step-ca step ca init --ssh --name "{{ ca.name }}" --dns {{ ca.host }} --address :8443 --provisioner admin --password-file /etc/step-ca/password.txt --provisioner-password-file /etc/step-ca/password.txt
+sudo chown -R step:step /etc/step-ca
+sudo tee /etc/systemd/system/step-ca.service <<'EOF'
+[Unit]
+Description=step-ca ({{ ca.name }})
+After=network-online.target
+
+[Service]
+User=step
+Environment=STEPPATH=/etc/step-ca
+ExecStart=/usr/bin/step-ca /etc/step-ca/config/ca.json --password-file /etc/step-ca/password.txt
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now step-ca
+sudo STEPPATH=/etc/step-ca step certificate fingerprint /etc/step-ca/certs/root_ca.crt
+```
+
+> 最後に表示される root 証明書のフィンガープリントを控えてください。以降の全ホストの登録に使います。あわせて `sudo cat /etc/step-ca/password.txt` の値（provisioner パスワード。証明書発行時に必要）をパスワードマネージャ等の安全な場所に保管してください。
+
+## 2. サービスホストの共通準備（各ホストで 1 回）
+
+step CLI と Caddy を導入し、CA に登録します。Caddy は `trust_pool` ディレクティブ（2.8 以降）を使うため、ディストリのパッケージ（Ubuntu 24.04 は 2.6 系）ではなく公式リポジトリから導入します。
+
+```bash
+ARCH=$(dpkg --print-architecture)   # DGX Spark (GB10) は arm64
+wget https://dl.smallstep.com/cli/docs-ca-install/latest/step-cli_${ARCH}.deb
+sudo dpkg -i step-cli_${ARCH}.deb
+sudo apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo apt-get update && sudo apt-get install -y caddy
+step ca bootstrap --ca-url https://{{ ca.host }}:8443 --fingerprint <控えたフィンガープリント>
+step ca root root_ca.crt
+sudo install -m 644 root_ca.crt /etc/caddy/root_ca.crt
+```
+
+## 3. サーバ証明書を発行して mTLS 終端を置く
+
+{% for s in services %}{{ s.name }}（{{ s.host }} 上、upstream: {{ s.upstream }}）のサーバ証明書:
+
+```bash
+step ca certificate {{ s.fqdn }} {{ s.name }}.crt {{ s.name }}.key
+sudo install -m 644 {{ s.name }}.crt /etc/caddy/{{ s.name }}.crt
+sudo install -m 600 -o caddy -g caddy {{ s.name }}.key /etc/caddy/{{ s.name }}.key
+```
+
+{% endfor %}同一ホストの全サービスを 1 つの Caddyfile にまとめて書き込みます（ホストが分かれる場合は、そのホストに載るサービスのみ記載してください）。
+
+```bash
+sudo tee /etc/caddy/Caddyfile <<'EOF'
+{% for s in services %}{{ s.fqdn }}:443 {
+  log
+  tls /etc/caddy/{{ s.name }}.crt /etc/caddy/{{ s.name }}.key {
+    client_auth {
+      mode require_and_verify
+      trust_pool file /etc/caddy/root_ca.crt
+    }
+  }
+  reverse_proxy {{ s.upstream }}
+}
+{% endfor %}EOF
+sudo systemctl reload caddy
+```
+
+## 4. 平文の直接アクセス経路を閉じる
+
+mTLS ゲートウェイ経由以外の経路が残るとゼロトラストは成立しません。既存の待ち受けとファイアウォール許可を明示的に閉じます。以下は dgx-spark-ollama テンプレートで公開した ollama API（0.0.0.0 待ち受け + クライアント別 ufw 許可）を閉じる例です。
+
+```bash
+sudo sed -i 's|^Environment="OLLAMA_HOST=.*|Environment="OLLAMA_HOST=127.0.0.1:11434"|' /etc/systemd/system/ollama.service.d/override.conf
+sudo systemctl daemon-reload
+sudo systemctl restart ollama
+{% for a in plaintext_allows %}sudo ufw delete allow from {{ a.from }} to any port {{ a.port }} proto tcp
+{% endfor %}sudo ufw status numbered   # 平文経路の allow ルールが残っていないことを確認
+```
+
+> `plaintext_allows` は dgx-spark-ollama テンプレートで開けたクライアント IP・ポートと一致させてください。ここが一致しないと mTLS を迂回する平文経路が残ります。
+
+## 5. クライアント証明書を発行する
+
+利用者・端末ごとに短命の証明書を発行します。失効は期限切れ任せにせず `step ca revoke` で行えます。
+
+```bash
+{% for c in clients %}step ca certificate "{{ c.user }}@{{ c.device }}" {{ c.device }}.crt {{ c.device }}.key --not-after {{ c.cert_validity }}
+{% endfor %}```
+
+## 6. SSH を証明書認証に置き換える
+
+サーバ側で CA を信頼させ、証明書でのログインを確認してから、パスワード認証と静的鍵を無効化します。**この順序を守らないとロックアウトします。**
+
+サーバ側（各サービスホスト）で CA を信頼させます:
+
+```bash
+step ssh config --roots | sudo tee /etc/ssh/user_ca_keys.pub
+printf 'TrustedUserCAKeys /etc/ssh/user_ca_keys.pub\n' | sudo tee /etc/ssh/sshd_config.d/60-step-ca.conf
+sudo systemctl reload ssh
+```
+
+クライアント側で利用者ごとに SSH 証明書を発行します（有効期限 {{ ssh.user_cert_validity }}）:
+
+```bash
+{% for c in clients %}step ssh certificate --principal {{ ssh.principal }} --not-after {{ ssh.user_cert_validity }} {{ c.user }}@{{ site }} ~/.ssh/{{ c.user }}_step
+{% endfor %}```
+
+証明書でログインできることを確認します。**この確認が取れるまで次のブロックを実行しないでください**:
+
+```bash
+{% for s in services %}ssh -i ~/.ssh/{{ clients[0].user }}_step {{ ssh.principal }}@{{ s.host }} hostname
+{% endfor %}```
+
+確認後、パスワード認証と静的鍵（authorized_keys）を無効化します:
+
+```bash
+printf 'PasswordAuthentication no\nAuthorizedKeysFile none\n' | sudo tee -a /etc/ssh/sshd_config.d/60-step-ca.conf
+sudo systemctl reload ssh
+```
+
+## 7. ブルートフォース対策と監査ログ
+
+```bash
+sudo apt-get install -y fail2ban
+sudo systemctl enable --now fail2ban
+```
+
+アクセスの監査証跡は journald に残ります。ゲートウェイは `journalctl -u caddy`（Caddyfile の `log` ディレクティブによるアクセスログ）、証明書の発行履歴は `journalctl -u step-ca` で確認できます。
+
+## 8. ファイアウォールを default deny にする
+
+各サービスホスト:
+
+```bash
+sudo ufw default deny incoming
+{% for port in firewall.allow_tcp %}sudo ufw allow {{ port }}/tcp
+{% endfor %}sudo ufw --force enable
+```
+
+CA ホスト（{{ ca.host }}）では、証明書の発行・更新用に 8443 も許可します:
+
+```bash
+sudo ufw default deny incoming
+{% for port in firewall.allow_tcp %}sudo ufw allow {{ port }}/tcp
+{% endfor %}sudo ufw allow 8443/tcp
+sudo ufw --force enable
+```
+
+## 9. 検証
+
+証明書なしのアクセスが**拒否される**こと、証明書ありが通ること、平文の直接経路が閉じていることをすべて確認します。
+
+各サービスの拒否確認:
+
+```bash
+{% for s in services %}curl https://{{ s.fqdn }}/api/version --cacert root_ca.crt   # 失敗すること（クライアント証明書なし）
+curl --max-time 3 http://{{ s.host }}:11434/api/version   # 失敗すること（セクション4で閉じた平文経路）
+{% endfor %}```
+
+各クライアントの許可確認:
+
+```bash
+{% for c in clients %}curl https://{{ services[0].fqdn }}/api/version --cacert root_ca.crt --cert {{ c.device }}.crt --key {{ c.device }}.key   # {{ c.user }}: 成功すること
+{% endfor %}```

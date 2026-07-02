@@ -32,6 +32,8 @@ const META: Meta[] = [
   { id: "incident-campus", name: "キャンパスネットワーク障害対応", desc: "症状・影響範囲・切り分けステップ・エスカレーションから Markdown 手順書を生成。", category: "runbook", format: "yaml", output: "markdown", updated: "2026-06-18", live: true },
   { id: "incident-proxy", name: "プロキシ環境のWebサービス接続不能", desc: "プロキシ設定・確認コマンド・判断分岐から Markdown 切り分け手順書を生成。", category: "runbook", format: "yaml", output: "markdown", updated: "2026-06-15", live: true },
   { id: "firewall-rules", name: "firewalld ルール一括投入", desc: "CSV の 1 行 1 ルールから、Rocky Linux 標準の firewalld rich rule 投入手順書（Markdown）を生成。", category: "network", format: "csv", output: "markdown", updated: "2026-06-30", live: true },
+  { id: "dgx-spark-ollama", name: "DGX Spark + ollama 初期構築", desc: "DGX OS の初期設定・SSH 堅牢化・ufw から、ollama の LAN 内 API 公開・モデル取得までの手順書（Markdown）を生成。", category: "ai", format: "yaml", output: "markdown", updated: "2026-07-02", live: true },
+  { id: "zero-trust-access", name: "ゼロトラストアクセス基盤構築", desc: "step-ca + Caddy の mTLS で AI マシンの API / SSH を保護する、商用利用可能な OSS 構成の構築手順書（Markdown）を生成。", category: "ai", format: "yaml", output: "markdown", updated: "2026-07-02", live: true },
 ];
 
 export const CGTemplates: Template[] = META.map((m) => ({
