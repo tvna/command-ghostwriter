@@ -30,8 +30,8 @@ import re
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-FLAKE_PATH = REPO_ROOT / "flake.nix"
+REPO_ROOT: Path = Path(__file__).resolve().parent.parent
+FLAKE_PATH: Path = REPO_ROOT / "flake.nix"
 
 KNOWN_TOOLS = ("actionlint", "shellcheck")
 

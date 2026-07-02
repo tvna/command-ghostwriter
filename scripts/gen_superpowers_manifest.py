@@ -29,13 +29,13 @@ import hashlib
 import re
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-SKILLS_DIR = REPO_ROOT / ".claude" / "skills"
-MANIFEST_PATH = SKILLS_DIR / ".superpowers-manifest.sha256"
-APM_LOCK = REPO_ROOT / "apm.lock.yaml"
+REPO_ROOT: Path = Path(__file__).resolve().parent.parent
+SKILLS_DIR: Path = REPO_ROOT / ".claude" / "skills"
+MANIFEST_PATH: Path = SKILLS_DIR / ".superpowers-manifest.sha256"
+APM_LOCK: Path = REPO_ROOT / "apm.lock.yaml"
 MANIFEST_REL = ".claude/skills/.superpowers-manifest.sha256"
 
-_COMMIT_RE = re.compile(r"^\s*resolved_commit:\s*([0-9a-f]{40})\s*$", re.MULTILINE)
+_COMMIT_RE: re.Pattern[str] = re.compile(r"^\s*resolved_commit:\s*([0-9a-f]{40})\s*$", re.MULTILINE)
 
 
 class ApmLockError(Exception):
