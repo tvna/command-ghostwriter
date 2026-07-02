@@ -150,6 +150,11 @@ jobs:
               echo "::error::could not find current pin for ${pin} in apm.yml"
               exit 1
             fi
+            current_count="$(printf '%s\n' "${current}" | wc -l)"
+            if [ "${current_count}" -ne 1 ]; then
+              echo "::error::expected exactly one pin for ${pin} in apm.yml, found ${current_count}"
+              exit 1
+            fi
 
             if [ "${latest}" != "${current}" ]; then
               sed -i "s@${pin}#${current}@${pin}#${latest}@" apm.yml
