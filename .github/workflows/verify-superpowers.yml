@@ -13,7 +13,7 @@
 #
 # 影響範囲 (Scope of Impact):
 # ---------------------------
-# - main への PR・push で superpowers スキルの陳腐化を検証する。
+# - main / develop への PR・push で superpowers スキルの陳腐化を検証する。
 # - リポジトリへの書き込みは行わない (contents: read)。
 #
 # セキュリティ (Security):
@@ -34,6 +34,7 @@ on:
   pull_request:
     branches:
       - main
+      - develop
     paths:
       - .claude/skills/**
       - apm.yml
@@ -43,6 +44,7 @@ on:
   push:
     branches:
       - main
+      - develop
     paths:
       - .claude/skills/**
       - apm.yml
