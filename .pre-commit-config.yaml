@@ -1,7 +1,7 @@
 # See https://pre-commit.com for more information
 # See https://pre-commit.com/hooks.html for more hooks
 minimum_pre_commit_version: "3.7.1" # pyproject.tomlと一致させる
-default_install_hook_types: [pre-commit, commit-msg]
+default_install_hook_types: [pre-commit, commit-msg, pre-push]
 default_stages: [pre-commit]
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -43,7 +43,7 @@ repos:
           - "--indent=4"
         description: "Run 'pretty-format-json' for JSON formatting"
         files: \.json$|\.code-workspace$
-        exclude: ^package\.json$
+        exclude: ^package\.json$|^package-lock\.json$
       - id: destroyed-symlinks
         description: "Run 'destroyed-symlinks' for checking destroyed symlinks"
 
@@ -67,21 +67,28 @@ repos:
         language: system
         types: ["yaml"]
         files: ^\.github/
-        entry: bunx prettier --parser="yaml" ./.github --write
+        entry: npx prettier --parser="yaml" ./.github --write
       - id: prettier-other-yaml
         name: prettier-other-yml
         description: Runs system-installed prettier to lint other yaml files
         language: system
         types: ["yaml"]
         files: ^\.*\.yml$
-        entry: bunx prettier --parser="yaml" "*.(yml|yaml)" --write
+        entry: npx prettier --parser="yaml" "*.(yml|yaml)" --write
       - id: prettier-code-workspace
         name: prettier-code-workspace
         description: Runs system-installed prettier to lint code-workspace files
         language: system
         types: ["json"]
         files: ^\.*\.code-workspace$
-        entry: bunx prettier --write --parser json --plugin prettier-plugin-sort-json command-ghostwriter.code-workspace
+        entry: npx prettier --write --parser json --plugin prettier-plugin-sort-json command-ghostwriter.code-workspace
+      - id: superpowers-manifest-drift
+        name: superpowers manifest drift
+        description: "Verify committed superpowers skills match their integrity manifest"
+        language: system
+        pass_filenames: false
+        files: ^\.claude/skills/.*|^apm\.lock\.yaml$
+        entry: uv run python scripts/gen_superpowers_manifest.py --check
 
   - repo: https://github.com/tox-dev/pyproject-fmt
     rev: v2.5.1
@@ -173,4 +180,13 @@ repos:
         language: system
         pass_filenames: false
         types: [python]
+        verbose: true
+      - id: ci-parity
+        name: CI-parity gate (ruff/mypy/all-language lizard/web tsc+vitest)
+        description: "Mirror CI's fast blocking checks before push so repairs don't slip through (refs #403)."
+        entry: bash scripts/ci-parity.sh
+        language: system
+        stages: [pre-push]
+        pass_filenames: false
+        always_run: true
         verbose: true

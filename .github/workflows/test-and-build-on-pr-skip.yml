@@ -1,0 +1,70 @@
+# ============================================================
+# Workflow Information: test-and-build-on-pr-skip.yml
+# ============================================================
+#
+# ワークフローの目的 (Purpose):
+# -----------------------------
+# `test-and-build-on-pr.yml` は `paths-ignore` に列挙したパス
+# (README.md など) のみを変更する Pull Request ではトリガーされません。
+# しかし、ブランチ保護で必須ステータスチェックに指定されている
+# `test-and-build / Workflow summary [Test & Build (on pull request)]`
+# は、そのワークフロー自体が起動しない限り永久に "Expected" のまま
+# 報告されず、PR がマージ不可能になってしまいます。
+# このワークフローは `test-and-build-on-pr.yml` の `paths-ignore` と
+# 同じパス一覧にのみトリガーされます。必須チェックのコンテキスト名
+# "<job_id> / <name>" を再現するため、`reusable-skip-summary.yml` を
+# 呼び出し、同名のステータスチェックを即座に success として報告する
+# ことで、ドキュメントのみの変更でも PR をマージ可能にします。
+#
+# ワークフローの影響範囲 (Scope of Impact):
+# ---------------------------------------
+# - `test-and-build-on-pr.yml` がトリガーされないドキュメント等のみの
+#   変更を含む Pull Request のマージ可否にのみ影響します。
+# - 実際のテスト・ビルドは一切実行しません。
+#
+# セキュリティポリシー (Security Policy):
+# ------------------------------------
+# - 外部アクションを使用せず、チェックアウトも行いません。
+# - `permissions` は既定の読み取り専用です。
+#
+# 参考URL (Reference URLs):
+# -------------------------
+# - GitHub Actions Documentation - paths-ignore と必須チェックの既知の制約:
+#   https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#example-excluding-paths
+#
+# ============================================================
+---
+name: Test and Build - on pull request
+
+on:
+  pull_request:
+    branches:
+      - main
+      - develop
+    paths:
+      - .cursor/**
+      - .devcontainer/**
+      - assets/**
+      - docs/**
+      - .gitignore
+      - .pre-commit-config.yaml
+      - .watchmanconfig
+      - .yamllint.yml
+      - "**.code-workspace"
+      - commitlint.config.js
+      - LICENSE
+      - README.md
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - edited
+  workflow_dispatch: {}
+
+permissions: {}
+
+jobs:
+  test-and-build:
+    uses: ./.github/workflows/reusable-skip-summary.yml
+    with:
+      workflow_summary_name: "Workflow summary [Test & Build (on pull request)]"

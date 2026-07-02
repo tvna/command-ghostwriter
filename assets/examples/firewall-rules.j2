@@ -1,0 +1,38 @@
+# firewalld ルール一括投入手順 — Rocky Linux
+
+CSV で定義した {{ csv_rows | length }} 件のアクセス制御ルールを、firewalld の
+rich rule として一括投入します。Rocky Linux 9 標準（firewalld + nftables
+バックエンド）を前提に、root 権限で上から順に実行してください。
+
+## 1. 投入するルール一覧
+
+| zone | action | source | protocol | port | 用途 |
+|------|--------|--------|----------|------|------|
+{% for r in csv_rows %}| {{ r["zone"] }} | {{ r["action"] }} | {{ r["source"] }} | {{ r["protocol"] }} | {{ r["port"] }} | {{ r["comment"] }} |
+{% endfor %}
+
+## 2. firewalld の稼働を確認する
+
+```bash
+systemctl enable --now firewalld
+firewall-cmd --state
+```
+
+## 3. ルールを永続設定として投入する
+
+各 CSV 行を 1 本の rich rule に対応させます。--permanent のため、この時点では
+runtime にはまだ反映されません。
+
+```bash
+{% for r in csv_rows %}firewall-cmd --zone={{ r["zone"] }} --permanent --add-rich-rule='rule family="ipv4" source address="{{ r["source"] }}" port port="{{ r["port"] }}" protocol="{{ r["protocol"] }}" {{ r["action"] }}'
+{% endfor %}```
+
+## 4. 設定を反映して確認する
+
+```bash
+firewall-cmd --reload
+firewall-cmd --list-all-zones
+```
+
+> reject と drop の違い: reject は拒否応答（ICMP）を返し、drop は無応答で破棄します。
+> 意図に応じて使い分けてください。

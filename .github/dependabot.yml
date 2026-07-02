@@ -5,6 +5,9 @@
 # package ecosystems to update and where the package manifests are located.
 # Please see the documentation for all configuration options:
 # https://docs.github.com/ja/code-security/dependabot/working-with-dependabot/dependabot-options-reference
+#
+# NOTE: `security-updates` は dependabot.yml の有効キーではないため使用しない
+# (セキュリティ更新はリポジトリ設定側で有効化する)。Refs #367.
 ---
 version: 2
 updates:
@@ -20,10 +23,10 @@ updates:
       timezone: "Asia/Tokyo"
     target-branch: develop
 
-  - package-ecosystem: bun
+  - package-ecosystem: npm
     directory: /
     groups:
-      bun:
+      npm:
         patterns:
           - "*"
     schedule:
@@ -32,10 +35,10 @@ updates:
       timezone: "Asia/Tokyo"
     target-branch: develop
 
-  - package-ecosystem: uv
+  - package-ecosystem: pip
     directory: /
     groups:
-      uv:
+      pip:
         patterns:
           - "*"
     schedule:

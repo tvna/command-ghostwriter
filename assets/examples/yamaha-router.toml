@@ -1,0 +1,27 @@
+[lan1]
+ip_address = "192.168.100.1/24"
+
+[pp1]
+description = "INTERNET (PPPoE)"
+auth_account = "user@example.ne.jp"
+auth_password = "********"
+mtu = 1454
+
+[[static_routes]]
+network = "default"
+gateway = "pp 1"
+
+[nat]
+type = "masquerade"
+inner = "192.168.100.0/24"
+
+[[filters]]
+id = 200000
+action = "pass"
+proto = "tcp"
+dst_port = "established"
+
+[[filters]]
+id = 200099
+action = "reject"
+proto = "*"

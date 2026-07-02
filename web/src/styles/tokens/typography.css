@@ -1,0 +1,46 @@
+/* ============================================================
+   Command Ghostwriter — Typography tokens
+   Source Sans 3 for UI/body, Source Code Pro for CLI output,
+   config files, and inline code (the heart of this tool).
+   ============================================================ */
+
+:root {
+  /* --- Families ------------------------------------------------ */
+  --font-sans: 'Source Sans 3', 'Source Sans Pro', -apple-system,
+               'Segoe UI', 'Hiragino Kaku Gothic ProN', 'Noto Sans JP',
+               Meiryo, sans-serif;
+  --font-mono: 'Source Code Pro', ui-monospace, 'SFMono-Regular',
+               'Menlo', 'Consolas', monospace;
+
+  /* --- Type scale (Streamlit-aligned rem sizing) --------------- */
+  --text-2xs:  0.6875rem;  /* 11px — micro labels, badges        */
+  --text-xs:   0.75rem;    /* 12px — captions, file meta         */
+  --text-sm:   0.875rem;   /* 14px — secondary UI, help text     */
+  --text-base: 1rem;       /* 16px — body, inputs, buttons       */
+  --text-md:   1.125rem;   /* 18px — emphasized body             */
+  --text-lg:   1.25rem;    /* 20px — subheaders                  */
+  --text-xl:   1.5rem;     /* 24px — section headings            */
+  --text-2xl:  1.75rem;    /* 28px — page subtitle               */
+  --text-3xl:  2.25rem;    /* 36px — page title (st.title)       */
+
+  /* --- Weights ------------------------------------------------- */
+  --weight-regular:  400;
+  --weight-semibold: 600;
+  --weight-bold:     700;
+
+  /* --- Line heights -------------------------------------------- */
+  --leading-tight:  1.2;
+  --leading-snug:   1.4;
+  --leading-normal: 1.6;
+  --leading-code:   1.5;
+
+  /* --- Letter spacing ------------------------------------------ */
+  --tracking-tight:  -0.01em;
+  --tracking-normal: 0;
+  --tracking-wide:   0.02em;
+
+  /* --- Semantic roles ------------------------------------------ */
+  --font-display:  var(--font-sans);
+  --font-body:     var(--font-sans);
+  --font-code:     var(--font-mono);
+}

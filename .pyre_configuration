@@ -30,7 +30,6 @@
     ".pyi"
   ],
   "strict": true,
-  "taint_models_path": "taint",
   "ignore_all_errors": [
     ".venv/lib/python*/site-packages/altair",
     ".venv/lib/python*/site-packages/narwhals"

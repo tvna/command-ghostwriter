@@ -1,0 +1,13 @@
+# 切り分け手順書: {{ title }}
+
+- **プロキシ**: `{{ proxy }}`
+- **除外 (no_proxy)**: `{{ no_proxy }}`
+
+## 確認手順
+{% for s in steps %}
+{{ loop_index }}. **{{ s.check }}**
+   ```
+   {{ s.cmd }}
+   ```
+   → {{ s.branch }}
+{% endfor %}

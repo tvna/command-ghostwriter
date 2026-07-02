@@ -1,0 +1,17 @@
+title: 特定棟でネットワーク接続不可
+scope: 工学部3号館 全フロア
+severity: high
+steps:
+  - layer: 物理
+    check: 該当棟エッジSWのリンク/電源ランプを確認
+    ok: 隣接フロアへ
+    ng: SW再起動・ケーブル交換
+  - layer: L2
+    check: アップリンクのVLAN/STP状態を確認
+    ok: L3へ
+    ng: トランク設定・ループを是正
+  - layer: L3/DHCP
+    check: クライアントのIP取得とGW疎通を確認
+    ok: 上位/外部へ
+    ng: DHCPスコープ枯渇・リレーを確認
+escalation: ネットワーク基盤チーム (内線 1234)

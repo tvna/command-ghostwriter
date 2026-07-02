@@ -7,7 +7,7 @@
   "settings": {
     "cSpell.ignorePaths": [
       "uv.lock",
-      "bun.lock",
+      "package-lock.json",
       "node_modules",
       "vscode-extension",
       ".git/objects",
@@ -49,8 +49,6 @@
       "rcfile",
       "remarkablemark",
       "selectbox",
-      "stlite",
-      "streamlit",
       "USERPROFILE",
       "venv"
     ],
@@ -73,7 +71,6 @@
       ".pyre": true,
       ".pyre_configuration": false,
       ".pre-commit-config.yaml": false,
-      ".streamlit": true,
       ".venv": true,
       ".watchmanconfig": true,
       ".yamllint.yml": true,
@@ -85,7 +82,7 @@
       "htmlcov/z_**.html": true,
       "htmlcov/**.js": true,
       "node_modules": true,
-      "bun.lock": false,
+      "package-lock.json": false,
       "uv.lock": false,
       "pytestdebug.log": true,
       "requirements.txt": false,
