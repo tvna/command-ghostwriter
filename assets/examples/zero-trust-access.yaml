@@ -1,0 +1,23 @@
+site: ai-lab-tokyo
+ca:
+  host: step-ca-01
+  ip: 192.168.10.5
+  name: AI Lab Internal CA
+services:
+  - name: ollama-api
+    host: dgx-spark-01
+    upstream: 127.0.0.1:11434
+    fqdn: llm.ai-lab.internal
+clients:
+  - user: sato-taro
+    device: laptop-0042
+    cert_days: 30
+  - user: app-batch
+    device: app-server-01
+    cert_days: 7
+ssh:
+  user_cert_validity: 8h
+firewall:
+  allow_tcp:
+    - 443
+    - 22

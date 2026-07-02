@@ -1,6 +1,6 @@
 import type { Format } from "./format";
 
-export type TemplateCategory = "network" | "server" | "dns" | "runbook";
+export type TemplateCategory = "network" | "server" | "dns" | "runbook" | "ai";
 export type TemplateOutput = "cli" | "config" | "markdown";
 
 export interface Template {

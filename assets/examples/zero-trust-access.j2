@@ -1,0 +1,79 @@
+# ゼロトラストアクセス基盤 構築手順 — {{ site }}
+
+AIマシンの API / SSH を、ネットワークの場所ではなく証明書による本人性で保護する構築手順です。商用利用可能な OSS（Smallstep step-ca / Caddy、いずれも Apache-2.0）のみで構成し、IaC は使わず CLI で完結します。
+
+方針:
+
+- **default deny**: 許可した宛先ポート以外はすべて拒否する
+- **場所を信用しない**: LAN 内からのアクセスも mTLS クライアント証明書を要求する
+- **短命クレデンシャル**: SSH は有効期限 {{ ssh.user_cert_validity }} の証明書に置き換える
+
+## 1. プライベート CA を構築する（{{ ca.host }} / {{ ca.ip }}）
+
+```bash
+wget https://dl.smallstep.com/cli/docs-ca-install/latest/step-cli_amd64.deb
+wget https://dl.smallstep.com/certificates/docs-ca-install/latest/step-ca_amd64.deb
+sudo dpkg -i step-cli_amd64.deb step-ca_amd64.deb
+step ca init --name "{{ ca.name }}" --dns {{ ca.host }} --address :8443 --provisioner admin --ssh
+step-ca $(step path)/config/ca.json
+```
+
+> `step ca init` が表示する root 証明書のフィンガープリントを控えてください。以降の全ホストの登録に使います。
+
+## 2. 保護対象サービスの前段に mTLS 終端を置く
+
+{% for s in services %}### {{ s.name }}（{{ s.host }} 上、upstream: {{ s.upstream }}）
+
+```bash
+sudo apt-get install -y caddy
+step ca bootstrap --ca-url https://{{ ca.host }}:8443 --fingerprint <控えたフィンガープリント>
+step ca certificate {{ s.fqdn }} /etc/caddy/{{ s.name }}.crt /etc/caddy/{{ s.name }}.key
+step ca root /etc/caddy/root_ca.crt
+sudo tee /etc/caddy/Caddyfile <<'EOF'
+{{ s.fqdn }}:443 {
+  tls /etc/caddy/{{ s.name }}.crt /etc/caddy/{{ s.name }}.key {
+    client_auth {
+      mode require_and_verify
+      trust_pool file /etc/caddy/root_ca.crt
+    }
+  }
+  reverse_proxy {{ s.upstream }}
+}
+EOF
+sudo systemctl reload caddy
+```
+
+upstream（{{ s.upstream }}）はループバック待ち受けに戻し、直接アクセスを閉じます。
+
+{% endfor %}## 3. ファイアウォールを default deny にする
+
+```bash
+sudo ufw default deny incoming
+{% for port in firewall.allow_tcp %}sudo ufw allow {{ port }}/tcp
+{% endfor %}sudo ufw --force enable
+```
+
+## 4. クライアント証明書を発行する
+
+利用者・端末ごとに短命の証明書を発行します。失効は期限切れ任せにせず `step ca revoke` で行えます。
+
+```bash
+{% for c in clients %}step ca certificate "{{ c.user }}@{{ c.device }}" {{ c.device }}.crt {{ c.device }}.key --not-after {{ c.cert_days * 24 }}h
+{% endfor %}```
+
+## 5. SSH を証明書認証に置き換える
+
+```bash
+step ssh certificate --principal ops ops-key   # 有効期限 {{ ssh.user_cert_validity }}（CA 側 provisioner 設定）
+sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+sudo systemctl reload ssh
+```
+
+## 6. 検証
+
+証明書なしのアクセスが**拒否される**こと、証明書ありが通ることの両方を確認します。
+
+```bash
+curl https://{{ services[0].fqdn }}/api/version --cacert root_ca.crt   # 失敗すること（クライアント証明書なし）
+{% for c in clients %}curl https://{{ services[0].fqdn }}/api/version --cacert root_ca.crt --cert {{ c.device }}.crt --key {{ c.device }}.key   # {{ c.user }}: 成功すること
+{% endfor %}```

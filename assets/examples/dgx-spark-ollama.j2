@@ -1,0 +1,76 @@
+# DGX Spark AIマシン初期セットアップ手順 — {{ hostname }}
+
+NVIDIA DGX Spark 上に ollama による LLM 推論サーバを構築する手順です。DGX OS の初回起動ウィザード完了後を前提に、sudo 権限で上から順に実行してください。IaC は使わず、すべて CLI で完結します。
+
+## 1. ホスト名・タイムゾーン・パッケージ更新
+
+```bash
+sudo hostnamectl set-hostname {{ hostname }}
+sudo timedatectl set-timezone {{ timezone }}
+sudo apt-get update && sudo apt-get upgrade -y
+```
+
+## 2. SSH を堅牢化する
+
+```bash
+{% if not ssh.permit_root_login %}sudo sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+{% endif %}{% if not ssh.password_auth %}sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+{% endif %}sudo systemctl reload ssh
+```
+
+> パスワード認証を切る前に、鍵での SSH ログインができることを必ず確認してください。
+
+## 3. ファイアウォールを有効化する（LAN 限定公開）
+
+```bash
+sudo ufw default deny incoming
+sudo ufw allow from {{ lan_subnet }} to any port 22 proto tcp
+sudo ufw allow from {{ lan_subnet }} to any port {{ ollama.port }} proto tcp
+sudo ufw --force enable
+```
+
+## 4. GPU を確認する
+
+DGX OS はドライバ・CUDA が導入済みです。GPU が認識されていることだけ確認します。
+
+```bash
+nvidia-smi
+```
+
+## 5. ollama をインストールする
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+```
+
+## 6. LAN 内 API 公開の設定（systemd オーバーライド）
+
+既定ではループバックのみ待ち受けるため、LAN 内クライアントから使えるように上書きします。
+
+```bash
+sudo mkdir -p /etc/systemd/system/ollama.service.d
+sudo tee /etc/systemd/system/ollama.service.d/override.conf <<'EOF'
+[Service]
+Environment="OLLAMA_HOST=0.0.0.0:{{ ollama.port }}"
+Environment="OLLAMA_KEEP_ALIVE={{ ollama.keep_alive }}"
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now ollama
+```
+
+## 7. モデルを取得する
+
+```bash
+{% for m in ollama.models %}ollama pull {{ m.name }}  # {{ m.purpose }}
+{% endfor %}```
+
+## 8. 動作確認
+
+```bash
+ollama list
+curl http://127.0.0.1:{{ ollama.port }}/api/version
+{% for c in clients %}# {{ c.name }} ({{ c.ip }}) から:
+curl http://{{ hostname }}:{{ ollama.port }}/api/version
+{% endfor %}```
+
+> ここまでで API は LAN 内に平文 HTTP で公開されています。商用運用では「ゼロトラストアクセス基盤構築」テンプレートで mTLS 化してください。
