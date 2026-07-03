@@ -680,7 +680,7 @@ jobs:
           allowed-endpoints: |+
 
       - name: Delete Artifacts
-        uses: actions/github-script@v9 # Use a specific version
+        uses: actions/github-script@v9.0.0 # Use a specific version
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
