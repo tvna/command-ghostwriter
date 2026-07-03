@@ -67,7 +67,7 @@ repos:
         language: system
         types: ["yaml"]
         files: ^\.github/
-        entry: bunx prettier --parser="yaml" ./.github --write
+        entry: bunx prettier --parser="yaml" --write
       - id: prettier-other-yaml
         name: prettier-other-yml
         description: Runs system-installed prettier to lint other yaml files

@@ -4,12 +4,17 @@
 #
 # 目的 (Purpose):
 # ---------------
-# エージェント指示を上流から追従させる2つの独立したジョブを持つ。
+# エージェント指示を上流から追従させる3つの独立したジョブを持つ。
 #  - sync-claude-md: 正本リポジトリ tvna/claude-md の CLAUDE.md を取得し、
 #    本リポジトリの CLAUDE.md (コミット済み実ファイル) へ追従させる。
 #  - sync-apm-skills: apm.yml にピン留めした obra/superpowers /
 #    tvna/clairvoyance の上流コミットを検知し、pin 更新・再デプロイ・
 #    マニフェスト再生成を行う。
+#  - sync-rulesets: 正本リポジトリ tvna/claude-md の
+#    .github/rulesets/all-branches.json (全ブランチforce-push禁止、汎用的)
+#    のみを取得し、本リポジトリへ追従させる。main.json はcommand-ghostwriter
+#    固有のrequired_status_checksを含むローカル正本のため同期対象外
+#    (構造が変わった場合は人間が見て判断する)。
 # いずれも差分があれば PR を作成/更新する (レビュー必須・自動マージしない)。
 #
 # 方式の根拠 (Rationale):
@@ -34,6 +39,7 @@
 # 関連 (Reference):
 # -----------------
 # - Issue #427, #467 (CLAUDE.md 同期), #480 (apm スキル上流追従), #446 (apm バージョンアップ, 別スコープ)
+# - Issue #503 (main保護ruleset整備)
 # - 設計書 docs/superpowers/specs/2026-06-13-claude-md-master-sync-design.md
 # - 設計書 docs/superpowers/specs/2026-07-02-sync-apm-skills-upstream-update-design.md
 # ============================================================
@@ -208,3 +214,53 @@ jobs:
             Review required; do not auto-merge.
 
             Refs #480
+
+  sync-rulesets:
+    name: Sync all-branches ruleset from tvna/claude-md
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Check out this repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Check out upstream all-branches.json
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: tvna/claude-md
+          ref: main
+          sparse-checkout: .github/rulesets/all-branches.json
+          sparse-checkout-cone-mode: false
+          path: .upstream-claude-md
+
+      - name: Copy upstream all-branches.json into place
+        run: |
+          cp .upstream-claude-md/.github/rulesets/all-branches.json .github/rulesets/all-branches.json
+          rm -rf .upstream-claude-md
+
+      - name: Create or update pull request
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          sign-commits: true
+          base: main
+          branch: chore/sync-rulesets
+          delete-branch: true
+          commit-message: "chore: sync all-branches ruleset from tvna/claude-md (#503)"
+          title: "chore: sync all-branches ruleset from tvna/claude-md"
+          body: |
+            Automated sync of `.github/rulesets/all-branches.json` from the
+            master repository [`tvna/claude-md`](https://github.com/tvna/claude-md) (`main`).
+
+            `.github/rulesets/main.json` is intentionally NOT synced here: it
+            carries command-ghostwriter-specific `required_status_checks` and
+            is a local source of truth. Review required; do not auto-merge.
+
+            Refs #503
