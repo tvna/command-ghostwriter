@@ -80,7 +80,10 @@ def render_summary_row(file: str, name: str, matches: int, action: str, live_id:
 
 
 def fetch_live_rulesets(repo: str, token: str, *, opener: Opener = urllib.request.urlopen) -> list[dict[str, Any]]:
-    body = _request_json(f"{API_ROOT}/repos/{repo}/rulesets", token=token, opener=opener)
+    # includes_parents=false: only repo-local rulesets, never an org-owned parent
+    # ruleset that happens to share a name. A parent ruleset's id lives under a
+    # different endpoint; matching one here would mis-route a PUT.
+    body = _request_json(f"{API_ROOT}/repos/{repo}/rulesets?includes_parents=false", token=token, opener=opener)
     if not isinstance(body, list):
         raise ValueError("GET /rulesets returned non-list JSON")
     return body
