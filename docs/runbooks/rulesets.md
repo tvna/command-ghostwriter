@@ -16,8 +16,14 @@
 
 | ファイル | 対象 | 内容 |
 |---|---|---|
-| `.github/rulesets/all-branches.json` | デフォルトブランチと`dependabot/*`を除く全ブランチ | force-push禁止（`non_fast_forward`）のみ。`tvna/claude-md`から`sync-agent-instructions.yml`の`sync-rulesets`ジョブで自動追従（PR経由、自動マージなし）。 |
+| `.github/rulesets/all-branches.json` | デフォルトブランチ・`dependabot/*`・`chore/sync-*`を除く全ブランチ | force-push禁止（`non_fast_forward`）のみ。`tvna/claude-md`から`sync-agent-instructions.yml`の`sync-rulesets`ジョブで自動追従（PR経由、自動マージなし）。 |
 | `.github/rulesets/main.json` | デフォルトブランチ（`main`） | PR必須・force-push禁止・線形履歴・署名必須・必須ステータスチェック1件。**command-ghostwriter固有の`required_status_checks`を含むため上流と同期しないローカル正本。** |
+
+### `refs/heads/chore/sync-*`除外について（ローカル追加、上流との差分）
+
+`all-branches.json`の`exclude`には、上流`tvna/claude-md`には存在しない`refs/heads/chore/sync-*`が含まれる。理由: `sync-agent-instructions.yml`の`sync-claude-md`・`sync-apm-skills`・`sync-rulesets`各ジョブは`peter-evans/create-pull-request@v8.1.1`（`sign-commits: true`）を使ってPRブランチを作成・更新するが、既存PRが未マージのまま次回スケジュール実行を迎えると、同ブランチへの更新は必ずforce-push相当の操作（signed commitsの場合はGitHub APIの`updateRef(..., force: true)`）を行う。`non_fast_forward`ルールが適用された状態でこれが起きると、週次sync PRの更新が失敗する（Codexレビュー指摘、PR #504で発覚）。
+
+この除外は`sync-rulesets`ジョブが上流ファイルをコピーした**直後に、Pythonで決定的に再付与**する（レビュアーが手動で気付いて足し直す運用には頼らない）。ジョブが生成するPR本文にも「除外パターンが差分に含まれているはず」という自己点検の一文が入っている。万一再付与ロジックにバグがあり除外が消えた状態でPRが来たら、そのままマージしないこと。
 
 ## 1. 必須シークレット: `RULESETS_PAT`
 

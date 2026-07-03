@@ -4,7 +4,8 @@
         "ref_name": {
             "exclude": [
                 "~DEFAULT_BRANCH",
-                "refs/heads/dependabot/*"
+                "refs/heads/dependabot/*",
+                "refs/heads/chore/sync-*"
             ],
             "include": [
                 "~ALL"
