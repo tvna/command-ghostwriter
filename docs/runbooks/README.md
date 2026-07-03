@@ -7,3 +7,4 @@
 
 - [開発者向けコマンド集](commands.md)
 - [Vercel デプロイ（アカウント作成から）](vercel-deploy.md)
+- [main保護ruleset（PAT発行からapply/verifyまで）](rulesets.md)

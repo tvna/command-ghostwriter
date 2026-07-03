@@ -1,0 +1,116 @@
+# ============================================================
+# Workflow Information: apply-rulesets.yml
+# ============================================================
+#
+# 目的 (Purpose):
+# -----------------------------
+# `.github/rulesets/*.json` を正本として、GitHub Repository Rulesets API
+# (`GET/POST/PUT /repos/{repo}/rulesets`) へplan（差分表示のみ）またはapply
+# （実際に作成・更新）する。`tvna/claude-md`の`apply-rulesets.yml`の簡略版
+# （plan/applyの2モードのみ、auto-delete/workflow-permissionsサブコマンド
+# 無し、PATは1本のみ）。
+#
+# 影響範囲 (Scope of Impact):
+# ---------------------------
+# - `dry_run: false`でdispatchした場合のみ、リポジトリのruleset（main保護、
+#   全ブランチforce-push禁止）を実際に作成・更新する。
+# - `dry_run: true`（既定）では読み取りのみで、実際の変更は行わない。
+#
+# 必須シークレット (Required Secret):
+# -----------------------------------
+# - `RULESETS_PAT`: Administration: Read and write, Metadata: Read-only の
+#   fine-grained PAT。発行手順は docs/runbooks/rulesets.md を参照。
+#   `ruleset-apply` Environment に登録すること（Environment保護ルールで
+#   人間の承認を必須にできる）。
+#
+# 関連 (Reference):
+# -----------------
+# - Issue #503
+# - docs/runbooks/rulesets.md
+# ============================================================
+---
+name: Apply rulesets
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Plan only (diff + intent, no live changes)"
+        type: boolean
+        required: true
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REPO: ${{ github.repository }}
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: ruleset-apply
+    steps:
+      - name: Guard dispatch ref
+        if: github.ref != 'refs/heads/main' && github.ref != 'refs/heads/develop'
+        run: |
+          echo "::error::apply-rulesets must be dispatched against main or develop (got ${{ github.ref }})."
+          exit 1
+
+      - name: Guard RULESETS_PAT
+        env:
+          GH_TOKEN: ${{ secrets.RULESETS_PAT }}
+        run: |
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error::RULESETS_PAT secret is not set. See docs/runbooks/rulesets.md \"Required secret\"."
+            exit 1
+          fi
+
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: block
+          disable-sudo: true
+          allowed-endpoints: >
+            api.github.com:443
+            github.com:443
+            release-assets.githubusercontent.com:443
+            files.pythonhosted.org:443
+            pypi.org:443
+            astral.sh:443
+
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Validate ruleset JSON syntax
+        run: |
+          set -euo pipefail
+          python3 -c "
+          import json
+          for f in ['.github/rulesets/main.json', '.github/rulesets/all-branches.json']:
+              json.load(open(f, encoding='utf-8'))
+              print(f'OK: {f}')
+          "
+
+      - name: Setup Python and restore cache
+        uses: ./.github/actions/setup-python
+        with:
+          python-version: ${{ vars.GLOBAL_PYTHON_VERSION }}
+
+      - name: Plan and apply rulesets
+        env:
+          GH_TOKEN: ${{ secrets.RULESETS_PAT }}
+          MODE: ${{ inputs.dry_run && 'plan' || 'apply' }}
+        run: |
+          set -euo pipefail
+          python3 scripts/rulesets_apply.py "$MODE" \
+            --repo "${REPO}" \
+            --sot-dir .github/rulesets \
+            --summary-file "$GITHUB_STEP_SUMMARY"

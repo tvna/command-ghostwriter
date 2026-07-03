@@ -1,0 +1,23 @@
+{
+    "bypass_actors": [],
+    "conditions": {
+        "ref_name": {
+            "exclude": [
+                "~DEFAULT_BRANCH",
+                "refs/heads/dependabot/*",
+                "refs/heads/chore/sync-*"
+            ],
+            "include": [
+                "~ALL"
+            ]
+        }
+    },
+    "enforcement": "active",
+    "name": "all-branches-no-force-push",
+    "rules": [
+        {
+            "type": "non_fast_forward"
+        }
+    ],
+    "target": "branch"
+}
