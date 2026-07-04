@@ -145,7 +145,7 @@ def test_release_config_updates_package_manifest_and_changelog() -> None:
     assert [
         "@semantic-release/git",
         {
-            "assets": ["package.json", "package-lock.json", "CHANGELOG.md"],
+            "assets": ["package.json", "package-lock.json", "CHANGELOG.md", ".release-signals.json"],
             "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}",
         },
     ] in config["plugins"]
@@ -173,6 +173,13 @@ def test_prepare_release_commits_creates_conventional_inputs_from_develop_merges
     assert subjects == [
         "fix: preserve uploaded csv values",
         "feat: add generated command preview",
+    ]
+    state_path = run_git(repo, "rev-parse", "--git-path", "command-ghostwriter-release-state.json").stdout.strip()
+    state = json.loads((repo / state_path).read_text(encoding="utf-8"))
+    assert state["baseHead"] == main_head
+    assert [source["subject"] for source in state["sources"]] == [
+        "feat: add generated command preview",
+        "fix: preserve uploaded csv values",
     ]
     assert "accepted 2 release title(s)" in result.stdout
 
@@ -331,6 +338,39 @@ def test_prepare_release_commits_skips_already_released_develop_commits(tmp_path
     assert "accepted 0 release title(s)" in second_result.stdout
 
 
+def test_prepare_release_commits_skips_sources_recorded_in_release_metadata(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    assert node is not None
+    repo = init_release_repo(tmp_path)
+    create_merge_commit(repo, "released-feature", "released.txt", "feat: release once")
+    source_sha = run_git(repo, "rev-parse", "develop").stdout.strip()
+    run_git(repo, "checkout", "main")
+    metadata = {
+        "releasedSources": [
+            {
+                "sourceSha": source_sha,
+                "version": "0.4.5",
+                "subject": "feat: release once",
+            }
+        ]
+    }
+    commit_file(repo, ".release-signals.json", json.dumps(metadata), "chore(release): 0.4.5 [skip ci]")
+    run_git(repo, "tag", "v0.4.5")
+    released_head = run_git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    result = subprocess.run(
+        [node, str(ROOT / "scripts" / "prepare_release_commits.mjs"), "develop"],
+        check=False,
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert run_git(repo, "rev-parse", "HEAD").stdout.strip() == released_head
+    assert "accepted 0 release title(s)" in result.stdout
+
+
 def test_prepare_release_commits_fails_when_develop_ref_is_missing(tmp_path: Path) -> None:
     node = shutil.which("node")
     assert node is not None
@@ -387,3 +427,61 @@ def test_apply_version_updates_package_json_and_lockfile(tmp_path: Path) -> None
     assert lock_data["version"] == "0.4.0"
     assert lock_data["packages"][""]["version"] == "0.4.0"
     assert lock_data["packages"]["node_modules/example"]["version"] == "1.0.0"
+
+
+def test_apply_version_restores_release_base_and_records_sources(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    assert node is not None
+    repo = init_release_repo(tmp_path)
+    run_git(repo, "checkout", "main")
+    (repo / "package.json").write_text(
+        json.dumps({"name": "command_ghostwriter", "version": "0.4.4"}),
+        encoding="utf-8",
+    )
+    (repo / "package-lock.json").write_text(
+        json.dumps(
+            {
+                "name": "command_ghostwriter",
+                "version": "0.4.4",
+                "packages": {"": {"name": "command_ghostwriter", "version": "0.4.4"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    run_git(repo, "add", "package.json", "package-lock.json")
+    run_git(repo, "commit", "-m", "chore: add package manifests")
+    create_merge_commit(repo, "feature-one", "feature.txt", "feat: add generated command preview")
+    main_head = run_git(repo, "rev-parse", "main").stdout.strip()
+    source_sha = run_git(repo, "rev-parse", "develop").stdout.strip()
+    run_git(repo, "checkout", "main")
+
+    prepare_result = subprocess.run(
+        [node, str(ROOT / "scripts" / "prepare_release_commits.mjs"), "develop"],
+        check=False,
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    assert prepare_result.returncode == 0, prepare_result.stderr
+    assert run_git(repo, "rev-parse", "HEAD").stdout.strip() != main_head
+    (repo / "CHANGELOG.md").write_text("## 0.5.0\n\n- generated notes\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [node, str(ROOT / "scripts" / "apply_version.mjs"), "0.5.0"],
+        check=False,
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert run_git(repo, "rev-parse", "HEAD").stdout.strip() == main_head
+    assert run_git(repo, "log", "--format=%s", f"{main_head}..HEAD").stdout.splitlines() == []
+    metadata = json.loads((repo / ".release-signals.json").read_text(encoding="utf-8"))
+    assert metadata["releasedSources"] == [
+        {
+            "sourceSha": source_sha,
+            "version": "0.5.0",
+            "subject": "feat: add generated command preview",
+        }
+    ]

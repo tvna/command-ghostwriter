@@ -30,10 +30,17 @@ first-parent titles that landed on `develop`. Before semantic-release runs,
 common GitHub merge commit bodies when needed, and creates local synthetic
 Conventional Commit inputs on top of the checked-out `main` branch.
 
-Each synthetic input records the source `develop` commit SHA with a
-`Release-Signal-Source:` marker. Later scheduled runs read those markers from
-the latest release tag and skip already released `develop` commits, so old
-titles do not trigger a new release every morning.
+Those synthetic commits are temporary analysis inputs only. During release
+preparation, `scripts/apply_version.mjs` restores `HEAD` to the original `main`
+checkout before `@semantic-release/git` creates the release commit. This keeps
+the pushed `main` history limited to the normal release commit instead of
+publishing the synthetic inputs.
+
+Each release records the source `develop` commit SHAs in `.release-signals.json`.
+Later scheduled runs read that metadata from the latest release tag and skip
+already released `develop` commits, so old titles do not trigger a new release
+every morning. Historical `Release-Signal-Source:` commit markers are still
+recognized for compatibility.
 
 The release uses Conventional Commit titles:
 
@@ -53,6 +60,11 @@ breaking-change-to-major behavior.
 Create a repository secret named `RELEASE_TOKEN` with permission to write
 contents and pull requests. The workflow falls back to `GITHUB_TOKEN`, but that
 token may not be able to push the release commit through branch protection.
+When `main` is protected by repository rules, the release actor must either be
+allowed to bypass the pull-request requirement and signature requirement, or it
+must create verified commits that satisfy those rules. The release workflow only
+pushes the generated release commit; synthetic `develop` signal commits are
+discarded before the push.
 
 Seed the baseline tag once after this release management change lands on `main`:
 
