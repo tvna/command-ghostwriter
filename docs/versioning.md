@@ -57,14 +57,52 @@ breaking-change-to-major behavior.
 
 ## Required Setup
 
-Create a repository secret named `RELEASE_TOKEN` with permission to write
-contents and pull requests. The workflow falls back to `GITHUB_TOKEN`, but that
-token may not be able to push the release commit through branch protection.
-When `main` is protected by repository rules, the release actor must either be
-allowed to bypass the pull-request requirement and signature requirement, or it
-must create verified commits that satisfy those rules. The release workflow only
-pushes the generated release commit; synthetic `develop` signal commits are
-discarded before the push.
+### Why the release needs a bypass actor
+
+`@semantic-release/git` pushes the generated release commit directly to `main`
+with `git push --tags HEAD:main`. When `main` carries a repository ruleset that
+requires pull requests and verified signatures, that direct push is rejected
+with `GH013` unless the pushing identity is on the ruleset **Bypass list**:
+
+- **Changes must be made through a pull request** can only be satisfied by a
+  bypass actor. Nothing in semantic-release turns its own direct push into a PR.
+- **Commits must have verified signatures** is also waived for a bypass actor,
+  because a ruleset bypass waives every rule in that ruleset at once. Signing the
+  commit alone does not help while the pull-request rule is still enforced.
+
+The default `GITHUB_TOKEN` runs as `github-actions[bot]`, which is never a bypass
+actor, so a release run without `RELEASE_TOKEN` fails at the final push. The
+workflow only pushes the single generated release commit; the synthetic
+`develop` signal commits are discarded before the push.
+
+### Configure `RELEASE_TOKEN` as a bypass actor
+
+Pick one identity and add it to the `main` ruleset Bypass list
+(Settings -> Rules -> Rulesets -> the `main` ruleset -> Bypass list):
+
+- **GitHub App (preferred, permanent).** Create/install a repo-scoped App with
+  Repository permissions `Contents: Read and write` and `Pull requests: Read and
+  write`, add the App to the Bypass list, and store an installation token as the
+  `RELEASE_TOKEN` secret. An App is not tied to a personal account and is the
+  smallest durable bypass surface.
+- **Fine-grained PAT (acceptable temporary workaround).** Create a fine-grained
+  PAT scoped to this repository only, with `Contents: Read and write` and
+  `Pull requests: Read and write`, a short expiry (<= 90 days), then add its owner
+  to the Bypass list. Rotate before expiry and replace with the App when ready.
+
+Store the token as the repository secret `RELEASE_TOKEN`
+(Settings -> Secrets and variables -> Actions). Never paste the token value into
+issues, PRs, logs, or commits.
+
+Grant only the two write permissions above; do not widen scope to chase the
+push failure. A broad or long-lived bypass token is the main security risk here.
+
+### Verify the handoff without exposing the secret
+
+Run `Release` via `workflow_dispatch` from `main` and confirm the
+`Run semantic-release` step reaches the push without a `GH013` rejection. A
+missing or non-bypass token surfaces as the `remote rejected ... repository rule
+violations` error, not as a leaked value, so the failure mode is safe to inspect.
 
 Seed the baseline tag once after this release management change lands on `main`:
 
