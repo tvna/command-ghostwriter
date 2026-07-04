@@ -19,12 +19,65 @@ def load_release_config() -> dict[str, Any]:
         return json.load(config_file)
 
 
+def run_git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def commit_file(repo: Path, filename: str, content: str, message: str, *extra_message_args: str) -> None:
+    target = repo / filename
+    target.write_text(content, encoding="utf-8")
+    run_git(repo, "add", filename)
+    run_git(repo, "commit", "-m", message, *extra_message_args)
+
+
+def init_release_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run_git(repo, "init", "-b", "main")
+    run_git(repo, "config", "user.email", "release-test@example.com")
+    run_git(repo, "config", "user.name", "Release Test")
+    run_git(repo, "config", "commit.gpgsign", "false")
+    commit_file(repo, "README.md", "baseline\n", "chore: baseline")
+    run_git(repo, "tag", "v0.4.4")
+    run_git(repo, "checkout", "-b", "develop")
+    return repo
+
+
+def create_merge_commit(repo: Path, branch: str, filename: str, message: str) -> None:
+    run_git(repo, "checkout", "-b", branch, "main")
+    commit_file(repo, filename, f"{message}\n", message)
+    run_git(repo, "checkout", "develop")
+    run_git(repo, "merge", "--no-ff", branch, "-m", message)
+
+
+def create_github_merge_commit(repo: Path, branch: str, filename: str, pr_number: int, title: str) -> None:
+    run_git(repo, "checkout", "-b", branch, "main")
+    commit_file(repo, filename, f"{title}\n", title)
+    run_git(repo, "checkout", "develop")
+    run_git(
+        repo,
+        "merge",
+        "--no-ff",
+        branch,
+        "-m",
+        f"Merge pull request #{pr_number} from test/{branch}",
+        "-m",
+        title,
+    )
+
+
 def test_release_workflow_runs_on_schedule_and_manual_dispatch_only() -> None:
     workflow = load_workflow()
 
     assert workflow["name"] == "Release"
     assert set(workflow[True]) == {"schedule", "workflow_dispatch"}
-    assert workflow[True]["schedule"] == [{"cron": "17 1 * * 1"}]
+    assert workflow[True]["schedule"] == [{"cron": "0 21 * * *"}]
     assert "push" not in workflow[True]
     assert "pull_request" not in workflow[True]
 
@@ -44,6 +97,19 @@ def test_release_workflow_requires_baseline_tag_and_release_token_fallback() -> 
     baseline = next(step for step in steps if step["name"] == "Require a baseline tag")
     assert "git tag --list 'v[0-9]*.[0-9]*.[0-9]*'" in baseline["run"]
     assert "silently releasing 1.0.0" in baseline["run"]
+
+
+def test_release_workflow_prepares_develop_merge_title_commits() -> None:
+    workflow = load_workflow()
+    steps = workflow["jobs"]["release"]["steps"]
+
+    prepare = next(step for step in steps if step["name"] == "Prepare release commits from develop")
+    assert "git fetch origin develop:refs/remotes/origin/develop --tags" in prepare["run"]
+    assert "node scripts/prepare_release_commits.mjs origin/develop" in prepare["run"]
+
+    run_release_index = next(index for index, step in enumerate(steps) if step["name"] == "Run semantic-release")
+    prepare_index = steps.index(prepare)
+    assert prepare_index < run_release_index
 
 
 def test_release_workflow_invokes_semantic_release_with_required_plugins() -> None:
@@ -81,6 +147,204 @@ def test_release_config_updates_package_manifest_and_changelog() -> None:
             "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}",
         },
     ] in config["plugins"]
+
+
+def test_prepare_release_commits_creates_conventional_inputs_from_develop_merges(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    assert node is not None
+    repo = init_release_repo(tmp_path)
+    create_merge_commit(repo, "feature-one", "feature.txt", "feat: add generated command preview")
+    create_merge_commit(repo, "bugfix-one", "bugfix.txt", "fix: preserve uploaded csv values")
+    main_head = run_git(repo, "rev-parse", "main").stdout.strip()
+    run_git(repo, "checkout", "main")
+
+    result = subprocess.run(
+        [node, str(ROOT / "scripts" / "prepare_release_commits.mjs"), "develop"],
+        check=False,
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    subjects = run_git(repo, "log", "--format=%s", f"{main_head}..HEAD").stdout.splitlines()
+    assert subjects == [
+        "fix: preserve uploaded csv values",
+        "feat: add generated command preview",
+    ]
+    assert "accepted 2 release title(s)" in result.stdout
+
+
+def test_prepare_release_commits_ignores_non_release_titles(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    assert node is not None
+    repo = init_release_repo(tmp_path)
+    create_merge_commit(repo, "docs-only", "docs.txt", "docs: clarify release setup")
+    main_head = run_git(repo, "rev-parse", "main").stdout.strip()
+    run_git(repo, "checkout", "main")
+
+    result = subprocess.run(
+        [node, str(ROOT / "scripts" / "prepare_release_commits.mjs"), "develop"],
+        check=False,
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert run_git(repo, "rev-parse", "HEAD").stdout.strip() == main_head
+    assert "accepted 0 release title(s)" in result.stdout
+
+
+def test_prepare_release_commits_accepts_breaking_change_titles(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    assert node is not None
+    repo = init_release_repo(tmp_path)
+    create_merge_commit(repo, "breaking-one", "breaking.txt", "refactor!: simplify template API")
+    main_head = run_git(repo, "rev-parse", "main").stdout.strip()
+    run_git(repo, "checkout", "main")
+
+    result = subprocess.run(
+        [node, str(ROOT / "scripts" / "prepare_release_commits.mjs"), "develop"],
+        check=False,
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    subjects = run_git(repo, "log", "--format=%s", f"{main_head}..HEAD").stdout.splitlines()
+    assert subjects == ["refactor!: simplify template API"]
+    assert "accepted 1 release title(s)" in result.stdout
+
+
+def test_prepare_release_commits_unwraps_github_merge_commit_body_titles(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    assert node is not None
+    repo = init_release_repo(tmp_path)
+    create_github_merge_commit(repo, "wrapped-feature", "wrapped.txt", 123, "feat: add wrapped PR title")
+    main_head = run_git(repo, "rev-parse", "main").stdout.strip()
+    run_git(repo, "checkout", "main")
+
+    result = subprocess.run(
+        [node, str(ROOT / "scripts" / "prepare_release_commits.mjs"), "develop"],
+        check=False,
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    subjects = run_git(repo, "log", "--format=%s", f"{main_head}..HEAD").stdout.splitlines()
+    assert subjects == ["feat: add wrapped PR title"]
+    assert "accepted 1 release title(s)" in result.stdout
+
+
+def test_prepare_release_commits_accepts_first_parent_squash_titles(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    assert node is not None
+    repo = init_release_repo(tmp_path)
+    commit_file(repo, "squash.txt", "squash\n", "fix: accept squash merge title")
+    main_head = run_git(repo, "rev-parse", "main").stdout.strip()
+    run_git(repo, "checkout", "main")
+
+    result = subprocess.run(
+        [node, str(ROOT / "scripts" / "prepare_release_commits.mjs"), "develop"],
+        check=False,
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    subjects = run_git(repo, "log", "--format=%s", f"{main_head}..HEAD").stdout.splitlines()
+    assert subjects == ["fix: accept squash merge title"]
+    assert "accepted 1 release title(s)" in result.stdout
+
+
+def test_prepare_release_commits_preserves_breaking_change_footer(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    assert node is not None
+    repo = init_release_repo(tmp_path)
+    commit_file(
+        repo,
+        "breaking-footer.txt",
+        "breaking footer\n",
+        "refactor: simplify template API",
+        "-m",
+        "BREAKING CHANGE: template filters are renamed",
+    )
+    main_head = run_git(repo, "rev-parse", "main").stdout.strip()
+    run_git(repo, "checkout", "main")
+
+    result = subprocess.run(
+        [node, str(ROOT / "scripts" / "prepare_release_commits.mjs"), "develop"],
+        check=False,
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    subjects = run_git(repo, "log", "--format=%s", f"{main_head}..HEAD").stdout.splitlines()
+    body = run_git(repo, "log", "--format=%b", f"{main_head}..HEAD").stdout
+    assert subjects == ["refactor: simplify template API"]
+    assert "BREAKING CHANGE: template filters are renamed" in body
+    assert "accepted 1 release title(s)" in result.stdout
+
+
+def test_prepare_release_commits_skips_already_released_develop_commits(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    assert node is not None
+    repo = init_release_repo(tmp_path)
+    create_merge_commit(repo, "released-feature", "released.txt", "feat: release once")
+    main_head = run_git(repo, "rev-parse", "main").stdout.strip()
+    run_git(repo, "checkout", "main")
+
+    first_result = subprocess.run(
+        [node, str(ROOT / "scripts" / "prepare_release_commits.mjs"), "develop"],
+        check=False,
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    assert first_result.returncode == 0, first_result.stderr
+    first_subjects = run_git(repo, "log", "--format=%s", f"{main_head}..HEAD").stdout.splitlines()
+    assert first_subjects == ["feat: release once"]
+    first_body = run_git(repo, "log", "--format=%b", "-1").stdout
+    assert "Release-Signal-Source:" in first_body
+
+    run_git(repo, "tag", "v0.4.5")
+    released_head = run_git(repo, "rev-parse", "HEAD").stdout.strip()
+    second_result = subprocess.run(
+        [node, str(ROOT / "scripts" / "prepare_release_commits.mjs"), "develop"],
+        check=False,
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert second_result.returncode == 0, second_result.stderr
+    assert run_git(repo, "rev-parse", "HEAD").stdout.strip() == released_head
+    assert "accepted 0 release title(s)" in second_result.stdout
+
+
+def test_prepare_release_commits_fails_when_develop_ref_is_missing(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    assert node is not None
+    repo = init_release_repo(tmp_path)
+    run_git(repo, "checkout", "main")
+
+    result = subprocess.run(
+        [node, str(ROOT / "scripts" / "prepare_release_commits.mjs"), "origin/develop"],
+        check=False,
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "develop ref not found: origin/develop" in result.stderr
 
 
 def test_apply_version_updates_package_json_and_lockfile(tmp_path: Path) -> None:

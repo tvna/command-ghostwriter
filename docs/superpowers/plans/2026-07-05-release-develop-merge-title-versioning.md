@@ -4,7 +4,7 @@
 
 **Goal:** Make the scheduled Release workflow run at 06:00 JST and derive semantic-release version bumps from release-worthy merge titles on `develop` while publishing from `main`.
 
-**Architecture:** Keep semantic-release as the release engine on `main`. Add a focused Node script that inspects `origin/develop` since the latest `vX.Y.Z` tag, creates local synthetic Conventional Commit inputs on top of the checked-out `main`, and lets the existing semantic-release plugins compute and publish the release.
+**Architecture:** Keep semantic-release as the release engine on `main`. Add a focused Node script that inspects `origin/develop`, skips source commits already recorded in the latest tagged release history, creates local synthetic Conventional Commit inputs on top of the checked-out `main`, and lets the existing semantic-release plugins compute and publish the release.
 
 **Tech Stack:** GitHub Actions YAML, Node.js ESM scripts using `node:child_process`, Python pytest workflow tests, existing semantic-release configuration.
 
@@ -13,7 +13,7 @@
 ## File Map
 
 - Create: `scripts/prepare_release_commits.mjs`
-  - Finds the latest release tag, extracts eligible `develop` merge titles, and creates local synthetic release-signal commits.
+  - Finds the latest release tag, extracts eligible `develop` titles, skips already released source SHAs, and creates local synthetic release-signal commits.
 - Modify: `tests/workflow/test_release_management.py`
   - Adds workflow assertions and temporary git repository tests for the script.
 - Modify: `.github/workflows/release.yml`
@@ -24,6 +24,7 @@
 ## Task 1: Workflow Contract Tests
 
 **Files:**
+
 - Modify: `tests/workflow/test_release_management.py`
 
 - [ ] **Step 1: Write the failing workflow test updates**
@@ -74,6 +75,7 @@ Do not commit yet. Task 1 is red-only and should be made green by Task 3.
 ## Task 2: Release Preparation Script Tests
 
 **Files:**
+
 - Modify: `tests/workflow/test_release_management.py`
 - Create: `scripts/prepare_release_commits.mjs`
 
@@ -211,6 +213,7 @@ Do not commit yet. Task 2 is red-only and should be made green by Task 3.
 ## Task 3: Implement Release Preparation
 
 **Files:**
+
 - Create: `scripts/prepare_release_commits.mjs`
 - Modify: `.github/workflows/release.yml`
 
@@ -252,9 +255,17 @@ function ensureRef(ref) {
 
 function latestReleaseTag() {
   try {
-    return git(["describe", "--tags", "--match", "v[0-9]*.[0-9]*.[0-9]*", "--abbrev=0"]);
+    return git([
+      "describe",
+      "--tags",
+      "--match",
+      "v[0-9]*.[0-9]*.[0-9]*",
+      "--abbrev=0",
+    ]);
   } catch {
-    fail("No v-prefixed semver tag found. Seed the release baseline before preparing release commits.");
+    fail(
+      "No v-prefixed semver tag found. Seed the release baseline before preparing release commits.",
+    );
   }
 }
 
@@ -274,23 +285,33 @@ function mergeTitlesSince(tag, ref) {
   if (!output) {
     return [];
   }
-  return output.split("\n").map((line) => line.trim()).filter(Boolean);
+  return output
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
 }
 
 function createSyntheticCommit(subject) {
   const tree = git(["write-tree"]);
   const parent = git(["rev-parse", "HEAD"]);
-  const commit = execFileSync("git", ["commit-tree", tree, "-p", parent, "-m", subject], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-  }).trim();
+  const commit = execFileSync(
+    "git",
+    ["commit-tree", tree, "-p", parent, "-m", subject],
+    {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  ).trim();
   git(["reset", "--soft", commit]);
 }
 
 ensureRef(developRef);
 const tag = latestReleaseTag();
 const titles = mergeTitlesSince(tag, developRef);
-const releaseTitles = titles.map(normalizeTitle).filter((title) => title !== null).reverse();
+const releaseTitles = titles
+  .map(normalizeTitle)
+  .filter((title) => title !== null)
+  .reverse();
 
 for (const title of releaseTitles) {
   createSyntheticCommit(title);
@@ -318,10 +339,10 @@ on:
 Add this step after `Require a baseline tag` and before `Run semantic-release`:
 
 ```yaml
-      - name: Prepare release commits from develop
-        run: |
-          git fetch origin develop:refs/remotes/origin/develop --tags
-          node scripts/prepare_release_commits.mjs origin/develop
+- name: Prepare release commits from develop
+  run: |
+    git fetch origin develop:refs/remotes/origin/develop --tags
+    node scripts/prepare_release_commits.mjs origin/develop
 ```
 
 - [ ] **Step 3: Run the focused workflow and script tests**
@@ -348,6 +369,7 @@ Expected: commit succeeds.
 ## Task 4: Documentation
 
 **Files:**
+
 - Modify: `docs/versioning.md`
 
 - [ ] **Step 1: Update release policy documentation**
@@ -360,11 +382,16 @@ Replace the "Automated Releases" section with:
 `.github/workflows/release.yml` runs semantic-release every day at 06:00 JST and
 via `workflow_dispatch`. Plain pushes to `main` do not publish releases.
 
-Release artifacts remain on `main`, but the release signal comes from merge
-titles that landed on `develop` since the latest `vX.Y.Z` tag. Before
-semantic-release runs, `scripts/prepare_release_commits.mjs` converts eligible
-`develop` merge titles into local Conventional Commit inputs on top of the
-checked-out `main` branch.
+Release artifacts remain on `main`, but the release signal comes from
+first-parent titles that landed on `develop`. Before semantic-release runs,
+`scripts/prepare_release_commits.mjs` reads the `develop` history, unwraps
+common GitHub merge commit bodies when needed, and creates local synthetic
+Conventional Commit inputs on top of the checked-out `main` branch.
+
+Each synthetic input records the source `develop` commit SHA with a
+`Release-Signal-Source:` marker. Later scheduled runs read those markers from
+the latest release tag and skip already released `develop` commits, so old
+titles do not trigger a new release every morning.
 
 The release uses Conventional Commits in merge titles:
 
@@ -404,6 +431,7 @@ Expected: commit succeeds.
 ## Task 5: Final Verification
 
 **Files:**
+
 - Read only unless failures require fixes.
 
 - [ ] **Step 1: Run the full workflow release-management test file**
@@ -439,3 +467,13 @@ Expected: only unrelated pre-existing untracked files remain, such as `.worktree
 - [ ] **Step 4: Summarize completion**
 
 Report the commit hashes, tests run, and any residual risk. Do not claim full release behavior was exercised unless semantic-release was actually run against a test repository.
+
+## Plan Drift Notes
+
+During Task 3 review, the implementation plan's initial `tag..develop` boundary
+was found to be insufficient because release tags are created on `main`, not on
+`develop`. The implemented script records each accepted source commit SHA in the
+synthetic commit body as `Release-Signal-Source: <sha>` and skips source SHAs
+already present in the latest tagged release history. The tests now cover this
+repeat-run case along with GitHub merge body unwrapping, squash/rebase-style
+subjects, and `BREAKING CHANGE` footers.

@@ -15,21 +15,34 @@ The git tag is the source of truth for releases. `package.json` and
 `package-lock.json` are updated automatically during release preparation by
 `scripts/apply_version.mjs`, then committed with the generated `CHANGELOG.md`.
 
-Do not hand-edit the package version for routine releases. Land conventional
-commits on `main`; the release workflow computes the next version from the
-commits since the latest `vX.Y.Z` tag.
+Do not hand-edit the package version for routine releases. Land release-worthy
+titles on `develop`; the release workflow converts those titles into local
+semantic-release input commits while publishing the release from `main`.
 
 ## Automated Releases
 
-`.github/workflows/release.yml` runs semantic-release on a weekly schedule and
+`.github/workflows/release.yml` runs semantic-release every day at 06:00 JST and
 via `workflow_dispatch`. Plain pushes to `main` do not publish releases.
 
-The release uses Conventional Commits:
+Release artifacts remain on `main`, but the release signal comes from
+first-parent titles that landed on `develop`. Before semantic-release runs,
+`scripts/prepare_release_commits.mjs` reads the `develop` history, unwraps
+common GitHub merge commit bodies when needed, and creates local synthetic
+Conventional Commit inputs on top of the checked-out `main` branch.
+
+Each synthetic input records the source `develop` commit SHA with a
+`Release-Signal-Source:` marker. Later scheduled runs read those markers from
+the latest release tag and skip already released `develop` commits, so old
+titles do not trigger a new release every morning.
+
+The release uses Conventional Commit titles:
 
 - `fix:` creates a patch release.
 - `feat:` creates a minor release.
 - Breaking changes create a minor release while the project remains below
   `1.0.0`.
+- Non-release titles such as `docs:` or `chore:` are ignored for version bump
+  purposes.
 
 When the project is ready for `1.0.0`, remove the breaking-change override from
 `.releaserc.json` so semantic-release can return to the default

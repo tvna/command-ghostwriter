@@ -39,9 +39,10 @@ titles into a temporary commit range semantic-release can analyze.
 
 The workflow stays anchored on `main`. After checkout, it fetches the full
 `develop` history and tags. A preparation step finds the latest `vX.Y.Z` tag,
-reads merge commits reachable from `origin/develop` after that tag, extracts the
-merge titles, and creates release-signal commits on a temporary local branch.
-Those commits use Conventional Commit subjects, so the existing
+reads first-parent commits reachable from `origin/develop`, skips any source SHA
+already recorded in the latest tagged release history, extracts release-worthy
+titles, and creates release-signal commits on a temporary local branch. Those
+commits use Conventional Commit subjects, so the existing
 `@semantic-release/commit-analyzer` and release notes generator can compute the
 next version without replacing the release engine.
 
@@ -56,12 +57,18 @@ history and semantic-release's expected input.
 3. The workflow fetches `origin/develop` and tags.
 4. The baseline tag guard fails if no `v`-prefixed semver tag exists.
 5. The preparation script locates the latest release tag.
-6. The script reads merge commit subjects from `origin/develop` after that tag.
-7. Eligible titles are normalized into Conventional Commit subjects.
-8. The script creates local synthetic commits on top of `main`.
-9. semantic-release analyzes those local commits, computes the next version, and
-   runs the existing changelog, version update, git, and GitHub release plugins.
-10. Only semantic-release's normal release commit and tag are pushed to `main`.
+6. The script reads `Release-Signal-Source:` markers from the latest tagged
+   release history on `main`.
+7. The script reads first-parent messages from `origin/develop`, including merge
+   commit bodies and squash/rebase-style subjects.
+8. Already released source SHAs are skipped.
+9. Eligible titles are normalized into Conventional Commit subjects.
+10. The script creates local synthetic commits on top of `main`; each synthetic
+    commit records its source `develop` SHA with `Release-Signal-Source:`.
+11. semantic-release analyzes those local commits, computes the next version, and
+    runs the existing changelog, version update, git, and GitHub release plugins.
+12. Only semantic-release's normal release commit, its synthetic input ancestors,
+    and tag are pushed to `main`.
 
 ## Title Selection Rules
 
@@ -102,6 +109,7 @@ found, semantic-release should produce no release.
 - Outputs:
   - local synthetic Conventional Commit commits when release-worthy develop
     merge titles exist.
+  - a `Release-Signal-Source:` marker in each synthetic commit body.
   - no commits when no release-worthy titles exist.
 - Failure behavior:
   - fail loudly if `origin/develop` is missing.
@@ -113,7 +121,8 @@ Tests:
 - Workflow test asserts the 06:00 JST cron.
 - Workflow test asserts `develop` is fetched/prepared before semantic-release.
 - Script tests use a temporary git repository to cover patch, minor, breaking,
-  ignored title, and missing develop-ref behavior.
+  ignored title, GitHub merge body unwrapping, squash/rebase-style titles,
+  already released source skipping, and missing develop-ref behavior.
 - Existing `apply_version` tests remain unchanged.
 
 Docs:
@@ -135,12 +144,18 @@ Docs:
 - Risk: non-Conventional titles are silently ignored.
   Mitigation: the script prints a summary of accepted and ignored titles without
   exposing secrets.
+- Risk: a `main` release tag is not an ancestor of `develop`, so a plain
+  `tag..develop` range can include previously released `develop` commits again.
+  Mitigation: synthetic commits record `Release-Signal-Source:` markers and the
+  preparation step skips source SHAs already present in the latest tagged release
+  history.
 
 ## Acceptance Criteria
 
 - `Release` runs daily at 06:00 JST and remains manually dispatchable.
 - The workflow remains release-only: no push or pull request trigger.
-- The release job analyzes `develop` merge titles since the latest release tag.
+- The release job analyzes unreleased `develop` titles and skips source commits
+  already recorded in the latest tagged release history.
 - semantic-release still owns version calculation, changelog generation, package
   version updates, release commits, tags, and GitHub Releases.
 - Tests cover workflow schedule, develop preparation, and merge-title conversion
