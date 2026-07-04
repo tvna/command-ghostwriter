@@ -40,6 +40,34 @@
             "async": false
           }
         ]
+      },
+      {
+        "matcher": "startup|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" session-start",
+            "async": false
+          }
+        ],
+        "_apm_source": "superpowers"
+      },
+      {
+        "matcher": "startup|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" session-start.sh",
+            "async": false
+          }
+        ],
+        "_apm_source": "clairvoyance"
+      }
+    ],
+    "sessionStart": [
+      {
+        "command": "./hooks/run-hook.cmd session-start",
+        "_apm_source": "superpowers"
       }
     ]
   }
