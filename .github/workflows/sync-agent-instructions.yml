@@ -33,10 +33,18 @@
 # - apm CLI 本体のバージョン (0.12.1) は verify-superpowers.yml の
 #   upstream-drift ジョブと同じ値を使う。apm 本体のバージョンアップは
 #   別スコープ (#446)。
+# - PR は develop へ向ける (base: develop)。dependabot (4エコシステム全て
+#   target-branch: develop) と揃え、develop で進行中の作業に指示・skill更新を
+#   即座に反映するため。main は develop→main のバージョンゲート付きリリース
+#   昇格時にのみ追従する (Issue #518)。schedule/workflow_dispatch トリガーの
+#   既定checkoutは default branch (main) になるため、checkout に明示的な
+#   `ref: develop` が必須 (これがないと diff/commit の基準ブランチが main の
+#   ままずれる)。
 #
 # 関連 (Reference):
 # -----------------
 # - Issue #427, #467 (CLAUDE.md 同期), #480 (apm スキル上流追従), #446 (apm バージョンアップ, 別スコープ)
+# - Issue #518 (PR ターゲットを develop へ変更)
 # - 設計書 docs/superpowers/specs/2026-06-13-claude-md-master-sync-design.md
 # - 設計書 docs/superpowers/specs/2026-07-02-sync-apm-skills-upstream-update-design.md
 # ============================================================
@@ -71,6 +79,8 @@ jobs:
 
       - name: Check out this repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: develop
 
       - name: Check out master CLAUDE.md
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -98,7 +108,7 @@ jobs:
         with:
           token: ${{ steps.app-token.outputs.token }}
           sign-commits: true
-          base: main
+          base: develop
           branch: chore/sync-claude-md
           delete-branch: true
           commit-message: "chore: sync CLAUDE.md from tvna/claude-md (#427)"
@@ -133,6 +143,8 @@ jobs:
 
       - name: Check out this repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: develop
 
       - name: Detect upstream apm dependency updates
         id: detect
@@ -213,7 +225,7 @@ jobs:
         with:
           token: ${{ steps.app-token.outputs.token }}
           sign-commits: true
-          base: main
+          base: develop
           branch: chore/sync-apm-skills
           delete-branch: true
           commit-message: "chore: sync apm skill dependency pins from upstream (#480)"
