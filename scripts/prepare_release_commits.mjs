@@ -1,6 +1,9 @@
 import { execFileSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
 
 const developRef = process.argv[2] ?? "origin/develop";
+const releaseMetadataPath = ".release-signals.json";
+const releaseStateGitPath = "command-ghostwriter-release-state.json";
 const conventionalSubjectPattern = /^[a-z][a-z0-9-]*(?:\([^)]+\))?!?: .+$/;
 const releaseSubjectPattern =
   /^(?:(?:feat|fix)(?:\([^)]+\))?!?: .+|[a-z][a-z0-9-]*(?:\([^)]+\))?!: .+)$/;
@@ -20,6 +23,14 @@ function gitQuiet(args) {
     return true;
   } catch {
     return false;
+  }
+}
+
+function gitOptional(args) {
+  try {
+    return git(args);
+  } catch {
+    return null;
   }
 }
 
@@ -97,8 +108,44 @@ function firstParentCommitsSince(tag, ref) {
 
 function releasedSourceShas(tag) {
   const output = git(["log", "--format=%B", tag]);
-  return new Set(
+  const sources = new Set(
     [...output.matchAll(releaseSignalSourcePattern)].map((match) => match[1]),
+  );
+  const metadata = gitOptional(["show", `${tag}:${releaseMetadataPath}`]);
+
+  if (metadata) {
+    try {
+      const parsed = JSON.parse(metadata);
+      for (const entry of parsed.releasedSources ?? []) {
+        if (/^[0-9a-f]{40}$/.test(entry.sourceSha ?? "")) {
+          sources.add(entry.sourceSha);
+        }
+      }
+    } catch {
+      // Ignore malformed historical metadata and fall back to commit trailers.
+    }
+  }
+
+  return sources;
+}
+
+function writeReleaseState(baseHead, tag, releaseEntries) {
+  const statePath = git(["rev-parse", "--git-path", releaseStateGitPath]);
+  writeFileSync(
+    statePath,
+    `${JSON.stringify(
+      {
+        baseHead,
+        latestTag: tag,
+        sources: releaseEntries.map((entry) => ({
+          sourceSha: entry.sourceSha,
+          subject: entry.subject,
+        })),
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
   );
 }
 
@@ -137,6 +184,7 @@ function createSyntheticCommit(entry) {
 
 ensureRef(developRef);
 const tag = latestReleaseTag();
+const baseHead = git(["rev-parse", "HEAD"]);
 const commits = firstParentCommitsSince(tag, developRef);
 const releasedSources = releasedSourceShas(tag);
 const releaseEntries = commits
@@ -144,6 +192,8 @@ const releaseEntries = commits
   .map(releaseEntryFromCommit)
   .filter((entry) => entry !== null)
   .reverse();
+
+writeReleaseState(baseHead, tag, releaseEntries);
 
 for (const entry of releaseEntries) {
   createSyntheticCommit(entry);
