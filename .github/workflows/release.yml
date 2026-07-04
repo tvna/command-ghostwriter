@@ -3,14 +3,14 @@ name: Release
 # Semantic versioning via semantic-release; the git tag is the single source of
 # truth. The full release flow and required setup live in docs/versioning.md.
 #
-# Cadence is intentional, not per-merge: a weekly schedule cuts the release, and
-# workflow_dispatch allows an ad-hoc release between weeks. Plain pushes to main
-# never release.
+# Cadence is intentional, not per-merge: a daily schedule cuts the release, and
+# workflow_dispatch allows an ad-hoc release between scheduled runs. Plain
+# pushes to main never release.
 
 on:
   schedule:
-    # Mondays at 01:17 UTC (~10:17 JST). Off-minute by GitHub's own guidance.
-    - cron: "17 1 * * 1"
+    # Daily at 21:00 UTC (06:00 JST). Off-hour to avoid the top-of-hour surge.
+    - cron: "0 21 * * *"
   workflow_dispatch:
 
 permissions:
@@ -54,6 +54,11 @@ jobs:
             echo "::error::No v-prefixed semver tag found. Seed the 0.x baseline first: git tag v0.3.6 && git push origin v0.3.6; refusing to risk silently releasing 1.0.0"
             exit 1
           fi
+
+      - name: Prepare release commits from develop
+        run: |
+          git fetch origin develop:refs/remotes/origin/develop --tags
+          node scripts/prepare_release_commits.mjs origin/develop
 
       - name: Run semantic-release
         env:
