@@ -20,8 +20,10 @@ def load_release_config() -> dict[str, Any]:
 
 
 def run_git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    git = shutil.which("git")
+    assert git is not None
     return subprocess.run(
-        ["git", *args],
+        [git, *args],
         cwd=repo,
         check=True,
         capture_output=True,
