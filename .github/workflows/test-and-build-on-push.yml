@@ -321,6 +321,23 @@ jobs:
           echo "Ensure Labels Success: ${{ steps.ensure-labels.outputs.success }}"
           echo "Show commit log: $(cat .commit-log.txt)"
 
+      # PR は GITHUB_TOKEN ではなく GitHub App トークンで作成する。GITHUB_TOKEN で
+      # 作った PR は on: pull_request を発火させず必須CIが pending のまま blocked に
+      # 陥るため、App bot 名義で作成して下流 CI を発火させる。上流 tvna/claude-md と
+      # 同じ App を用いる (Issue #511)。
+      - name: Mint GitHub App token
+        id: app-token
+        if: |
+          steps.compare-versions.outputs.comparison-result == '>' &&
+          steps.check-pr.outputs.success == 'true' &&
+          steps.check-pr.outputs.pr_exists == 'false' &&
+          steps.check-pr.outputs.title_exists == 'false' &&
+          steps.ensure-labels.outputs.success == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.AUTOMATION_APP_ID }}
+          private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
+
       - name: Create Pull Request using github-script
         id: create-pr-script
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
@@ -331,7 +348,7 @@ jobs:
           steps.check-pr.outputs.title_exists == 'false' &&
           steps.ensure-labels.outputs.success == 'true'
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ steps.app-token.outputs.token }}
           script: |
             const fs = require('fs');
             const developVersion = "${{ needs.get-develop-npm-version.outputs.version }}";

@@ -16,13 +16,16 @@
 # -----------------------
 # - submodule + symlink は web 環境の fresh clone で壊れる (submodule は親clone
 #   に含まれない) ため、CLAUDE.md はコミット済み実ファイルとして同期する。
-# - CLAUDE.md 変更をトリガにする CI は無いため GITHUB_TOKEN のみで足りる (PAT 不要)。
-# - リポジトリ設定で "Allow GitHub Actions to create and approve pull requests"
-#   を有効化しておくこと。
+# - PR は GITHUB_TOKEN ではなく GitHub App トークン (actions/create-github-app-token)
+#   で作成する。GITHUB_TOKEN で作った PR は on: pull_request を発火させず必須CIが
+#   永久 pending となり `mergeable_state: blocked` に陥る (PR #510)。App トークンなら
+#   App bot 名義の Verified コミットとなり、下流 CI も発火する。上流 tvna/claude-md と
+#   同じ方式・同じ GitHub App を用いる (Issue #511)。
+# - secret `AUTOMATION_APP_ID` / `AUTOMATION_APP_PRIVATE_KEY` に上流と同じ App の
+#   App ID / PEM 秘密鍵を登録し、App を本リポジトリにインストールしておくこと
+#   (権限: Contents=write, Pull requests=write, Issues=write)。
 # - create-pull-request の sign-commits: true により、ローカル git commit ではなく
-#   GitHub API 経由でコミットを作成し、GITHUB_TOKEN のままで Verified 署名済みコミット
-#   とする (新規 GitHub App / secret は不要)。未設定だと署名必須ブランチ保護で
-#   PR が `mergeable_state: blocked` のままマージ不能になる (PR #464 で発生)。
+#   GitHub API 経由でコミットを作成し、App トークンで Verified 署名済みコミットとする。
 # - sync-apm-skills は上流の既定ブランチ最新コミットを REST API やフル checkout
 #   ではなく `git ls-remote <url> HEAD` で取得する (GitHub API のレート制限を回避)。
 # - apm.yml の2依存が同時に更新されていても PR は1本にまとめる
@@ -83,10 +86,17 @@ jobs:
           cp .upstream-claude-md/CLAUDE.md CLAUDE.md
           rm -rf .upstream-claude-md
 
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.AUTOMATION_APP_ID }}
+          private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
+
       - name: Create or update pull request
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
           sign-commits: true
           base: main
           branch: chore/sync-claude-md
@@ -189,11 +199,19 @@ jobs:
         if: steps.detect.outputs.changed == '1'
         run: python3 scripts/gen_superpowers_manifest.py
 
+      - name: Mint GitHub App token
+        id: app-token
+        if: steps.detect.outputs.changed == '1'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.AUTOMATION_APP_ID }}
+          private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
+
       - name: Create or update pull request
         if: steps.detect.outputs.changed == '1'
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
           sign-commits: true
           base: main
           branch: chore/sync-apm-skills
