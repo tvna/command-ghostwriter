@@ -82,17 +82,26 @@ Pick one identity and add it to the `main` ruleset Bypass list
 
 - **GitHub App (preferred, permanent).** Create/install a repo-scoped App with
   Repository permissions `Contents: Read and write` and `Pull requests: Read and
-  write`, add the App to the Bypass list, and store an installation token as the
-  `RELEASE_TOKEN` secret. An App is not tied to a personal account and is the
-  smallest durable bypass surface.
+  write`, and add the App to the Bypass list. Do NOT store a raw installation
+  token: GitHub App installation access tokens expire after about one hour, so a
+  static secret would break the daily scheduled release as soon as it ages out.
+  Instead store the App's `app-id` and `private-key` as secrets and mint a fresh
+  installation token inside the workflow before Checkout (for example with
+  `actions/create-github-app-token`), then pass its output as the Checkout token
+  and the `GITHUB_TOKEN` env. An App is not tied to a personal account and is the
+  smallest durable bypass surface. The workflow as written consumes a single
+  static `RELEASE_TOKEN` secret, which fits the PAT path below directly; choosing
+  the App path additionally requires adding that token-minting step.
 - **Fine-grained PAT (acceptable temporary workaround).** Create a fine-grained
   PAT scoped to this repository only, with `Contents: Read and write` and
   `Pull requests: Read and write`, a short expiry (<= 90 days), then add its owner
   to the Bypass list. Rotate before expiry and replace with the App when ready.
 
-Store the token as the repository secret `RELEASE_TOKEN`
-(Settings -> Secrets and variables -> Actions). Never paste the token value into
-issues, PRs, logs, or commits.
+For the PAT path, store the token as the repository secret `RELEASE_TOKEN`
+(Settings -> Secrets and variables -> Actions). For the App path, store the
+`app-id` and `private-key` secrets instead and mint the token at runtime as
+described above. Never paste a token or private key value into issues, PRs, logs,
+or commits.
 
 Grant only the two write permissions above; do not widen scope to chase the
 push failure. A broad or long-lived bypass token is the main security risk here.
