@@ -86,9 +86,9 @@ function ConceptCard({ icon, title, sub, note, outcome }: ConceptCardProps) {
   );
 }
 
-function Op({ children, accent }: { children: ReactNode; accent?: boolean }) {
+function Op({ children, accent, className }: { children: ReactNode; accent?: boolean; className?: string }) {
   return (
-    <div style={{ display: 'grid', placeItems: 'center', width: 34, flexShrink: 0, fontSize: 22, color: accent ? 'var(--cg-red)' : 'var(--cg-text-faint)', fontWeight: 700 }}>
+    <div className={className} style={{ display: 'grid', placeItems: 'center', width: 34, flexShrink: 0, fontSize: 22, color: accent ? 'var(--cg-red)' : 'var(--cg-text-faint)', fontWeight: 700 }}>
       {children}
     </div>
   );
@@ -196,11 +196,11 @@ export function EmptyState({
           </div>
 
           {/* concept diagram */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4, marginBottom: 34, flexWrap: 'wrap' }}>
+          <div className="cg-concept" style={{ marginBottom: 34 }}>
             <ConceptCard icon={<Icon name="config-file" size={26} />} title="設定定義ファイル" sub="TOML · YAML · CSV" note="「値」を定義" />
             <Op>＋</Op>
             <ConceptCard icon={<Icon name="template-file" size={26} />} title="Jinjaテンプレート" sub=".j2 · .jinja2" note="「雛形」を記述" />
-            <Op accent>→</Op>
+            <Op accent className="cg-op-arrow">→</Op>
             <ConceptCard icon={<Icon name="terminal" size={26} color="var(--cg-red)" />} title="実行可能なコマンド" sub="CLI · Markdown" note="そのまま実行" outcome />
           </div>
 
