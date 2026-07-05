@@ -115,9 +115,13 @@ export function useGenerate(
     return () => clearTimeout(handle);
   }, [ready, memoKey, dataText, format, tplText, settings]);
 
-  // Shape the worker result into what the Editor consumes. `ready` reflects
-  // whether the Pyodide worker has finished bootstrapping: until then the
-  // right pane has no output to show and must render an initializing state
-  // rather than a blank/empty surface.
-  return useMemo<GenState>(() => ({ ...shapeResult(raw, dataText, format, tplText), ready }), [raw, tplText, dataText, format, ready]);
+  // Shape the worker result into what the Editor consumes. `ready` gates the
+  // output pane's loading state: the pane can show generated content only once
+  // the worker has bootstrapped AND the first result (or error) has actually
+  // arrived. Between the `ready` message and the first debounced generate
+  // result, `raw` is still null and shapeResult() returns an empty-but-"ok"
+  // value; without the `raw !== null` guard the pane would briefly render an
+  // empty result with copy/save enabled. A bootstrap error sets `raw` (so this
+  // becomes true) and surfaces via the normal error path rather than spinning.
+  return useMemo<GenState>(() => ({ ...shapeResult(raw, dataText, format, tplText), ready: ready && raw !== null }), [raw, tplText, dataText, format, ready]);
 }
