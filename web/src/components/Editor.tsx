@@ -125,29 +125,52 @@ export function Editor({ initial, onBack, settings, onSettings, download, onDown
   const dataErrLine = computeDataErrLine(r);
   const enc = download.enc;
 
-  // Draggable split between the two panes. `leftFrac` is the left pane's share
-  // of the workspace width (clamped so neither pane collapses).
+  // Draggable split between the two panes. `leftFrac` is the committed left-pane
+  // width fraction (clamped so neither pane collapses). During a drag we mutate
+  // the grid template imperatively via rAF instead of calling setState on every
+  // pointer move, so we don't re-render the whole editor tree (both CodeView
+  // panes + MarkdownView) per event; state is committed once on pointer-up. The
+  // columns are applied from a layout effect rather than React inline style so
+  // an unrelated re-render mid-drag can't clobber the in-progress value.
   const workspaceRef = React.useRef<HTMLDivElement>(null);
   const [leftFrac, setLeftFrac] = React.useState(0.5);
+  const dragCleanupRef = React.useRef<(() => void) | null>(null);
+
+  React.useLayoutEffect(() => {
+    const ws = workspaceRef.current;
+    if (ws) ws.style.gridTemplateColumns = `${leftFrac}fr 7px ${1 - leftFrac}fr`;
+  }, [leftFrac]);
+  // Tear down an in-flight drag if the editor unmounts before pointer-up, so the
+  // window listeners and the global body cursor/user-select don't leak.
+  React.useEffect(() => () => dragCleanupRef.current?.(), []);
+
   const startResize = (e: React.PointerEvent) => {
     e.preventDefault();
     const ws = workspaceRef.current;
     if (!ws) return;
-    const rect = ws.getBoundingClientRect();
+    let frac = leftFrac;
+    let raf = 0;
     const onMove = (ev: PointerEvent) => {
-      const frac = (ev.clientX - rect.left) / rect.width;
-      setLeftFrac(Math.min(0.8, Math.max(0.2, frac)));
+      const rect = ws.getBoundingClientRect();
+      frac = Math.min(0.8, Math.max(0.2, (ev.clientX - rect.left) / rect.width));
+      if (!raf) raf = requestAnimationFrame(() => { raf = 0; ws.style.gridTemplateColumns = `${frac}fr 7px ${1 - frac}fr`; });
     };
-    const onUp = () => {
+    const teardown = () => {
+      if (raf) cancelAnimationFrame(raf);
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
+      dragCleanupRef.current = null;
     };
+    const onUp = () => { teardown(); setLeftFrac(frac); };
+    dragCleanupRef.current = teardown;
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
   };
 
   return (
@@ -157,7 +180,7 @@ export function Editor({ initial, onBack, settings, onSettings, download, onDown
       <AppBar tpl={tpl} blocked={blocked} onBack={onBack} onHowto={() => setHowto(true)} onSettings={() => setSettingsOpen(true)} />
 
       {/* ===== Workspace ===== */}
-      <div ref={workspaceRef} style={{ flex: 1, display: 'grid', gridTemplateColumns: `${leftFrac}fr 7px ${1 - leftFrac}fr`, gridTemplateRows: 'minmax(0, 1fr)', minHeight: 0 }}>
+      <div ref={workspaceRef} style={{ flex: 1, display: 'grid', gridTemplateRows: 'minmax(0, 1fr)', minHeight: 0 }}>
 
         {/* ---- LEFT: input ---- */}
         <LeftPane
