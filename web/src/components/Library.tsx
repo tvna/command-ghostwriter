@@ -20,6 +20,26 @@ const CATS: { id: TemplateCategory | 'all'; label: string; icon: string }[] = [
 const FMT_TONE: Record<Format, 'brand' | 'info' | 'warning'> = { toml: 'brand', yaml: 'info', csv: 'warning' };
 const OUT_LABEL: Record<TemplateOutput, string> = { cli: 'CLI', config: 'config', markdown: 'Markdown' };
 
+const CAT_ORDER = CATS.map((c) => c.id);
+
+// Group templates into ordered sub-category sections. Groups are ordered by
+// their category (so same-category sub-categories stay adjacent, even in the
+// "すべて" view) and, within that, by first appearance; template order inside a
+// group is preserved.
+function groupBySubCategory(list: Template[]): { label: string; items: Template[] }[] {
+  const sorted = [...list].sort((a, b) => CAT_ORDER.indexOf(a.category) - CAT_ORDER.indexOf(b.category));
+  const groups: { label: string; items: Template[] }[] = [];
+  for (const t of sorted) {
+    let g = groups.find((x) => x.label === t.subCategory);
+    if (!g) {
+      g = { label: t.subCategory, items: [] };
+      groups.push(g);
+    }
+    g.items.push(t);
+  }
+  return groups;
+}
+
 function CatIcon({ name, size, color }: { name: string; size: number; color?: string }) {
   return <Icon name={name} size={size} color={color} />;
 }
@@ -75,6 +95,7 @@ export function Library({ onOpen, onClose }: LibraryProps) {
   const [cat, setCat] = React.useState<TemplateCategory | 'all'>('all');
   const all = CGTemplates;
   const list = cat === 'all' ? all : all.filter((t) => t.category === cat);
+  const groups = groupBySubCategory(list);
   const count = (id: TemplateCategory | 'all') => (id === 'all' ? all.length : all.filter((t) => t.category === id).length);
 
   return (
@@ -135,8 +156,8 @@ export function Library({ onOpen, onClose }: LibraryProps) {
           <p style={{ fontSize: 'var(--text-sm)', color: 'var(--cg-text-muted)', margin: '0 0 22px' }}>
             定型作業のテンプレートを選ぶと、データ定義とテンプレートを読み込んだ状態でエディタが開きます。
           </p>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(244px, 1fr))', gap: 14 }}>
-            {/* 空から作成 */}
+          {/* 空から作成 */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(244px, 1fr))', gap: 14, marginBottom: 28 }}>
             <button
               onClick={() => onOpen(null)}
               style={{
@@ -158,10 +179,22 @@ export function Library({ onOpen, onClose }: LibraryProps) {
               <span style={{ fontSize: 'var(--text-sm)', fontWeight: 600 }}>空から作成</span>
               <span style={{ fontSize: 'var(--text-xs)', color: 'var(--cg-text-faint)' }}>サンプルから書き始める</span>
             </button>
-            {list.map((t) => (
-              <TemplateCard key={t.id} tpl={t} onOpen={onOpen} />
-            ))}
           </div>
+
+          {/* sub-category sections */}
+          {groups.map((g) => (
+            <section key={g.label} style={{ marginBottom: 26 }}>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, margin: '0 0 12px', paddingBottom: 6, borderBottom: '1px solid var(--cg-border)' }}>
+                <span style={{ fontSize: 'var(--text-sm)', fontWeight: 700, color: 'var(--cg-text)' }}>{g.label}</span>
+                <span style={{ fontSize: 11, color: 'var(--cg-text-faint)', fontFamily: 'var(--font-mono)' }}>{g.items.length}</span>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(244px, 1fr))', gap: 14 }}>
+                {g.items.map((t) => (
+                  <TemplateCard key={t.id} tpl={t} onOpen={onOpen} />
+                ))}
+              </div>
+            </section>
+          ))}
         </main>
       </div>
     </div>

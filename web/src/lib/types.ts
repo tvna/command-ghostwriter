@@ -8,6 +8,7 @@ export interface Template {
   name: string;
   desc: string;
   category: TemplateCategory;
+  subCategory: string;
   format: Format;
   output: TemplateOutput;
   updated: string;

@@ -56,6 +56,7 @@ function uploadedTemplate(config: UploadedPart, template: UploadedPart): Templat
     name: `${config.file.name} + ${template.file.name}`,
     desc: "アップロードした2つのファイルから作成した一時ドキュメント。",
     category: "network",
+    subCategory: "アップロード",
     format: formatFromFileName(config.file.name),
     output: "markdown",
     updated: new Date().toISOString().slice(0, 10),
