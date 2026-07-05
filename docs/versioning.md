@@ -87,8 +87,9 @@ Pick one identity and add it to the `main` ruleset Bypass list
   static secret would break the daily scheduled release as soon as it ages out.
   Instead store the App's `app-id` and `private-key` as secrets and mint a fresh
   installation token inside the workflow before Checkout (for example with
-  `actions/create-github-app-token`), then pass its output as the Checkout token
-  and the `GITHUB_TOKEN` env. An App is not tied to a personal account and is the
+  `actions/create-github-app-token`, pinned to a commit SHA to match this repo's
+  action-pinning convention), then pass its output as the Checkout token and the
+  `GITHUB_TOKEN` env. An App is not tied to a personal account and is the
   smallest durable bypass surface. The workflow as written consumes a single
   static `RELEASE_TOKEN` secret, which fits the PAT path below directly; choosing
   the App path additionally requires adding that token-minting step.
