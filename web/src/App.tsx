@@ -41,7 +41,7 @@ function analyticsLocation(): { route: string; path: string } {
   return { route: "/", path: "/" };
 }
 
-const DEFAULT_DOWNLOAD: DownloadOptions = { enc: "UTF-8", fname: "command", ts: true, ext: "txt" };
+const DEFAULT_DOWNLOAD: DownloadOptions = { enc: "UTF-8", ts: true };
 
 function formatFromFileName(name: string): Format {
   const ext = name.split(".").pop()?.toLowerCase();
@@ -56,6 +56,7 @@ function uploadedTemplate(config: UploadedPart, template: UploadedPart): Templat
     name: `${config.file.name} + ${template.file.name}`,
     desc: "アップロードした2つのファイルから作成した一時ドキュメント。",
     category: "network",
+    subCategory: "アップロード",
     format: formatFromFileName(config.file.name),
     output: "markdown",
     updated: new Date().toISOString().slice(0, 10),

@@ -1,5 +1,5 @@
 import React from 'react';
-import { Toggle, TextInput, Selectbox, RadioGroup, Button } from '../ds';
+import { Toggle, TextInput, Selectbox, Button } from '../ds';
 import { Icon } from './Icon';
 import type { GenerateSettings } from '../worker/types';
 
@@ -28,9 +28,7 @@ function Sub({ children }: { children: React.ReactNode }) {
 
 export interface DownloadOptions {
   enc: 'UTF-8' | 'Shift_JIS';
-  fname: string;
   ts: boolean;
-  ext: string;
 }
 
 export interface SettingsModalProps {
@@ -52,6 +50,7 @@ export function SettingsModal({ open, onClose, settings, onSettings, download, o
 
   return (
     <div
+      className="cg-overlay-in"
       onClick={onClose}
       style={{
         position: 'fixed',
@@ -65,6 +64,7 @@ export function SettingsModal({ open, onClose, settings, onSettings, download, o
       }}
     >
       <div
+        className="cg-pop-in"
         onClick={(e) => e.stopPropagation()}
         style={{
           width: 620,
@@ -140,28 +140,15 @@ export function SettingsModal({ open, onClose, settings, onSettings, download, o
               />
             </Field>
             <Field>
-              <TextInput
-                label="ダウンロード時のファイル名"
-                value={download.fname}
-                onChange={(v) => setD({ fname: v })}
-              />
-            </Field>
-            <Field>
               <Toggle
                 checked={download.ts}
                 label="ファイル名にタイムスタンプを付与"
                 onChange={(v) => setD({ ts: v })}
               />
             </Field>
-            <Field>
-              <RadioGroup
-                label="ファイル拡張子"
-                value={download.ext}
-                options={['txt', 'md']}
-                horizontal
-                onChange={(v) => setD({ ext: v })}
-              />
-            </Field>
+            <div style={{ fontSize: 'var(--text-xs)', color: 'var(--cg-text-faint)', lineHeight: 1.6 }}>
+              ファイル名はエディタ上部で編集できます。拡張子は出力（手順書 → .md / Raw → .txt）に応じて自動で決まります。
+            </div>
           </div>
         </div>
 

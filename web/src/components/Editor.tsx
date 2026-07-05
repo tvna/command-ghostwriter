@@ -1,6 +1,6 @@
 import React from 'react';
 import type { ReactNode } from 'react';
-import { Button, Badge, Selectbox } from '../ds';
+import { Button, Badge } from '../ds';
 import { CodeView } from './CodeView';
 import { SettingsModal } from './SettingsModal';
 import type { DownloadOptions } from './SettingsModal';
@@ -12,7 +12,7 @@ import type { GenerateSettings } from '../worker/types';
 import type { Template } from '../lib/types';
 import { useGenerate } from '../useGenerate';
 import type { GenError } from '../useGenerate';
-import { triggerDownload, downloadFilename } from '../download';
+import { triggerDownload, downloadFilename, sanitizeFilename } from '../download';
 import type { DownloadEncoding } from '../download';
 import logoMark from '../assets/brand/logo-mark.svg';
 
@@ -99,6 +99,13 @@ function computeDataErrLine(r: GenResult): number {
   return r.error && r.error.pane !== 'tpl' ? r.error.line || 0 : 0;
 }
 
+// Minimum widths (px) each pane keeps while dragging the splitter, so header
+// controls never clip. The left header (data/template tabs + format switch) is
+// wider than the right (output tabs + copy), so the two sides get different
+// floors — measured against the widest state of each header.
+const LEFT_MIN_PX = 512;
+const RIGHT_MIN_PX = 448;
+
 export function Editor({ initial, onBack, settings, onSettings, download, onDownload }: EditorProps) {
   const tpl = initial || null;
   const [leftTab, setLeftTab] = React.useState<'data' | 'tpl'>('data');
@@ -111,6 +118,8 @@ export function Editor({ initial, onBack, settings, onSettings, download, onDown
   // live, editable input
   const [dataText, setDataText] = React.useState(initialData(tpl));
   const [tplText, setTplText] = React.useState(initialTemplate(tpl));
+  // Editable document name shown in the app bar; it is the download filename base.
+  const [docName, setDocName] = React.useState(tpl?.id || 'command');
 
   const toastTimer = React.useRef<ReturnType<typeof setTimeout>>();
   const fire = (msg: string) => {
@@ -123,7 +132,6 @@ export function Editor({ initial, onBack, settings, onSettings, download, onDown
   const r = useGenerate(dataText, format, tplText, settings);
   const blocked = !r.ok;
   const dataErrLine = computeDataErrLine(r);
-  const enc = download.enc;
 
   // Draggable split between the two panes. `leftFrac` is the committed left-pane
   // width fraction (clamped so neither pane collapses). During a drag we mutate
@@ -143,6 +151,22 @@ export function Editor({ initial, onBack, settings, onSettings, download, onDown
   // Tear down an in-flight drag if the editor unmounts before pointer-up, so the
   // window listeners and the global body cursor/user-select don't leak.
   React.useEffect(() => () => dragCleanupRef.current?.(), []);
+  // Re-clamp the committed split on window resize. The floors are pixel-based
+  // but `leftFrac` is stored as a fraction re-applied in fr units, so without
+  // this a "drag wide, then shrink the window" sequence would drop a pane below
+  // its floor and clip its header — exactly what the floors exist to prevent.
+  React.useEffect(() => {
+    const onResize = () => {
+      const ws = workspaceRef.current;
+      if (!ws) return;
+      const w = ws.getBoundingClientRect().width;
+      const minFrac = LEFT_MIN_PX / w;
+      const maxFrac = 1 - RIGHT_MIN_PX / w;
+      setLeftFrac((f) => (minFrac < maxFrac ? Math.min(maxFrac, Math.max(minFrac, f)) : 0.5));
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
 
   const startResize = (e: React.PointerEvent) => {
     e.preventDefault();
@@ -152,7 +176,13 @@ export function Editor({ initial, onBack, settings, onSettings, download, onDown
     let raf = 0;
     const onMove = (ev: PointerEvent) => {
       const rect = ws.getBoundingClientRect();
-      frac = Math.min(0.8, Math.max(0.2, (ev.clientX - rect.left) / rect.width));
+      // Clamp so neither pane header clips: left floor is LEFT_MIN_PX, right
+      // floor is RIGHT_MIN_PX. When the window is too small to grant both
+      // floors, fall back to a 50/50 split.
+      const minFrac = LEFT_MIN_PX / rect.width;
+      const maxFrac = 1 - RIGHT_MIN_PX / rect.width;
+      const raw = (ev.clientX - rect.left) / rect.width;
+      frac = minFrac < maxFrac ? Math.min(maxFrac, Math.max(minFrac, raw)) : 0.5;
       if (!raf) raf = requestAnimationFrame(() => { raf = 0; ws.style.gridTemplateColumns = `${frac}fr 7px ${1 - frac}fr`; });
     };
     const teardown = () => {
@@ -177,7 +207,7 @@ export function Editor({ initial, onBack, settings, onSettings, download, onDown
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', minHeight: 620, minWidth: 1024, background: 'var(--cg-bg)', fontFamily: 'var(--font-sans)', color: 'var(--cg-text)' }}>
 
       {/* ===== App bar ===== */}
-      <AppBar tpl={tpl} blocked={blocked} onBack={onBack} onHowto={() => setHowto(true)} onSettings={() => setSettingsOpen(true)} />
+      <AppBar tpl={tpl} blocked={blocked} docName={docName} setDocName={setDocName} onBack={onBack} onHowto={() => setHowto(true)} onSettings={() => setSettingsOpen(true)} />
 
       {/* ===== Workspace ===== */}
       <div ref={workspaceRef} style={{ flex: 1, display: 'grid', gridTemplateRows: 'minmax(0, 1fr)', minHeight: 0 }}>
@@ -214,9 +244,8 @@ export function Editor({ initial, onBack, settings, onSettings, download, onDown
           setRightMode={setRightMode}
           format={format}
           setFormat={setFormat}
-          enc={enc}
           download={download}
-          onDownload={onDownload}
+          docName={docName}
           blocked={blocked}
           r={r}
           fire={fire}
@@ -249,7 +278,7 @@ const FORMATS: SegItem[] = [
 
 type GenResult = ReturnType<typeof useGenerate>;
 
-function AppBar({ tpl, blocked, onBack, onHowto, onSettings }: { tpl: Template | null; blocked: boolean; onBack?: () => void; onHowto: () => void; onSettings: () => void }) {
+function AppBar({ tpl, blocked, docName, setDocName, onBack, onHowto, onSettings }: { tpl: Template | null; blocked: boolean; docName: string; setDocName: (v: string) => void; onBack?: () => void; onHowto: () => void; onSettings: () => void }) {
   return (
     <header style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-4)', padding: '0 18px', height: 56, borderBottom: '1px solid var(--cg-border)', flexShrink: 0, userSelect: 'none' }}>
       {onBack && (
@@ -261,7 +290,18 @@ function AppBar({ tpl, blocked, onBack, onHowto, onSettings }: { tpl: Template |
       </div>
       <div style={{ width: 1, height: 22, background: 'var(--cg-border)', margin: '0 4px' }} />
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--cg-text-muted)', fontSize: 'var(--text-sm)' }}>
-        <span style={{ color: 'var(--cg-text)' }}>{tpl ? tpl.id : '無題のドキュメント'}</span>
+        <input
+          className="cg-fname"
+          value={docName}
+          onChange={(e) => setDocName(e.target.value)}
+          size={Math.max(docName.length, 7)}
+          maxLength={80}
+          placeholder="command"
+          spellCheck={false}
+          aria-label="ファイル名"
+          title="ファイル名（ダウンロード名に使われます）"
+          style={{ color: 'var(--cg-text)', fontFamily: 'var(--font-sans)', fontSize: 'var(--text-sm)', fontWeight: 600, background: 'transparent', borderRadius: 'var(--radius-sm)', padding: '3px 7px', outline: 'none', minWidth: 40, maxWidth: 280 }}
+        />
         <Badge tone="success">{tpl ? '保存済み' : '新規'}</Badge>
       </div>
       <div style={{ flex: 1 }} />
@@ -395,18 +435,16 @@ function LeftPane({ leftTab, setLeftTab, format, setFormat, dataText, setDataTex
   );
 }
 
-function OutputActions({ enc, download, onDownload, blocked, r, fire }: { enc: DownloadOptions['enc']; download: DownloadOptions; onDownload: (d: DownloadOptions) => void; blocked: boolean; r: GenResult; fire: (msg: string) => void }) {
+// Copy stays in the pane header; the download action lives in the footer.
+function CopyButton({ blocked, r, fire }: { blocked: boolean; r: GenResult; fire: (msg: string) => void }) {
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-      <Selectbox value={enc} options={['UTF-8', 'Shift_JIS']} onChange={(v) => onDownload({ ...download, enc: v as DownloadOptions['enc'] })} style={{ width: 152 }} />
-      <Button variant="secondary" size="sm" disabled={blocked || !r.ready} icon={<Icon name="copy" size={14} />} onClick={() => { void navigator.clipboard.writeText(r.output); fire('コピーしました'); }}>コピー</Button>
-      <Button variant="primary" size="sm" disabled={blocked || !r.ready} icon={<Icon name="download" size={14} />} onClick={() => {
-        const e: DownloadEncoding = enc === 'Shift_JIS' ? 'Shift_JIS' : 'utf-8';
-        triggerDownload(r.output, downloadFilename(download.fname, download.ext, download.ts), e);
-        fire('ダウンロードを開始');
-      }}>保存</Button>
-    </div>
+    <Button variant="secondary" size="sm" disabled={blocked || !r.ready} icon={<Icon name="copy" size={14} />} onClick={() => { void navigator.clipboard.writeText(r.output); fire('コピーしました'); }}>コピー</Button>
   );
+}
+
+// Extension is derived from the output mode: 手順書 (md) → .md, Raw → .txt.
+function outputExt(rightMode: 'md' | 'raw' | 'debug'): string {
+  return rightMode === 'md' ? 'md' : 'txt';
 }
 
 function OutputBody({ rightMode, format, setFormat, blocked, r }: { rightMode: 'md' | 'raw' | 'debug'; format: Format; setFormat: (f: Format) => void; blocked: boolean; r: GenResult }) {
@@ -428,7 +466,7 @@ function OutputBody({ rightMode, format, setFormat, blocked, r }: { rightMode: '
   );
 }
 
-function RightStatusBar({ rightMode, enc, blocked, r }: { rightMode: 'md' | 'raw' | 'debug'; enc: DownloadOptions['enc']; blocked: boolean; r: GenResult }) {
+function RightStatusBar({ rightMode, download, docName, blocked, r, fire }: { rightMode: 'md' | 'raw' | 'debug'; download: DownloadOptions; docName: string; blocked: boolean; r: GenResult; fire: (msg: string) => void }) {
   if (!r.ready && !blocked) {
     return (
       <StatusBar>
@@ -437,6 +475,19 @@ function RightStatusBar({ rightMode, enc, blocked, r }: { rightMode: 'md' | 'raw
       </StatusBar>
     );
   }
+  const ext = outputExt(rightMode);
+  // Sanitize once and reuse for the label, the tooltip, and the actual download
+  // so they can't diverge. The label notes the timestamp suffix (rather than
+  // rendering a concrete time that would drift from the click-time value) and
+  // truncates a long base so it can't overflow the footer.
+  const base = sanitizeFilename(docName) || 'command';
+  const tsNote = download.ts ? '（+日時）' : '';
+  const dispBase = base.length > 32 ? base.slice(0, 31) + '…' : base;
+  const onSave = () => {
+    const e: DownloadEncoding = download.enc === 'Shift_JIS' ? 'Shift_JIS' : 'utf-8';
+    triggerDownload(r.output, downloadFilename(base, ext, download.ts), e);
+    fire('ダウンロードを開始');
+  };
   return (
     <StatusBar tone={blocked ? 'err' : 'ok'}>
       {blocked ? (
@@ -448,8 +499,16 @@ function RightStatusBar({ rightMode, enc, blocked, r }: { rightMode: 'md' | 'raw
         <>
           <span>✓</span>
           {rightMode === 'raw' && <span>生成成功 · {r.output.replace(/\n+$/, '').split('\n').length} 行 · raw</span>}
-          {rightMode === 'md' && <span>手順書を生成 · {enc}</span>}
+          {rightMode === 'md' && <span>手順書を生成 · {download.enc}</span>}
           {rightMode === 'debug' && <span>解析成功 · {r.keys} keys · {r.interfaces} interfaces</span>}
+        </>
+      )}
+      {rightMode !== 'debug' && (
+        <>
+          <div style={{ flex: 1 }} />
+          <Button variant="primary" size="sm" disabled={blocked || !r.ready} icon={<Icon name="download" size={13} />} title={`${base}.${ext}${tsNote} をダウンロード`} onClick={onSave}>
+            {dispBase}.{ext}{tsNote} を保存
+          </Button>
         </>
       )}
     </StatusBar>
@@ -461,15 +520,14 @@ interface RightPaneProps {
   setRightMode: (m: 'md' | 'raw' | 'debug') => void;
   format: Format;
   setFormat: (f: Format) => void;
-  enc: DownloadOptions['enc'];
   download: DownloadOptions;
-  onDownload: (d: DownloadOptions) => void;
+  docName: string;
   blocked: boolean;
   r: GenResult;
   fire: (msg: string) => void;
 }
 
-function RightPane({ rightMode, setRightMode, format, setFormat, enc, download, onDownload, blocked, r, fire }: RightPaneProps) {
+function RightPane({ rightMode, setRightMode, format, setFormat, download, docName, blocked, r, fire }: RightPaneProps) {
   return (
     <section style={{ display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, overflow: 'hidden' }}>
       <PaneHeader>
@@ -483,16 +541,14 @@ function RightPane({ rightMode, setRightMode, format, setFormat, enc, download, 
           ]}
         />
         <div style={{ flex: 1 }} />
-        {rightMode !== 'debug' && (
-          <OutputActions enc={enc} download={download} onDownload={onDownload} blocked={blocked} r={r} fire={fire} />
-        )}
+        {rightMode !== 'debug' && <CopyButton blocked={blocked} r={r} fire={fire} />}
       </PaneHeader>
 
       <div style={{ flex: 1, minHeight: 0 }}>
         <OutputBody rightMode={rightMode} format={format} setFormat={setFormat} blocked={blocked} r={r} />
       </div>
 
-      <RightStatusBar rightMode={rightMode} enc={enc} blocked={blocked} r={r} />
+      <RightStatusBar rightMode={rightMode} download={download} docName={docName} blocked={blocked} r={r} fire={fire} />
     </section>
   );
 }

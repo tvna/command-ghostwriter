@@ -49,8 +49,8 @@ function Step({ n, title, children }: { n: number; title: string; children: Reac
 export function HowToModal({ open, onClose }: HowToModalProps) {
   if (!open) return null;
   return (
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(0,0,0,.55)", backdropFilter: "blur(2px)", display: "grid", placeItems: "center", padding: 24 }}>
-      <div onClick={(e) => e.stopPropagation()} style={{ width: 680, maxHeight: "88vh", overflow: "auto", background: "var(--cg-bg)", border: "1px solid var(--cg-border)", borderRadius: "var(--radius-lg)", boxShadow: "var(--shadow-lg)", fontFamily: "var(--font-sans)", color: "var(--cg-text)" }}>
+    <div className="cg-overlay-in" onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(0,0,0,.55)", backdropFilter: "blur(2px)", display: "grid", placeItems: "center", padding: 24 }}>
+      <div className="cg-pop-in" onClick={(e) => e.stopPropagation()} style={{ width: 680, maxHeight: "88vh", overflow: "auto", background: "var(--cg-bg)", border: "1px solid var(--cg-border)", borderRadius: "var(--radius-lg)", boxShadow: "var(--shadow-lg)", fontFamily: "var(--font-sans)", color: "var(--cg-text)" }}>
 
         {/* header */}
         <div style={{ position: "sticky", top: 0, zIndex: 1, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 20px", borderBottom: "1px solid var(--cg-border)", background: "var(--cg-bg)" }}>
