@@ -56,12 +56,14 @@ export function shapeResult(
   return { ok: true, error: null, suggest: null, vars, output: raw.output ?? "", json: raw.configDebug, interfaces, keys };
 }
 
+export type GenState = GenResult & { ready: boolean };
+
 export function useGenerate(
   dataText: string,
   format: Format,
   tplText: string,
   settings: GenerateSettings,
-): GenResult {
+): GenState {
   const workerRef = useRef<Worker | null>(null);
   const idRef = useRef(0);
   const [ready, setReady] = useState(false);
@@ -113,6 +115,9 @@ export function useGenerate(
     return () => clearTimeout(handle);
   }, [ready, memoKey, dataText, format, tplText, settings]);
 
-  // Shape the worker result into what the Editor consumes.
-  return useMemo<GenResult>(() => shapeResult(raw, dataText, format, tplText), [raw, tplText, dataText, format]);
+  // Shape the worker result into what the Editor consumes. `ready` reflects
+  // whether the Pyodide worker has finished bootstrapping: until then the
+  // right pane has no output to show and must render an initializing state
+  // rather than a blank/empty surface.
+  return useMemo<GenState>(() => ({ ...shapeResult(raw, dataText, format, tplText), ready }), [raw, tplText, dataText, format, ready]);
 }

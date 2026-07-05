@@ -23,6 +23,28 @@ html {
   min-height: 100vh;
 }
 
+/* ---- editor: Pyodide init spinner ---- */
+@keyframes cg-spin { to { transform: rotate(360deg); } }
+.cg-spin { animation: cg-spin 0.8s linear infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .cg-spin { animation-duration: 2.4s; }
+}
+
+/* ---- empty state: concept diagram ----
+   Row of three cards on desktop; when the viewport is too narrow to hold the
+   row, stack the cards vertically and point the flow arrow downward so the
+   "+" / "->" operators stay aligned instead of floating at wrapped row ends. */
+.cg-concept {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
+@media (max-width: 720px) {
+  .cg-concept { flex-direction: column; }
+  .cg-concept .cg-op-arrow { transform: rotate(90deg); }
+}
+
 /* ---- tasteful, workplace-safe "haunting" for the empty state ---- */
 @keyframes cg-bob   { 0%,100% { transform: translateY(0) } 50% { transform: translateY(-9px) } }
 @keyframes cg-glow  { 0%,100% { opacity: .30; transform: scale(1) } 50% { opacity: .55; transform: scale(1.06) } }

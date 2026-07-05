@@ -59,7 +59,7 @@ function Segmented({ items, value, onChange }: { items: SegItem[]; value: string
 
 function PaneHeader({ children }: { children: ReactNode }) {
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', padding: '10px 14px', borderBottom: '1px solid var(--cg-border)', background: 'var(--cg-bg-secondary)', minHeight: 30 }}>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', padding: '10px 14px', borderBottom: '1px solid var(--cg-border)', background: 'var(--cg-bg-secondary)', minHeight: 30, userSelect: 'none' }}>
       {children}
     </div>
   );
@@ -70,7 +70,7 @@ function StatusBar({ children, tone }: { children: ReactNode; tone?: 'ok' | 'err
   const bg = tone === 'err' ? 'var(--cg-error-bg)' : 'var(--cg-bg-secondary)';
   const bd = tone === 'err' ? 'var(--cg-error-border)' : 'var(--cg-border)';
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', padding: '7px 14px', borderTop: `1px solid ${bd}`, background: bg, fontFamily: 'var(--font-mono)', fontSize: 'var(--text-xs)', color: c }}>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', padding: '7px 14px', borderTop: `1px solid ${bd}`, background: bg, fontFamily: 'var(--font-mono)', fontSize: 'var(--text-xs)', color: c, userSelect: 'none' }}>
       {children}
     </div>
   );
@@ -125,6 +125,31 @@ export function Editor({ initial, onBack, settings, onSettings, download, onDown
   const dataErrLine = computeDataErrLine(r);
   const enc = download.enc;
 
+  // Draggable split between the two panes. `leftFrac` is the left pane's share
+  // of the workspace width (clamped so neither pane collapses).
+  const workspaceRef = React.useRef<HTMLDivElement>(null);
+  const [leftFrac, setLeftFrac] = React.useState(0.5);
+  const startResize = (e: React.PointerEvent) => {
+    e.preventDefault();
+    const ws = workspaceRef.current;
+    if (!ws) return;
+    const rect = ws.getBoundingClientRect();
+    const onMove = (ev: PointerEvent) => {
+      const frac = (ev.clientX - rect.left) / rect.width;
+      setLeftFrac(Math.min(0.8, Math.max(0.2, frac)));
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  };
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', minHeight: 620, minWidth: 1024, background: 'var(--cg-bg)', fontFamily: 'var(--font-sans)', color: 'var(--cg-text)' }}>
 
@@ -132,7 +157,7 @@ export function Editor({ initial, onBack, settings, onSettings, download, onDown
       <AppBar tpl={tpl} blocked={blocked} onBack={onBack} onHowto={() => setHowto(true)} onSettings={() => setSettingsOpen(true)} />
 
       {/* ===== Workspace ===== */}
-      <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '1fr 7px 1fr', gridTemplateRows: 'minmax(0, 1fr)', minHeight: 0 }}>
+      <div ref={workspaceRef} style={{ flex: 1, display: 'grid', gridTemplateColumns: `${leftFrac}fr 7px ${1 - leftFrac}fr`, gridTemplateRows: 'minmax(0, 1fr)', minHeight: 0 }}>
 
         {/* ---- LEFT: input ---- */}
         <LeftPane
@@ -149,8 +174,14 @@ export function Editor({ initial, onBack, settings, onSettings, download, onDown
           r={r}
         />
 
-        {/* resizer */}
-        <div style={{ background: 'var(--cg-border)', cursor: 'col-resize', display: 'grid', placeItems: 'center' }}>
+        {/* resizer — drag to reallocate width between the panes */}
+        <div
+          onPointerDown={startResize}
+          role="separator"
+          aria-orientation="vertical"
+          title="ドラッグして幅を調整"
+          style={{ background: 'var(--cg-border)', cursor: 'col-resize', display: 'grid', placeItems: 'center', touchAction: 'none', userSelect: 'none' }}
+        >
           <div style={{ width: 3, height: 28, borderRadius: 2, background: 'var(--cg-border-strong)' }} />
         </div>
 
@@ -197,7 +228,7 @@ type GenResult = ReturnType<typeof useGenerate>;
 
 function AppBar({ tpl, blocked, onBack, onHowto, onSettings }: { tpl: Template | null; blocked: boolean; onBack?: () => void; onHowto: () => void; onSettings: () => void }) {
   return (
-    <header style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-4)', padding: '0 18px', height: 56, borderBottom: '1px solid var(--cg-border)', flexShrink: 0 }}>
+    <header style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-4)', padding: '0 18px', height: 56, borderBottom: '1px solid var(--cg-border)', flexShrink: 0, userSelect: 'none' }}>
       {onBack && (
         <button onClick={onBack} title="戻る" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 30, height: 30, flexShrink: 0, cursor: 'pointer', background: 'transparent', border: '1px solid var(--cg-border)', borderRadius: 'var(--radius-md)', color: 'var(--cg-text-muted)', fontSize: 16, lineHeight: 1 }}>←</button>
       )}
@@ -345,8 +376,8 @@ function OutputActions({ enc, download, onDownload, blocked, r, fire }: { enc: D
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
       <Selectbox value={enc} options={['UTF-8', 'Shift_JIS']} onChange={(v) => onDownload({ ...download, enc: v as DownloadOptions['enc'] })} style={{ width: 152 }} />
-      <Button variant="secondary" size="sm" disabled={blocked} icon={<Icon name="copy" size={14} />} onClick={() => { void navigator.clipboard.writeText(r.output); fire('コピーしました'); }}>コピー</Button>
-      <Button variant="primary" size="sm" disabled={blocked} icon={<Icon name="download" size={14} />} onClick={() => {
+      <Button variant="secondary" size="sm" disabled={blocked || !r.ready} icon={<Icon name="copy" size={14} />} onClick={() => { void navigator.clipboard.writeText(r.output); fire('コピーしました'); }}>コピー</Button>
+      <Button variant="primary" size="sm" disabled={blocked || !r.ready} icon={<Icon name="download" size={14} />} onClick={() => {
         const e: DownloadEncoding = enc === 'Shift_JIS' ? 'Shift_JIS' : 'utf-8';
         triggerDownload(r.output, downloadFilename(download.fname, download.ext, download.ts), e);
         fire('ダウンロードを開始');
@@ -356,6 +387,12 @@ function OutputActions({ enc, download, onDownload, blocked, r, fire }: { enc: D
 }
 
 function OutputBody({ rightMode, format, setFormat, blocked, r }: { rightMode: 'md' | 'raw' | 'debug'; format: Format; setFormat: (f: Format) => void; blocked: boolean; r: GenResult }) {
+  // Show the initializing state only while genuinely loading. If the worker
+  // reported a bootstrap error, `blocked` is set and we fall through to
+  // BlockedOutput so the failure surfaces rather than spinning forever.
+  if (!r.ready && !blocked) {
+    return <InitializingOutput />;
+  }
   if (blocked) {
     return <BlockedOutput format={format} error={r.error} suggest={r.suggest} onFix={() => r.suggest && setFormat(r.suggest)} />;
   }
@@ -369,6 +406,14 @@ function OutputBody({ rightMode, format, setFormat, blocked, r }: { rightMode: '
 }
 
 function RightStatusBar({ rightMode, enc, blocked, r }: { rightMode: 'md' | 'raw' | 'debug'; enc: DownloadOptions['enc']; blocked: boolean; r: GenResult }) {
+  if (!r.ready && !blocked) {
+    return (
+      <StatusBar>
+        <span className="cg-spin" style={{ width: 11, height: 11, borderRadius: '50%', border: '2px solid var(--cg-border)', borderTopColor: 'var(--cg-red)', display: 'inline-block' }} />
+        <span>実行環境を初期化中…</span>
+      </StatusBar>
+    );
+  }
   return (
     <StatusBar tone={blocked ? 'err' : 'ok'}>
       {blocked ? (
@@ -426,6 +471,18 @@ function RightPane({ rightMode, setRightMode, format, setFormat, enc, download, 
 
       <RightStatusBar rightMode={rightMode} enc={enc} blocked={blocked} r={r} />
     </section>
+  );
+}
+
+function InitializingOutput() {
+  return (
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 14, background: 'var(--cg-bg-code)', padding: 32, textAlign: 'center' }}>
+      <span className="cg-spin" style={{ width: 34, height: 34, borderRadius: '50%', border: '3px solid var(--cg-border)', borderTopColor: 'var(--cg-red)', display: 'inline-block' }} />
+      <div style={{ fontFamily: 'var(--font-sans)', fontSize: 'var(--text-base)', fontWeight: 700, color: 'var(--cg-text)' }}>実行環境を初期化しています…</div>
+      <div style={{ fontFamily: 'var(--font-sans)', fontSize: 'var(--text-sm)', color: 'var(--cg-text-muted)', maxWidth: 340, lineHeight: 1.6 }}>
+        ブラウザ上でPython実行環境（Pyodide）を読み込んでいます。初回は数秒かかることがあります。完了すると、ここに生成結果が表示されます。
+      </div>
+    </div>
   );
 }
 
