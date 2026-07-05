@@ -12,7 +12,7 @@ import type { GenerateSettings } from '../worker/types';
 import type { Template } from '../lib/types';
 import { useGenerate } from '../useGenerate';
 import type { GenError } from '../useGenerate';
-import { triggerDownload, downloadFilename } from '../download';
+import { triggerDownload, downloadFilename, sanitizeFilename } from '../download';
 import type { DownloadEncoding } from '../download';
 import logoMark from '../assets/brand/logo-mark.svg';
 
@@ -151,6 +151,22 @@ export function Editor({ initial, onBack, settings, onSettings, download, onDown
   // Tear down an in-flight drag if the editor unmounts before pointer-up, so the
   // window listeners and the global body cursor/user-select don't leak.
   React.useEffect(() => () => dragCleanupRef.current?.(), []);
+  // Re-clamp the committed split on window resize. The floors are pixel-based
+  // but `leftFrac` is stored as a fraction re-applied in fr units, so without
+  // this a "drag wide, then shrink the window" sequence would drop a pane below
+  // its floor and clip its header — exactly what the floors exist to prevent.
+  React.useEffect(() => {
+    const onResize = () => {
+      const ws = workspaceRef.current;
+      if (!ws) return;
+      const w = ws.getBoundingClientRect().width;
+      const minFrac = LEFT_MIN_PX / w;
+      const maxFrac = 1 - RIGHT_MIN_PX / w;
+      setLeftFrac((f) => (minFrac < maxFrac ? Math.min(maxFrac, Math.max(minFrac, f)) : 0.5));
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
 
   const startResize = (e: React.PointerEvent) => {
     e.preventDefault();
@@ -278,7 +294,9 @@ function AppBar({ tpl, blocked, docName, setDocName, onBack, onHowto, onSettings
           className="cg-fname"
           value={docName}
           onChange={(e) => setDocName(e.target.value)}
-          size={Math.max(docName.length || 1, 4)}
+          size={Math.max(docName.length, 7)}
+          maxLength={80}
+          placeholder="command"
           spellCheck={false}
           aria-label="ファイル名"
           title="ファイル名（ダウンロード名に使われます）"
@@ -458,10 +476,16 @@ function RightStatusBar({ rightMode, download, docName, blocked, r, fire }: { ri
     );
   }
   const ext = outputExt(rightMode);
-  const filename = `${docName.trim() || 'command'}.${ext}`;
+  // Sanitize once and reuse for the label, the tooltip, and the actual download
+  // so they can't diverge. The label notes the timestamp suffix (rather than
+  // rendering a concrete time that would drift from the click-time value) and
+  // truncates a long base so it can't overflow the footer.
+  const base = sanitizeFilename(docName) || 'command';
+  const tsNote = download.ts ? '（+日時）' : '';
+  const dispBase = base.length > 32 ? base.slice(0, 31) + '…' : base;
   const onSave = () => {
     const e: DownloadEncoding = download.enc === 'Shift_JIS' ? 'Shift_JIS' : 'utf-8';
-    triggerDownload(r.output, downloadFilename(docName.trim() || 'command', ext, download.ts), e);
+    triggerDownload(r.output, downloadFilename(base, ext, download.ts), e);
     fire('ダウンロードを開始');
   };
   return (
@@ -482,8 +506,8 @@ function RightStatusBar({ rightMode, download, docName, blocked, r, fire }: { ri
       {rightMode !== 'debug' && (
         <>
           <div style={{ flex: 1 }} />
-          <Button variant="primary" size="sm" disabled={blocked || !r.ready} icon={<Icon name="download" size={13} />} title={`${filename} をダウンロード`} onClick={onSave}>
-            {filename} を保存
+          <Button variant="primary" size="sm" disabled={blocked || !r.ready} icon={<Icon name="download" size={13} />} title={`${base}.${ext}${tsNote} をダウンロード`} onClick={onSave}>
+            {dispBase}.{ext}{tsNote} を保存
           </Button>
         </>
       )}

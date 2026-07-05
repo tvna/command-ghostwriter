@@ -12,6 +12,14 @@ export function downloadFilename(name: string, ext: string, appendTimestamp: boo
   return `${name}${suffix}.${ext}`;
 }
 
+// Strip characters that are invalid in filenames across OSes (path separators
+// and Windows-reserved punctuation) plus leading dots, so a user-typed document
+// name can't produce a broken or platform-dependent download name. Returns ""
+// when nothing usable remains, so callers supply a fallback base.
+export function sanitizeFilename(name: string): string {
+  return name.replace(/[/\\:*?"<>|]/g, "").replace(/^\.+/, "").trim();
+}
+
 export function encodeText(text: string, encoding: DownloadEncoding): BlobPart {
   if (encoding === "Shift_JIS") {
     const codes = Encoding.stringToCode(text);

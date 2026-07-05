@@ -110,5 +110,36 @@ describe("Editor (redesign-b)", () => {
     // Raw output mode switches the extension to .txt.
     fireEvent.click(screen.getByRole("button", { name: "Raw" }));
     expect(screen.getByRole("button", { name: /myrunbook\.txt を保存/ })).toBeTruthy();
+
+    // Filename-invalid characters are stripped from the download name.
+    fireEvent.change(nameInput, { target: { value: "a/b:c*" } });
+    expect(screen.getByRole("button", { name: /abc\.txt を保存/ })).toBeTruthy();
+
+    // Clearing the field falls back to the default "command" base.
+    fireEvent.change(nameInput, { target: { value: "" } });
+    expect(screen.getByRole("button", { name: /command\.txt を保存/ })).toBeTruthy();
+  });
+
+  it("notes the timestamp suffix in the save label when enabled", () => {
+    vi.useFakeTimers();
+    render(
+      <Editor
+        settings={DEFAULT_SETTINGS}
+        onSettings={() => {}}
+        download={{ enc: "UTF-8", ts: true }}
+        onDownload={() => {}}
+      />,
+    );
+    const worker = workerInstances[0];
+    act(() => { worker.onmessage!({ data: { kind: "ready" } } as MessageEvent); });
+    act(() => { vi.advanceTimersByTime(300); });
+    act(() => {
+      worker.onmessage!({
+        data: { kind: "result", id: 1, result: { output: "X\n", configError: null, templateError: null, configDebug: "{}" } },
+      } as MessageEvent);
+    });
+    // With the timestamp toggle on, the label must disclose the suffix rather
+    // than claim the plain "command.md" name.
+    expect(screen.getByRole("button", { name: /command\.md（\+日時） を保存/ })).toBeTruthy();
   });
 });
