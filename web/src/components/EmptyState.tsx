@@ -169,7 +169,7 @@ export function EmptyState({
 
       {/* hero */}
       <div style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-start', padding: '40px 24px', position: 'relative', zIndex: 1 }}>
-        <div style={{ width: '100%', maxWidth: 880 }}>
+        <div className="cg-enter-up" style={{ width: '100%', maxWidth: 880 }}>
 
           {/* headline */}
           <div style={{ textAlign: 'center', marginBottom: 30 }}>
@@ -190,8 +190,8 @@ export function EmptyState({
               <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--cg-red)', fontWeight: 600 }}>&gt;_</span>
               <span style={{ width: 40, height: 1, background: 'linear-gradient(90deg, var(--cg-border-strong), transparent)' }} />
             </div>
-            <div className="cg-flicker" style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-sm)', letterSpacing: '.18em', color: 'var(--cg-ghost-outline)' }}>
-              設定定義 × テンプレート → 再現可能なコマンド
+            <div className="cg-flicker" style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-sm)', letterSpacing: '.14em', color: 'var(--cg-ghost-outline)' }}>
+              値を変えるだけで、コマンドも手順書も。
             </div>
           </div>
 

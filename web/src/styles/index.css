@@ -48,6 +48,27 @@ html {
   .cg-concept .cg-op-arrow { transform: rotate(90deg); }
 }
 
+/* ---- editor: editable filename in the app bar ---- */
+.cg-fname {
+  border: 1px solid transparent;
+  transition: border-color var(--dur-base, .15s), background var(--dur-base, .15s);
+}
+.cg-fname:hover { border-color: var(--cg-border); }
+.cg-fname:focus { border-color: var(--cg-red); background: var(--cg-bg); }
+
+/* ---- entrance animations (overlays + empty state) ----
+   `both` fill keeps the final state; under reduced-motion we snap straight to
+   the end state (opacity 1) so a fade-in never leaves an element invisible. */
+@keyframes cg-overlay-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes cg-pop-in { from { opacity: 0; transform: translateY(8px) scale(.985); } to { opacity: 1; transform: none; } }
+@keyframes cg-enter-up { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.cg-overlay-in { animation: cg-overlay-in 0.18s ease-out both; }
+.cg-pop-in { animation: cg-pop-in 0.22s cubic-bezier(.2,.7,.3,1) both; }
+.cg-enter-up { animation: cg-enter-up 0.5s cubic-bezier(.2,.7,.3,1) both; }
+@media (prefers-reduced-motion: reduce) {
+  .cg-overlay-in, .cg-pop-in, .cg-enter-up { animation: none; opacity: 1; transform: none; }
+}
+
 /* ---- tasteful, workplace-safe "haunting" for the empty state ---- */
 @keyframes cg-bob   { 0%,100% { transform: translateY(0) } 50% { transform: translateY(-9px) } }
 @keyframes cg-glow  { 0%,100% { opacity: .30; transform: scale(1) } 50% { opacity: .55; transform: scale(1.06) } }

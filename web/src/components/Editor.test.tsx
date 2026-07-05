@@ -2,7 +2,7 @@
 // NOTE: These tests replaced the old textarea-based Editor tests (stale after P2 redesign port).
 // The new Editor is the full two-pane Pyodide-backed editor; smoke-test that it mounts.
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, act } from "@testing-library/react";
+import { render, screen, act, fireEvent } from "@testing-library/react";
 
 // jsdom has no real Worker; mock the worker module so useGenerate's mount doesn't crash.
 // The mock records each constructed instance so a test can drive its onmessage handler
@@ -22,7 +22,7 @@ vi.mock("../worker/generate.worker?worker", () => ({
 import { Editor } from "./Editor";
 import { DEFAULT_SETTINGS } from "../worker/types";
 
-const defaultDownload = { enc: "UTF-8" as const, fname: "output", ts: false, ext: "txt" };
+const defaultDownload = { enc: "UTF-8" as const, ts: false };
 
 function renderEditor() {
   return render(
@@ -85,5 +85,30 @@ describe("Editor (redesign-b)", () => {
     expect(screen.queryByText("実行環境を初期化しています…")).toBeNull();
     expect(screen.getByText("HELLO WORLD")).toBeTruthy();
     expect((screen.getByRole("button", { name: "コピー" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("downloads with the editable filename and a mode-derived extension", () => {
+    vi.useFakeTimers();
+    renderEditor();
+    const worker = workerInstances[0];
+    act(() => { worker.onmessage!({ data: { kind: "ready" } } as MessageEvent); });
+    act(() => { vi.advanceTimersByTime(300); });
+    act(() => {
+      worker.onmessage!({
+        data: { kind: "result", id: 1, result: { output: "OUT\n", configError: null, templateError: null, configDebug: "{}" } },
+      } as MessageEvent);
+    });
+
+    // Default doc name is "command"; 手順書 (md) mode → .md in the footer save button.
+    expect(screen.getByRole("button", { name: /command\.md を保存/ })).toBeTruthy();
+
+    // Editing the header filename flows into the download name.
+    const nameInput = screen.getByLabelText("ファイル名") as HTMLInputElement;
+    fireEvent.change(nameInput, { target: { value: "myrunbook" } });
+    expect(screen.getByRole("button", { name: /myrunbook\.md を保存/ })).toBeTruthy();
+
+    // Raw output mode switches the extension to .txt.
+    fireEvent.click(screen.getByRole("button", { name: "Raw" }));
+    expect(screen.getByRole("button", { name: /myrunbook\.txt を保存/ })).toBeTruthy();
   });
 });

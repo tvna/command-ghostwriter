@@ -41,7 +41,7 @@ function analyticsLocation(): { route: string; path: string } {
   return { route: "/", path: "/" };
 }
 
-const DEFAULT_DOWNLOAD: DownloadOptions = { enc: "UTF-8", fname: "command", ts: true, ext: "txt" };
+const DEFAULT_DOWNLOAD: DownloadOptions = { enc: "UTF-8", ts: true };
 
 function formatFromFileName(name: string): Format {
   const ext = name.split(".").pop()?.toLowerCase();
