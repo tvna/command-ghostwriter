@@ -120,6 +120,10 @@ def test_release_workflow_invokes_semantic_release_with_required_plugins() -> No
     command = run_step["run"]
 
     assert run_step["env"]["GITHUB_TOKEN"] == "${{ secrets.RELEASE_TOKEN || github.token }}"
+    # The prepare step moves local HEAD off the remote main SHA (synthetic commits),
+    # which trips semantic-release's strict isBranchUpToDate check. --no-ci skips that
+    # CI branch-sync verification so the release is analyzed and published.
+    assert "semantic-release --no-ci" in command
     for package in [
         "semantic-release@^24",
         "@semantic-release/commit-analyzer@^13",

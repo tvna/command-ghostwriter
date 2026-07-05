@@ -65,6 +65,18 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
         # Versions pinned by major. semantic-release runs on the runner's
         # preinstalled Node; no release dependencies are committed to this repo.
+        #
+        # --no-ci is required, not optional. The "Prepare release commits from
+        # develop" step builds synthetic Conventional Commit inputs on top of the
+        # checked-out main, which moves local HEAD off the remote main SHA.
+        # semantic-release's isBranchUpToDate compares `git rev-parse HEAD` with
+        # the remote branch SHA by strict equality; the moved HEAD makes that
+        # check fail, so without --no-ci semantic-release logs "the local branch
+        # main is behind the remote one" and publishes nothing. --no-ci skips that
+        # CI branch-sync verification. It does not force a dry run, so the release
+        # still publishes. Safety is preserved by the workflow-level concurrency
+        # serialization and by git's fast-forward requirement on the final push,
+        # which still fails loudly if main advanced underneath us.
         run: >
           npx --yes
           -p semantic-release@^24
@@ -75,4 +87,4 @@ jobs:
           -p @semantic-release/git@^10
           -p @semantic-release/github@^11
           -p conventional-changelog-conventionalcommits@^8
-          semantic-release
+          semantic-release --no-ci
