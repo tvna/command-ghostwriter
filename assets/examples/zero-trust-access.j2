@@ -202,6 +202,6 @@ curl --max-time 3 http://{{ s.host }}:11434/api/version   # 失敗すること�
 ## 注意事項
 
 - SSH 証明書認証への切替は、証明書ログインが確認できるまでパスワード認証・静的鍵を無効化しない（手順の順序を守らないとロックアウトする）。
-- `plaintext_allows` は dgx-spark-ollama テンプレートで開けた IP・ポートと必ず一致させる。一致しないと mTLS を迂回する平文経路が残る。
+- `plaintext_allows` は dgx-spark-ollama テンプレートで開けたクライアント IP・ポートと必ず一致させる。一致しないと mTLS を迂回する平文経路が残る。
 - CA の provisioner パスワードや証明書の秘密鍵は、演習後も安全に管理し、不要になったら失効（`step ca revoke`）する。
 - `ufw default deny incoming` を実行する前に、現在接続しているポート（SSH等）が `firewall.allow_tcp` に含まれていることを確認する。含まれないと接続が切断され、コンソールアクセスでしか復旧できない。
