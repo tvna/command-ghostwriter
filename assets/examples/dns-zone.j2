@@ -14,6 +14,7 @@ BIND の DNS ゾーンファイルを作成し、SOA / NS / MX / A / TXT（SPF�
 - **NS / MX / A レコード**: それぞれ権威サーバ・メールサーバ・ホストの IP アドレスを示すレコード
 - **SPF / DKIM / DMARC**: メールの送信元を認証するための仕組み（TXT レコードで公開）
 - **named-checkzone / named-checkconf**: 反映前に構文を検証するコマンド
+- **rndc**: 稼働中の named プロセスを制御するコマンド（reload で設定・ゾーンの再読込を行う）
 
 ## 1. ゾーンファイルを作成する
 
