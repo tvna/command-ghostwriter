@@ -4,7 +4,7 @@
 
 ## 目的
 
-BIND の DNS ゾーンファイルを作成し、SOA / NS / MX / A / TXT（SPF・DKIM・DMARC）を含む権威 DNS の基本構成を理解し、構文チェックから反映・反引き確認までの一連の流れを実施できるようになることを目指します。
+BIND の DNS ゾーンファイルを作成し、SOA / NS / MX / A / TXT（SPF・DKIM・DMARC）を含む権威 DNS の基本構成を理解し、構文チェックから反映・正引き確認までの一連の流れを実施できるようになることを目指します。
 
 ## 用語解説
 
@@ -68,7 +68,7 @@ named-checkconf
 rndc reload {{ origin }}
 ```
 
-## 4. 反引き確認
+## 4. 正引き確認
 
 ```bash
 dig @{{ soa.primary_ns }} {{ origin }} SOA +short
