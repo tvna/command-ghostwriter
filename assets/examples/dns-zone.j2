@@ -2,6 +2,20 @@
 
 権威 DNS サーバー（BIND）に **{{ origin }}** のゾーンを初期化します。SOA / NS / MX / A と送信者認証 TXT（SPF・DKIM・DMARC）を含みます。
 
+## 目的
+
+BIND の DNS ゾーンファイルを作成し、SOA / NS / MX / A / TXT（SPF・DKIM・DMARC）を含む権威 DNS の基本構成を理解し、構文チェックから反映・正引き確認までの一連の流れを実施できるようになることを目指します。
+
+## 用語解説
+
+- **ゾーンファイル**: あるドメインの DNS レコードをまとめたファイル
+- **SOA レコード**: ゾーンの管理情報（シリアル・再取得間隔等）を持つレコード
+- **シリアル番号**: ゾーンの更新を表す番号。更新のたびに増やす必要がある
+- **NS / MX / A レコード**: NS は権威サーバのホスト名、MX はメールサーバのホスト名、A はホストの IP アドレスを示すレコード（NS・MX の値はホスト名であり IP アドレスではない点に注意）
+- **SPF / DKIM / DMARC**: メールの送信元を認証するための仕組み（TXT レコードで公開）
+- **named-checkzone / named-checkconf**: 反映前に構文を検証するコマンド
+- **rndc**: 稼働中の named プロセスを制御するコマンド（reload で設定・ゾーンの再読込を行う）
+
 ## 1. ゾーンファイルを作成する
 
 `/var/named/db.{{ origin }}` として以下を保存します。レコードを更新したら SOA の serial も必ず進めてください。
@@ -54,9 +68,22 @@ named-checkconf
 rndc reload {{ origin }}
 ```
 
-## 4. 反引き確認
+## 4. 正引き確認
 
 ```bash
 dig @{{ soa.primary_ns }} {{ origin }} SOA +short
 dig @{{ soa.primary_ns }} {{ origin }} MX +short
 ```
+
+## 動作確認
+
+- `named-checkzone` `named-checkconf` がエラーなく通ること
+- `dig @<NS> <ドメイン> SOA +short` で設定したシリアルが返ること
+- `dig @<NS> <ドメイン> MX +short` で設定したメールサーバが返ること
+- `rndc reload` 実行後にエラーが出力されないこと
+
+## 注意事項
+
+- レコードを更新したのに SOA のシリアルを進め忘れると、セカンダリ DNS や外部キャッシュに変更が伝搬しない。
+- 反映前に必ず `named-checkzone` / `named-checkconf` で構文を検証し、エラーがある状態で `rndc reload` しない。
+- 本番ドメインで演習する場合は実際のメール配送・Web 公開に影響するため、必ずテスト用ドメインまたは検証環境で実施する。

@@ -4,6 +4,17 @@ CSV で定義した {{ csv_rows | length }} 件のアクセス制御ルールを
 rich rule として一括投入します。Rocky Linux 9 標準（firewalld + nftables
 バックエンド）を前提に、root 権限で上から順に実行してください。
 
+## 目的
+
+CSV で定義したアクセス制御ルールを firewalld の rich rule として一括投入し、Rocky Linux におけるゾーン・permanent/runtime の概念を理解した上で安全に反映できるようになることを目指します。
+
+## 用語解説
+
+- **firewalld**: Rocky Linux / RHEL 系で標準のファイアウォール管理サービス
+- **zone（ゾーン）**: 信頼度に応じて通信ルールをまとめる単位（public/internal/dmz等）
+- **rich rule**: 送信元・ポート・プロトコル等を細かく指定できる firewalld のルール記法
+- **--permanent**: 再起動後も残る永続設定として登録するオプション（即時反映はされない）
+
 ## 1. 投入するルール一覧
 
 | zone | action | source | protocol | port | 用途 |
@@ -36,3 +47,16 @@ firewall-cmd --list-all-zones
 
 > reject と drop の違い: reject は拒否応答（ICMP）を返し、drop は無応答で破棄します。
 > 意図に応じて使い分けてください。
+
+## 動作確認
+
+- `firewall-cmd --state` が running であること
+- `firewall-cmd --list-all-zones` に投入した全ルールが反映されていること
+- 許可したはずの通信（例: HTTPS）が成功し、拒否したはずの通信が失敗すること
+- `firewall-cmd --reload` 実行後もルールが消えていないこと（--permanent で投入したか確認）
+
+## 注意事項
+
+- `--permanent` のみでは即時反映されない。必ず `firewall-cmd --reload` まで実施してから動作確認する。
+- SSH 等、自分の接続に使っているポートを誤って拒否ルールにすると、リモート作業中の場合は接続が切断されるおそれがある。
+- 本番環境に適用する前に、CSV の内容を必ず確認し、意図しないポート公開がないか確認する。
