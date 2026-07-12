@@ -5,7 +5,7 @@
 
 ## 確認手順
 {% for s in steps %}
-{{ loop_index }}. **{{ s.check }}**
+{{ loop.index }}. **{{ s.check }}**
    ```
    {{ s.cmd }}
    ```
