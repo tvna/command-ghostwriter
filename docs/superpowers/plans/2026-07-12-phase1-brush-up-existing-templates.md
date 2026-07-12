@@ -423,6 +423,19 @@ EOF
 **Files:**
 - Modify: `assets/examples/incident-proxy.j2`
 
+> **スコープ追加（実装時に発見した既存バグの修正）**: `assets/examples/incident-proxy.j2` の確認手順ループは `{{ loop_index }}` を参照しているが、これは Jinja2 の標準ループ変数ではない（正しくは `{{ loop.index }}`）。この誤りにより、`is_strict_undefined=True`（Web UI のデフォルト設定 `web/src/worker/types.ts` の `isStrictUndefined: true`）でレンダリングすると `Template runtime error: 'loop_index' is undefined` で **レンダリングが完全に失敗し、Markdown が一切生成されない**。これは本フェーズの追加作業（用語解説等）以前からの既存バグで、かつ Step 3 のレンダリング確認自体を妨げる（strict モードで検証できない）ため、Task 6 の一部として `loop_index` → `loop.index` の1行修正も行う。データファイル・他のロジックは変更しない。
+
+- [ ] **Step 0: 既存バグを修正する（`loop_index` → `loop.index`）**
+
+`assets/examples/incident-proxy.j2` の以下の行:
+```jinja
+{{ loop_index }}. **{{ s.check }}**
+```
+を、次のように修正する:
+```jinja
+{{ loop.index }}. **{{ s.check }}**
+```
+
 - [ ] **Step 1: 冒頭に「目的」「用語解説」を挿入する**
 
 4行目（`- **除外 (no_proxy)**: ...`）の直後、5行目（空行）・6行目（`## 確認手順`）の前に、以下を挿入する:
