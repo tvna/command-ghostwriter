@@ -1,0 +1,6 @@
+[default.extend-words]
+# RTO = Recovery Time Objective, a standard DR/backup terminology acronym.
+RTO = "RTO"
+# chage = the real Linux command for managing password expiry
+# (`man chage` / `change user password expiry information`).
+chage = "chage"
