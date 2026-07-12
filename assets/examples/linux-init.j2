@@ -2,6 +2,19 @@
 
 新規ホスト **{{ hostname }}** の初期化手順です。root 権限（sudo）で上から順に実行してください。
 
+## 目的
+
+Linux サーバの初期セットアップ（ホスト名・ユーザー作成・SSH 鍵配置・パッケージ導入・ファイアウォール有効化）を CLI で一巡し、新規サーバを安全に払い出すための標準手順を理解できるようになることを目指します。
+
+## 用語解説
+
+- **ホスト名**: サーバを識別する名前（`hostnamectl` で設定）
+- **SSH 公開鍵認証**: 秘密鍵を持つ者だけがログインできる認証方式
+- **authorized_keys**: ログインを許可する公開鍵の一覧ファイル
+- **sudo**: 一般ユーザーが管理者権限でコマンドを実行する仕組み
+- **ufw**: Linux のファイアウォールを簡易に操作するフロントエンド
+- **PermitRootLogin / PasswordAuthentication**: `sshd_config` の認証関連設定項目
+
 ## 1. ホスト名とタイムゾーン
 
 ```bash
@@ -44,3 +57,16 @@ systemctl reload sshd
 {% for port in firewall %}ufw allow {{ port }}
 {% endfor %}ufw --force enable
 ```
+
+## 動作確認
+
+- `hostnamectl` `timedatectl` の表示が設定値と一致すること
+- 作成したユーザーで鍵認証による SSH ログインが成功すること
+- `sshd -t` が構文エラーなく通り、`systemctl status sshd` が active であること
+- `ufw status` で許可したポートのみが開いていること
+
+## 注意事項
+
+- `PasswordAuthentication no` を設定する前に、必ず鍵認証でログインできることを別セッションで確認する（自分をロックアウトするリスクがある）。
+- `ufw enable` はデフォルトで許可していないポートへの接続を遮断する。作業に使っているポート（SSH等）を確実に許可してから有効化する。
+- 秘密鍵は演習環境外に持ち出さず、共有・送信しない。
