@@ -1,0 +1,5 @@
+title: Webサーバの負荷急増
+hostname: web-prod-01
+load_threshold: "4.0"
+target_service: nginx
+escalation: インフラ基盤チーム (内線 1201)
