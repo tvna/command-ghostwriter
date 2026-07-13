@@ -1,0 +1,9 @@
+[targets]
+logs = ["/var/log/app/access.log.1", "/var/log/app/error.log.1"]
+
+[ledger]
+dir = "/var/backups/log-ledger"
+filename = "2026-07-13.sha256"
+
+[protect]
+chattr_target = "/var/log/app/access.log.1"
