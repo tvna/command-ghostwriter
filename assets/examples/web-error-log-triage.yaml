@@ -1,0 +1,7 @@
+title: Webサーバの5xxエラー多発
+hostname: web-prod-01
+access_log: /var/log/nginx/access.log
+error_log: /var/log/nginx/error.log
+backend_service: app-backend
+target_url: https://example.internal/health
+escalation: インフラ基盤チーム (内線 1201)
