@@ -1,0 +1,15 @@
+listen_address = "192.168.10.1"
+domain = "office.local"
+upstream_servers = ["8.8.8.8", "1.1.1.1"]
+
+[[hosts]]
+name = "fileserver"
+ip = "192.168.10.11"
+
+[[hosts]]
+name = "printer01"
+ip = "192.168.10.12"
+
+[[hosts]]
+name = "app-internal"
+ip = "192.168.10.20"

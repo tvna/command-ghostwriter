@@ -1,0 +1,6 @@
+path,type,owner,group,perm,description
+/srv/shared,dir,root,dev-team,2775,部門共有ディレクトリ(setgidでグループ継承)
+/srv/shared/reports,dir,root,dev-team,2770,レポート格納(グループのみアクセス)
+/srv/shared/reports/monthly.csv,file,ops,dev-team,0660,月次レポート(グループ読み書き)
+/srv/shared/public,dir,root,dev-team,0755,公開用ディレクトリ(全員読み取り可)
+/srv/shared/public/notice.txt,file,ops,dev-team,0644,お知らせファイル

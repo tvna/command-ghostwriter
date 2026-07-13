@@ -1,0 +1,5 @@
+site,required_hosts,assigned_cidr
+tokyo,50,192.168.10.0/26
+osaka,20,192.168.10.64/26
+nagoya,10,192.168.10.128/26
+fukuoka,5,192.168.10.192/26

@@ -1,0 +1,96 @@
+# virsh による Linux VM 作成・起動停止手順 — {{ domain }}
+
+libvirt/KVM ハイパーバイザー上に **{{ domain }}** という名前の VM をコマンドラインのみで作成し、起動・停止・自動起動の管理を virsh で行います。
+
+## 目的
+
+ハイパーバイザー上に VM を CLI だけで作成し、起動・停止・自動起動の管理を virsh で行えるようになることを目指します。
+
+## 用語解説
+
+- **ハイパーバイザー(KVM/QEMU)**: Linux カーネルの仮想化機能（KVM）と QEMU を組み合わせて仮想マシンを実行する基盤
+- **libvirt**: KVM/QEMU などのハイパーバイザーを統一的な API・CLI（virsh 等）で管理するための仮想化管理レイヤー
+- **ドメイン**: libvirt の用語で、個々の仮想マシンのインスタンスを指す
+- **qcow2仮想ディスク**: 差分・スナップショットに対応した QEMU 標準の仮想ディスクイメージ形式
+- **defaultネットワーク(NAT)**: libvirt が標準で用意する NAT 方式の仮想ネットワーク
+- **virt-install**: ドメインを定義しつつ OS インストール（またはイメージ起動）まで行うコマンド
+- **shutdownとdestroyの違い**: `shutdown` はゲスト OS への正常なシャットダウン要求、`destroy` はハイパーバイザー側からの強制電源断
+
+## 1. 仮想化支援の確認
+
+ホスト CPU が仮想化支援命令（Intel VT-x / AMD-V）に対応しているか確認し、libvirt が KVM を認識しているかを見ます。
+
+```bash
+grep -E 'vmx|svm' /proc/cpuinfo | head -1
+virsh version
+```
+
+## 2. 仮想ネットワークの確認
+
+ドメインを接続する {{ network }} ネットワークが有効になっているか確認します。
+
+```bash
+virsh net-list --all
+```
+
+## 3. 仮想ディスクの作成
+
+クラウドイメージ（{{ cloud_image_path }}）を差分元ファイル（backing file、元イメージを直接変更せず差分だけを保持する仕組み）とした qcow2 仮想ディスクを作成します。
+
+```bash
+qemu-img create -f qcow2 -F qcow2 \
+  -b {{ cloud_image_path }} \
+  {{ disk_path }} {{ disk_size_gb }}G
+```
+
+## 4. virt-install でドメインを作成
+
+クラウドイメージをそのままインポートする形でドメイン {{ domain }} を作成します。クラウドイメージは初期状態でログイン用パスワードが設定されていないため、`--cloud-init` でログイン確認用の root パスワードを自動生成させます。
+
+```bash
+virt-install \
+  --name {{ domain }} \
+  --vcpus {{ vcpus }} \
+  --memory {{ memory_mb }} \
+  --disk path={{ disk_path }},bus=virtio \
+  --network network={{ network }} \
+  --os-variant {{ os_variant }} \
+  --cloud-init root-password-generate=yes,disable=no \
+  --import \
+  --graphics none \
+  --console pty,target_type=serial
+```
+
+インストール完了後のログに、自動生成された root パスワードが出力されます（保存して手順5で使用します）。
+
+## 5. コンソールでのログイン確認
+
+```bash
+virsh console {{ domain }}
+```
+
+プロンプトが表示されたらログインし、`Ctrl+]` でコンソールから抜けます。
+
+## 6. 停止・起動・自動起動の管理
+
+正常なシャットダウン、起動、ホスト起動時の自動起動設定を行います。
+
+```bash
+virsh shutdown {{ domain }}
+virsh list --all
+virsh start {{ domain }}
+virsh autostart {{ domain }}
+```
+
+## 動作確認
+
+- `virsh list` で {{ domain }} が running 状態であること
+- `virsh console {{ domain }}` からログインできること
+- `virsh net-dhcp-leases {{ network }}` に {{ domain }} の IP アドレスが表示されること
+- `virsh shutdown {{ domain }}` 実行後、`virsh list --all` で shut off 状態に遷移すること
+
+## 注意事項
+
+- ホストの CPU が仮想化支援（VT-x/AMD-V）に対応している必要があり、非対応環境では virt-install が失敗する。
+- `destroy` は強制電源断であり、`shutdown` による正常なシャットダウンとは異なる点に注意する。ファイルシステム破損の恐れがあるため、応答がない場合の最終手段として使う。
+- backing file 方式の qcow2 ディスクは元のクラウドイメージファイルに依存するため、クラウドイメージを削除・移動すると起動できなくなる。

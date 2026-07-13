@@ -1,0 +1,7 @@
+image: nginx:1.27
+container_name: web
+host_port: 8080
+container_port: 80
+volume:
+  host_dir: /home/ops/docker-basic-ops/html
+  demo_html: "Hello from bind mount (v2)"
