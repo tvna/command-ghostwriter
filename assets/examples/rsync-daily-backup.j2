@@ -1,0 +1,92 @@
+# rsyncによる日次バックアップ取得 — {{ backup_root }}
+
+対象ディレクトリを rsync で `{{ backup_root }}` 配下へ日次バックアップします。世代管理にはハードリンク（`--link-dest`）を使い、ディスク消費を抑えます。
+
+## 目的
+
+「コピー」と「バックアップ」の違い（世代・差分・除外）を理解し、rsync と cron で日次バックアップを構成・検証できるようになることを目指します。
+
+## 用語解説
+
+- **フルバックアップと差分**: 毎回全体を複製するか、変化分だけを扱うかの違い
+- **rsyncのアーカイブモード(-a)**: パーミッション・タイムスタンプ・シンボリックリンクを保ったまま複製するオプション
+- **--dry-run**: 実際には転送せず、転送予定のみを表示するオプション
+- **--deleteの危険性**: 宛先にしかないファイルを削除する破壊的オプション
+- **除外パターン**: バックアップ対象から外すファイル・ディレクトリの指定
+- **3-2-1ルール**: データを3部、2種類の媒体に、うち1部を別の場所に保管する原則
+- **ハードリンク世代管理(--link-dest)**: 変化のないファイルを複製せずリンクで共有し、世代ごとの容量増加を防ぐ仕組み
+
+## 1. バックアップ対象と除外を確認する
+
+```bash
+{% for d in source_dirs %}echo "対象: {{ d }}"
+{% endfor %}{% for p in exclude_patterns %}echo "除外: {{ p }}"
+{% endfor %}```
+
+## 2. dry-runで転送予定を確認する
+
+本実行の前に、必ず `--dry-run`（`-n`）で転送対象を確認します。
+
+```bash
+mkdir -p {{ backup_root }}
+{% for d in source_dirs %}mkdir -p {{ backup_root }}/latest{{ d }}
+rsync -avn {% for p in exclude_patterns %}--exclude='{{ p }}' {% endfor %}{{ d }}/ {{ backup_root }}/latest{{ d }}/
+{% endfor %}```
+
+## 3. 本実行し、ログを保存する
+
+```bash
+{% for d in source_dirs %}mkdir -p {{ backup_root }}/latest{{ d }}
+rsync -av {% for p in exclude_patterns %}--exclude='{{ p }}' {% endfor %}{{ d }}/ {{ backup_root }}/latest{{ d }}/ | tee -a {{ cron.log_path }}
+{% endfor %}```
+
+## 4. ハードリンクで世代ディレクトリを作成する
+
+`latest` を基準に、日付ディレクトリへ `--link-dest` でハードリンク世代を作ります。世代管理を機能させるには、Step 3（`latest` への同期）を実行した直後にこのステップを実行し、常に最新化された `latest` を基準にハードリンクを作る必要があります。
+
+```bash
+DATE=$(date +%Y-%m-%d)
+{% for d in source_dirs %}mkdir -p {{ backup_root }}/${DATE}{{ d }}
+rsync -av {% for p in exclude_patterns %}--exclude='{{ p }}' {% endfor %}--link-dest={{ backup_root }}/latest{{ d }} {{ d }}/ {{ backup_root }}/${DATE}{{ d }}/
+{% endfor %}```
+
+## 5. cronに日次ジョブを登録する
+
+日次ジョブは、Step 3（`latest` への同期）と Step 4（日付ディレクトリへのハードリンク）を同じ順序でこの順に実行します。`latest` を毎回最新化してからハードリンクすることで、変化のないファイルだけがリンク共有され、変化したファイルのみ新規コピーされます。
+
+```bash
+sudo tee {{ cron.script_path }} <<'EOF'
+#!/bin/bash
+set -euo pipefail
+DATE=$(date +%Y-%m-%d)
+{% for d in source_dirs %}mkdir -p {{ backup_root }}/latest{{ d }}
+rsync -av {% for p in exclude_patterns %}--exclude='{{ p }}' {% endfor %}{{ d }}/ {{ backup_root }}/latest{{ d }}/
+mkdir -p {{ backup_root }}/${DATE}{{ d }}
+rsync -av {% for p in exclude_patterns %}--exclude='{{ p }}' {% endfor %}--link-dest={{ backup_root }}/latest{{ d }} {{ d }}/ {{ backup_root }}/${DATE}{{ d }}/
+{% endfor %}EOF
+sudo chmod +x {{ cron.script_path }}
+(crontab -l 2>/dev/null; echo "{{ cron.schedule }} {{ cron.script_path }} >> {{ cron.log_path }} 2>&1") | crontab -
+```
+
+## 6. 保持ポリシーを確認する
+
+保持日数は `{{ retention_days }}` 日です。古い世代ディレクトリは保持日数を超えたものから削除します。`{{ backup_root }}` 自体、ハードリンクの基準ディレクトリ `latest`（サブディレクトリへの書き込みだけでは自身の更新日時が進まないため、削除候補に誤って含まれやすい）、そして `restore-drill` シナリオが利用するチェックサム台帳ディレクトリ `checksums`（復元訓練の頻度によっては長期間更新されず、同じ理由で削除候補に含まれやすい）を除外して検索します。
+
+```bash
+find {{ backup_root }} -mindepth 1 -maxdepth 1 -type d ! -name latest ! -name checksums -mtime +{{ retention_days }}
+```
+
+## 動作確認
+
+- dry-run（Step 2）と本実行（Step 3）の転送件数が一致すること
+- `diff -r` で元と複製の内容が一致すること
+- 2世代目のディレクトリが `du -sh` でディスクをほぼ消費していないこと（ハードリンクの効果）
+- `crontab -l` に登録したジョブが表示され、`{{ cron.log_path }}` に実行痕跡があること
+
+## 注意事項
+
+- `--delete` オプションは宛先にしかないファイルを削除する破壊的操作のため、本計画では使用せず、必要な場合も必ず `--dry-run` で対象を確認してから追加する。
+- `--link-dest` の基準ディレクトリ（`latest`）を誤ると、世代間のハードリンクが効かずディスクを浪費する。
+- 保持日数（`{{ retention_days }}` 日）を超えた世代ディレクトリの削除は、削除前に一覧を確認してから実行する。
+- cronスクリプトは `set -e` のため、1つの `source_dirs`（対象ディレクトリ）で rsync が失敗すると以降のディレクトリが同期されないまま終了する。本番導入時はディレクトリごとにエラーハンドリングする（例: 各 rsync を `|| true` で継続させ、失敗も別途ログする）ことを検討する。
+- このバックアップは同一拠点内の複製にとどまる。3-2-1ルール（データを3部、2種類の媒体に、うち1部を別拠点に）に沿うには、`{{ backup_root }}` の複製をさらに別拠点・別媒体へ複製することを検討する。

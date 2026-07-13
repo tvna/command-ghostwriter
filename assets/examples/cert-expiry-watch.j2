@@ -1,0 +1,86 @@
+# TLS証明書の期限確認と更新運用
+
+CSVで定義した監視対象について、openssl で期限を点検する日次監視を構築し、期限切れが迫った証明書を `certbot renew --dry-run` で事前検証してから実更新します（定期点検と更新運用を一気通貫で扱います）。
+
+## 目的
+
+証明書の有効期限切れが引き起こす障害を理解し、opensslコマンドで期限・チェーンを点検して定期監視化し、更新作業をdry-runで事前確認してから実施できるようになることを目指します。
+
+## 用語解説
+
+- **TLS/SSL証明書**: 通信の暗号化と相手の身元を保証する電子証明書
+- **有効期限(notAfter)**: 証明書が失効する日時
+- **証明書チェーンと中間証明書**: ルートCAとサーバ証明書の間を橋渡しする証明書群
+- **CNとSAN**: 証明書が保証するドメイン名を示す項目
+- **certbotとACME**: Let's Encrypt等の証明書を自動発行・更新する仕組みとそのクライアント
+- **dry-run更新**: 実際には証明書を書き換えず、更新できるかどうかだけを確認する動作
+
+## 1. 監視対象を確認する
+
+| domain | port | warn_days |
+|---|---|---|
+{% for r in csv_rows %}| {{ r["domain"] }} | {{ r["port"] }} | {{ r["warn_days"] }} |
+{% endfor %}
+
+## 2. 稼働中サービスの証明書の期限を取得する
+
+```bash
+{% for r in csv_rows %}echo | openssl s_client -connect {{ r["domain"] }}:{{ r["port"] }} -servername {{ r["domain"] }} 2>/dev/null | openssl x509 -noout -enddate -subject -ext subjectAltName
+{% endfor %}```
+
+`-subject` の出力が CN（コモンネーム）を、`-ext subjectAltName` の出力が SAN（Subject Alternative Name）を示します。証明書がどのドメイン名を保証しているかはこの両方で確認します。証明書チェーン（サーバ証明書と中間証明書のつながり）を確認する場合は `-showcerts` オプションを追加してください。
+
+## 3. 点検スクリプトを作り、cronで日次点検化する
+
+閾値割れを検出したら `logger` で記録します。
+
+```bash
+sudo tee /usr/local/bin/cert-expiry-check.sh <<'EOF'
+#!/bin/bash
+set -euo pipefail
+{% for r in csv_rows %}ENDDATE=$(echo | openssl s_client -connect {{ r["domain"] }}:{{ r["port"] }} -servername {{ r["domain"] }} 2>/dev/null | openssl x509 -noout -enddate | cut -d= -f2)
+REMAIN=$(( ($(date -d "$ENDDATE" +%s) - $(date +%s)) / 86400 ))
+if [ "$REMAIN" -lt {{ r["warn_days"] }} ]; then
+  logger -t cert-expiry "WARN: {{ r["domain"] }} expires in ${REMAIN} days (threshold {{ r["warn_days"] }})"
+fi
+{% endfor %}EOF
+sudo chmod +x /usr/local/bin/cert-expiry-check.sh
+(crontab -l 2>/dev/null; echo "0 6 * * * /usr/local/bin/cert-expiry-check.sh") | crontab -
+```
+
+## 4. 閾値割れが検出された対象をdry-runで事前検証する
+
+Step 3 の点検で閾値割れが検出された対象について実施します。以下は全対象を一括で確認する例です（閾値割れしていない対象は dry-run が単に成功します）。
+
+```bash
+{% for r in csv_rows %}sudo certbot renew --cert-name {{ r["domain"] }} --dry-run
+{% endfor %}```
+
+## 5. dry-run成功後に実更新する
+
+```bash
+{% for r in csv_rows %}sudo certbot renew --cert-name {{ r["domain"] }}
+{% endfor %}sudo systemctl reload nginx
+```
+
+サービスの reload を忘れると、証明書ファイルは更新されてもプロセスは古い証明書を使い続けます。
+
+## 6. 更新後の期限を確認する
+
+```bash
+{% for r in csv_rows %}echo | openssl s_client -connect {{ r["domain"] }}:{{ r["port"] }} -servername {{ r["domain"] }} 2>/dev/null | openssl x509 -noout -enddate
+{% endfor %}```
+
+## 動作確認
+
+- 全対象ホストの残日数一覧（Step 2）が作成できていること
+- `crontab -l` に日次登録があること
+- `certbot renew --dry-run`（Step 4）が成功すること
+- 更新後 `openssl s_client`（Step 6）で新しい notAfter が確認できること
+
+## 注意事項
+
+- `certbot renew` の本実行前に必ず `--dry-run` で確認する。certbot は ACME プロトコルで CA と自動的にやり取りし、証明書の発行・更新を行う。
+- 更新後はサービスの reload を忘れると新しい証明書が反映されない。
+- 点検スクリプトは `set -e` のため、1つのドメインへの接続に失敗すると以降のドメインが点検されないまま終了する。本番導入時はドメインごとにエラーハンドリングする（例: 各行を `|| true` で継続させ、失敗も別途ログする）ことを検討する。
+- 既存の `zero-trust-access`（CA構築側）とはレイヤが異なる（本シナリオは証明書の消費・運用側）ため重複しない。

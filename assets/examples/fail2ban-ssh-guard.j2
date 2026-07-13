@@ -1,0 +1,99 @@
+# fail2banによるSSHブルートフォース対策
+
+認証ログから攻撃の実態を観察したうえで、fail2ban で自動遮断を構成します。**`ignoreip` に管理端末を登録してから** jail を有効化し、自己ロックアウトを防ぎます。
+
+## 目的
+
+認証ログから攻撃の実態を観察し、fail2banで自動遮断を構成できるようになることを目指します。自分自身を締め出さないためのignoreip設計の重要性を理解します。
+
+## 用語解説
+
+- **ブルートフォース攻撃**: パスワードやログインを総当たりで試行する攻撃
+- **jail**: fail2banが監視・遮断するサービス単位の設定
+- **bantime・findtime・maxretry**: それぞれ「遮断時間」「集計時間枠」「許容失敗回数」を表す設定値
+- **ignoreip(除外リスト)**: 遮断対象から常に除外するIPアドレスの一覧
+- **ban解除(unban)**: 遮断を手動で解除する操作
+- **誤遮断(自己ロックアウト)**: 管理者自身のIPを誤って遮断してしまうこと
+
+## 1. 認証ログから攻撃の実在を確認する
+
+```bash
+sudo grep "Failed password" {{ jail.logpath }} | tail -n 20
+```
+
+## 2. fail2banを導入し、jail.localを作成する
+
+`jail.conf` は直接編集せず、`jail.local` に上書き設定を書きます。
+
+```bash
+sudo apt-get install -y fail2ban
+sudo tee /etc/fail2ban/jail.local <<'EOF'
+[DEFAULT]
+ignoreip = 127.0.0.1/8{% for ip in ignoreip %} {{ ip.address }}{% endfor %}
+
+[{{ jail.name }}]
+enabled = true
+port = {{ jail.port }}
+logpath = {{ jail.logpath }}
+bantime = {{ jail.bantime }}
+findtime = {{ jail.findtime }}
+maxretry = {{ jail.maxretry }}
+EOF
+```
+
+**`ignoreip` に管理端末（{% for ip in ignoreip %}{{ ip.address }} ({{ ip.label }}){% if not loop.last %}, {% endif %}{% endfor %}）を必ず登録してから**、次のステップで有効化します。
+
+## 3. サービスを起動し、状態を確認する
+
+```bash
+sudo systemctl enable --now fail2ban
+sudo fail2ban-client status {{ jail.name }}
+```
+
+## 4. テスト端末からの攻撃を模擬し、検知を観察する
+
+localhost への失敗ログイン試行は fail2ban のログ監視に検知されますが、`127.0.0.1` は `ignoreip` の既定値に含まれるため、検知されても遮断はされません（自己ロックアウト防止のための意図的な安全設計です）。ここでは、まず「検知はしているが遮断はしない」という ignoreip の効果そのものを確認します。
+
+```bash
+sudo apt-get install -y sshpass
+for i in $(seq 1 {{ jail.maxretry }}); do
+  sshpass -p wrongpass ssh -o StrictHostKeyChecking=no -o PubkeyAuthentication=no invaliduser@localhost -p 22 2>/dev/null
+done
+sudo fail2ban-client status {{ jail.name }}
+```
+
+`Currently failed` / `Total failed` が増加している一方、`Currently banned` が 0 のままであることを確認します（`127.0.0.1` が `ignoreip` で保護されているため）。
+
+## 5. 遮断とunbanの実際の動作を確認する
+
+実際の遮断・iptablesルール反映・unban の一連の流れは、`ignoreip` に含まれない（＝本来遮断され得る）IPに対して手動で遮断を発生させて確認します。`{{ test.attacker_ip }}` は外部からの実攻撃を想定した例示IPで、`ignoreip` には含まれていません。
+
+```bash
+sudo fail2ban-client set {{ jail.name }} banip {{ test.attacker_ip }}
+sudo fail2ban-client status {{ jail.name }}
+sudo iptables -L -n | grep {{ test.attacker_ip }}
+sudo fail2ban-client set {{ jail.name }} unbanip {{ test.attacker_ip }}
+sudo fail2ban-client status {{ jail.name }}
+sudo iptables -L -n | grep {{ test.attacker_ip }}
+```
+
+unban後は `iptables -L -n` にルールが残っていないことを確認します。
+
+## 6. 管理端末が失敗を繰り返してもbanされないことを確認する
+
+```bash
+{% for ip in ignoreip %}sudo fail2ban-client status {{ jail.name }} | grep -q "{{ ip.address }}" && echo "誤検知あり: {{ ip.address }}" || echo "OK: {{ ip.address }} ({{ ip.label }}) は遮断対象外"
+{% endfor %}```
+
+## 動作確認
+
+- `fail2ban-client status {{ jail.name }}` に監視中のjailと failed/banned カウンタが表示されること
+- Step 4 のローカル模擬テスト後、`Total failed` が増加する一方 `Currently banned` は 0 のままであること（`127.0.0.1` が `ignoreip` で保護されているため）
+- Step 5 で `{{ test.attacker_ip }}` を手動 ban した際に `iptables -L` にルールが出現し、`unban` 後にルールが消えること
+- 管理端末（{% for ip in ignoreip %}{{ ip.address }}{% if not loop.last %}, {% endif %}{% endfor %}）は失敗を繰り返してもbanされないこと
+
+## 注意事項
+
+- `ignoreip` に管理端末のIPを必ず登録してから有効化する（登録漏れは自己ロックアウトに直結する）。
+- `127.0.0.1` は `ignoreip` の既定値に含まれるため、localhost からの模擬攻撃は検知はされても実際には遮断されない。実際の遮断・unban動作は `ignoreip` に含まれない `{{ test.attacker_ip }}` を手動 ban して確認する（Step 5）。
+- `jail.conf` を直接編集せず、`jail.local` への上書きで運用する（パッケージ更新で `jail.conf` が上書きされても設定が失われない）。

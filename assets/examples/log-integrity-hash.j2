@@ -1,0 +1,84 @@
+# ログ改ざん検知の基礎（ハッシュ検証）
+
+「ログは改ざんされ得る」前提のもと、sha256sum によるハッシュ台帳の作成・照合と、ローテート済みログの追記専用化（append-only）を行います。
+
+## 目的
+
+「ログは改ざんされ得る」前提を理解し、sha256sumによるハッシュ台帳の作成・照合と、ローテート済みログの保全手順を実施できるようになることを目指します。
+
+## 用語解説
+
+- **ハッシュ関数**: データから固定長の値（ハッシュ値）を生成し、内容が変化すると値も変わる関数
+- **sha256sum**: SHA-256アルゴリズムでファイルのハッシュ値を計算するコマンド
+- **改ざん検知と改ざん防止の違い**: 検知は変更を「気付ける」仕組み、防止は変更自体を「できなくする」仕組み
+- **append-only属性(chattr +a)**: ファイルへの追記のみを許可し、上書き・削除を拒否する属性
+- **証跡(エビデンス)保全**: 障害調査・監査のためにログの完全性を保つこと
+
+## 1. 保全対象ログを確認する
+
+```bash
+{% for log in targets.logs %}ls -l {{ log }}
+{% endfor %}```
+
+## 2. ハッシュ台帳を作成する
+
+sha256sum はハッシュ関数の一種である SHA-256 を使い、ファイル内容から固定長のハッシュ値を計算します。
+
+```bash
+sudo mkdir -p {{ ledger.dir }}
+{% for log in targets.logs %}sha256sum {{ log }} | sudo tee -a {{ ledger.dir }}/{{ ledger.filename }}
+{% endfor %}```
+
+台帳は保全対象ログと同じ場所には置かず、`{{ ledger.dir }}` へ退避します（改ざん時に台帳も一緒に書き換えられるのを防ぐため）。
+
+## 3. 台帳と照合する
+
+台帳には `sha256sum` 実行時の絶対パスが記録されているため、照合コマンドの実行ディレクトリ（カレントディレクトリ）はどこでも構いません（ここでは明示のため `/` に移動しています）。
+
+```bash
+cd / && sudo sha256sum -c {{ ledger.dir }}/{{ ledger.filename }}
+```
+
+## 4. 改変を演習し、照合がFAILEDになることを観察する
+
+改変前に、復元用のバックアップを取得しておきます（末尾に改行のないログファイルに追記すると、追記内容が最終行と結合してしまい、行単位の削除では元の最終行ごと失われるため）。
+
+```bash
+sudo cp {{ protect.chattr_target }} /tmp/pre-tamper.bak
+echo "TAMPERED" | sudo tee -a {{ protect.chattr_target }}
+cd / && sudo sha256sum -c {{ ledger.dir }}/{{ ledger.filename }}
+```
+
+FAILED と表示されることを確認したら、この時点ではまだ `chattr +a` を設定していないため、バックアップから復元します。
+
+```bash
+sudo cp /tmp/pre-tamper.bak {{ protect.chattr_target }}
+```
+
+復元後、Step 3 のコマンドを再実行し、`OK` に戻ることを確認してから次のステップへ進みます。
+
+## 5. 追記専用属性を設定する
+
+```bash
+sudo chattr +a {{ protect.chattr_target }}
+sudo lsattr {{ protect.chattr_target }}
+```
+
+上書き・削除が拒否されることを確認します。
+
+```bash
+sudo truncate -s 0 {{ protect.chattr_target }} 2>&1 | grep -i "Operation not permitted" && echo "上書き拒否を確認"
+```
+
+## 動作確認
+
+- 未改変ログの照合(Step 3)が全件 `OK` を報告すること
+- 改変後の照合(Step 4)が `FAILED` を報告すること
+- `lsattr {{ protect.chattr_target }}` で `a` 属性が確認できること
+
+## 注意事項
+
+- ハッシュ台帳（`{{ ledger.dir }}`）は保全対象ログと同じ場所に置かない（改ざん時に台帳も一緒に書き換えられるため）。
+- `chattr +a` は root 権限で解除可能な点を理解しておく（`chattr -a` で改ざん防止が完全ではないことを認識する）。
+- 改ざん演習（Step 4）はテスト用ログに対してのみ行い、本番ログには適用しない。
+- ハッシュ台帳と `lsattr` の出力は、障害調査・監査時の証跡として別途保管しておく。

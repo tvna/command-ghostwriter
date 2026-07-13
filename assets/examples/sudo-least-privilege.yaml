@@ -1,0 +1,7 @@
+target_user: appdeploy
+sudoers_file: /etc/sudoers.d/appdeploy
+allowed_commands:
+  - /usr/bin/systemctl restart app.service
+  - /usr/bin/systemctl status app.service
+  - /usr/bin/journalctl -u app.service
+forbidden_test_command: /usr/sbin/useradd testuser

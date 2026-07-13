@@ -1,0 +1,11 @@
+[server]
+host = "app-01"
+admin_user = "ops"
+
+[key]
+type = "ed25519"
+comment = "ops@app-01"
+label = "id_ed25519_app01"
+
+[paths]
+sshd_dropin = "/etc/ssh/sshd_config.d/60-disable-password.conf"

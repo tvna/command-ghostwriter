@@ -1,0 +1,4 @@
+domain,port,warn_days
+shop.example.internal,443,14
+api.example.internal,443,14
+mail.example.internal,465,30

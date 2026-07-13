@@ -1,0 +1,18 @@
+[jail]
+name = "sshd"
+bantime = "1h"
+findtime = "10m"
+maxretry = 5
+port = "ssh"
+logpath = "/var/log/auth.log"
+
+[[ignoreip]]
+address = "192.168.10.5"
+label = "管理端末A"
+
+[[ignoreip]]
+address = "192.168.10.6"
+label = "管理端末B"
+
+[test]
+attacker_ip = "203.0.113.50"

@@ -1,0 +1,73 @@
+# 脆弱性スキャン結果への一次対応
+
+脆弱性スキャン結果（CSV）を重要度順に整理し、影響確認 → 優先度判定 → パッチ適用可否の一次判断までを行います。
+
+## 目的
+
+脆弱性情報（CVE・重要度）の読み方を理解し、スキャン結果一覧から影響確認→優先度判定→パッチ適用可否の一次判断を報告できるようになることを目指します。
+
+## 用語解説
+
+- **CVE**: 個々の脆弱性を一意に識別する番号
+- **CVSSと重要度(Critical〜Low)**: 脆弱性の深刻度を数値・段階で表す指標
+- **セキュリティアドバイザリ**: ベンダーが公開する脆弱性と修正版の告知
+- **dnf updateinfo**: 配布済みのセキュリティ修正情報を確認するコマンド
+- **パッチ適用とサービス再起動の関係**: パッケージ更新後、稼働中プロセスに反映するには再起動が必要な場合がある
+- **一次対応(トリアージ)**: 全件を精査する前に、影響度に応じて優先順位を判定する初動対応
+
+## 1. スキャン結果を重要度（CVSSベースの Critical〜Low）順に整理する
+
+| cve_id | severity | package | installed_version | fixed_version | service_active |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["cve_id"] }} | {{ r["severity"] }} | {{ r["package"] }} | {{ r["installed_version"] }} | {{ r["fixed_version"] }} | {{ r["service_active"] }} |
+{% endfor %}
+
+## 2. 該当パッケージの実在とバージョンを確認する
+
+```bash
+{% for r in csv_rows %}rpm -q {{ r["package"] }}
+{% endfor %}```
+
+## 3. 配布済み修正の有無を確認する
+
+```bash
+sudo dnf updateinfo list --security --with-cve | grep -E "{% for r in csv_rows %}{{ r["cve_id"] }}{% if not loop.last %}|{% endif %}{% endfor %}"
+```
+
+## 4. サービスが実際に稼働・公開されているか確認する
+
+```bash
+{% for r in csv_rows %}{% if r["service_active"] == "true" %}systemctl is-active {{ r["package"] }}
+ss -tlnp | grep {{ r["package"] }}
+{% endif %}{% endfor %}```
+
+`package` は必ずしも systemd のユニット名と一致しません（`httpd`/`nginx`/`sshd` のようなサービス本体のパッケージでは一致しますが、`openssl`/`curl` のようなライブラリ・CLIツールのパッケージには対応する systemd ユニットが存在しません）。ライブラリ系パッケージの場合は、`systemctl is-active` の代わりに、そのライブラリを利用している実際のサービス名（例: `ss -tlnp | grep httpd`）で稼働・公開状況を確認してください。
+
+## 5. 優先度判定表を作成する
+
+Critical かつ公開中（`service_active = true`）のものを最優先とします。
+
+```bash
+{% for r in csv_rows %}{% if r["severity"] == "Critical" and r["service_active"] == "true" %}echo "最優先: {{ r["cve_id"] }} ({{ r["package"] }})"
+{% elif r["service_active"] == "true" %}echo "要対応: {{ r["cve_id"] }} ({{ r["package"] }})"
+{% else %}echo "経過観察: {{ r["cve_id"] }} ({{ r["package"] }})"
+{% endif %}{% endfor %}```
+
+## 6. セキュリティ更新を適用し、結果を記録する
+
+```bash
+{% for r in csv_rows %}{% if r["installed_version"] != r["fixed_version"] %}sudo dnf update --security --cve={{ r["cve_id"] }} -y
+{% endif %}{% endfor %}{% for r in csv_rows %}{% if r["installed_version"] != r["fixed_version"] %}rpm -q {{ r["package"] }}
+{% endif %}{% endfor %}```
+
+## 動作確認
+
+- 対象パッケージのバージョンが修正版（`fixed_version`）以上になっていること
+- `dnf updateinfo` で該当アドバイザリが「適用済み」扱いになっていること
+- 優先度判定表（Step 5）に全CVEの処置（適用/回避/リスク受容）が記録されていること
+
+## 注意事項
+
+- `dnf update --security` の適用は再起動が必要な場合があるため、事前にメンテナンスウィンドウを確認する。
+- 本番適用前に検証環境での動作確認を推奨する。
+- `service_active` が `false` の対象（例: CVE-2026-2222）は稼働・公開されていないため最優先度から外れるが、経過観察として記録は残す。
