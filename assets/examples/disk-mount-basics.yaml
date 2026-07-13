@@ -1,0 +1,5 @@
+image_path: /opt/training/disk-mount-basics/loopback.img
+image_size_mb: 512
+filesystem: ext4
+mount_point: /mnt/training-loop
+label: TRAINDISK

@@ -1,0 +1,85 @@
+# cron による定期実行ジョブ設定演習
+
+crontab の5フィールド書式を確認しながら、ログ出力付きの定期ジョブを登録し、実行結果を自分で検証します。
+
+## 目的
+
+crontabの5フィールド書式を理解し、ログ出力付きの定期ジョブを登録して実行結果を自分で検証できるようになることを目指します。
+
+## 用語解説
+
+- **cron**: 指定したスケジュールでコマンドを定期実行するLinuxのデーモン
+- **crontab**: cronのジョブ定義ファイル。ユーザーごとに `crontab -e` で編集する
+- **スケジュール式(5フィールド)**: 分・時・日・月・曜日の順で、`*` はワイルドカード(毎回)を意味する
+- **標準出力と標準エラー**: cronはジョブの出力をメールしようとするため、ログファイルへのリダイレクトが実務では必須
+- **リダイレクト**: `>` (上書き)・`>>` (追記)・`2>&1` (標準エラーを標準出力に合流)でコマンドの出力先を制御する記法
+- **環境変数PATH**: cronの実行環境は対話シェルよりPATHが狭いため、コマンドを絶対パスで書くのが安全
+- **絶対パス**: `/usr/local/bin/xxx.sh` のように、実行時のディレクトリに依存しないフルパス表記
+
+## シナリオ設定
+
+以下 {{ csv_rows | length }} 件のジョブを登録します。
+
+| minute | hour | day_of_month | month | day_of_week | command | description |
+|--------|------|--------------|-------|-------------|---------|------|
+{% for r in csv_rows %}| {{ r["minute"] }} | {{ r["hour"] }} | {{ r["day_of_month"] }} | {{ r["month"] }} | {{ r["day_of_week"] }} | `{{ r["command"] }}` | {{ r["description"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 現在時刻を確認する
+
+```bash
+date
+timedatectl
+```
+
+### 2. 日時をログに追記するテストスクリプトを作成する
+
+```bash
+cat > /usr/local/bin/training-heartbeat-log.sh <<'EOF'
+#!/bin/bash
+echo "$(date '+%Y-%m-%d %H:%M:%S') cron heartbeat" >> /var/log/training-cron-heartbeat.log
+EOF
+chmod +x /usr/local/bin/training-heartbeat-log.sh
+```
+
+### 3. 現状の crontab を確認する
+
+```bash
+crontab -l
+```
+
+> `crontab -r` は確認なしで現在のユーザーの全ジョブを削除するコマンドで、`-l`(一覧表示)や `-e`(編集)と1文字違いのため誤入力事故が起きやすい。まず `-l`/`-e` の違いを体に覚えさせてから扱うこと。
+
+### 4. ジョブを登録する
+
+```bash
+{% for r in csv_rows %}(crontab -l 2>/dev/null; echo "{{ r['minute'] }} {{ r['hour'] }} {{ r['day_of_month'] }} {{ r['month'] }} {{ r['day_of_week'] }} {{ r['command'] }} >> /var/log/training-cron-job.log 2>&1") | crontab -
+{% endfor %}crontab -l
+```
+
+### 5. 数分待ってログファイルを確認する
+
+```bash
+sleep 120
+cat /var/log/training-cron-heartbeat.log
+```
+
+### 6. 実行履歴を journal / cron ログで確認する
+
+```bash
+journalctl -u cron -n 20 2>/dev/null || tail -n 20 /var/log/cron
+```
+
+## 動作確認
+
+- `crontab -l` にCSV定義通りのジョブが表示されること
+- `/var/log/training-cron-heartbeat.log` に実行時刻が毎分追記されていること
+- `journalctl -u cron` または `/var/log/cron` にCRON実行のエントリが記録されていること
+
+## 注意事項
+
+- `cron-healthcheck`（フェーズ3）とは焦点を分離しており、本シナリオはcrontab書式・PATH問題・`-r`事故に集中する。監視スクリプトの設計自体は扱わない。
+- `crontab -r` は確認なしで全ジョブを削除するため、`-e`(編集)や `-l`(一覧)との違いを必ず理解してから使う。誤って `-r` した場合、直前にバックアップ(`crontab -l > backup.txt`)していなければ復元できない。
+- 演習用ジョブは検証後に必ず削除する(`crontab -e` で該当行を削除、またはバックアップから復元)。

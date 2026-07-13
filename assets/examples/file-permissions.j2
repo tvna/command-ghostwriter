@@ -1,0 +1,102 @@
+# ファイルパーミッションと所有者管理演習
+
+演習用の部門共有ディレクトリツリーを作成し、パーミッション・所有者・グループを CSV の定義通りに設定します。root 権限（sudo）で実施してください。
+
+## 目的
+
+rwx と 8進表記の対応、ファイルとディレクトリで権限の意味が異なることを理解し、`chmod`/`chown` で部門共有ディレクトリを設計できるようになることを目指します。
+
+## 用語解説
+
+- **パーミッション**: ファイル・ディレクトリへの読み取り(r)・書き込み(w)・実行(x)の許可設定
+- **所有者とグループ**: 各ファイルには所有者(1名)と所有グループ(1つ)が紐づき、それぞれに独立した権限を設定できる
+- **8進表記**: rwx を2進数(4+2+1)とみなし、所有者・グループ・その他の3桁で権限を表す方式(例: `0775`)
+- **実行ビット**: ディレクトリでは「中に入れる(cd できる)」ことを意味し、ファイルの実行権限とは意味が異なる
+- **setgid**: ディレクトリに設定すると、その中に新規作成されたファイル・ディレクトリの所有グループが自動的に親ディレクトリのグループを継承する(8進表記の先頭に `2` を付与)
+- **umask**: 新規作成時のデフォルト権限から差し引かれるマスク値
+- **`ls -l` の読み方**: 先頭10文字のうち1文字目がファイル種別(`d`=ディレクトリ)、残り9文字が所有者/グループ/その他それぞれの rwx
+
+## シナリオ設定
+
+部門共有ディレクトリ `/srv/shared` 配下に、CSV で定義した権限構成を適用します。対象は {{ csv_rows | length }} 件です。
+
+| path | type | owner | group | perm | description |
+|------|------|-------|-------|------|------|
+{% for r in csv_rows %}| {{ r["path"] }} | {{ r["type"] }} | {{ r["owner"] }} | {{ r["group"] }} | {{ r["perm"] }} | {{ r["description"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 演習用グループとユーザーを作成する
+
+```bash
+groupadd -f dev-team
+id ops >/dev/null 2>&1 || useradd -m -G dev-team ops
+id trainee >/dev/null 2>&1 || useradd -m -G dev-team trainee
+```
+
+### 2. `ls -l` の読み方を確認する
+
+```bash
+touch /tmp/sample.txt
+ls -l /tmp/sample.txt
+# 例: -rw-r--r-- 1 root root 0 Jul 13 10:00 /tmp/sample.txt
+# 1文字目: ファイル種別(-=通常ファイル, d=ディレクトリ)
+# 2-4文字目: 所有者の rwx / 5-7文字目: グループの rwx / 8-10文字目: その他の rwx
+```
+
+### 3. ディレクトリ・ファイルを作成する
+
+```bash
+{% for r in csv_rows %}{% if r["type"] == "dir" %}mkdir -p {{ r["path"] }}
+{% else %}touch {{ r["path"] }}
+{% endif %}{% endfor %}```
+
+### 4. 8進表記とシンボリック表記の両方で `chmod` する
+
+CSV定義の8進表記(先頭が `2` のものは setgid 付き)を適用します。
+
+```bash
+{% for r in csv_rows %}chmod {{ r["perm"] }} {{ r["path"] }}
+{% endfor %}```
+
+参考: シンボリック表記でも同じ結果を得られます(例: `chmod u=rwx,g=rwx,o=rx {{ csv_rows[0]["path"] }}`)。
+
+### 5. 所有者・グループを変更する
+
+```bash
+{% for r in csv_rows %}chown {{ r["owner"] }}:{{ r["group"] }} {{ r["path"] }}
+{% endfor %}```
+
+### 6. umask を確認する
+
+```bash
+umask
+sudo -u ops bash -c 'umask; touch /srv/shared/umask-test.txt; ls -l /srv/shared/umask-test.txt'
+```
+
+### 7. setgid によるグループ継承を確認する
+
+```bash
+sudo -u ops bash -c 'touch /srv/shared/inherited.txt; ls -l /srv/shared/inherited.txt'
+# グループが dev-team になっていれば setgid によるグループ継承が機能している
+```
+
+### 8. 別ユーザー視点でアクセス可否をテストする
+
+```bash
+sudo -u trainee bash -c 'cat /srv/shared/reports/monthly.csv && echo "read: OK"'
+sudo -u trainee bash -c 'echo test >> /srv/shared/public/notice.txt && echo "write: OK" || echo "write: DENIED"'
+```
+
+## 動作確認
+
+- `stat -c '%a %U %G' <path>` の出力がCSV定義の `perm`/`owner`/`group` と一致すること
+- 別ユーザー(`ops`/`trainee`)での読み書き可否がパーミッション定義通りであること
+- `/srv/shared` 配下に作成した新規ファイルの所有グループが `dev-team` に継承されること(setgid)
+
+## 注意事項
+
+- 権限変更は対象パスを誤ると意図しないファイルへのアクセスを許可・拒否してしまうため、演習用ディレクトリ(`/srv/shared` 配下)に限定して実施する。
+- 本番の共有ディレクトリで同様の変更を行う場合は、既存ファイルへの影響範囲を事前に洗い出し、業務時間外など影響の小さいタイミングで実施する。
+- 演習後は `rm -rf /srv/shared` および作成した演習用ユーザー(`userdel -r trainee` 等)で環境を元に戻す。

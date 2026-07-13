@@ -45,6 +45,14 @@ const META: Meta[] = [
   { id: "dnsmasq-office-dns", name: "dnsmasqで小規模オフィスの内部DNSを立てる", desc: "dnsmasqで内部DNSとフォワーダを構成し、社内ホスト名解決とDNSキャッシュを提供する手順", category: "dns", subCategory: "dnsmasq", format: "toml", output: "markdown", updated: "2026-07-13", live: true },
   { id: "dns-secondary-transfer", name: "セカンダリDNSを追加してゾーン転送で冗長化する", desc: "プライマリ/セカンダリ構成のDNSでゾーン転送(AXFR/IXFR)とNOTIFYによる更新伝搬を設定・検証する", category: "dns", subCategory: "BIND冗長化", format: "toml", output: "markdown", updated: "2026-07-13", live: true },
   { id: "podman-rootless-service", name: "Podmanでrootlessコンテナを常時起動サービス化する", desc: "root権限なしでコンテナを実行し、systemdユーザーサービスとして再起動後も自動起動する構成をPodmanで作る手順", category: "server", subCategory: "Podman", format: "yaml", output: "markdown", updated: "2026-07-13", live: true },
+  { id: "file-permissions", name: "ファイルパーミッションと所有者管理", desc: "rwxと8進表記、setgidによるグループ継承を、chmod/chownを使った部門共有ディレクトリ設計の手順書（Markdown）として生成。", category: "server", subCategory: "パーミッション", format: "csv", output: "markdown", updated: "2026-07-13", live: true },
+  { id: "connectivity-check", name: "ping・tracerouteによる疎通確認", desc: "自分→GW→外部IP→FQDNの順に疎通を切り分ける、pingとtracerouteによる標準チェック手順書（Markdown）を生成。", category: "network", subCategory: "疎通確認", format: "csv", output: "markdown", updated: "2026-07-13", live: true },
+  { id: "systemd-unit-basics", name: "systemdサービスの基本操作とユニット作成", desc: "start/stop/enableの違いとdaemon-reloadの意味を、自作スクリプトのサービス化を通じて学ぶ手順書（Markdown）を生成。", category: "server", subCategory: "systemd基本", format: "toml", output: "markdown", updated: "2026-07-13", live: true },
+  { id: "port-listening-check", name: "ssとncによるポート待受・疎通確認", desc: "LISTEN状態の読み方とL4疎通テストを、ssとnc/curlを使った点検手順書（Markdown）として生成。", category: "network", subCategory: "ポート確認", format: "csv", output: "markdown", updated: "2026-07-13", live: true },
+  { id: "cron-scheduling", name: "cronによる定期実行ジョブの設定", desc: "crontabの5フィールド書式とPATH問題、-r事故の防止を、ログ出力付きジョブの登録・検証手順書（Markdown）として生成。", category: "server", subCategory: "cron", format: "csv", output: "markdown", updated: "2026-07-13", live: true },
+  { id: "subnetting-basics", name: "IPアドレス設計とサブネット分割の基礎", desc: "CIDR表記とサブネットマスクの対応を、拠点要件からのサブネット分割設計とipcalcでの検証手順書（Markdown）として生成。", category: "network", subCategory: "IPアドレス設計", format: "csv", output: "markdown", updated: "2026-07-13", live: true },
+  { id: "ntp-chrony", name: "chronyによるNTP時刻同期の設定", desc: "stratumやslew/stepの概念を踏まえ、chronyの導入・サーバ設定・同期状態検証までの手順書（Markdown）を生成。", category: "server", subCategory: "時刻同期", format: "toml", output: "markdown", updated: "2026-07-13", live: true },
+  { id: "disk-mount-basics", name: "ディスクのフォーマットとマウント入門", desc: "ブロックデバイス→ファイルシステム→マウントの階層構造を、ループバックデバイスで安全に体験する手順書（Markdown）を生成。", category: "server", subCategory: "ディスク管理", format: "yaml", output: "markdown", updated: "2026-07-13", live: true },
 ];
 
 export const CGTemplates: Template[] = META.map((m) => ({

@@ -1,0 +1,4 @@
+port,protocol,bind_address,service_name,description
+8080,tcp,0.0.0.0,training-echo,全インターフェースで待受(外部から到達可能)
+9090,tcp,127.0.0.1,training-local,ローカルのみ待受(外部から到達不可)
+8000,tcp,0.0.0.0,training-http,curlでHTTPレベルまで確認する対象
