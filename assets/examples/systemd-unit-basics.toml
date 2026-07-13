@@ -1,0 +1,16 @@
+[practice]
+existing_service = "sshd"
+
+[unit]
+name = "training-heartbeat"
+description = "Training heartbeat logger (education)"
+exec_start = "/usr/local/bin/heartbeat.sh"
+working_directory = "/opt/training"
+user = "trainee"
+restart = "on-failure"
+restart_sec = 5
+
+[script]
+path = "/usr/local/bin/heartbeat.sh"
+log_path = "/var/log/training-heartbeat.log"
+interval_seconds = 10
