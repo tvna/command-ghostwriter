@@ -59,21 +59,21 @@ ss -tlnp
 ```bash
 # 127.0.0.1 バインドのポートは、自ホスト以外のインターフェースアドレスから接続できないことを確認する
 ip a   # 自ホストの非ループバックアドレスを控える
-nc -w 2 -z <自ホストの非ループバックアドレス> 9090; echo "exit=$?"   # 接続不可であることを確認
-```
+{% for r in csv_rows %}{% if r["bind_address"] == "127.0.0.1" %}nc -w 2 -z <自ホストの非ループバックアドレス> {{ r["port"] }}; echo "exit=$?"   # {{ r["service_name"] }}: 接続不可であることを確認
+{% endif %}{% endfor %}```
 
 ### 6. `curl` でHTTPレベルの確認を追加する
 
 ```bash
-python3 -m http.server 8000 &
-curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/
-```
+{% for r in csv_rows %}{% if r["service_name"] == "training-http" %}python3 -m http.server {{ r["port"] }} &
+curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:{{ r["port"] }}/
+{% endif %}{% endfor %}```
 
 ### 7. 演習で開いたリスナーを終了する
 
 ```bash
 jobs -l
-kill %1 %2 %3 2>/dev/null
+kill $(jobs -p) 2>/dev/null
 ```
 
 ## 動作確認
@@ -87,4 +87,4 @@ kill %1 %2 %3 2>/dev/null
 
 - 演習で開いたポートは検証後に必ず閉じる(`nc`/`http.server` のリスナープロセスを `kill` で終了する)。開けたままにするとポートスキャンや不正接続の対象になり得る。
 - ファイアウォール(firewalld/ufw等)の設定次第で外部からの到達性が変わる点に注意する。演習環境のファイアウォール設定を事前に確認する。
-- 本番サービスで使用中のポート番号と重複しないよう、演習用ポート(このシナリオでは 8080/9090/8000)を使用する。
+- 本番サービスで使用中のポート番号と重複しないよう、演習用ポート(このシナリオでは{% for r in csv_rows %} {{ r["port"] }}{% if not loop.last %}/{% endif %}{% endfor %})を使用する。

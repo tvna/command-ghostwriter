@@ -32,6 +32,8 @@ systemctl status {{ practice.existing_service }}
 
 ### 2. 既存サービスで start/stop/restart を練習する
 
+> `{{ practice.existing_service }}` を停止しても、確立済みのSSHセッション自体は切断されない(新規接続のみ拒否される)。ただし停止中にセッションが切れると再接続できなくなるため、`systemctl start` まで一連の流れを止めずに実行し、可能であればコンソールなど別経路のアクセス手段を確保してから実施する。
+
 ```bash
 systemctl stop {{ practice.existing_service }}
 systemctl status {{ practice.existing_service }}
@@ -113,6 +115,7 @@ journalctl -u {{ unit.name }} -n 20
 
 ## 注意事項
 
+- `{{ practice.existing_service }}` のようなSSHセッションが依存するサービスを停止する際は、停止から再起動までの間にセッションが切断されると再接続できなくなるリスクがある。コンソール等の別経路のアクセス手段を確保してから実施する。
 - 本番相当のユニット名と衝突しないよう、演習用のユニット名(`{{ unit.name }}`)を使用する。
 - ユニットファイル編集後は `daemon-reload` を忘れると変更が反映されない。反映されていない疑いがあるときは `systemctl daemon-reload` を再実行する。
 - 演習後は `systemctl disable --now {{ unit.name }}` で停止・無効化し、`/etc/systemd/system/{{ unit.name }}.service` と `{{ script.path }}` を削除して環境を元に戻す。

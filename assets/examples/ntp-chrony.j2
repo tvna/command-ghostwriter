@@ -43,8 +43,8 @@ systemctl enable --now chronyd
 
 ```bash
 cp /etc/chrony.conf /etc/chrony.conf.bak
-{% for s in ntp_servers %}sed -i '/^pool /d; /^server /d' /etc/chrony.conf
-{% endfor %}cat >> /etc/chrony.conf <<'EOF'
+sed -i '/^pool /d; /^server /d' /etc/chrony.conf
+cat >> /etc/chrony.conf <<'EOF'
 {% for s in ntp_servers %}server {{ s }} iburst
 {% endfor %}EOF
 ```
