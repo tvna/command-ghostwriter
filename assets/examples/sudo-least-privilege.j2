@@ -1,0 +1,65 @@
+# sudo権限の最小化 — {{ target_user }}
+
+ユーザー **{{ target_user }}** に「全部sudo可」を許さず、必要なコマンドだけを許可する最小権限の sudoers 設定を行います。設定は必ず `visudo` 系のコマンドで構文検証してから反映してください。
+
+## 目的
+
+「全部sudo可」の危険性を理解し、visudoによる構文検証を挟みながら、必要なコマンドだけを許可する最小権限のsudoers設定を実施できるようになることを目指します。
+
+## 用語解説
+
+- **最小権限の原則**: 必要な操作だけを許可し、それ以外は許可しない設計原則
+- **sudoers**: sudo の許可ルールを定義するファイル
+- **visudo(構文チェックの意味)**: 構文エラーのある設定を反映してしまい、sudoが一切使えなくなる事故を防ぐための専用エディタ/検証コマンド
+- **sudoers.dドロップイン**: `/etc/sudoers` 本体を直接編集せず、`/etc/sudoers.d/` に個別ファイルとして追加する方式
+- **コマンドエイリアス**: 複数のコマンドをまとめて名前を付けて扱う sudoers の機能
+- **監査ログ**: sudo の実行記録が残るログ（`/var/log/secure` 等）
+
+## 1. 現状の権限を確認する
+
+```bash
+sudo -l -U {{ target_user }}
+```
+
+## 2. sudoers.d に限定ルールのファイルを作成する
+
+`/etc/sudoers` 本体は編集せず、`{{ sudoers_file }}` にドロップインとして作成します。
+
+```bash
+sudo tee {{ sudoers_file }} <<'EOF'
+{% for c in allowed_commands %}{{ target_user }} ALL=(root) NOPASSWD: {{ c }}
+{% endfor %}EOF
+sudo chmod 440 {{ sudoers_file }}
+```
+
+## 3. 反映前に構文検証する
+
+**構文検証をパスするまで、次のステップには進まないでください。**
+
+```bash
+sudo visudo -cf {{ sudoers_file }}
+```
+
+## 4. 別セッションでrootシェルを保持したまま試験する
+
+万一設定を誤っても復旧できるよう、別セッションで `sudo -i` 等のrootシェルを開いたまま試験します。
+
+```bash
+sudo -l -U {{ target_user }}
+{% for c in allowed_commands %}sudo -u {{ target_user }} sudo -l | grep -F "{{ c }}" && echo "許可確認OK: {{ c }}"
+{% endfor %}sudo -u {{ target_user }} sudo {{ forbidden_test_command }} 2>&1 | grep -Ei "not allowed|password is required" && echo "拒否確認OK: {{ forbidden_test_command }}"
+```
+
+## 動作確認
+
+- `sudo -l -U {{ target_user }}` に許可コマンドのみが列挙されること
+- `allowed_commands` の各コマンドが成功し、`forbidden_test_command` が拒否されること
+- sudo実行が監査ログ（`/var/log/secure` 等）に記録されること
+
+## 注意事項
+
+- `visudo -cf` で構文検証せずに反映すると、sudoが一切使えなくなり自分をロックアウトする危険がある。
+- 別セッションでrootシェルを保持したまま作業し、設定ミスに気付いた場合すぐに復旧できるようにする。
+- `NOPASSWD` を安易に付与すると、パスワード確認なしで許可コマンドが実行できてしまうため、対象コマンドを必要最小限に絞る。
+- 許可コマンドが増える場合はコマンドエイリアス（`Cmnd_Alias`）で一括管理する方法もあるが、本シナリオでは対象が少ないため個別指定とした。
+- sudoers はコマンド全体を文字列として厳密照合するため、引数が1文字でも異なると拒否される（例: `systemctl restart app.service` の許可は `restart otherapp.service` には及ばない）。
