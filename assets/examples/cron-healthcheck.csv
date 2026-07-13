@@ -1,0 +1,4 @@
+service,check_command,tag,note
+nginx,/usr/bin/systemctl is-active --quiet nginx,healthcheck_nginx,Webサーバ死活監視
+sshd,/usr/bin/systemctl is-active --quiet sshd,healthcheck_sshd,SSH死活監視
+postgresql,/usr/bin/pg_isready -q,healthcheck_postgresql,DB接続監視

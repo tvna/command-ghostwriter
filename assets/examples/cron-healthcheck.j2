@@ -1,0 +1,84 @@
+# cronとシェルスクリプトによる簡易死活監視の構築
+
+CSVで定義した {{ csv_rows | length }} 件の監視対象に対し、cron + シェルスクリプト + logger による最小構成の死活監視を構築します。
+
+## 目的
+
+監視ツールがない環境で、cron・シェルスクリプト・loggerを組み合わせた最小の死活監視を自作し、「監視とは定期的な確認と記録の自動化である」ことを体得することを目指します。
+
+## 用語解説
+
+- **死活監視**: 対象サービス・ホストが正常に稼働しているかを定期確認すること
+- **cron / crontab**: 決まった時刻・間隔でジョブを自動実行するLinuxの仕組みと、その設定
+- **終了コード**: コマンドの成否を表す数値。0は成功を示す
+- **logger(syslogへの記録)**: コマンドの出力をsyslog/journalへ記録するコマンド
+- **PATH(cron環境変数の罠)**: cronの実行環境はログインシェルよりPATHが最小であり、絶対パス指定が必要になることが多い
+- **リダイレクト**: コマンドの出力を別の場所（ファイル等）に転送する仕組み
+- **監視間隔**: チェックを実行する頻度
+
+## 1. 監視対象一覧
+
+| service | check_command | tag | note |
+| --- | --- | --- | --- |
+{% for r in csv_rows %}| {{ r["service"] }} | `{{ r["check_command"] }}` | {{ r["tag"] }} | {{ r["note"] }} |
+{% endfor %}
+
+## 2. チェックスクリプトを配置する
+
+```bash
+{% for r in csv_rows %}cat > /usr/local/bin/healthcheck_{{ r["service"] }}.sh <<'EOF'
+#!/bin/bash
+if {{ r["check_command"] }}; then
+  logger -t {{ r["tag"] }} "OK: {{ r["service"] }} is healthy"
+else
+  logger -t {{ r["tag"] }} "NG: {{ r["service"] }} health check failed"
+fi
+EOF
+chmod +x /usr/local/bin/healthcheck_{{ r["service"] }}.sh
+{% endfor %}```
+
+（`cat > ... <<'EOF' ... EOF` はリダイレクトの一種で、ヒアドキュメントの内容をファイルへ書き出しています）
+
+## 3. 手動実行して正常時・異常時の挙動を確認する
+
+```bash
+{% for r in csv_rows %}/usr/local/bin/healthcheck_{{ r["service"] }}.sh; echo "exit code: $?"
+{% endfor %}```
+
+## 4. syslogへの記録を確認する
+
+```bash
+{% for r in csv_rows %}journalctl -t {{ r["tag"] }} -n 5 --no-pager
+{% endfor %}```
+
+## 5. crontabへ登録する
+
+cronの実行環境はPATHが最小のため、スクリプト内のコマンドは絶対パスで指定済みであることを前提とします。
+
+```bash
+crontab -l 2>/dev/null | { cat; {% for r in csv_rows %}echo "*/5 * * * * /usr/local/bin/healthcheck_{{ r["service"] }}.sh"
+{% endfor %}} | crontab -
+```
+
+`*/5 * * * *` は監視間隔（5分間隔）を表しています。
+
+## 6. 疑似障害を発生させ異常検知を試験する
+
+```bash
+{% for r in csv_rows %}systemctl stop {{ r["service"] }} 2>/dev/null || true
+/usr/local/bin/healthcheck_{{ r["service"] }}.sh
+systemctl start {{ r["service"] }} 2>/dev/null || true
+{% endfor %}```
+
+## 動作確認
+
+- `crontab -l` に登録行が存在すること
+- `journalctl -t <tag>` に定期記録があること
+- 疑似障害時に異常ログが記録されること
+- 復旧後に正常ログへ戻ること
+
+## 注意事項
+
+- 本シナリオではcrontab構文そのものの解説は最小限にとどめ、監視スクリプトの設計に焦点を当てます。
+- cronジョブのコマンドは絶対パスで記述する。
+- 演習終了後は不要なジョブを `crontab -r` 等で削除する。
