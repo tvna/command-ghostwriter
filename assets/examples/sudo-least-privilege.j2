@@ -21,23 +21,23 @@
 sudo -l -U {{ target_user }}
 ```
 
-## 2. sudoers.d に限定ルールのファイルを作成する
+## 2. 限定ルールを一時ファイルに作成し、構文検証する
 
-`/etc/sudoers` 本体は編集せず、`{{ sudoers_file }}` にドロップインとして作成します。
+`/etc/sudoers` 本体も `{{ sudoers_file }}` 本番パスも直接編集せず、まず一時ファイルにドロップイン内容を作成して検証します。`{{ sudoers_file }}` を含む `/etc/sudoers.d/` は多くの環境で `@includedir` により自動的に読み込まれるため、検証前に本番パスへ書き込むと、構文エラーが一瞬でも有効化され sudo が使えなくなる事故につながります。**構文検証をパスするまで、次のステップには進まないでください。**
 
 ```bash
-sudo tee {{ sudoers_file }} <<'EOF'
+TMP_SUDOERS=$(mktemp)
+sudo tee "$TMP_SUDOERS" <<'EOF'
 {% for c in allowed_commands %}{{ target_user }} ALL=(root) NOPASSWD: {{ c }}
 {% endfor %}EOF
-sudo chmod 440 {{ sudoers_file }}
+sudo visudo -cf "$TMP_SUDOERS"
 ```
 
-## 3. 反映前に構文検証する
-
-**構文検証をパスするまで、次のステップには進まないでください。**
+## 3. 検証済みのファイルを本番パスへ反映する
 
 ```bash
-sudo visudo -cf {{ sudoers_file }}
+sudo install -o root -g root -m 440 "$TMP_SUDOERS" {{ sudoers_file }}
+sudo rm -f "$TMP_SUDOERS"
 ```
 
 ## 4. 別セッションでrootシェルを保持したまま試験する
@@ -58,7 +58,7 @@ sudo -l -U {{ target_user }}
 
 ## 注意事項
 
-- `visudo -cf` で構文検証せずに反映すると、sudoが一切使えなくなり自分をロックアウトする危険がある。
+- `{{ sudoers_file }}` へ直接書き込んで構文検証すると、検証前の内容が一瞬でも有効化され、sudoが一切使えなくなり自分をロックアウトする危険がある。必ず一時ファイルで検証してから本番パスへ配置する。
 - 別セッションでrootシェルを保持したまま作業し、設定ミスに気付いた場合すぐに復旧できるようにする。
 - `NOPASSWD` を安易に付与すると、パスワード確認なしで許可コマンドが実行できてしまうため、対象コマンドを必要最小限に絞る。
 - 許可コマンドが増える場合はコマンドエイリアス（`Cmnd_Alias`）で一括管理する方法もあるが、本シナリオでは対象が少ないため個別指定とした。

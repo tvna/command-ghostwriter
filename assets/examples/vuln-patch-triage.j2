@@ -56,7 +56,7 @@ Critical かつ公開中（`service_active = true`）のものを最優先とし
 ## 6. セキュリティ更新を適用し、結果を記録する
 
 ```bash
-{% for r in csv_rows %}{% if r["installed_version"] != r["fixed_version"] %}sudo dnf update --security --advisory={{ r["cve_id"] }} -y
+{% for r in csv_rows %}{% if r["installed_version"] != r["fixed_version"] %}sudo dnf update --security --cve={{ r["cve_id"] }} -y
 {% endif %}{% endfor %}{% for r in csv_rows %}{% if r["installed_version"] != r["fixed_version"] %}rpm -q {{ r["package"] }}
 {% endif %}{% endfor %}```
 

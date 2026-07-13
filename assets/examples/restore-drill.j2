@@ -49,7 +49,7 @@ rsync -a {{ backup_root }}/{{ generation }}{{ production_path }}/ {{ restore_tmp
 ```bash
 mkdir -p $(dirname {{ checksum_manifest }})
 (cd {{ backup_root }}/{{ generation }}{{ production_path }} && find . -type f -exec sha256sum {} \;) > {{ checksum_manifest }}
-(cd {{ restore_tmp_dir }}/restored && sha256sum -c {{ checksum_manifest }} --ignore-missing)
+(cd {{ restore_tmp_dir }}/restored && sha256sum -c {{ checksum_manifest }})
 ```
 
 ## 5. 本来のパスへ移動し、所有者・権限を復旧する

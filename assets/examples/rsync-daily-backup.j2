@@ -47,7 +47,7 @@ rsync -av {% for p in exclude_patterns %}--exclude='{{ p }}' {% endfor %}{{ d }}
 ```bash
 DATE=$(date +%Y-%m-%d)
 {% for d in source_dirs %}mkdir -p {{ backup_root }}/${DATE}{{ d }}
-rsync -av --link-dest={{ backup_root }}/latest{{ d }} {{ d }}/ {{ backup_root }}/${DATE}{{ d }}/
+rsync -av {% for p in exclude_patterns %}--exclude='{{ p }}' {% endfor %}--link-dest={{ backup_root }}/latest{{ d }} {{ d }}/ {{ backup_root }}/${DATE}{{ d }}/
 {% endfor %}```
 
 ## 5. cronに日次ジョブを登録する
@@ -62,7 +62,7 @@ DATE=$(date +%Y-%m-%d)
 {% for d in source_dirs %}mkdir -p {{ backup_root }}/latest{{ d }}
 rsync -av {% for p in exclude_patterns %}--exclude='{{ p }}' {% endfor %}{{ d }}/ {{ backup_root }}/latest{{ d }}/
 mkdir -p {{ backup_root }}/${DATE}{{ d }}
-rsync -av --link-dest={{ backup_root }}/latest{{ d }} {{ d }}/ {{ backup_root }}/${DATE}{{ d }}/
+rsync -av {% for p in exclude_patterns %}--exclude='{{ p }}' {% endfor %}--link-dest={{ backup_root }}/latest{{ d }} {{ d }}/ {{ backup_root }}/${DATE}{{ d }}/
 {% endfor %}EOF
 sudo chmod +x {{ cron.script_path }}
 (crontab -l 2>/dev/null; echo "{{ cron.schedule }} {{ cron.script_path }} >> {{ cron.log_path }} 2>&1") | crontab -

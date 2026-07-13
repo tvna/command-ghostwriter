@@ -50,9 +50,9 @@ sudo systemctl enable --now fail2ban
 sudo fail2ban-client status {{ jail.name }}
 ```
 
-## 4. テスト端末からの攻撃を模擬し、遮断を観察する
+## 4. テスト端末からの攻撃を模擬し、検知を観察する
 
-ローカルで模擬する場合、`ssh ... localhost` への失敗接続は `127.0.0.1` からの試行として記録されるため、遮断確認も `127.0.0.1` に対して行います（テスト対象の外部IP `{{ test.attacker_ip }}` はドキュメント用の例示アドレスであり、実環境で本物の外部ホストから検証する際に読み替えて使用してください）。
+localhost への失敗ログイン試行は fail2ban のログ監視に検知されますが、`127.0.0.1` は `ignoreip` の既定値に含まれるため、検知されても遮断はされません（自己ロックアウト防止のための意図的な安全設計です）。ここでは、まず「検知はしているが遮断はしない」という ignoreip の効果そのものを確認します。
 
 ```bash
 sudo apt-get install -y sshpass
@@ -60,17 +60,24 @@ for i in $(seq 1 {{ jail.maxretry }}); do
   sshpass -p wrongpass ssh -o StrictHostKeyChecking=no -o PubkeyAuthentication=no invaliduser@localhost -p 22 2>/dev/null
 done
 sudo fail2ban-client status {{ jail.name }}
-sudo iptables -L -n | grep 127.0.0.1
 ```
 
-外部ホストから実接続で検証する場合は、攻撃元IP（例: `{{ test.attacker_ip }}`）を実際の外部テストIPに読み替え、`sudo iptables -L -n | grep <実際の外部テストIP>` で遮断ルールを確認します。
+`Currently failed` / `Total failed` が増加している一方、`Currently banned` が 0 のままであることを確認します（`127.0.0.1` が `ignoreip` で保護されているため）。
 
-## 5. unban手順を訓練する
+## 5. 遮断とunbanの実際の動作を確認する
+
+実際の遮断・iptablesルール反映・unban の一連の流れは、`ignoreip` に含まれない（＝本来遮断され得る）IPに対して手動で遮断を発生させて確認します。`{{ test.attacker_ip }}` は外部からの実攻撃を想定した例示IPで、`ignoreip` には含まれていません。
 
 ```bash
-sudo fail2ban-client set {{ jail.name }} unbanip 127.0.0.1
+sudo fail2ban-client set {{ jail.name }} banip {{ test.attacker_ip }}
 sudo fail2ban-client status {{ jail.name }}
+sudo iptables -L -n | grep {{ test.attacker_ip }}
+sudo fail2ban-client set {{ jail.name }} unbanip {{ test.attacker_ip }}
+sudo fail2ban-client status {{ jail.name }}
+sudo iptables -L -n | grep {{ test.attacker_ip }}
 ```
+
+unban後は `iptables -L -n` にルールが残っていないことを確認します。
 
 ## 6. 管理端末が失敗を繰り返してもbanされないことを確認する
 
@@ -80,13 +87,13 @@ sudo fail2ban-client status {{ jail.name }}
 
 ## 動作確認
 
-- `fail2ban-client status {{ jail.name }}` に監視中のjailとban数が表示されること
-- しきい値超過でローカル模擬テストのIP（`127.0.0.1`）が遮断され、`iptables -L` にルールが出現すること（外部ホストからの実接続検証時は `{{ test.attacker_ip }}` を実際の外部テストIPに読み替えること）
-- `unban` 後に再接続できること
+- `fail2ban-client status {{ jail.name }}` に監視中のjailと failed/banned カウンタが表示されること
+- Step 4 のローカル模擬テスト後、`Total failed` が増加する一方 `Currently banned` は 0 のままであること（`127.0.0.1` が `ignoreip` で保護されているため）
+- Step 5 で `{{ test.attacker_ip }}` を手動 ban した際に `iptables -L` にルールが出現し、`unban` 後にルールが消えること
 - 管理端末（{% for ip in ignoreip %}{{ ip.address }}{% if not loop.last %}, {% endif %}{% endfor %}）は失敗を繰り返してもbanされないこと
 
 ## 注意事項
 
 - `ignoreip` に管理端末のIPを必ず登録してから有効化する（登録漏れは自己ロックアウトに直結する）。
-- 誤banした場合の `unban` 手順（Step 5）も事前に確認しておく。ローカル模擬では `127.0.0.1` が遮断・unban対象になる点に注意し、`{{ test.attacker_ip }}` は外部からの実攻撃を想定した例示IPであってローカル模擬のログとは一致しないことを理解しておく。
+- `127.0.0.1` は `ignoreip` の既定値に含まれるため、localhost からの模擬攻撃は検知はされても実際には遮断されない。実際の遮断・unban動作は `ignoreip` に含まれない `{{ test.attacker_ip }}` を手動 ban して確認する（Step 5）。
 - `jail.conf` を直接編集せず、`jail.local` への上書きで運用する（パッケージ更新で `jail.conf` が上書きされても設定が失われない）。
