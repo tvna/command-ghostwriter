@@ -35,7 +35,7 @@ TTLを使ってDNS切替を「思いつきの書き換え」ではなく計画�
 rndc reload example.com
 ```
 
-短縮したTTLがキャッシュに行き渡るよう、最低でも旧TTL（最大 {{ csv_rows[0]["old_ttl"] }} 秒程度）が経過してから次の作業に進みます。
+短縮したTTLがキャッシュに行き渡るよう、最低でも旧TTL（最大 {{ csv_rows | map(attribute="old_ttl") | map("int") | max }} 秒程度）が経過してから次の作業に進みます。
 
 ## 3. 切替前の値をdigで記録する
 
