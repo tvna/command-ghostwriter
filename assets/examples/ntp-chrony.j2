@@ -1,0 +1,94 @@
+# chrony による NTP 時刻同期の設定演習
+
+時刻ずれが認証・ログ突合・証明書検証に与える影響を理解した上で、chronyを導入し時刻同期の設定と検証を行います。root 権限（sudo）で実施してください。
+
+## 目的
+
+時刻ずれが認証・ログ突合・証明書に与える影響を理解し、chronyで同期設定と同期状態の検証ができるようになることを目指します。
+
+## 用語解説
+
+- **NTP (Network Time Protocol)**: ネットワーク経由でホストの時刻をNTPサーバに同期させるプロトコル
+- **stratum**: NTP階層構造での序列。stratum 1は原子時計等に直結したサーバ、そこから同期を受けるたびに数値が1つ増える
+- **UTCとタイムゾーン**: UTCは世界共通の協定時刻、タイムゾーンはそこからのオフセット(日本は `Asia/Tokyo`, UTC+9)を適用した表示上の時刻
+- **slewとstep**: slewは時刻を少しずつ調整する方式(サービスへの影響が小さい)、stepは瞬時に時刻を変更する方式(ログの逆行等が起きうる)
+- **ドリフト**: ハードウェアクロックの精度誤差により、時間経過とともに実時刻からずれていく現象
+- **chrony**: NTPクライアント/サーバの実装の1つ。断続的なネットワーク接続や仮想環境でも高精度に同期できる
+- **timedatectl**: システムの時刻・タイムゾーン・同期状態を確認・設定するコマンド
+
+## シナリオ設定
+
+タイムゾーンを **{{ timezone }}** に設定し、以下のNTPサーバに同期します。
+
+- {% for s in ntp_servers %}{{ s }}{% if not loop.last %}, {% endif %}{% endfor %}
+
+## 手順
+
+### 1. 現状を確認する
+
+```bash
+timedatectl
+```
+
+`System clock synchronized` と `NTP service` の行で、現在同期しているかどうかを確認します。
+
+### 2. chrony を導入する
+
+```bash
+dnf install -y chrony    # Rocky/RHEL系の場合
+systemctl enable --now chronyd
+```
+
+### 3. `/etc/chrony.conf` にサーバを設定する
+
+```bash
+cp /etc/chrony.conf /etc/chrony.conf.bak
+{% for s in ntp_servers %}sed -i '/^pool /d; /^server /d' /etc/chrony.conf
+{% endfor %}cat >> /etc/chrony.conf <<'EOF'
+{% for s in ntp_servers %}server {{ s }} iburst
+{% endfor %}EOF
+```
+
+### 4. サービスを再起動する
+
+```bash
+systemctl restart chronyd
+```
+
+### 5. 参照先の同期状態を確認する
+
+```bash
+chronyc sources
+```
+
+先頭が `^*` の行が現在の参照サーバ(同期先として選ばれているサーバ)です。`^+` は同期候補、`^-` は除外されたサーバを示します。
+
+### 6. オフセットを確認する
+
+```bash
+chronyc tracking
+```
+
+`System time` 行のオフセットが十分小さい(通常はミリ秒〜数十ミリ秒程度)ことを確認します。
+
+### 7. タイムゾーンを設定する
+
+```bash
+timedatectl set-timezone {{ timezone }}
+timedatectl
+```
+
+> タイムゾーンの変更は表示上のオフセットを変えるだけで、時刻同期(NTP)とは独立した設定です。タイムゾーンを変えても同期状態は変わりません。
+
+## 動作確認
+
+- `chronyc sources` に `^*` の付いた参照サーバの行が表示されること
+- `timedatectl` の `System clock synchronized` が `yes` であること
+- `chronyc tracking` の `System time` オフセットが十分小さい値であること
+- `timedatectl` のタイムゾーン表示が `{{ timezone }}` になっていること
+
+## 注意事項
+
+- 時刻の急激な変更(step)はログのタイムスタンプの逆行やTLS証明書検証(有効期限判定)に影響するため、本番稼働中のサーバで大幅な時刻ずれを修正する場合は、影響時間帯やメンテナンスウィンドウを考慮する。
+- `/etc/chrony.conf` を変更する前に必ずバックアップ(`/etc/chrony.conf.bak`)を取得し、演習後に元の設定に戻せるようにする。
+- 社内NTPサーバがある環境では、外部NTPサーバの代わりに社内サーバを指定する運用が一般的。演習環境に合わせて `ntp_servers` の値を読み替える。
