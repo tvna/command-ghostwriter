@@ -1,0 +1,82 @@
+# systemdサービス起動失敗の調査と復旧 — {{ hostname }}
+
+- **対象サービス**: {{ service_name }}
+
+## 目的
+
+サービスが起動しない時にログから失敗原因を特定し、activeとenabledの違いを理解した上で恒久復旧できるようになることを目指します。
+
+## 用語解説
+
+- **ユニット**: systemdが管理するサービス・タイマー等の単位
+- **activeとenabledの違い**: activeは「現在起動しているか」、enabledは「OS起動時に自動起動する設定になっているか」を示す別々の状態
+- **journalctl**: systemdのログを閲覧するコマンド
+- **終了コード**: プロセスが終了した際に返す数値。0は正常終了、それ以外は異常終了を示すことが多い
+- **設定ファイルの構文チェック**: 反映前に設定の構文誤りを検出するコマンド（例: `nginx -t`）
+- **依存関係(After/Requires)**: ユニット定義で他のユニットとの起動順序・依存を指定する項目
+- **daemon-reload**: ユニットファイルの変更をsystemdに再読み込みさせるコマンド
+
+## シナリオ設定
+
+{{ hostname }} で {{ service_name }} が起動しないとの報告がありました。ログから原因を特定し、恒久復旧してください。
+
+## 手順
+
+### 1. 状態・直近ログ・終了コードを確認する
+
+```bash
+systemctl status {{ service_name }}
+```
+
+### 2. 失敗時刻前後のログを精読する
+
+```bash
+journalctl -u {{ service_name }} -e --no-pager
+```
+
+### 3. ユニットの依存関係を確認する
+
+`After`/`Requires` 等の依存関係が原因で起動順序の問題が起きていないか確認します。
+
+```bash
+systemctl list-dependencies {{ service_name }}
+```
+
+### 4. 設定起因かどうかを構文チェックで切り分ける
+
+```bash
+{{ config_check_command }}
+```
+
+### 5. 修正後、ユニット変更時のみ daemon-reload してから再起動する
+
+```bash
+systemctl daemon-reload
+systemctl restart {{ service_name }}
+```
+
+### 6. 自動起動設定を確認する
+
+```bash
+systemctl is-enabled {{ service_name }}
+```
+
+### 7. 障害内容と対処を作業記録に残す
+
+原因・実施した対処・所要時間を記録します。
+
+### 8. 自己解決できない場合はエスカレーションする
+
+原因が特定できない、または対処後も復旧しない場合は {{ escalation }} へ連絡する。
+
+## 動作確認
+
+- `systemctl is-active {{ service_name }}` が active であること
+- `journalctl -u {{ service_name }}` に新規エラーがないこと
+- 再起動後もサービス提供が継続していること（curl等での応答確認）
+- `systemctl is-enabled {{ service_name }}` が意図通りであること
+
+## 注意事項
+
+- 本番相当のサービスを止めると影響があるため、演習用サービスまたは検証環境で実施する。
+- 設定変更後は必ず `daemon-reload` を忘れない。

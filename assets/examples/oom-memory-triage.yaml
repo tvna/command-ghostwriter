@@ -1,0 +1,4 @@
+title: サービスプロセスの突然停止（OOM Killer疑い）
+hostname: app-prod-04
+victim_service: app-worker
+escalation: インフラ基盤チーム (内線 1201)
