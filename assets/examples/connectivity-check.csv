@@ -1,0 +1,7 @@
+stage,target,method,note
+loopback,127.0.0.1,ping,自ホストのループバックアドレス
+self,192.168.1.10,ping,自ホストのIPアドレス
+gateway,192.168.1.1,ping,デフォルトゲートウェイ
+external,8.8.8.8,ping,外部の既知IP(DNS非依存の確認)
+fqdn,www.example.com,ping,FQDN宛(名前解決込みの疎通確認)
+trace,8.8.8.8,traceroute,経路上の各ホップを確認
