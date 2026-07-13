@@ -1,0 +1,5 @@
+profile: training
+bucket_name: training-backups-example-2026
+archive_file: backup-20260713.tar.gz
+sync_source_dir: /var/backups/app-data
+restore_check_dir: /tmp/s3-restore-check

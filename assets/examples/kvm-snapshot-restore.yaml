@@ -1,0 +1,5 @@
+vm: web01
+disk_path: /var/lib/libvirt/images/web01.qcow2
+snapshot_date: "20260713"
+ticket_number: "INC-4821"
+change_description: "パッケージ一括更新（yum update）"

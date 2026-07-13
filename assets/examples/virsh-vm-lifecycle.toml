@@ -1,0 +1,8 @@
+domain = "training-vm01"
+vcpus = 2
+memory_mb = 2048
+os_variant = "ubuntu22.04"
+network = "default"
+cloud_image_path = "/var/lib/libvirt/images/base/jammy-server-cloudimg-amd64.img"
+disk_path = "/var/lib/libvirt/images/training-vm01.qcow2"
+disk_size_gb = 20
