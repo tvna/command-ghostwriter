@@ -1,0 +1,4 @@
+username,department,status,last_login_expected
+tanaka,営業部,現役,2026-07-01
+kobayashi,開発部,退職済み,2025-01-15
+shared-svc,共通,共有アカウント,2024-06-01
