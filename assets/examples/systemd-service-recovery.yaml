@@ -1,0 +1,5 @@
+title: nginx サービスが起動しない
+hostname: web-prod-02
+service_name: nginx
+config_check_command: nginx -t
+escalation: インフラ基盤チーム (内線 1201)
