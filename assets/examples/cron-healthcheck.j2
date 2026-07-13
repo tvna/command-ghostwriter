@@ -32,6 +32,7 @@ if {{ r["check_command"] }}; then
   logger -t {{ r["tag"] }} "OK: {{ r["service"] }} is healthy"
 else
   logger -t {{ r["tag"] }} "NG: {{ r["service"] }} health check failed"
+  exit 1
 fi
 EOF
 chmod +x /usr/local/bin/healthcheck_{{ r["service"] }}.sh
