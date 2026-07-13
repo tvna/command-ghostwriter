@@ -50,15 +50,17 @@ sudo chmod +x /usr/local/bin/cert-expiry-check.sh
 
 ## 4. 閾値割れが検出された対象をdry-runで事前検証する
 
+Step 3 の点検で閾値割れが検出された対象について実施します。以下は全対象を一括で確認する例です（閾値割れしていない対象は dry-run が単に成功します）。
+
 ```bash
-sudo certbot renew --cert-name {{ csv_rows[0]["domain"] }} --dry-run
-```
+{% for r in csv_rows %}sudo certbot renew --cert-name {{ r["domain"] }} --dry-run
+{% endfor %}```
 
 ## 5. dry-run成功後に実更新する
 
 ```bash
-sudo certbot renew --cert-name {{ csv_rows[0]["domain"] }}
-sudo systemctl reload nginx
+{% for r in csv_rows %}sudo certbot renew --cert-name {{ r["domain"] }}
+{% endfor %}sudo systemctl reload nginx
 ```
 
 サービスの reload を忘れると、証明書ファイルは更新されてもプロセスは古い証明書を使い続けます。
@@ -66,8 +68,8 @@ sudo systemctl reload nginx
 ## 6. 更新後の期限を確認する
 
 ```bash
-echo | openssl s_client -connect {{ csv_rows[0]["domain"] }}:{{ csv_rows[0]["port"] }} -servername {{ csv_rows[0]["domain"] }} 2>/dev/null | openssl x509 -noout -enddate
-```
+{% for r in csv_rows %}echo | openssl s_client -connect {{ r["domain"] }}:{{ r["port"] }} -servername {{ r["domain"] }} 2>/dev/null | openssl x509 -noout -enddate
+{% endfor %}```
 
 ## 動作確認
 

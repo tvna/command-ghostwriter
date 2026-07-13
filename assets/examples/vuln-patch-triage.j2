@@ -41,6 +41,8 @@ sudo dnf updateinfo list --security --with-cve | grep -E "{% for r in csv_rows %
 ss -tlnp | grep {{ r["package"] }}
 {% endif %}{% endfor %}```
 
+`package` は必ずしも systemd のユニット名と一致しません（`httpd`/`nginx`/`sshd` のようなサービス本体のパッケージでは一致しますが、`openssl`/`curl` のようなライブラリ・CLIツールのパッケージには対応する systemd ユニットが存在しません）。ライブラリ系パッケージの場合は、`systemctl is-active` の代わりに、そのライブラリを利用している実際のサービス名（例: `ss -tlnp | grep httpd`）で稼働・公開状況を確認してください。
+
 ## 5. 優先度判定表を作成する
 
 Critical かつ公開中（`service_active = true`）のものを最優先とします。
