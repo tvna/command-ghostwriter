@@ -1,0 +1,84 @@
+# バックアップからのリストア訓練 — {{ production_path }}
+
+「{{ incident.description }}」（{{ incident.date }} 発生想定）を演習用ディレクトリで再現し、`{{ backup_root }}` の世代からリストアする訓練です。`rsync-daily-backup` シナリオで取得したバックアップから復元する想定で、必ずそちらを先に実施してから本シナリオへ進んでください。
+
+## 目的
+
+「リストアできて初めてバックアップ」という原則を理解し、誤削除を想定した復元作業を、本番を汚さない検証手順つきで実施できるようになることを目指します。
+
+## 用語解説
+
+- **リストア**: バックアップからデータを復元する作業
+- **RPO・RTO**: RPOは「どの時点まで戻せるか」、RTOは「復旧にかかる時間」の目標値
+- **世代選択**: 複数のバックアップ世代から、復元すべき正しい時点を選ぶこと
+- **復元先の分離**: 復元データをまず一時ディレクトリへ戻し、本番パスへ直接上書きしないこと
+- **チェックサム**: ハッシュ値を比較してファイルの完全性を検証する手法
+- **リストア訓練(DRドリル)**: 実際に復元操作を行い、手順とRTOを検証する演習
+
+## 1. 誤削除を演習用ディレクトリで再現する
+
+```bash
+mkdir -p {{ restore_tmp_dir }}/incident-repro
+cp -a {{ production_path }}/. {{ restore_tmp_dir }}/incident-repro/
+rm -f {{ restore_tmp_dir }}/incident-repro/*.conf
+echo "再現完了: $(date)"
+```
+
+## 2. 復元すべき世代を特定する
+
+障害発生時刻（{{ incident.date }}）から、直前の世代 `{{ generation }}` を復元対象と判断します。
+
+```bash
+ls -1 {{ backup_root }} | sort
+```
+
+## 3. 一時ディレクトリへ復元する
+
+本番パスへ直接戻さず、まず一時ディレクトリへ復元します。
+
+```bash
+START=$(date +%s)
+mkdir -p {{ restore_tmp_dir }}/restored
+rsync -a {{ backup_root }}/{{ generation }}{{ production_path }}/ {{ restore_tmp_dir }}/restored/
+```
+
+## 4. チェックサム台帳を作成し、完全性を検証する
+
+復元前に、バックアップ世代からチェックサム台帳を作成します（台帳は復元後の照合に使うため、復元対象とは別の場所に保存します）。
+
+```bash
+mkdir -p $(dirname {{ checksum_manifest }})
+(cd {{ backup_root }}/{{ generation }}{{ production_path }} && find . -type f -exec sha256sum {} \;) > {{ checksum_manifest }}
+(cd {{ restore_tmp_dir }}/restored && sha256sum -c {{ checksum_manifest }} --ignore-missing)
+```
+
+## 5. 本来のパスへ移動し、所有者・権限を復旧する
+
+検証が通ったら、本番パスへ反映します。
+
+```bash
+sudo rsync -a --owner --group --perms {{ restore_tmp_dir }}/restored/ {{ production_path }}/
+stat -c '%U %G %a' {{ production_path }}
+```
+
+## 6. 所要時間を記録する
+
+RTO（復旧にかかった時間）を実測します。今回選んだ世代（`{{ generation }}`）と障害発生日（{{ incident.date }}）の差が、実質的な RPO（許容したデータロス範囲）です。
+
+```bash
+END=$(date +%s)
+echo "RTO実測値: $((END - START)) 秒"
+echo "RPO目安: {{ incident.date }} 時点の障害に対し {{ generation }} 世代（前日分）まで復元"
+```
+
+## 動作確認
+
+- 復元ファイルのチェックサムが `{{ checksum_manifest }}` の記録と一致すること
+- `stat` で確認した所有者・パーミッションが元の状態と一致すること
+- 復元作業の所要時間（RTO実測値）が記録されていること
+
+## 注意事項
+
+- 復元は必ず `{{ restore_tmp_dir }}` に対して行い、本番パス（`{{ production_path }}`）へ直接上書きしない。
+- 誤ったバックアップ世代を選択すると、古いデータで本番を上書きするリスクがある。世代の日付を必ず確認する。
+- 本シナリオは `rsync-daily-backup` と対で運用する（先にバックアップを取得済みであることが前提）。
