@@ -1,0 +1,7 @@
+title: /var 領域のディスク使用率100%到達
+hostname: app-prod-03
+filesystem: /dev/mapper/vg-var
+mount_point: /var
+threshold_percent: 90
+suspect_service: rsyslog
+escalation: インフラ基盤チーム (内線 1201)
