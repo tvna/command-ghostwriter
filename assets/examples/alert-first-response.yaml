@@ -1,0 +1,10 @@
+title: 監視アラート一次対応演習
+hostname: web-prod-01
+alert_types:
+  - type: 死活監視アラート
+    check_command: systemctl is-active nginx
+  - type: ディスク使用率アラート
+    check_command: df -h /var
+  - type: 負荷アラート
+    check_command: uptime
+escalation: インフラ基盤チーム (内線 1201、演習用連絡先)
