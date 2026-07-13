@@ -1,0 +1,85 @@
+# メモリ枯渇・OOM Killer発動時の切り分け — {{ hostname }}
+
+- **報告内容**: {{ victim_service }} が突然停止した
+
+## 目的
+
+freeの見方（availableとfreeの違い）とOOM Killerの仕組みを理解し、「プロセスが突然消えた」障害をカーネルログから裏取りできるようになることを目指します。
+
+## 用語解説
+
+- **OOM Killer**: メモリが枯渇した際、カーネルが強制的にプロセスを終了させて全体停止を防ぐ仕組み
+- **freeとavailableの違い**: freeは完全な未使用メモリ、availableはページキャッシュ解放分も含めた実質的に使えるメモリ量
+- **ページキャッシュ**: ディスクI/Oを高速化するためカーネルがメモリ上に保持するファイルの内容。必要に応じて解放される
+- **スワップ**: 物理メモリが不足した際にディスク上へ退避する領域
+- **カーネルログ(dmesg/journalctl -k)**: カーネルが出力するログ。OOM Killerの発動記録が残る
+- **常駐メモリ(RSS)**: プロセスが実際に使用している物理メモリ量
+- **oom_score**: OOM Killerがどのプロセスを終了させるか判断するスコア
+
+## シナリオ設定
+
+{{ hostname }} で {{ victim_service }} が予兆なく停止したと報告がありました。既に発生した障害の証跡をログから調査し、原因を特定してください（メモリを意図的に枯渇させる再現操作は行いません）。
+
+## 手順
+
+### 1. サービスの終了理由を確認する
+
+```bash
+systemctl status {{ victim_service }}
+```
+
+signal 9 や oom-kill による終了でないか確認します。
+
+### 2. カーネルログでOOM Killer発動の証跡を確認する
+
+```bash
+journalctl -k | grep -i oom
+dmesg -T | grep -i "killed process"
+```
+
+発動時刻と犠牲プロセス（victim）を特定します。
+
+### 3. 現在のメモリ状況を確認する
+
+```bash
+free -h
+```
+
+available列を確認し、「free（空き）が少ない＝異常」ではなく、ページキャッシュを含めた available で判断します。
+
+### 4. メモリ消費上位プロセスとoom_scoreを確認する
+
+```bash
+ps aux --sort=-rss | head -10
+cat /proc/<PID>/oom_score
+```
+
+`oom_score`が高いプロセスほどOOM Killerに選ばれやすくなります。上位プロセスの中でスコアが高いものを確認します。
+
+### 5. スワップの有無・使用状況を確認する
+
+```bash
+swapon --show
+free -h | grep Swap
+```
+
+### 6. サービスを復帰させ、恒久対策の選択肢を記録する
+
+```bash
+systemctl start {{ victim_service }}
+systemctl is-active {{ victim_service }}
+```
+
+恒久対策の例: メモリ上限の見直し、cgroupでのリソース制限、メモリリークの調査、スケールアウト。
+
+## 動作確認
+
+- {{ victim_service }} が active に復帰していること
+- `journalctl -k` に新規のOOM発生がないこと
+- available メモリが基準値以上であること
+- 報告記録に犠牲プロセスと発動時刻が明記されていること
+
+## 注意事項
+
+- 意図的なメモリ枯渇の再現はさせず、既発生の証跡調査型として実施する（本番相当環境でメモリを枯渇させるとシステム全体に影響するため）。
+- 恒久対策の判断が難しい場合は {{ escalation }} へエスカレーションする。
