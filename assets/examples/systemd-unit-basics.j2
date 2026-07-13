@@ -43,8 +43,14 @@ systemctl restart {{ practice.existing_service }}
 
 ### 3. 常駐する簡単なスクリプトを作成する
 
+サービスの実行ユーザー(`{{ unit.user }}`)を作成し、ログファイルの書き込み権限を与えます。
+
 ```bash
+id {{ unit.user }} >/dev/null 2>&1 || useradd -r -s /sbin/nologin {{ unit.user }}
 mkdir -p {{ unit.working_directory }}
+chown {{ unit.user }}: {{ unit.working_directory }}
+touch {{ script.log_path }}
+chown {{ unit.user }}: {{ script.log_path }}
 cat > {{ script.path }} <<'EOF'
 #!/bin/bash
 while true; do

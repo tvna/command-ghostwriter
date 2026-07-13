@@ -39,8 +39,10 @@ ss -tlnp
 ### 2. 各ポートで仮のリスナーを起動する
 
 ```bash
-{% for r in csv_rows %}nc -l {{ r["bind_address"] }} {{ r["port"] }} &   # {{ r["service_name"] }}: {{ r["description"] }}
+{% for r in csv_rows %}nc -lk {{ r["bind_address"] }} {{ r["port"] }} &   # {{ r["service_name"] }}: {{ r["description"] }}
 {% endfor %}```
+
+> `-k` を付けずに `nc -l` だけで起動すると、1回接続を受けるとリスナーは終了してしまう。手順4で一度接続した後も手順5で同じリスナーを使うため、`-k`(keep-listening)で接続後も待ち受けを継続させる。
 
 ### 3. `ss` で待受状態を確認する
 

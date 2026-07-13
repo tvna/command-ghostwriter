@@ -72,7 +72,7 @@ CSV定義の8進表記(先頭が `2` のものは setgid 付き)を適用しま�
 
 ```bash
 umask
-sudo -u ops bash -c 'umask; touch /srv/shared/public/umask-test.txt; ls -l /srv/shared/public/umask-test.txt'
+sudo -u ops bash -c 'umask; touch /srv/shared/umask-test.txt; ls -l /srv/shared/umask-test.txt'
 ```
 
 ### 7. setgid によるグループ継承を確認する
