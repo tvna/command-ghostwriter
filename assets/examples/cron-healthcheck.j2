@@ -65,6 +65,8 @@ crontab -l 2>/dev/null | { cat; {% for r in csv_rows %}echo "*/5 * * * * /usr/lo
 
 ## 6. 疑似障害を発生させ異常検知を試験する
 
+対象にはsshdが含まれます。SSH接続でこの手順を実施している場合、sshdを停止すると自分の接続がロックアウトされるおそれがあるため、コンソール接続または他の接続手段を確保してから実行してください。
+
 ```bash
 {% for r in csv_rows %}systemctl stop {{ r["service"] }} 2>/dev/null || true
 /usr/local/bin/healthcheck_{{ r["service"] }}.sh
@@ -82,4 +84,5 @@ systemctl start {{ r["service"] }} 2>/dev/null || true
 
 - 本シナリオではcrontab構文そのものの解説は最小限にとどめ、監視スクリプトの設計に焦点を当てます。
 - cronジョブのコマンドは絶対パスで記述する。
-- 演習終了後は不要なジョブを削除する。`crontab -r` はcrontab全体を削除してしまうため、追加した行だけを対象に `crontab -l | grep -v healthcheck_ | crontab -` のように限定して削除する。
+- SSH接続でsshdの死活監視を試験する場合、sshdの停止によって自分の接続がロックアウトされるおそれがある。コンソール接続または他の接続手段を確保してから実施する。
+- 演習終了後は不要なジョブを削除する。`crontab -r` はcrontab全体を削除してしまうため、追加した行だけを対象に `crontab -l 2>/dev/null | grep -v healthcheck_ | crontab -` のように限定して削除する。
