@@ -1,0 +1,10 @@
+origin = "example.com."
+primary_ip = "203.0.113.11"
+secondary_ip = "203.0.113.12"
+
+[soa]
+serial = 2026070101
+
+[new_record]
+name = "app"
+ip = "203.0.113.30"

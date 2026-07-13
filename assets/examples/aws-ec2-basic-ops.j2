@@ -1,0 +1,155 @@
+# AWS CLI で EC2 インスタンスを作成・停止・削除する手順 — {{ region }}
+
+AWS CLI の認証設定から EC2 インスタンスのライフサイクル（起動→接続→停止→削除→残骸確認）までを一人で完結できるようになるための手順です。
+
+## 目的
+
+AWS CLI の認証設定（プロファイル）を行い、EC2 インスタンスの起動・SSH 接続・停止・削除、および削除後の残骸（セキュリティグループ・キーペア・EBS）確認までを一巡し、AWS 料金を発生させ続けないクリーンな運用を CLI で実施できるようになることを目指します。
+
+## 用語解説
+
+- **リージョン / AZ（アベイラビリティーゾーン）**: リージョンは AWS のデータセンター群がある地域（例: `{{ region }}`）、AZ はリージョン内の独立した物理的な区画。インスタンスは必ずいずれかの AZ で起動する
+- **AMI（Amazon Machine Image）**: インスタンス起動時のOSやミドルウェア構成を含むテンプレートイメージ
+- **インスタンスタイプ**: CPU・メモリなどのスペックの組み合わせ（例: `t3.micro`）
+- **セキュリティグループ**: インスタンスに適用する仮想ファイアウォール。許可した送信元・ポートのみ通信できる
+- **キーペア**: SSH ログインに使う公開鍵・秘密鍵の組。秘密鍵は自分のPCにのみ保管する
+- **EBS（Elastic Block Store）**: インスタンスにアタッチされる永続ブロックストレージ。インスタンス終了後も残る場合があり課金対象になる
+- **stop と terminate の違い**: stop は一時停止（ディスクは残り再開可能、課金は主にEBS分のみ）、terminate は完全削除（ルートEBSも通常削除され、原則インスタンス自体の再開は不可）
+- **タグ**: リソースに付与する識別用のキーと値の組（例: `Name` タグ）
+
+## 1. AWS CLI の認証設定
+
+演習用プロファイルを作成し、以降のコマンドはこのプロファイルで実行します。
+
+```bash
+aws configure --profile {{ profile }}
+```
+
+## 2. キーペアを作成する
+
+SSH ログイン用のキーペアを作成し、秘密鍵の権限を 600 に制限します。
+
+```bash
+aws ec2 create-key-pair \
+  --profile {{ profile }} --region {{ region }} \
+  --key-name {{ key_name }} \
+  --query 'KeyMaterial' --output text > {{ key_name }}.pem
+chmod 600 {{ key_name }}.pem
+```
+
+## 3. セキュリティグループを作成する
+
+SSH（22番ポート）は自分のIPアドレスからのみ許可します。
+
+```bash
+aws ec2 create-security-group \
+  --profile {{ profile }} --region {{ region }} \
+  --group-name {{ sg_name }} \
+  --description "Training SG for EC2 basic ops"
+
+aws ec2 authorize-security-group-ingress \
+  --profile {{ profile }} --region {{ region }} \
+  --group-name {{ sg_name }} \
+  --protocol tcp --port 22 --cidr {{ allowed_cidr }}
+```
+
+## 4. インスタンスを起動する
+
+AMI とインスタンスタイプを指定し、`Name` タグを付けて起動します。
+
+```bash
+INSTANCE_ID=$(aws ec2 run-instances \
+  --profile {{ profile }} --region {{ region }} \
+  --image-id {{ ami_id }} \
+  --instance-type {{ instance_type }} \
+  --key-name {{ key_name }} \
+  --security-groups {{ sg_name }} \
+  --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value={{ name_tag }}}]" \
+  --query 'Instances[0].InstanceId' --output text)
+
+echo "INSTANCE_ID=$INSTANCE_ID"
+```
+
+## 5. IPアドレスを取得してSSH接続する
+
+```bash
+aws ec2 wait instance-running \
+  --profile {{ profile }} --region {{ region }} \
+  --instance-ids $INSTANCE_ID
+
+PUBLIC_IP=$(aws ec2 describe-instances \
+  --profile {{ profile }} --region {{ region }} \
+  --instance-ids $INSTANCE_ID \
+  --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
+
+echo "起動 AZ: $(aws ec2 describe-instances \
+  --profile {{ profile }} --region {{ region }} \
+  --instance-ids $INSTANCE_ID \
+  --query 'Reservations[0].Instances[0].Placement.AvailabilityZone' --output text)"
+
+ssh -i {{ key_name }}.pem ec2-user@$PUBLIC_IP
+```
+
+## 6. インスタンスを停止する
+
+`stop-instances` はディスク（EBS）を残したまま一時停止する操作です。状態遷移を確認します。
+
+```bash
+aws ec2 stop-instances \
+  --profile {{ profile }} --region {{ region }} \
+  --instance-ids $INSTANCE_ID
+
+aws ec2 wait instance-stopped \
+  --profile {{ profile }} --region {{ region }} \
+  --instance-ids $INSTANCE_ID
+
+aws ec2 describe-instances \
+  --profile {{ profile }} --region {{ region }} \
+  --instance-ids $INSTANCE_ID \
+  --query 'Reservations[0].Instances[0].State.Name' --output text
+```
+
+## 7. インスタンスを削除し、残骸を片付ける
+
+`terminate-instances` はインスタンスを完全に削除する操作で、stop とは異なり原則再開できません。削除後はセキュリティグループ・キーペア・EBS の残骸を必ず確認して片付けます。
+
+```bash
+aws ec2 terminate-instances \
+  --profile {{ profile }} --region {{ region }} \
+  --instance-ids $INSTANCE_ID
+
+aws ec2 wait instance-terminated \
+  --profile {{ profile }} --region {{ region }} \
+  --instance-ids $INSTANCE_ID
+
+# 残存EBSがないか確認（used-by-noneのvolumeが残っていないか）
+aws ec2 describe-volumes \
+  --profile {{ profile }} --region {{ region }} \
+  --filters "Name=status,Values=available"
+
+# セキュリティグループとキーペアを削除する
+aws ec2 delete-security-group \
+  --profile {{ profile }} --region {{ region }} \
+  --group-name {{ sg_name }}
+
+aws ec2 delete-key-pair \
+  --profile {{ profile }} --region {{ region }} \
+  --key-name {{ key_name }}
+
+rm -f {{ key_name }}.pem
+```
+
+## 動作確認
+
+- インスタンスの状態が `running` → `stopped` → `terminated` と正しく遷移すること
+- 手順5でキーペアを使ったSSHログインが成功すること
+- `describe-volumes` で自分が作成した残存EBSボリュームがないこと
+- `describe-security-groups` `describe-key-pairs` に演習用リソースが残っていないこと
+- AWS請求ダッシュボードに継続課金となる項目が残っていないこと
+
+## 注意事項
+
+- この手順は実際にAWS料金が発生する。演習後は `terminate-instances` に加え、セキュリティグループ・キーペア・EBS の残骸を必ず削除すること。
+- 演習が終わったら請求ダッシュボード（Billing Dashboard）で課金項目が残っていないか必ず確認する。
+- セキュリティグループのSSH許可送信元は必ず自分のIPアドレス（`{{ allowed_cidr }}` のようなピンポイントのCIDR）に限定し、`0.0.0.0/0` のような全世界公開にしない。
+- 秘密鍵ファイル（`.pem`）は演習環境外に持ち出さず、共有・送信しない。

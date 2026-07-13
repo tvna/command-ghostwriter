@@ -1,0 +1,95 @@
+# AWS CLIでS3バケットを作りバックアップを保管する手順 — {{ bucket_name }}
+
+AWS CLI を使って S3 バケット **{{ bucket_name }}** を作成し、バックアップの保管と取り出し検証、公開設定の安全確認までを行う手順です。
+
+## 目的
+
+オブジェクトストレージの概念を理解し、S3 へのバックアップ保管と取り出し検証、公開設定の安全確認までを CLI で一巡できるようになることを目指します。
+
+## 用語解説
+
+- **オブジェクトストレージ**: ファイルをディレクトリ階層ではなく「キー」に紐づく単位（オブジェクト）として保管するストレージ方式。S3 はその代表例
+- **バケット**: S3 でオブジェクトを保管する最上位の入れ物。名前はグローバルに一意である必要がある
+- **キーとプレフィックス**: オブジェクトを一意に識別する文字列を「キー」と呼び、`/` 区切りの先頭部分を擬似的なディレクトリのように扱うものを「プレフィックス」と呼ぶ
+- **cp と sync の違い**: `aws s3 cp` は指定した1ファイル（またはディレクトリ全体を再帰指定した場合）をそのままコピーするのに対し、`aws s3 sync` は転送元と転送先の差分だけを比較して転送する
+- **パブリックアクセスブロック**: バケットやオブジェクトが誤って公開設定にされることを防ぐ、アカウント/バケット単位の安全装置
+- **バージョニング**: 同じキーに対する上書き・削除の履歴を保持し、以前のバージョンへ復元できるようにする機能
+- **ストレージクラス**: オブジェクトごとに設定できる保存階層（STANDARD 等）。アクセス頻度に応じてコストと取り出し速度が変わる
+
+## 1. プロファイルとバケットの準備
+
+利用する AWS CLI プロファイルを確認し、バケットを作成します。バケット名はグローバルに一意である必要があるため、既存のものと衝突しない名前を選んでください。
+
+```bash
+aws sts get-caller-identity --profile {{ profile }}
+aws s3 mb s3://{{ bucket_name }} --profile {{ profile }}
+```
+
+## 2. パブリックアクセスブロックを確認する
+
+作成直後のバケットが非公開のままであることを確認します。4項目すべてが `true` であることを確認してください。
+
+```bash
+aws s3api get-public-access-block --bucket {{ bucket_name }} --profile {{ profile }}
+```
+
+## 3. バージョニングを有効化する
+
+誤削除・誤上書きからの復元に備え、バージョニングを有効化します。
+
+```bash
+aws s3api put-bucket-versioning \
+  --bucket {{ bucket_name }} \
+  --versioning-configuration Status=Enabled \
+  --profile {{ profile }}
+```
+
+## 4. バックアップアーカイブを作成してアップロードする
+
+対象ディレクトリを tar でアーカイブし、単一ファイルとして `cp` でアップロードします。
+
+```bash
+tar czf {{ archive_file }} -C {{ sync_source_dir }} .
+aws s3 cp {{ archive_file }} s3://{{ bucket_name }}/archives/{{ archive_file }} --profile {{ profile }}
+```
+
+`--storage-class` を指定しない場合、オブジェクトは既定のストレージクラス（STANDARD）で保存されます。
+
+## 5. ディレクトリをそのまま同期する
+
+アーカイブとは別に、ディレクトリ全体を差分同期でバケット内の同名プレフィックス配下へ保管します。差分のみ転送されるため、繰り返し実行しても未変更ファイルは再送信されません。
+
+```bash
+aws s3 sync {{ sync_source_dir }} s3://{{ bucket_name }}/sync/{{ sync_source_dir }} --profile {{ profile }}
+```
+
+## 6. 取り出して整合性を検証する
+
+アップロードしたアーカイブを別ディレクトリへ取り出し、元ファイルとハッシュ値を比較します。
+
+```bash
+mkdir -p {{ restore_check_dir }}
+aws s3 cp s3://{{ bucket_name }}/archives/{{ archive_file }} {{ restore_check_dir }}/{{ archive_file }} --profile {{ profile }}
+sha256sum {{ archive_file }} {{ restore_check_dir }}/{{ archive_file }}
+```
+
+## 7. 後片付け
+
+演習が終わったらオブジェクトとバケットを削除します。バージョニングが有効な場合、オブジェクトの全バージョンを削除しないとバケット自体は削除できません。
+
+```bash
+aws s3 rm s3://{{ bucket_name }} --recursive --profile {{ profile }}
+aws s3 rb s3://{{ bucket_name }} --profile {{ profile }}
+```
+
+## 動作確認
+
+- `aws s3 ls s3://{{ bucket_name }}/archives/` にアップロードしたオブジェクトが存在すること
+- 取り出したファイルの `sha256sum` が元ファイルと一致すること
+- `get-public-access-block` の4項目（`BlockPublicAcls` `IgnorePublicAcls` `BlockPublicPolicy` `RestrictPublicBuckets`）がすべて有効であること
+
+## 注意事項
+
+- この手順は実際に AWS 料金が発生する。金額はごく僅かだが、後片付けを忘れると保管容量に応じて課金が継続する。
+- バケット名はグローバルに一意である必要があるため、`{{ bucket_name }}` のような例示名をそのまま使うと既存バケットと衝突する可能性がある。
+- パブリックアクセスブロックを外したまま放置しない。検証や設定変更で一時的に外した場合は、作業後すぐに再度有効化する。

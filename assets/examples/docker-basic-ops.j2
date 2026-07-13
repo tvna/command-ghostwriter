@@ -1,0 +1,96 @@
+# Docker コンテナ基本操作手順 — {{ container_name }}
+
+Docker Engine 上でイメージ **{{ image }}** から演習用コンテナ **{{ container_name }}** を起動し、確認・改変・破棄までの一連の操作を CLI で一巡します。
+
+## 目的
+
+コンテナとイメージの関係を理解し、pull → run → 動作確認 → 破棄という Docker コンテナのライフサイクル全体を CLI 操作で一巡できるようになることを目指します。
+
+## 用語解説
+
+- **イメージ**: コンテナの実行に必要なファイル一式をまとめたテンプレート。読み取り専用で、これを元にコンテナが起動される
+- **コンテナ**: イメージから作られた、実際に動作するプロセスの実体
+- **レジストリ (Docker Hub)**: イメージを配布・取得するための保管庫。`docker pull` はここからイメージを取得する
+- **タグ**: `nginx:1.27` の `:1.27` のように、イメージのバージョンを識別する文字列
+- **ポート公開 (-p)**: ホストのポートとコンテナ内のポートを接続し、外部からコンテナのサービスにアクセスできるようにする設定
+- **ボリューム**: コンテナの外（ホスト側）にデータを保持し、コンテナに読み書きさせる仕組み。コンテナを破棄してもデータが残る
+- **デタッチ実行 (-d)**: コンテナをバックグラウンドで起動し、ターミナルを占有しない実行方式
+- **docker logs**: コンテナの標準出力・標準エラー出力を確認するコマンド
+
+## 1. Docker 環境を確認する
+
+Docker Engine が導入され、コマンドを実行できる状態かを確認します。
+
+```bash
+docker version
+docker info
+```
+
+## 2. イメージを取得する
+
+レジストリ（Docker Hub）からタグ付きイメージを取得します。
+
+```bash
+docker pull {{ image }}
+```
+
+## 3. コンテナを起動する
+
+デタッチ実行でコンテナを起動し、ホストのポートをコンテナに公開します。他のコンテナと混同しないよう `--name` で必ず識別します。
+
+```bash
+docker run -d --name {{ container_name }} -p {{ host_port }}:{{ container_port }} {{ image }}
+```
+
+## 4. 動作確認とログの確認
+
+公開したポート経由でアクセスできることを確認し、コンテナのログを確認します。
+
+```bash
+docker ps
+curl -i localhost:{{ host_port }}
+docker logs {{ container_name }}
+```
+
+## 5. ボリュームマウントで内容を差し替える
+
+いったんコンテナを停止・削除し、ホスト側ディレクトリをボリュームとしてマウントしたコンテナを再作成します。
+
+```bash
+mkdir -p {{ volume.host_dir }}
+cat > {{ volume.host_dir }}/index.html <<'EOF'
+{{ volume.demo_html }}
+EOF
+
+docker stop {{ container_name }}
+docker rm {{ container_name }}
+docker run -d --name {{ container_name }} -p {{ host_port }}:{{ container_port }} \
+  -v {{ volume.host_dir }}:/usr/share/nginx/html:ro {{ image }}
+
+curl -i localhost:{{ host_port }}
+```
+
+## 6. コンテナとイメージを掃除する
+
+演習用コンテナとイメージを完全に削除し、痕跡が残っていないことを確認します。
+
+```bash
+docker stop {{ container_name }}
+docker rm {{ container_name }}
+docker rmi {{ image }}
+```
+
+## 動作確認
+
+- `docker ps` で {{ container_name }} の STATUS が `Up` になっていること
+- `curl localhost:{{ host_port }}` がステータスコード 200 を返すこと
+- `docker logs {{ container_name }}` にアクセスログの行が出力されていること
+- ボリュームマウント後、`curl localhost:{{ host_port }}` の応答が差し替えた HTML の内容に変わっていること
+- 掃除後、`docker ps -a` と `docker images` に {{ container_name }} / {{ image }} の痕跡が残っていないこと
+
+## 注意事項
+
+- 演習用コンテナは `--name {{ container_name }}` で必ず識別し、他の稼働中コンテナと混同しない。
+- 事前に Docker Engine が導入済みで、root 権限または docker グループへの所属が必要。
+- ホスト上でポート {{ host_port }} が他のプロセスに使用されていないか、`docker run` 前に確認する。
+- `docker rm` / `docker rmi` は破棄後に元へ戻せない操作のため、対象のコンテナ名・イメージ名を必ず確認してから実行する。

@@ -1,0 +1,97 @@
+# セカンダリ DNS 追加によるゾーン転送冗長化手順 — {{ origin }}
+
+権威 DNS サーバー（BIND）の **{{ origin }}** に、プライマリ/セカンダリ構成のセカンダリ DNS を追加し、ゾーン転送と更新伝搬を設定・検証します。
+
+## 目的
+
+DNS の冗長化構成（プライマリ/セカンダリ）を理解し、ゾーン転送によってセカンダリへゾーンデータを複製し、更新が正しく伝搬することを確認できるようになることを目指します。
+
+## 用語解説
+
+- **プライマリ/セカンダリ**: ゾーンデータを直接編集する権威サーバ（プライマリ）と、そこから複製を受け取り応答する権威サーバ（セカンダリ）
+- **ゾーン転送（AXFR/IXFR）**: プライマリからセカンダリへゾーンデータ全体（AXFR）または差分（IXFR）を転送する仕組み
+- **NOTIFY**: プライマリがゾーン更新時にセカンダリへ即座に再取得を促す通知
+- **SOA シリアル**: ゾーンの更新回数を表す番号。更新のたびに増やす必要があり、プライマリとセカンダリで一致していることが正常な同期の目安となる
+- **リフレッシュ間隔**: セカンダリが NOTIFY を待たずに定期的にプライマリへ更新確認を行う間隔
+- **allow-transfer**: ゾーン転送を許可するホストを制限する BIND の設定項目
+- **NS レコード**: そのゾーンの権威サーバのホスト名を示すレコード。冗長化後はプライマリ・セカンダリ両方を登録する
+
+## 1. プライマリにゾーン転送の許可と通知先を設定する
+
+プライマリの `named.conf` で、セカンダリ（`{{ secondary_ip }}`）にのみゾーン転送を許可し、更新時に NOTIFY を送るよう設定します。
+
+```bash
+cat >> /etc/named.conf <<'EOF'
+zone "{{ origin }}" IN {
+    type master;
+    file "/var/named/db.{{ origin }}";
+    allow-transfer { {{ secondary_ip }}; };
+    also-notify { {{ secondary_ip }}; };
+    notify yes;
+};
+EOF
+```
+
+## 2. セカンダリに転送受信用のゾーン定義を追加する
+
+セカンダリ（`{{ secondary_ip }}`）の `named.conf` に、プライマリ（`{{ primary_ip }}`）から転送を受け取る `slave` ゾーンを定義します。
+
+```bash
+cat >> /etc/named.conf <<'EOF'
+zone "{{ origin }}" IN {
+    type slave;
+    file "slaves/db.{{ origin }}";
+    masters { {{ primary_ip }}; };
+};
+EOF
+```
+
+## 3. 両系で構文チェックする
+
+反映前に、プライマリ・セカンダリ双方の `named.conf` を検証します。
+
+```bash
+# プライマリ・セカンダリそれぞれで実行
+named-checkconf
+```
+
+## 4. 設定を反映しセカンダリでのゾーン転送を確認する
+
+```bash
+# プライマリ
+rndc reload {{ origin }}
+
+# セカンダリ（転送実行後にゾーンファイルが生成されることを確認）
+rndc retransfer {{ origin }}
+ls -l /var/named/slaves/db.{{ origin }}
+```
+
+## 5. プライマリでレコードを追加しシリアルを更新、NOTIFY による伝搬を確認する
+
+`{{ new_record.name }}.{{ origin }}` を追加し、SOA シリアルを現在値（`{{ soa.serial }}`）から 1 進めます。
+
+```bash
+# /var/named/db.{{ origin }} を編集
+# SOA シリアルを {{ soa.serial }} -> {{ soa.serial + 1 }} に更新
+# 以下の A レコードを追加
+# {{ new_record.name }}     IN A    {{ new_record.ip }}
+
+named-checkzone {{ origin }} /var/named/db.{{ origin }}
+rndc reload {{ origin }}
+
+# セカンダリで NOTIFY 受信後の自動転送を確認
+dig @{{ secondary_ip }} {{ new_record.name }}.{{ origin }} A +short
+```
+
+## 動作確認
+
+- `dig @{{ primary_ip }} {{ origin }} SOA +short` と `dig @{{ secondary_ip }} {{ origin }} SOA +short` のシリアルが一致すること
+- セカンダリ（`{{ secondary_ip }}`）からの AXFR のみ成功し、許可外の第三者からの転送要求は拒否されること（`allow-transfer` の制限が効いていること）
+- `dig @{{ primary_ip }} {{ origin }} NS +short` にプライマリ・セカンダリ両方のホスト名が登録されていること
+- レコード追加後、NOTIFY によりセカンダリへ即時伝搬され `{{ new_record.name }}.{{ origin }}` が引けること
+
+## 注意事項
+
+- `allow-transfer` は第三者に開放せず、セカンダリの IP アドレス（`{{ secondary_ip }}`）のみに限定すること。ゾーンデータ全体の漏えいにつながる。
+- レコードを更新した際は SOA シリアルを必ず進めること。進め忘れるとセカンダリが更新を取得しない。
+- 本演習にはプライマリ・セカンダリの 2 台構成が必要。1 台のみでは動作確認ができない。

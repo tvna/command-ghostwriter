@@ -1,0 +1,6 @@
+title: 社内アプリのホスト名が名前解決できない
+hostname: app01.internal.example
+public_resolver: 8.8.8.8
+test_entry:
+  hostname: dns-check-test.internal.example
+  ip: 203.0.113.99

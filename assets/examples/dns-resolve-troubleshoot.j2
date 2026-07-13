@@ -1,0 +1,118 @@
+# 名前解決トラブルの切り分け手順 — {{ hostname }}
+
+「名前が引けない」という障害を、hostsファイル→スタブリゾルバ→キャッシュDNS→権威DNSの層に分解して切り分けます。
+
+## 目的
+
+**{{ hostname }}** の名前解決ができないという障害を、OS 側の解決経路（hosts ファイル・スタブリゾルバ）とキャッシュ DNS・権威 DNS のどの層で起きているかに分解して切り分けられるようになることを目指します。
+
+## 用語解説
+
+- **リゾルバ**: アプリケーションからの名前解決要求を受け、DNS 問い合わせなどを行って IP アドレスを返す仕組み
+- **/etc/resolv.conf**: 問い合わせ先の DNS サーバ（スタブリゾルバの参照先）を記述する設定ファイル
+- **systemd-resolved**: Linux でスタブリゾルバとキャッシュを担うサービス。`resolvectl` で状態を確認できる
+- **キャッシュDNSと権威DNSの違い**: キャッシュ DNS は問い合わせを受けて再帰的に解決し結果を一時保存するサーバ、権威 DNS はそのドメインの正式な回答を持つサーバという違い
+- **dig**: 指定した DNS サーバに直接問い合わせて応答（レコード・ステータスコード）を確認するコマンド
+- **getent**: `/etc/nsswitch.conf` の設定に従い、hosts ファイルを含む OS 全体の解決経路で名前を引くコマンド
+- **NXDOMAIN**: 問い合わせた名前が存在しないことを示す DNS の応答コード
+- **hostsファイル**: `/etc/hosts` のこと。ホスト名と IP アドレスの対応をローカルに固定し、DNS より先に参照される
+
+## 1. 事象の再現確認
+
+対象ホストへの接続やアプリケーションのエラーから、名前解決に失敗している事象を再現します。
+
+```bash
+ping -c 1 {{ hostname }}
+```
+
+## 2. OS解決経路の確認（getent）
+
+`getent` で hosts ファイルを含む OS 全体の解決経路から結果を確認します。
+
+```bash
+getent hosts {{ hostname }}
+```
+
+→ 結果が返らない、または想定と異なる IP が返る場合は次に進みます。
+
+## 3. DNS応答の確認（dig）
+
+`dig` で、設定されているリゾルバに対して直接問い合わせ、応答コードを確認します。
+
+```bash
+dig {{ hostname }}
+```
+
+→ `status: NXDOMAIN` ならその名前がそもそも DNS に存在しない、`status: NOERROR` だが ANSWER が空なら別レコード種別や別経路の問題を疑います。
+
+## 4. 参照先DNSとの比較（dig @8.8.8.8）
+
+社内のキャッシュ DNS ではなく、公開の権威側に近いリゾルバ（{{ public_resolver }}）に直接問い合わせ、結果を比較します。
+
+```bash
+dig @{{ public_resolver }} {{ hostname }}
+```
+
+→ 社内 DNS の結果とここでの結果が異なる場合、問題は社内のキャッシュ DNS 層にある可能性が高いと判断します。
+
+## 5. リゾルバ設定の確認（resolvectl / /etc/resolv.conf）
+
+OS がどのリゾルバを参照しているかを確認します。
+
+```bash
+resolvectl status
+cat /etc/resolv.conf
+```
+
+→ 想定と異なる DNS サーバが設定されている場合は、`/etc/resolv.conf` を書き換える前に必ずバックアップを取得します。
+
+## 6. hostsファイルでの経路差の実演
+
+`/etc/hosts` にテスト用エントリを追加し、`getent` と `dig` の経路の違いを実際に観察します。
+
+```bash
+echo "{{ test_entry.ip }} {{ test_entry.hostname }}" | sudo tee -a /etc/hosts
+getent hosts {{ test_entry.hostname }}
+dig {{ test_entry.hostname }}
+```
+
+→ `getent` は hosts ファイルを参照するためテストエントリの IP を返しますが、`dig` は DNS サーバへ直接問い合わせるため hosts ファイルの内容を経由せず、`status: NXDOMAIN` など DNS 側の応答が返ります。この差から、hosts ファイルはリゾルバより手前で参照される経路であることを確認します。
+
+## 7. 原因層の判定と報告
+
+ここまでの結果を突き合わせ、原因がどの層にあるかを判定し、報告フォーマットに記入します。
+
+```bash
+cat <<EOF
+対象ホスト名: {{ hostname }}
+getent hosts の結果: (手順2の出力を記入)
+dig の結果 / status: (手順3の出力を記入)
+dig @{{ public_resolver }} の結果 / status: (手順4の出力を記入)
+参照リゾルバ: (手順5の出力を記入)
+判定した原因層: (hosts / スタブリゾルバ / キャッシュDNS / 権威DNS のいずれか)
+EOF
+```
+
+## 8. テストエントリの掃除
+
+`/etc/hosts` に追加したテスト用エントリを必ず削除します。
+
+```bash
+sudo sed -i "/{{ test_entry.hostname }}/d" /etc/hosts
+getent hosts {{ test_entry.hostname }}
+```
+
+→ 削除後は `getent hosts {{ test_entry.hostname }}` が何も返さないことを確認します。
+
+## 動作確認
+
+- `dig {{ hostname }}` の `status` が `NOERROR` であること
+- `getent hosts {{ hostname }}` と `dig {{ hostname }}` の結果（IP アドレス）が一致していること
+- `resolvectl status` で参照している DNS サーバが意図した値になっていること
+- `/etc/hosts` に追加したテストエントリ（{{ test_entry.hostname }}）が手順の最後に削除されていること
+
+## 注意事項
+
+- `/etc/hosts` に追加したテスト用エントリは手順の最後に必ず削除する。放置すると以後の障害調査で誤った名前解決結果を参照してしまう。
+- 本番の `/etc/resolv.conf` を書き換える場合は、必ず事前にバックアップを取得してから変更する。
+- テストエントリの追加・削除や `/etc/resolv.conf` の変更には管理者権限が必要なため、作業前に対象環境が検証用であることを確認する。
