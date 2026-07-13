@@ -1,0 +1,5 @@
+title: Postfixからのメール送信不能
+hostname: mail-relay-01
+domain: example-training.internal
+test_recipient: check@example-training.internal
+escalation: インフラ基盤チーム (内線 1201)
