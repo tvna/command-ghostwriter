@@ -57,10 +57,10 @@ aws s3 cp {{ archive_file }} s3://{{ bucket_name }}/archives/{{ archive_file }} 
 
 ## 5. ディレクトリをそのまま同期する
 
-アーカイブとは別に、ディレクトリ全体を差分同期でバケット内の同名プレフィックス配下へ保管します。差分のみ転送されるため、繰り返し実行しても未変更ファイルは再送信されません。
+アーカイブとは別に、ディレクトリ全体を差分同期でバケット内の `sync/` プレフィックス配下へ保管します。差分のみ転送されるため、繰り返し実行しても未変更ファイルは再送信されません。
 
 ```bash
-aws s3 sync {{ sync_source_dir }} s3://{{ bucket_name }}/sync/{{ sync_source_dir }} --profile {{ profile }}
+aws s3 sync {{ sync_source_dir }} s3://{{ bucket_name }}/sync/ --profile {{ profile }}
 ```
 
 ## 6. 取り出して整合性を検証する

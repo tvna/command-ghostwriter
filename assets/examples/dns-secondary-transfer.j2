@@ -83,6 +83,8 @@ rndc reload {{ origin }}
 dig @{{ secondary_ip }} {{ new_record.name }}.{{ origin }} A +short
 ```
 
+NOTIFY が届かない場合でも、セカンダリはリフレッシュ間隔の経過後に自ら SOA を確認し IXFR（差分転送）を試みるため、いずれ同期される。
+
 ## 動作確認
 
 - `dig @{{ primary_ip }} {{ origin }} SOA +short` と `dig @{{ secondary_ip }} {{ origin }} SOA +short` のシリアルが一致すること
