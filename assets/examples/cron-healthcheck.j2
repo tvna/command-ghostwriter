@@ -81,4 +81,4 @@ systemctl start {{ r["service"] }} 2>/dev/null || true
 
 - 本シナリオではcrontab構文そのものの解説は最小限にとどめ、監視スクリプトの設計に焦点を当てます。
 - cronジョブのコマンドは絶対パスで記述する。
-- 演習終了後は不要なジョブを `crontab -r` 等で削除する。
+- 演習終了後は不要なジョブを削除する。`crontab -r` はcrontab全体を削除してしまうため、追加した行だけを対象に `crontab -l | grep -v healthcheck_ | crontab -` のように限定して削除する。

@@ -54,8 +54,9 @@ dig MX {{ domain }} +short
 ### 5. 宛先SMTPポートへの到達性を確認する
 
 ```bash
-nc -zv $(dig MX {{ domain }} +short | awk '{print $2}' | sed 's/\.$//' | head -1) 25
-nc -zv $(dig MX {{ domain }} +short | awk '{print $2}' | sed 's/\.$//' | head -1) 587
+MX_HOST=$(dig MX {{ domain }} +short | awk '{print $2}' | sed 's/\.$//' | head -1)
+nc -zv "$MX_HOST" 25
+nc -zv "$MX_HOST" 587
 ```
 
 25番はMTA間リレー、587番はクライアントからの投稿(submission)用途で用いられます。
