@@ -27,12 +27,12 @@ TTLを使ってDNS切替を「思いつきの書き換え」ではなく計画�
 
 ## 2. 切替前日にTTLを300秒へ短縮する
 
-権威サーバ（`ns1.example.com`）のゾーンファイルで、対象レコードのTTLを一時的に300秒へ短縮し、SOAシリアルを進めてから反映します。
+権威サーバ（`{{ csv_rows[0]["primary_ns"] }}`）のゾーンファイルで、対象レコードのTTLを一時的に300秒へ短縮し、SOAシリアルを進めてから反映します。
 
 ```bash
 {% for r in csv_rows %}# {{ r["name"] }} のTTLを {{ r["old_ttl"] }} -> 300 に変更
-{% endfor %}named-checkzone example.com /var/named/db.example.com
-rndc reload example.com
+{% endfor %}named-checkzone {{ csv_rows[0]["zone"] }} /var/named/db.{{ csv_rows[0]["zone"] }}
+rndc reload {{ csv_rows[0]["zone"] }}
 ```
 
 短縮したTTLがキャッシュに行き渡るよう、最低でも旧TTL（最大 {{ csv_rows | map(attribute="old_ttl") | map("int") | max }} 秒程度）が経過してから次の作業に進みます。
@@ -50,8 +50,8 @@ rndc reload example.com
 ```bash
 {% for r in csv_rows %}# {{ r["name"] }} ({{ r["type"] }}): {{ r["old_value"] }} -> {{ r["new_value"] }}
 {% endfor %}# ゾーンファイルを編集後、SOAシリアルをインクリメント
-named-checkzone example.com /var/named/db.example.com
-rndc reload example.com
+named-checkzone {{ csv_rows[0]["zone"] }} /var/named/db.{{ csv_rows[0]["zone"] }}
+rndc reload {{ csv_rows[0]["zone"] }}
 ```
 
 ## 5. 権威サーバへ直接digして即時反映を確認する
@@ -59,7 +59,7 @@ rndc reload example.com
 DNSキャッシュの影響を受けない権威サーバへ直接問い合わせ、レコードが新しい値に変わっていることを確認します。
 
 ```bash
-{% for r in csv_rows %}dig @ns1.example.com {{ r["name"] }} {{ r["type"] }} +short
+{% for r in csv_rows %}dig @{{ csv_rows[0]["primary_ns"] }} {{ r["name"] }} {{ r["type"] }} +short
 {% endfor %}```
 
 ## 6. キャッシュリゾルバ経由でTTL満了後の反映を確認する
@@ -76,8 +76,8 @@ DNSキャッシュの影響を受けない権威サーバへ直接問い合わ�
 
 ```bash
 {% for r in csv_rows %}# {{ r["name"] }} のTTLを 300 -> {{ r["old_ttl"] }} に復元
-{% endfor %}named-checkzone example.com /var/named/db.example.com
-rndc reload example.com
+{% endfor %}named-checkzone {{ csv_rows[0]["zone"] }} /var/named/db.{{ csv_rows[0]["zone"] }}
+rndc reload {{ csv_rows[0]["zone"] }}
 ```
 
 ## 動作確認

@@ -18,6 +18,8 @@ root 権限なしでコンテナを実行する意味を理解し、systemd ユ�
 
 ## 1. rootless で動作していることを確認する
 
+Podman はデーモンレスで動作するため、常駐する特権プロセスを介さず一般ユーザーの権限のまま直接コンテナを起動・管理できることを確認します。
+
 ```bash
 sudo -u {{ user }} podman info
 ```
@@ -36,7 +38,16 @@ sudo -u {{ user }} podman run -d --name {{ service_name }} -p {{ host_port }}:{{
 curl -sS -o /dev/null -w '%{http_code}\n' http://localhost:{{ host_port }}
 ```
 
-## 4. Quadlet 定義を配置する
+## 4. 動作確認用コンテナを停止してポートを解放する
+
+Quadlet が同じホストポート {{ host_port }} を公開するため、手順2で起動した動作確認用コンテナを停止・削除してポートを解放します。
+
+```bash
+sudo -u {{ user }} podman stop {{ service_name }}
+sudo -u {{ user }} podman rm {{ service_name }}
+```
+
+## 5. Quadlet 定義を配置する
 
 ```bash
 sudo -u {{ user }} mkdir -p ~{{ user }}/.config/containers/systemd
@@ -54,14 +65,14 @@ EOF
 chown {{ user }}: ~{{ user }}/.config/containers/systemd/{{ service_name }}.container
 ```
 
-## 5. systemd ユーザーサービスとして有効化する
+## 6. systemd ユーザーサービスとして有効化する
 
 ```bash
 sudo -u {{ user }} XDG_RUNTIME_DIR=/run/user/$(id -u {{ user }}) systemctl --user daemon-reload
 sudo -u {{ user }} XDG_RUNTIME_DIR=/run/user/$(id -u {{ user }}) systemctl --user enable --now {{ service_name }}.service
 ```
 
-## 6. linger を設定して再起動テストする
+## 7. linger を設定して再起動テストする
 
 ```bash
 loginctl enable-linger {{ user }}

@@ -45,7 +45,7 @@ qemu-img create -f qcow2 -F qcow2 \
 
 ## 4. virt-install でドメインを作成
 
-クラウドイメージをそのままインポートする形でドメイン {{ domain }} を作成します。
+クラウドイメージをそのままインポートする形でドメイン {{ domain }} を作成します。クラウドイメージは初期状態でログイン用パスワードが設定されていないため、`--cloud-init` でログイン確認用の root パスワードを自動生成させます。
 
 ```bash
 virt-install \
@@ -55,10 +55,13 @@ virt-install \
   --disk path={{ disk_path }},bus=virtio \
   --network network={{ network }} \
   --os-variant {{ os_variant }} \
+  --cloud-init root-password-generate=yes,disable=no \
   --import \
   --graphics none \
   --console pty,target_type=serial
 ```
+
+インストール完了後のログに、自動生成された root パスワードが出力されます（保存して手順5で使用します）。
 
 ## 5. コンソールでのログイン確認
 

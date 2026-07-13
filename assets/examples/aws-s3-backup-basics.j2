@@ -75,10 +75,15 @@ sha256sum {{ archive_file }} {{ restore_check_dir }}/{{ archive_file }}
 
 ## 7. 後片付け
 
-演習が終わったらオブジェクトとバケットを削除します。バージョニングが有効な場合、オブジェクトの全バージョンを削除しないとバケット自体は削除できません。
+演習が終わったらオブジェクトとバケットを削除します。バージョニングが有効なバケットでは、`aws s3 rm --recursive` は削除マーカーを追加するだけで実際のバージョンは残るため、`list-object-versions` で全バージョンと削除マーカーを列挙してから個別に削除しないと `aws s3 rb` が `BucketNotEmpty` で失敗します。
 
 ```bash
-aws s3 rm s3://{{ bucket_name }} --recursive --profile {{ profile }}
+aws s3api delete-objects --bucket {{ bucket_name }} --profile {{ profile }} \
+  --delete "$(aws s3api list-object-versions --bucket {{ bucket_name }} --profile {{ profile }} \
+    --query '{Objects: Versions[].{Key:Key,VersionId:VersionId}}' --output json)"
+aws s3api delete-objects --bucket {{ bucket_name }} --profile {{ profile }} \
+  --delete "$(aws s3api list-object-versions --bucket {{ bucket_name }} --profile {{ profile }} \
+    --query '{Objects: DeleteMarkers[].{Key:Key,VersionId:VersionId}}' --output json)"
 aws s3 rb s3://{{ bucket_name }} --profile {{ profile }}
 ```
 

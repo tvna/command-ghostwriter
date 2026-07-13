@@ -18,10 +18,17 @@ DNS の冗長化構成（プライマリ/セカンダリ）を理解し、ゾー
 
 ## 1. プライマリにゾーン転送の許可と通知先を設定する
 
-プライマリの `named.conf` で、セカンダリ（`{{ secondary_ip }}`）にのみゾーン転送を許可し、更新時に NOTIFY を送るよう設定します。
+プライマリの `named.conf` には、すでに **{{ origin }}** の master ゾーン定義（`type master;`）が存在している前提です。新しい zone ブロックを追加するのではなく、既存の定義に `allow-transfer` / `also-notify` / `notify yes;` を追記し、セカンダリ（`{{ secondary_ip }}`）にのみゾーン転送を許可し、更新時に NOTIFY を送るよう編集します。
 
 ```bash
-cat >> /etc/named.conf <<'EOF'
+# /etc/named.conf を編集し、既存の zone "{{ origin }}" 定義（type master;）に
+# 以下の3行を追記する（新しい zone ブロックを別途追加しない）
+vi /etc/named.conf
+```
+
+編集後、既存の master ゾーン定義は以下の状態になります。
+
+```
 zone "{{ origin }}" IN {
     type master;
     file "/var/named/db.{{ origin }}";
@@ -29,7 +36,6 @@ zone "{{ origin }}" IN {
     also-notify { {{ secondary_ip }}; };
     notify yes;
 };
-EOF
 ```
 
 ## 2. セカンダリに転送受信用のゾーン定義を追加する
