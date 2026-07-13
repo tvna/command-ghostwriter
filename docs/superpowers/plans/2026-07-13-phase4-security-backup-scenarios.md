@@ -10,6 +10,13 @@
 
 **Issue:** #547（親issue #541、フェーズ1は issue #542 / PR #543）
 
+> **Post-plan corrections:** レビュー（内部/外部双方）により、以下5シナリオの埋め込みコードは実装後に修正されており、この計画書内の該当スニペットは古いままです。実装の正としては本計画書ではなく `assets/examples/*.j2` を参照してください。
+> - restore-drill: チェックサム照合から `--ignore-missing` を削除（不完全な復元を検知できるように）
+> - sudo-least-privilege: 一時ファイルで `visudo -cf` 検証してから `{{ sudoers_file }}` へアトミックに反映する方式に変更
+> - rsync-daily-backup: Step 4（世代ディレクトリ作成）とcronスクリプトの両方に `--exclude` を追加
+> - fail2ban-ssh-guard: Step 4-5 を「localhostでの検知確認（127.0.0.1はignoreipのため遮断されない）」と「`test.attacker_ip` への手動ban/unban確認」の2段階に再構成
+> - vuln-patch-triage: `dnf update --advisory=` を `--cve=` に修正（CVE IDはadvisory IDではないため）
+
 ---
 
 ## 共通の検証手順（各タスクで使用）

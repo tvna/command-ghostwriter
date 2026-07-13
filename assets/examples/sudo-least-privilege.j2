@@ -27,17 +27,19 @@ sudo -l -U {{ target_user }}
 
 ```bash
 TMP_SUDOERS=$(mktemp)
-sudo tee "$TMP_SUDOERS" <<'EOF'
+tee "$TMP_SUDOERS" <<'EOF'
 {% for c in allowed_commands %}{{ target_user }} ALL=(root) NOPASSWD: {{ c }}
 {% endfor %}EOF
-sudo visudo -cf "$TMP_SUDOERS"
+visudo -cf "$TMP_SUDOERS"
 ```
+
+`$TMP_SUDOERS` は `mktemp` で作成した自分専用のファイルのため、作成・検証には root 権限は不要です（`sudo` を付けないことも最小権限の実践です）。
 
 ## 3. 検証済みのファイルを本番パスへ反映する
 
 ```bash
 sudo install -o root -g root -m 440 "$TMP_SUDOERS" {{ sudoers_file }}
-sudo rm -f "$TMP_SUDOERS"
+rm -f "$TMP_SUDOERS"
 ```
 
 ## 4. 別セッションでrootシェルを保持したまま試験する

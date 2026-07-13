@@ -50,7 +50,7 @@ ssh -i ~/.ssh/{{ key.label }} {{ server.admin_user }}@{{ server.host }} hostname
 
 ## 5. パスワード認証を無効化する
 
-構文チェックを挟んでから反映します。**この確認が取れるまで次のコマンドは実行しないでください。**
+構文チェックを挟んでから反映します。**この確認が取れるまで次のコマンドは実行しないでください。** `{{ paths.sshd_dropin }}` への書き込み自体は sshd デーモンには即座に反映されません（明示的な reload まで有効化されないため、この時点ではまだ現在の接続に影響しません）。
 
 ```bash
 ssh {{ server.admin_user }}@{{ server.host }} 'echo "PasswordAuthentication no" | sudo tee {{ paths.sshd_dropin }}'

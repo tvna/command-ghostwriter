@@ -70,10 +70,10 @@ sudo chmod +x {{ cron.script_path }}
 
 ## 6. 保持ポリシーを確認する
 
-保持日数は `{{ retention_days }}` 日です。古い世代ディレクトリは保持日数を超えたものから削除します。`{{ backup_root }}` 自体と、ハードリンクの基準ディレクトリ `latest`（サブディレクトリへの書き込みだけでは自身の更新日時が進まないため、削除候補に誤って含まれやすい）を除外して検索します。
+保持日数は `{{ retention_days }}` 日です。古い世代ディレクトリは保持日数を超えたものから削除します。`{{ backup_root }}` 自体、ハードリンクの基準ディレクトリ `latest`（サブディレクトリへの書き込みだけでは自身の更新日時が進まないため、削除候補に誤って含まれやすい）、そして `restore-drill` シナリオが利用するチェックサム台帳ディレクトリ `checksums`（復元訓練の頻度によっては長期間更新されず、同じ理由で削除候補に含まれやすい）を除外して検索します。
 
 ```bash
-find {{ backup_root }} -mindepth 1 -maxdepth 1 -type d ! -name latest -mtime +{{ retention_days }}
+find {{ backup_root }} -mindepth 1 -maxdepth 1 -type d ! -name latest ! -name checksums -mtime +{{ retention_days }}
 ```
 
 ## 動作確認
