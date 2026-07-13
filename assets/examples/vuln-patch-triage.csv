@@ -1,0 +1,4 @@
+cve_id,severity,package,installed_version,fixed_version,service_active
+CVE-2026-1111,Critical,openssl,3.0.7-1,3.0.9-1,true
+CVE-2026-2222,High,bash,5.1-6,5.1-6,false
+CVE-2026-3333,Medium,curl,7.81.0-1,7.88.0-1,true
