@@ -1,0 +1,85 @@
+# logrotateによるログローテーション設定
+
+CSVで定義した {{ csv_rows | length }} 件のログに対し、logrotate設定を作成し、dry-runで検証してから適用します。
+
+## 目的
+
+ログ肥大によるディスク枯渇を予防するローテーション設定を作成し、dry-runで挙動を検証してから適用できるようになることを目指します。ローテート後にプロセスがログを掴み続ける問題も理解します。
+
+## 用語解説
+
+- **ログローテーション**: 肥大化するログを定期的に切り替え・保存する仕組み
+- **世代管理**: 過去何世代分のログを保持するかの設定（rotate数）
+- **圧縮(gzip)**: ローテート済みログを圧縮して保存容量を削減する機能
+- **copytruncateとcreateの違い**: copytruncateは元ファイルをコピー後に空にする方式、createはファイルをリネームし新規ファイルを作成する方式
+- **postrotate**: ローテート後に実行する処理を定義するブロック（サービスへのシグナル送信等）
+- **dry-run**: 実際には変更せず、実行結果だけを確認するモード
+- **シグナル(HUP)**: プロセスに設定再読み込み等を指示するために送る通知
+- **/etc/logrotate.d**: 対象ごとの logrotate 設定を配置するディレクトリ
+
+## 1. 対象ログの現状を確認する
+
+```bash
+{% for r in csv_rows %}ls -lh {{ r["log_path"] }}
+{% endfor %}```
+
+## 2. logrotate設定を配置する
+
+```bash
+{% for r in csv_rows %}cat > /etc/logrotate.d/$(basename {{ r["log_path"] }} .log) <<'EOF'
+{{ r["log_path"] }} {
+    {{ r["rotate_interval"] }}
+    rotate {{ r["rotate_count"] }}
+{% if r["compress"] == "yes" %}    compress
+    delaycompress
+{% endif %}
+{% if r["mode"] == "copytruncate" %}    copytruncate
+{% else %}    create 0640 root adm
+    missingok
+    notifempty
+{% if r["postrotate_service"] is string and r["postrotate_service"] %}    postrotate
+        # systemctl reload はサービス内部でHUPシグナル相当の設定再読み込みを送出する
+        systemctl reload {{ r["postrotate_service"] }} > /dev/null 2>&1 || true
+    endscript
+{% endif %}
+{% endif %}
+}
+EOF
+{% endfor %}```
+
+## 3. dry-runで事前確認する
+
+```bash
+{% for r in csv_rows %}logrotate -d /etc/logrotate.d/$(basename {{ r["log_path"] }} .log)
+{% endfor %}```
+
+## 4. 強制ローテートし実挙動を確認する
+
+```bash
+{% for r in csv_rows %}logrotate -f /etc/logrotate.d/$(basename {{ r["log_path"] }} .log)
+ls -lh {{ r["log_path"] }}*
+{% endfor %}```
+
+## 5. ローテート後もプロセスが旧ファイルへ書き続けていないか確認する
+
+```bash
+{% for r in csv_rows %}lsof {{ r["log_path"] }} 2>/dev/null
+{% endfor %}```
+
+## 6. cron.dailyでの自動実行タイミングを確認する
+
+```bash
+cat /etc/cron.daily/logrotate 2>/dev/null || systemctl list-timers | grep logrotate
+```
+
+## 動作確認
+
+- ローテート済みファイル（`.1` / `.gz`）が生成されていること
+- 新ログファイルに追記が継続していること
+- dry-run出力と実際のローテート挙動が一致していること
+- 世代数（rotate_count）が定義通りであること
+
+## 注意事項
+
+- 本番ログに対して `logrotate -f` を実行する前に必ず `-d`（dry-run）で挙動を確認する。設定ミスでログが失われる可能性がある。
+- copytruncate はコピー〜切り詰めの間のログを欠落させるリスクがあるため、postrotateでシグナル送信できるサービスでは create を優先する。
