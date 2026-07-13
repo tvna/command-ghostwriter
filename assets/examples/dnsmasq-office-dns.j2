@@ -1,0 +1,85 @@
+# dnsmasq 社内 DNS 構築手順 — {{ domain }}
+
+dnsmasq を使って小規模オフィス向けの内部DNSを構築し、社内ホスト名の解決とキャッシュ、外部名前解決の上流DNSへのフォワードを設定します。
+
+## 目的
+
+dnsmasq で内部DNSを構築し、フォワーダとして上流DNSへ外部名を転送しつつ、社内ホスト名を `/etc/hosts` 連携で解決できるようにする一連の手順を理解し、実施できるようになることを目指します。
+
+## 用語解説
+
+- **内部DNS**: 社内ネットワーク専用のホスト名解決を提供する DNS サーバー
+- **フォワーダ**: 自身で解決できない問い合わせを別の DNS サーバーへ転送する仕組み
+- **上流DNS**: フォワーダが問い合わせを転送する先の外部 DNS サーバー
+- **/etc/hosts連携**: dnsmasq が `/etc/hosts` の内容を読み込んでゾーンデータとして配信する仕組み
+- **DNSキャッシュ**: 一度解決した結果を保持し、再問い合わせを高速化する機能
+- **ドメインサフィックス**: 社内ホスト名に付与される共通ドメイン部分（例: `office.local`）
+- **UDP/TCP 53番ポート**: DNS 問い合わせで使用される標準ポート。他の DNS サービスと競合しやすい
+
+## 1. dnsmasq をインストールする
+
+```bash
+sudo apt-get update
+sudo apt-get install -y dnsmasq
+```
+
+## 2. listen-address・ドメインサフィックス・上流DNSを設定する
+
+`/etc/dnsmasq.conf` に以下を追記し、待受アドレス、社内ドメインサフィックス、上流DNS（フォワーダ）を設定します。
+
+```bash
+cat >> /etc/dnsmasq.conf <<'EOF'
+listen-address={{ listen_address }}
+domain={{ domain }}
+{% for server in upstream_servers %}server={{ server }}
+{% endfor %}cache-size=1000
+EOF
+```
+
+## 3. 社内ホストを /etc/hosts に追記する
+
+内部DNSが名前解決する社内ホストを `/etc/hosts` に追記します。dnsmasq はこの内容を `/etc/hosts` 連携で読み込みます。
+
+```bash
+cat >> /etc/hosts <<'EOF'
+{% for h in hosts %}{{ h.ip }}	{{ h.name }}.{{ domain }}
+{% endfor %}EOF
+```
+
+## 4. 構文チェックを行う
+
+反映前に `dnsmasq --test` で設定ファイルの構文を検証します。
+
+```bash
+dnsmasq --test
+```
+
+## 5. dnsmasq を起動・有効化する
+
+UDP/TCP 53番ポートで待ち受けるサービスとして dnsmasq を有効化・起動します。
+
+```bash
+sudo systemctl enable --now dnsmasq
+sudo systemctl status dnsmasq
+```
+
+## 6. クライアントの参照DNSを向け替えて検証する
+
+クライアントの DNS 参照先を `{{ listen_address }}` に向け替え、社内名と外部名の両方を `dig` で確認します。
+
+```bash
+{% for h in hosts %}dig @{{ listen_address }} {{ h.name }}.{{ domain }} +short
+{% endfor %}dig @{{ listen_address }} example.com +short
+```
+
+## 動作確認
+
+- `dig @{{ listen_address }} <社内ホスト名>.{{ domain }}` が正しい A レコードを返すこと
+- 外部ドメイン名も上流DNSへのフォワードにより正常に解決されること
+- `dnsmasq --test` がエラーなく成功すること
+- 同じ問い合わせを2回目に実行すると、DNSキャッシュにより応答時間が短縮されること
+
+## 注意事項
+
+- 既存の DNS サービス（systemd-resolved 等）が UDP/TCP 53番ポートを既に使用していないか、設定前に必ず確認する。
+- 設定変更後は反映前に必ず `dnsmasq --test` で構文検証を行い、エラーがある状態で `systemctl restart dnsmasq` しない。

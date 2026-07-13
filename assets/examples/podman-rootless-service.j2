@@ -1,0 +1,92 @@
+# Podman rootlessコンテナ常時起動サービス化手順 — {{ service_name }}
+
+一般ユーザー **{{ user }}** で {{ image }} を rootless コンテナとして起動し、systemd ユーザーサービスとして再起動後も自動起動する構成を作ります。
+
+## 目的
+
+root 権限なしでコンテナを実行する意味を理解し、systemd ユーザーサービスとして再起動後も自動起動する構成を作れるようになることを目指します。
+
+## 用語解説
+
+- **rootless コンテナ**: root 権限を持たない一般ユーザーの権限のみで実行されるコンテナ
+- **Podman**: デーモンレスで動作するコンテナエンジン。Docker 互換の CLI を持つ
+- **デーモンレス**: 常駐する特権プロセス（デーモン）を介さず、コンテナを直接起動・管理する方式
+- **systemd ユーザーサービス**: 一般ユーザー権限で systemd に管理させるサービス単位（`systemctl --user` で操作）
+- **Quadlet**: Podman コンテナ定義（`.container` ファイル）から systemd ユニットを自動生成する仕組み
+- **非特権ポート**: 1024 番以降の、一般ユーザーでも bind できるポート（1024 未満は特権ポートで rootless からは使えない）
+- **linger**: ユーザーがログアウトしてもそのユーザーの systemd インスタンスを起動し続ける設定（`loginctl enable-linger`）
+
+## 1. rootless で動作していることを確認する
+
+Podman はデーモンレスで動作するため、常駐する特権プロセスを介さず一般ユーザーの権限のまま直接コンテナを起動・管理できることを確認します。
+
+```bash
+sudo -u {{ user }} podman info
+```
+
+## 2. 一般ユーザーで nginx を起動する
+
+非特権ポートである {{ host_port }} 番でコンテナを公開します。
+
+```bash
+sudo -u {{ user }} podman run -d --name {{ service_name }} -p {{ host_port }}:{{ container_port }} {{ image }}
+```
+
+## 3. curl で応答を確認する
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' http://localhost:{{ host_port }}
+```
+
+## 4. 動作確認用コンテナを停止してポートを解放する
+
+Quadlet が同じホストポート {{ host_port }} を公開するため、手順2で起動した動作確認用コンテナを停止・削除してポートを解放します。
+
+```bash
+sudo -u {{ user }} podman stop {{ service_name }}
+sudo -u {{ user }} podman rm {{ service_name }}
+```
+
+## 5. Quadlet 定義を配置する
+
+```bash
+sudo -u {{ user }} mkdir -p ~{{ user }}/.config/containers/systemd
+cat > ~{{ user }}/.config/containers/systemd/{{ service_name }}.container <<'EOF'
+[Container]
+Image={{ image }}
+PublishPort={{ host_port }}:{{ container_port }}
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=default.target
+EOF
+chown {{ user }}: ~{{ user }}/.config/containers/systemd/{{ service_name }}.container
+```
+
+## 6. systemd ユーザーサービスとして有効化する
+
+```bash
+sudo -u {{ user }} XDG_RUNTIME_DIR=/run/user/$(id -u {{ user }}) systemctl --user daemon-reload
+sudo -u {{ user }} XDG_RUNTIME_DIR=/run/user/$(id -u {{ user }}) systemctl --user enable --now {{ service_name }}.service
+```
+
+## 7. linger を設定して再起動テストする
+
+```bash
+loginctl enable-linger {{ user }}
+reboot
+```
+
+## 動作確認
+
+- 非 root ユーザー（{{ user }}）の `podman ps` にコンテナ {{ service_name }} が表示されること
+- curl のレスポンスが 200 であること
+- OS 再起動後も `systemctl --user status {{ service_name }}.service` が active であること
+
+## 注意事項
+
+- `loginctl enable-linger` を設定しないと、ログアウト後にユーザーサービスが停止する。
+- 1024 未満の特権ポートは rootless では使用できない点に注意する（本手順では非特権ポートの {{ host_port }} を使用）。
+- Quadlet の `.container` ファイルは対象ユーザーの所有権（`chown`）を正しく設定しないと systemd に認識されない。
