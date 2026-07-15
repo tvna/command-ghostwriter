@@ -29,10 +29,10 @@ updates:
   # bunがサポートされるまでJS依存のDependabot自動更新は一時停止し、`bun update`を手動/別途の
   # 仕組みで運用する。
 
-  - package-ecosystem: pip
+  - package-ecosystem: uv
     directory: /
     groups:
-      pip:
+      uv:
         patterns:
           - "*"
     schedule:
