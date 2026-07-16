@@ -1,0 +1,81 @@
+# LVM論理ボリュームのオンライン拡張
+
+ディスク追加からPV作成・VG拡張・LV拡張・ファイルシステム拡張までを、サービスを停止せずに行います。root権限（sudo）で実施してください。
+
+## 目的
+
+LVMの階層構造（PV/VG/LV）を理解し、ディスク追加からファイルシステム拡張までの一連のオンライン拡張作業を安全に実施できるようになることを目指します。
+
+## 用語解説
+
+- **PV (Physical Volume)**: LVM管理下に組み込まれた物理ディスク・パーティション
+- **VG (Volume Group)**: 複数のPVをまとめた容量プール
+- **LV (Logical Volume)**: VGから切り出された論理ボリューム。ファイルシステムを作成する対象
+- **オンライン拡張**: サービスを停止せずにファイルシステムの容量を拡張する操作
+
+## シナリオ設定
+
+VG **{{ vg_name }}** 配下のLV **{{ lv_name }}**（マウント先 `{{ mount_point }}`、ファイルシステム `{{ filesystem }}`）に対し、新規デバイス **{{ new_device }}** を追加して **{{ extend_size }}** 拡張します。
+
+## 手順
+
+### 1. 現状を確認する
+
+```bash
+pvs
+vgs
+lvs
+df -h {{ mount_point }}
+```
+
+### 2. 新規デバイスをPVとして初期化する
+
+```bash
+pvcreate {{ new_device }}
+pvs {{ new_device }}
+```
+
+### 3. VGを拡張する
+
+```bash
+vgextend {{ vg_name }} {{ new_device }}
+vgs {{ vg_name }}
+```
+
+### 4. LVを拡張する
+
+```bash
+lvextend -L +{{ extend_size }} /dev/{{ vg_name }}/{{ lv_name }}
+lvs {{ vg_name }}/{{ lv_name }}
+```
+
+### 5. ファイルシステムを拡張する
+
+```bash
+{% if filesystem == "xfs" %}xfs_growfs {{ mount_point }}
+{% else %}resize2fs /dev/{{ vg_name }}/{{ lv_name }}
+{% endif %}```
+
+`{{ filesystem }}` は稼働中のままオンライン拡張が可能なファイルシステムです。
+
+### 6. 拡張後の検証
+
+```bash
+df -h {{ mount_point }}
+lvs {{ vg_name }}/{{ lv_name }}
+```
+
+`{{ mount_point }}` のサイズが `{{ extend_size }}` 分増えていることを確認します。
+
+## 動作確認
+
+- `pvs {{ new_device }}` に新規PVとして表示されること
+- `vgs {{ vg_name }}` の合計容量が `{{ extend_size }}` 分増加していること
+- `df -h {{ mount_point }}` のサイズが拡張後の値になっていること
+- サービス停止を伴わず一連の操作が完了していること
+
+## 注意事項
+
+- 本手順は拡張専用であり、LVの縮小（`lvreduce`）はファイルシステムを先に縮小する必要があるなど手順が異なるため別手順として扱う。
+- `vgextend` 前に対象デバイスが誤って他用途で使用中でないことを必ず確認する（`pvcreate` はデータを破壊する）。
+- disk-mount-basics(既存)は単純なパーティション・マウント作業を扱うのに対し、本手順はLVM層（PV/VG/LV）の拡張操作に焦点を当てている。

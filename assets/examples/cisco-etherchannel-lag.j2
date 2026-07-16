@@ -1,0 +1,99 @@
+# CiscoスイッチのEtherChannel(LACP)構成
+
+複数の物理リンクをLACPで束ね、帯域拡張とリンク冗長化を実現するEtherChannelを構成します。両端のスイッチで設定を揃える必要があるため、対向機器の設定と併せて実施してください。
+
+## 目的
+
+LACPによる複数リンクの論理的な集約(EtherChannel)を構成し、通常時の負荷分散動作とリンク断時の縮退動作の両方を検証できるようになることを目指します。
+
+## 用語解説
+
+- **LACP(Link Aggregation Control Protocol)**: IEEE 802.3ad標準の動的リンク集約プロトコル。対向機器と制御パケットを交換して自動的にチャネルを形成する
+- **PAgP**: Cisco独自のリンク集約プロトコル(LACPと同様の役割だがCisco機器同士でのみ利用可能)
+- **モードの組合せ**: LACPは`active`(自ら集約を開始)と`passive`(相手からの要求を待つ)があり、両端の少なくとも一方が`active`である必要がある(`passive`同士は集約が成立しない)
+- **channel-group**: 束ねる物理インターフェースと、それらが所属する論理インターフェース(Port-channel)を結びつける番号
+- **ロードバランス方式**: 集約したリンク間へのトラフィック振り分け基準(送信元/宛先MAC、IPアドレスの組合せ等)
+
+## シナリオ設定
+
+channel-group {{ channel_group }} として以下の{{ member_interfaces | length }}本の物理インターフェースを束ね、LACPモード `{{ lacp_mode }}` で集約します。
+
+{% for intf in member_interfaces %}- `{{ intf }}`
+{% endfor %}
+
+集約後のPort-channelはVLAN {{ trunk_vlans | join(', ') }} を通すトランクポートとし、ロードバランス方式は `{{ load_balance_method }}` を使用します。
+
+## 手順
+
+### 1. 事前条件を確認する
+
+両端のスイッチで、束ねる物理インターフェースの速度・デュプレックス・現在のswitchport設定が一致しているか確認します。設定が食い違うと集約が成立しないか、意図しない動作になります。
+
+```bash
+enable
+{% for intf in member_interfaces %}show interfaces {{ intf }} status
+{% endfor %}```
+
+### 2. channel-groupを設定する
+
+```bash
+configure terminal
+{% for intf in member_interfaces %}interface {{ intf }}
+ channel-group {{ channel_group }} mode {{ lacp_mode }}
+exit
+{% endfor %}```
+
+### 3. Port-channelインターフェースをトランクとして設定する
+
+```bash
+interface Port-channel{{ channel_group }}
+ switchport trunk allowed vlan {{ trunk_vlans | join(',') }}
+ switchport mode trunk
+ port-channel load-balance {{ load_balance_method }}
+exit
+end
+write memory
+```
+
+### 4. show etherchannel summaryで状態を確認する
+
+```bash
+show etherchannel summary
+show etherchannel {{ channel_group }} port-channel
+show interfaces Port-channel{{ channel_group }} trunk
+```
+
+`show etherchannel summary`のポート状態フラグが`P`(bundled in port-channel)であることを確認します。
+
+### 5. リンク断時の縮退動作を検証する
+
+メンバーインターフェースの1本を停止し、通信が継続すること、残りのリンクへ切り替わることを確認します。
+
+```bash
+interface {{ member_interfaces[0] }}
+ shutdown
+exit
+show etherchannel summary
+```
+
+確認後は必ず復旧します。
+
+```bash
+interface {{ member_interfaces[0] }}
+ no shutdown
+exit
+show etherchannel summary
+```
+
+## 動作確認
+
+- `show etherchannel summary`に`Po{{ channel_group }}`が作成され、束ねた{{ member_interfaces | length }}本のメンバーインターフェースが全て`P`フラグで表示されること
+- `show interfaces Port-channel{{ channel_group }} trunk`のAllowed VLANsに `{{ trunk_vlans | join(', ') }}` が含まれること
+- メンバーインターフェースを1本停止しても、Port-channel経由の通信が継続すること
+- 停止したインターフェースを`no shutdown`した後、自動的に集約状態へ復帰すること
+
+## 注意事項
+
+- 両端で`channel-group`のモードが不整合(例: 片方`passive`かつ相手も`passive`)だと集約が成立せず、各インターフェースが個別リンクとして動作してしまう。意図しないループやスパニングツリー障害の原因になるため、投入前に対向機器の設定も確認する。
+- Port-channelを構成する前に、メンバーインターフェース個々のswitchport設定(VLAN、モード)がPort-channel側の設定と食い違っていないか確認する。食い違いがあると`channel-group`コマンド自体が拒否される場合がある。
+- 縮退動作の検証(手順5)は実運用トラフィックに影響し得るため、必ずメンテナンス時間帯に実施し、確認後は速やかに`no shutdown`で復旧すること。

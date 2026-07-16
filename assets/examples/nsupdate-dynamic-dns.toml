@@ -1,0 +1,5 @@
+zone_name = "dyn.example.com"
+tsig_key_name = "dyn-update-key"
+tsig_algorithm = "hmac-sha256"
+allowed_update_records = "A, TXT"
+update_client_host = "10.0.0.50"

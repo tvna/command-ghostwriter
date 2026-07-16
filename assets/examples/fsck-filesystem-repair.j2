@@ -1,0 +1,83 @@
+# fsckによるファイルシステム修復 — {{ target_device }}
+
+破損したファイルシステムをアンマウントまたはレスキュー環境から `fsck` で修復します。修復ログの読み方と `lost+found` の扱いまでを一巡します。
+
+## 目的
+
+`{{ filesystem_type }}` の `{{ target_device }}` に対し、{{ boot_method }} で安全な環境を確保したうえで `fsck` を実施し、修復結果と `lost+found` を正しく処置できるようになることを目指します。
+
+## 用語解説
+
+- **fsck**: ファイルシステムの整合性を検査・修復するツール。ext系では内部的に `e2fsck` が呼ばれる
+- **アンマウント必須**: マウント中のファイルシステムへの `fsck` はカーネルとの二重書き込みを引き起こし、破損を悪化させる
+- **-n オプション**: 修復を行わず、どの程度の不整合があるかを確認のみ行うドライラン相当のオプション
+- **lost+found**: 親ディレクトリ情報を失ったファイル・断片が修復時に回収される先の特殊ディレクトリ
+- **inode孤立(orphaned inode)**: ディレクトリエントリを失い、名前と結びつかなくなったinode。fsckが `lost+found` に回収する対象
+
+## シナリオ設定
+
+対象は `{{ filesystem_type }}` の `{{ target_device }}` です。{{ boot_method }} を用いて安全な非マウント環境を確保します。バックアップ確認状況は `{{ backup_confirmed }}` で、`lost+found` の処置方針は「{{ lost_found_policy }}」とします。
+
+## 手順
+
+### 1. 実施前提を確認する
+
+```bash
+echo "backup_confirmed={{ backup_confirmed }}"
+```
+
+{% if backup_confirmed %}→ バックアップ確認済み(`{{ backup_confirmed }}`)のため、次のアンマウント・修復作業に進みます。{% endif %}
+
+### 2. アンマウントし、必要なら{{ boot_method }}で起動する
+
+```bash
+sudo umount {{ target_device }} || echo "マウント中の場合は {{ boot_method }} から起動して作業する"
+```
+
+→ 対象がルートファイルシステムなど直接アンマウントできない場合は `{{ boot_method }}` から起動し、対象デバイスをマウントせずに操作します。
+
+### 3. fsck -nで事前診断する
+
+```bash
+sudo fsck -n -t {{ filesystem_type }} {{ target_device }}
+```
+
+→ `-n` は確認のみで書き込みを行いません。検出された不整合の件数・種類から修復規模を見積もります。
+
+### 4. 修復を実行し応答の意味を確認する
+
+```bash
+sudo fsck -y -t {{ filesystem_type }} {{ target_device }}
+```
+
+→ `-y` はすべての確認プロンプトに自動で「はい」と応答します。`FILE SYSTEM WAS MODIFIED` と表示された場合、少なくとも1件の修復が行われています。
+
+### 5. lost+foundを確認する
+
+```bash
+sudo mount {{ target_device }} /mnt/repair && ls -la /mnt/repair/lost+found
+```
+
+→ 回収されたファイルが存在する場合、方針「{{ lost_found_policy }}」に沿って内容確認・復元を進めます。ファイル名は失われ番号のみになるため、内容からの推測が必要です。
+
+### 6. 再マウントし整合性を検証する
+
+```bash
+sudo umount /mnt/repair
+sudo mount {{ target_device }}
+sudo fsck -n -t {{ filesystem_type }} {{ target_device }}
+```
+
+→ 再度 `-n` で診断し、不整合が解消されていることを確認してから本来のマウントポイントへ復帰させます。
+
+## 動作確認
+
+- `fsck -n -t {{ filesystem_type }} {{ target_device }}` が `clean` を報告すること
+- `lost+found` 配下のファイルが方針「{{ lost_found_policy }}」に沿って処置されていること
+- 対象ファイルシステムが正常にマウントされ、読み書きができること
+
+## 注意事項
+
+- マウント中の `fsck` は実施しない。必ずアンマウント、または `{{ boot_method }}` のようなライブ環境から作業する。
+- `backup_confirmed`(`{{ backup_confirmed }}`)が偽の場合は、可能な限り修復前にディスクイメージ(`dd`等)を取得してから実施する。
+- `fsck -y` は破損の激しいinodeやディレクトリを削除して修復することがあるため、実行前に `-n` で規模を必ず見積もる。

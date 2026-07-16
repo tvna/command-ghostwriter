@@ -1,0 +1,6 @@
+subnet = "10.0.10.0/24"
+pool_range = "10.0.10.100 - 10.0.10.200"
+gateway = "10.0.10.1"
+dns_servers = "10.0.10.2, 10.0.10.3"
+lease_time = 3600
+reservations_note = "MACアドレスベースの固定IP予約はhostsセクションに追記する"

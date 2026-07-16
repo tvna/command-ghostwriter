@@ -1,0 +1,6 @@
+vg_name = "vg_data"
+origin_lv = "lv_app"
+snapshot_name = "lv_app_snap"
+snapshot_size = "5G"
+backup_dest = "/mnt/backup/lv_app_snap.img.gz"
+retention_note = "取得日から7日以内に削除し、恒久保存はしない"

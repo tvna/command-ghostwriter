@@ -1,0 +1,92 @@
+# 推論APIの負荷試験と性能基準の測定
+
+推論サーバに段階的な同時リクエストをかけ、レイテンシ・スループット・限界点を測定し、受入基準と安全運転域を定めます。
+
+## 目的
+
+`{{ target_endpoint }}` に対する段階的な負荷試験を通じて、レイテンシ・スループット・エラー率を定量的に測定し、成功基準に対する合否と限界点を判定できるようになることを目指します。
+
+## 用語解説
+
+- **TTFT (Time To First Token)**: リクエスト送信から最初のトークンが返るまでの時間。体感応答性に直結する
+- **トークン毎秒(tokens/sec)**: 生成完了までのスループットを表す指標。同時実行数が増えると1リクエストあたりは低下しやすい
+- **同時実行数(concurrency)**: 同時に投げつけるリクエスト数。段階的に上げて限界点を探る
+- **p95レイテンシ**: 全リクエストのうち95パーセンタイルに位置する応答時間。外れ値を含めた実運用に近い指標
+- **限界点(saturation point)**: これ以上同時実行数を上げてもスループットが伸びず、エラー率だけが増える点
+
+## シナリオ設定
+
+対象エンドポイントは `{{ target_endpoint }}`、モデルは `{{ model_name }}` です。プロンプトは {{ prompt_profile }} を使用し、同時実行数を {% for c in concurrency_steps %}{{ c }}{% if not loop.last %} → {% endif %}{% endfor %} と段階的に上げ、各段階を {{ duration }} 継続します。成功基準は p95レイテンシ {{ success_criteria.p95_latency_ms }}ms 以下、エラー率 {{ success_criteria.error_rate_percent }}%以下、スループット {{ success_criteria.min_tokens_per_sec }} トークン毎秒以上です。
+
+## 手順
+
+### 1. 試験環境を分離する
+
+本番トラフィックと混在させないよう、試験専用のクライアントホストから実行します。
+
+```bash
+which hey || sudo apt install -y hey
+curl -s {{ target_endpoint }} -o /dev/null -w "warmup: %{http_code}\n"
+```
+
+### 2. ウォームアップリクエストを送る
+
+初回ロードによるコールドスタートの影響を除くため、計測前に数回投げておきます。
+
+```bash
+for i in 1 2 3; do
+  curl -s -X POST {{ target_endpoint }} \
+    -H "Content-Type: application/json" \
+    -d '{"model":"{{ model_name }}","messages":[{"role":"user","content":"warmup ({{ prompt_profile }})"}]}' \
+    -o /dev/null -w "warmup %{time_total}s\n"
+done
+```
+
+### 3. 同時実行数を段階的に上げて負荷をかける
+
+```bash
+{% for c in concurrency_steps %}echo "=== concurrency={{ c }} duration={{ duration }} ==="
+hey -z {{ duration }} -c {{ c }} -m POST \
+  -H "Content-Type: application/json" \
+  -d '{"model":"{{ model_name }}","messages":[{"role":"user","content":"prompt ({{ prompt_profile }})"}]}' \
+  {{ target_endpoint }} | tee /tmp/loadtest-c{{ c }}.log
+{% endfor %}```
+
+### 4. GPUメトリクスと突き合わせる
+
+各段階の負荷中に、別ターミナルでGPU使用率・VRAM・温度を記録し、性能限界がGPU側かAPI層側かを切り分けます。
+
+```bash
+nvidia-smi --query-gpu=utilization.gpu,memory.used,temperature.gpu --format=csv -l 5
+```
+
+### 5. 限界点と安全運転域を判定する
+
+```bash
+for c in {% for c in concurrency_steps %}{{ c }}{% if not loop.last %} {% endif %}{% endfor %}; do
+  awk -v c="$c" '/Slowest|Fastest|Average|Requests\/sec|Error distribution/' /tmp/loadtest-c${c}.log
+done
+```
+
+計測結果を成功基準(p95 {{ success_criteria.p95_latency_ms }}ms、エラー率 {{ success_criteria.error_rate_percent }}%、{{ success_criteria.min_tokens_per_sec }}トークン毎秒)と突き合わせ、基準を満たす最大の同時実行数を安全運転域とします。
+
+### 6. 結果を報告する
+
+```bash
+tail -n 20 /tmp/loadtest-c*.log
+```
+
+計測ログと判定結果を、対象モデル(`{{ model_name }}`)・試験日時・安全運転域とあわせて記録し、関係者へ共有します。
+
+## 動作確認
+
+- すべての同時実行段階({% for c in concurrency_steps %}{{ c }}{% if not loop.last %}, {% endif %}{% endfor %})でログ(`/tmp/loadtest-c*.log`)が生成されていること
+- 各段階のp95レイテンシ・エラー率・スループットが記録され、成功基準との比較結果が明確であること
+- GPUメトリクスのログから、限界点がGPU飽和によるものかAPI層のボトルネックかを説明できること
+
+## 注意事項
+
+- 本番環境と同一のエンドポイントに対して高負荷をかけると、実利用者に影響するため、試験専用環境または利用の少ない時間帯を選ぶ。
+- `hey`のようなツールはコネクション枯渇やクライアント側CPU律速を引き起こしうるため、クライアントホスト自体のリソースも監視する。
+- 成功基準(p95 {{ success_criteria.p95_latency_ms }}ms等)は用途によって妥当性が異なるため、固定値のまま鵜呑みにせず利用シーンに応じて見直す。
+- 本手順は計画的な受入試験・キャパシティ把握が目的であり、障害発生時のその場対応(load-spike-triage)とは焦点が異なる。

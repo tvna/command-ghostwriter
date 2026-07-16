@@ -1,0 +1,84 @@
+# 誤検知アラートの分析としきい値再調整
+
+頻発するが実害のないアラートを放置すると、本当に重要な通知が埋もれる「狼少年化」を招きます。発報履歴を集計して誤検知率を算出し、しきい値変更・抑制・削除のいずれで対処すべきかを安全に判断する手順を示します。
+
+## 目的
+
+過去30日間に頻発した{{ csv_rows | length }}件のアラートについて発報履歴を集計・分類し、誤検知率に基づいてしきい値の再設計や抑制・削除の判断を安全に行えるようになることを目指します。
+
+## 用語解説
+
+- **狼少年化(アラート疲れ)**: 誤検知の多いアラートが放置され続けることで、担当者が通知を無視するようになり、本物の障害の発報も見逃す状態
+- **fire_count_30d**: 過去30日間にアラートが発報された回数
+- **true_positive_count**: そのうち実際に対応が必要だった真陽性の件数
+- **誤検知率**: `(fire_count_30d - true_positive_count) / fire_count_30d` で算出する、発報のうち誤検知が占める割合
+- **抑制(サプレッション)**: アラート自体は維持しつつ、特定条件下（例: 夜間バッチ時間帯）でのみ通知を止める設定
+- **しきい値・評価期間の再設計**: 発報条件の数値や継続時間を、実際の障害発生パターンに合わせて調整すること
+
+## シナリオ設定
+
+過去30日間で頻発したアラートは{{ csv_rows | length }}件です。
+
+| alert_name | fire_count_30d | true_positive_count | proposed_action |
+|---|---|---|---|
+{% for r in csv_rows %}| {{ r["alert_name"] }} | {{ r["fire_count_30d"] }} | {{ r["true_positive_count"] }} | {{ r["proposed_action"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. ノイズの弊害を説明し、対応の必要性を共有する
+
+誤検知が多いアラートを放置すると、担当者が通知を確認しないまま流す「狼少年化」が進み、真陽性のアラートも見逃されるようになります。今回対象の{{ csv_rows | length }}件について、この弊害を関係者と共有してから着手します。
+
+### 2. アラート発報履歴を集計する
+
+```bash
+{% for r in csv_rows %}echo "{{ r["alert_name"] }}: fired={{ r["fire_count_30d"] }} true_positive={{ r["true_positive_count"] }}"
+{% endfor %}```
+
+### 3. 誤検知率を算出し分類する
+
+```bash
+{% for r in csv_rows %}python3 -c "print('{{ r["alert_name"] }}', 1 - {{ r["true_positive_count"] }} / {{ r["fire_count_30d"] }})"
+{% endfor %}```
+
+誤検知率が高く、かつroot_causeが恒常的でない（一過性・想定内の動作である）ものを対処対象とします。
+
+### 4. しきい値・評価期間を再設計する
+
+proposed_action が「しきい値変更」の対象について、現状の条件を見直します。
+
+```bash
+{% for r in csv_rows %}{% if r["proposed_action"] == "しきい値変更" %}echo "{{ r["alert_name"] }}: root_cause={{ r["root_cause"] }} -> しきい値・評価期間を再設計 (要監視ツール側での設定変更)"
+{% endif %}{% endfor %}```
+
+### 5. 抑制・削除の判断基準を適用し安全確認する
+
+抑制または削除を選ぶ前に、真陽性を取りこぼさない代替策（別ルールでの検知など）があるかを確認します。
+
+```bash
+{% for r in csv_rows %}{% if r["proposed_action"] == "抑制" %}echo "SUPPRESS: {{ r["alert_name"] }} - {{ r["risk_note"] }}"
+{% elif r["proposed_action"] == "削除" %}echo "DELETE (要事前確認): {{ r["alert_name"] }} - {{ r["risk_note"] }}"
+{% endif %}{% endfor %}```
+
+### 6. 変更を適用し効果を測定する
+
+```bash
+{% for r in csv_rows %}echo "{{ r["alert_name"] }}: applied={{ r["proposed_action"] }}"
+{% endfor %}date -Iseconds >> /var/log/alert-tuning-history.log
+```
+
+変更適用日を記録し、次回30日後に同じ集計（Step 2〜3）を再実施して効果を測定します。
+
+## 動作確認
+
+- 全{{ csv_rows | length }}件について誤検知率が算出できていること
+- proposed_action が「削除」の対象について、代替の検知手段が用意されていること（risk_noteに記載の懸念が解消されていること）
+- 変更適用日が `/var/log/alert-tuning-history.log` に記録されていること
+- 次回見直し日（30日後）がカレンダー等に登録されていること
+
+## 注意事項
+
+- 「削除」は取り消しが難しい変更であり、誤って真陽性の検知能力を失うと障害の見逃しに直結する。risk_note に記載の懸念（代替検知の有無など）を必ず事前に解消してから実施する。
+- 誤検知率だけで機械的に判断せず、root_cause（一過性か恒常的か）を必ず確認する。http_5xx_spike のように発報回数が多くても真陽性率が高いアラートは対象から除外する。
+- 既存の `alert-first-response`(アラート受信時の一次対応)とは異なり、本手順は監視設計そのものの継続的な見直しに焦点を当てる。

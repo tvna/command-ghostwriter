@@ -1,0 +1,5 @@
+detection_source: "fail2banのban通知メール"
+attack_window: "2026-07-16 02:10 〜 03:40 (JST)"
+top_source_ips: "198.51.100.23, 203.0.113.88, 192.0.2.140"
+targeted_accounts: "root, admin, deploy"
+block_method: "iptables で送信元IPを DROP し、fail2ban のban時間を24時間に延長"

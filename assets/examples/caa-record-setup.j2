@@ -1,0 +1,64 @@
+# CAAレコードによる証明書発行元の制限
+
+CSV で設計した {{ csv_rows | length }} 件のCAAレコードをドメインへ登録し、許可していない認証局(CA)からの証明書発行を防ぎます。
+
+## 目的
+
+CAAレコードの仕組みを理解し、ドメインごとに発行を許可するCAを宣言・登録したうえで、意図しないCAからの発行が拒否されることを確認できるようになることを目指します。
+
+## 用語解説
+
+- **CAA (Certification Authority Authorization)**: どの認証局がそのドメインの証明書を発行してよいかをDNSで宣言するレコード
+- **flag**: 通常は0を指定する。128(critical)は対応していないCAに発行を強制拒否させる
+- **issue**: 通常の証明書発行を許可するCAを指定するtag
+- **issuewild**: ワイルドカード証明書の発行を許可するCAを指定するtag。指定がない場合issueが流用される
+- **iodef**: 許可されていないCAが発行を試みた際の通知先を指定するtag
+
+## シナリオ設定
+
+登録対象は {% for r in csv_rows %}`{{ r["domain"] }}`({{ r["tag"] }}){% if not loop.last %}, {% endif %}{% endfor %} の {{ csv_rows | length }} 件です。すべて flag は `{{ csv_rows[0]["flag"] }}` として登録します。
+
+## 手順
+
+### 1. 現状のCAAレコードを確認する
+
+```bash
+{% for r in csv_rows %}dig CAA {{ r["domain"] }} +short
+{% endfor %}```
+
+### 2. レコードを設計・登録する
+
+```bash
+{% for r in csv_rows %}echo '{{ r["domain"] }} IN CAA {{ r["flag"] }} {{ r["tag"] }} "{{ r["value"] }}"  ; {{ r["note"] }}' >> /var/named/db.example.com
+{% endfor %}
+named-checkzone example.com /var/named/db.example.com
+rndc reload
+```
+
+### 3. 反映結果を確認する
+
+```bash
+{% for r in csv_rows %}dig CAA {{ r["domain"] }} +short
+{% endfor %}```
+
+### 4. 発行テストで動作を確認する
+
+```bash
+# 許可済みCAでのドライラン(成功するはず)
+certbot certonly --dry-run -d {{ csv_rows[0]["domain"] }}
+
+# 許可していないCAで発行を試み、拒否されることを確認する(手元でのCA切り替えテスト)
+```
+
+## 動作確認
+
+- 各ドメインで `dig CAA` が設計どおりのタグ・値を返すこと
+- `named-checkzone` がエラーなく通ること
+- 許可済みCAでの `certbot --dry-run` が成功すること
+- 許可していないCAからの発行試行がCA側で拒否されること(発行ログまたはCAの応答で確認)
+
+## 注意事項
+
+- `{{ csv_rows[2]["note"] }}` を必ずCA・監視システムから読める運用にしておくこと。通知が届かないとCAAの効果に気づけない。
+- CAAレコードは既存の有効な証明書には影響しない。次回発行・更新時から適用される。
+- flag 128(critical)を安易に使うと、対応していない古いCA実装が発行そのものを拒否してしまうことがあるため、まずは0で運用を開始すること。

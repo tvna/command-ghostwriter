@@ -1,0 +1,86 @@
+# auditdによる重要ファイル監査ルール設定
+
+auditdで重要ファイルの変更・特権コマンド実行を記録する監査ルールを一括投入し、`ausearch`/`aureport` で検証します。
+
+## 目的
+
+台帳(CSV)に基づき、重要ファイルの変更や特権コマンド実行をauditdで確実に記録し、`ausearch` で該当イベントを追跡できるようになることを目指します。
+
+## 用語解説
+
+- **auditd**: カーネルの監査サブシステム(audit)のログを収集・記録するデーモン
+- **watchルール**: 特定のファイル・ディレクトリへのアクセス(読み書き・属性変更等)を監視するルール
+- **syscallルール**: 特定のシステムコール呼び出しを、パスやパーミッション条件付きで監視するルール
+- **監査キー(key)**: `-k` で付与するタグ。`ausearch -k <key>` で関連イベントだけを抽出できる
+- **augenrules**: `/etc/audit/rules.d/*.rules` を集約し、有効なルールセットとして反映するコマンド
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 件のルールを投入します。
+
+| rule_type | target_path | permissions | key_name | purpose |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["rule_type"] }} | {{ r["target_path"] }} | {{ r["permissions"] }} | {{ r["key_name"] }} | {{ r["purpose"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. auditdの稼働状態を確認する
+
+```bash
+sudo systemctl status auditd --no-pager
+sudo auditctl -s
+```
+
+### 2. ルールファイルを作成する
+
+`rule_type` が `watch` の行は `-w`、`syscall` の行は `-a always,exit` で記述します。
+
+```bash
+sudo tee /etc/audit/rules.d/important-files.rules <<'EOF'
+{% for r in csv_rows %}{% if r["rule_type"] == "watch" %}-w {{ r["target_path"] }} -p {{ r["permissions"] }} -k {{ r["key_name"] }}
+{% else %}-a always,exit -F path={{ r["target_path"] }} -F perm={{ r["permissions"] }} -F auid>=1000 -F auid!=unset -k {{ r["key_name"] }}
+{% endif %}{% endfor %}EOF
+```
+
+### 3. augenrulesで反映する
+
+```bash
+sudo augenrules --load
+sudo auditctl -l
+```
+
+### 4. 監視対象を操作して記録されるか確認する
+
+`watch` ルールは属性変更(`touch`)で、`syscall` ルールは実際の実行で発火させます。
+
+```bash
+{% for r in csv_rows %}{% if r["rule_type"] == "watch" %}sudo touch {{ r["target_path"] }}
+{% else %}{{ r["target_path"] }} --version >/dev/null
+{% endif %}{% endfor %}```
+
+### 5. ausearch・aureportで検証する
+
+```bash
+{% for r in csv_rows %}sudo ausearch -k {{ r["key_name"] }} -ts recent
+{% endfor %}sudo aureport -f -ts recent
+```
+
+### 6. ログ肥大化を確認する
+
+```bash
+sudo du -sh /var/log/audit/
+sudo aureport --summary
+```
+
+## 動作確認
+
+- `auditctl -l` に投入した {{ csv_rows | length }} 件のルールが全て表示されること
+- 各対象ファイルへの操作後、`ausearch -k <key_name>` で対応するイベントが記録されていること
+- `/var/log/audit/audit.log` のサイズが急激に増加していないこと(想定外に大量のイベントが出ていないか)
+
+## 注意事項
+
+- 監査対象を広げすぎるとログが急増し、ディスク逼迫や検索性の低下を招く。目的(purpose列)が明確なパスに限定する。
+- `/etc/audit/rules.d/` への追記は `augenrules --load` で反映されるまで有効にならない。`auditctl -w` の直接投入は再起動で消える一時的な確認用途に留める。
+- 監査ルール自体の削除・変更(`auid=0` の操作)は特に重要度が高いため、本ルールセットとは別に監査の監査(自己防衛)を検討する。

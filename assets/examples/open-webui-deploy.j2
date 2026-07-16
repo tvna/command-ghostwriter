@@ -1,0 +1,83 @@
+# Open WebUIによるLLM対話環境の構築
+
+Open WebUI をコンテナで導入し、ollama等の推論バックエンドと接続して、社内ユーザー向けの対話UIを提供します。
+
+## 目的
+
+コンテナでOpen WebUIを起動してバックエンドと接続し、初期管理者設定・データ永続化・公開範囲の制限まで行える状態を作ることを目指します。
+
+## 用語解説
+
+- **Open WebUI**: ChatGPT風のブラウザUIを提供し、ollamaやOpenAI互換APIをバックエンドとして利用できるフロントエンド
+- **ollama_base_url**: Open WebUIが接続する推論バックエンドのエンドポイントURL
+- **data_volume**: チャット履歴・ユーザー設定・アップロードファイルを永続化するDockerボリューム
+- **auth_mode**: サインアップの扱い(例: `signup_disabled` は初期管理者作成後に新規登録を無効化する運用)
+- **admin_user**: 初回起動時に管理者権限を付与するメールアドレス
+
+## シナリオ設定
+
+構成図は以下の通りです。
+
+```
+[ブラウザ] -> [Open WebUI (port {{ container_port }})] -> [{{ ollama_base_url }}]
+```
+
+データは Dockerボリューム `{{ data_volume }}` に永続化し、認証モードは `{{ auth_mode }}`、初期管理者は `{{ admin_user }}` です。
+
+## 手順
+
+### 1. コンテナを起動しバックエンドへ接続する
+
+```bash
+docker volume create {{ data_volume }}
+docker run -d \
+  --name open-webui \
+  -p {{ container_port }}:8080 \
+  -e OLLAMA_BASE_URL={{ ollama_base_url }} \
+  -v {{ data_volume }}:/app/backend/data \
+  --restart unless-stopped \
+  ghcr.io/open-webui/open-webui:main
+```
+
+### 2. 初期管理者を設定しユーザー管理を構成する
+
+```bash
+docker logs -f open-webui
+```
+
+ブラウザで `http://<ホスト>:{{ container_port }}` へアクセスし、`{{ admin_user }}` で初回アカウントを作成します。管理者作成後、設定画面で `{{ auth_mode }}` に応じてサインアップを無効化します。
+
+### 3. モデル選択と動作確認を行う
+
+```bash
+curl {{ ollama_base_url }}/api/tags
+```
+
+WebUI左上のモデル選択欄に、上記コマンドで確認したモデル一覧が表示されることを確認し、チャットで疎通テストを行います。
+
+### 4. データ永続化を確認しバックアップを取得する
+
+```bash
+docker run --rm -v {{ data_volume }}:/data -v $(pwd):/backup alpine \
+  tar czf /backup/open-webui-data.tar.gz -C /data .
+```
+
+### 5. LAN内公開範囲を確認する
+
+```bash
+sudo ss -tlnp | grep {{ container_port }}
+```
+
+外部公開が不要な場合はホストのファイアウォールでLAN内アクセスのみに制限し、意図しない全世界公開になっていないか確認します。
+
+## 動作確認
+
+- `http://<ホスト>:{{ container_port }}` にブラウザでアクセスでき、`{{ admin_user }}` でログインできること
+- WebUIのモデル選択欄に `{{ ollama_base_url }}` 上のモデルが表示され、チャット応答が返ること
+- `docker volume inspect {{ data_volume }}` でボリュームが存在し、コンテナ再作成後もチャット履歴が残ること
+
+## 注意事項
+
+- `{{ auth_mode }}` を `signup_disabled` にする前に、必ず `{{ admin_user }}` での管理者アカウント作成を完了させる。忘れると誰もログインできなくなる。
+- ポート `{{ container_port }}` を安易にインターネットへ公開しない。社内LAN限定を原則とし、外部公開が必要な場合はリバースプロキシと認証を別途構成する。
+- 本手順はUI層の構築に焦点を絞り、`{{ ollama_base_url }}` が指すバックエンド自体の構築・運用は対象外とする。

@@ -1,0 +1,85 @@
+# etckeeperによる/etc変更履歴の管理
+
+etckeeperで `/etc` をGit管理し、パッケージ操作前後の自動コミットと、手動変更の追跡・過去版への巻き戻しができる状態を整えます。
+
+## 目的
+
+etckeeperの仕組みを理解し、`/etc` の変更履歴をGitで追跡しながら、機微情報を含むファイルを履歴から除外し、必要に応じて過去の設定へ復元できるようになることを目指します。
+
+## 用語解説
+
+- **etckeeper**: `/etc` をバージョン管理システムで自動追跡するツール
+- **vcs**: etckeeperが使用するバージョン管理システムの種別(`{{ vcs }}` など)
+- **apt連動コミット**: apt/dnfのパッケージインストール・削除前後に自動でコミットが作られる仕組み
+- **.gitignore(etckeeper版)**: `/etc/.gitignore` で、鍵や秘匿情報を含むファイルを追跡対象外にする設定
+- **daily_autocommit**: 1日1回の定期コミットをcronまたはsystemdタイマーで実行する設定
+
+## シナリオ設定
+
+バージョン管理システムは `{{ vcs }}`、コミット作成者は `{{ commit_author | safe }}` とします。日次自動コミットの有効化は `{{ daily_autocommit }}` です。履歴から除外する機微パスは {{ sensitive_ignore_paths | length }} 件({% for p in sensitive_ignore_paths %}`{{ p }}`{% if not loop.last %}, {% endif %}{% endfor %})で、履歴確認には `{{ review_command }}` を使用します。
+
+## 手順
+
+### 1. etckeeperを導入し初期化する
+
+```bash
+sudo apt-get install -y etckeeper
+sudo git config --file /etc/.git/config user.email "{{ commit_author | safe }}"
+sudo etckeeper init
+sudo etckeeper commit "initial import"
+```
+
+### 2. 機微情報を含むファイルを追跡対象から除外する
+
+```bash
+sudo tee -a /etc/.gitignore <<'EOF'
+{% for p in sensitive_ignore_paths %}{{ p }}
+{% endfor %}EOF
+sudo git -C /etc rm --cached -r --ignore-unmatch {% for p in sensitive_ignore_paths %}{{ p }} {% endfor %}
+sudo etckeeper commit "exclude sensitive paths from history"
+```
+
+### 3. 手動変更を行いコミットする
+
+```bash
+echo "# managed by infra team" | sudo tee -a /etc/hosts.allow
+sudo etckeeper commit "add managed marker to hosts.allow"
+```
+
+### 4. 変更履歴を追跡・確認する
+
+```bash
+{{ review_command }}
+sudo git -C /etc log -p -- /etc/hosts.allow | head -n 40
+```
+
+### 5. 過去版のファイルを復元する
+
+```bash
+sudo git -C /etc log --oneline -- /etc/hosts.allow
+sudo git -C /etc checkout <直前のコミットハッシュ> -- /etc/hosts.allow
+sudo git -C /etc diff --cached -- /etc/hosts.allow
+```
+
+`<直前のコミットハッシュ>` はStep 4のログ出力から該当コミットのハッシュ値に置き換えてください。
+
+### 6. 日次自動コミットの動作を確認する
+
+```bash
+{% if daily_autocommit %}systemctl list-timers | grep -i etckeeper
+{% endif %}sudo etckeeper unclean && echo "未コミットの変更あり" || echo "作業ツリーはクリーン"
+```
+
+## 動作確認
+
+- Step 1実行直後に `{{ review_command }}` で初回コミットが確認できること
+- `{{ sensitive_ignore_paths | length }}` 件の機微パスが `git -C /etc status` の追跡対象に含まれないこと
+- Step 5の `checkout` 後、対象ファイルの内容が過去コミット時点の内容に戻ること
+- `{{ daily_autocommit }}` が真の場合、systemdタイマーまたはcronにetckeeperの定期実行エントリが存在すること
+
+## 注意事項
+
+- `/etc/.gitignore` への除外設定は追加のみでは不十分で、既に追跡済みのファイルは `git rm --cached` で明示的に外す必要がある。
+- `/etc` はroot権限のGitリポジトリであり、一般ユーザーが誤って `git` コマンドを実行しないよう権限設計を確認する。
+- 過去版への `checkout` は作業ツリーを直接書き換えるため、復元前に現状の差分を確認してから実行する。
+- パッケージ管理操作(apt/dnf)と連動した自動コミットは、大量のパッケージ更新時に大量のコミットを生む場合があるため、履歴の可読性を定期的に見直す。

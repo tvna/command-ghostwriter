@@ -1,0 +1,4 @@
+zone,external_port,protocol,dest_ip,dest_port,purpose
+public,8080,tcp,10.0.1.11,80,社内Webサーバへの転送
+public,2222,tcp,10.0.1.12,22,踏み台経由の保守SSH転送
+public,5432,tcp,10.0.1.20,5432,検証用DB接続転送

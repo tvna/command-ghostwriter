@@ -1,0 +1,5 @@
+gpu_model: "NVIDIA A100 80GB PCIe"
+driver_version: "550.90.07"
+cuda_version: "12.4"
+install_method: "パッケージ管理(apt, cuda-drivers メタパッケージ)"
+secure_boot_note: "Secure Bootが有効な環境ではMOK登録でカーネルモジュールの署名を許可する必要がある"

@@ -1,0 +1,6 @@
+title: nginxでのファイルディスクリプタ枯渇
+affected_service: nginx
+current_limit: 1024
+fd_count_command: "ls /proc/<PID>/fd | wc -l"
+leak_suspect: "アップロード処理で一時ファイルをcloseし忘れている可能性がある"
+new_limit: 65536

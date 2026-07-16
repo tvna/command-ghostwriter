@@ -1,0 +1,5 @@
+pool_name = "pool01"
+pool_path = "/var/lib/libvirt/images/pool01"
+volume_name = "app01.qcow2"
+volume_size = "20G"
+volume_format = "qcow2"

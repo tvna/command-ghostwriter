@@ -1,0 +1,91 @@
+# systemd-coredumpによるコアダンプ収集設定
+
+クラッシュ時のコアダンプを`systemd-coredump`で収集し、保存先・容量上限を制限したうえで`coredumpctl`による解析に備えます。sudo権限で実施してください。
+
+## 目的
+
+`core`ファイルと`ulimit -c`の関係、`systemd-coredump`による集中管理の仕組みを理解し、容量を制限しつつクラッシュ時の解析情報を確実に保全できるようになることを目指します。
+
+## 用語解説
+
+- **core**: プロセスが異常終了(シグナル受信等)した際に、メモリ内容をファイルに書き出したもの。デバッグ・解析に使う
+- **ulimit -c**: シェル・プロセス単位でcoreファイルの最大サイズを制限する古典的な仕組み。0の場合はcore自体が生成されない
+- **systemd-coredump**: `kernel.core_pattern`をフックし、各プロセスのcoreを集中管理された保存先(既定は`/var/lib/systemd/coredump/`)に圧縮保存する仕組み
+- **storage_mode**: coreの保存方式。`external`(ファイルとして保存)、`journal`(journaldに埋め込み)、`none`(保存しない)
+- **coredumpctl**: 保存されたcoreの一覧表示・情報表示・取り出し(dump)を行うコマンド
+
+## シナリオ設定
+
+保存方式`{{ storage_mode }}`、保存領域上限`{{ max_use }}`、プロセス単体の上限`{{ process_size_max }}`でコアダンプを収集します。検証には`{{ test_binary }}`を意図的にクラッシュさせて使用します。{{ retention_note }}
+
+## 手順
+
+### 1. coredump.confを設定する
+
+```bash
+sudo tee /etc/systemd/coredump.conf.d/local.conf <<'EOF'
+[Coredump]
+Storage={{ storage_mode }}
+MaxUse={{ max_use }}
+ProcessSizeMax={{ process_size_max }}
+EOF
+sudo mkdir -p /etc/systemd/coredump.conf.d
+```
+
+`ulimit -c`が`0`のままだとアプリケーション側でcore生成が抑止される場合があるため、必要に応じて`/etc/security/limits.conf`側の`core`項目も確認します。
+
+```bash
+ulimit -c
+```
+
+### 2. テストクラッシュで採取を確認する
+
+```bash
+{{ test_binary }} > /dev/null &
+TESTPID=$!
+sleep 1
+kill -SEGV $TESTPID
+sleep 1
+```
+
+`{{ test_binary }}`にSEGVシグナルを送り、意図的にクラッシュさせます。
+
+### 3. coredumpctl listで採取結果を確認する
+
+```bash
+coredumpctl list --since "5 minutes ago"
+```
+
+直前にクラッシュさせた`{{ test_binary }}`のPIDがリストに表示されることを確認します。
+
+### 4. coredumpctl info・dumpで内容を確認する
+
+```bash
+coredumpctl info $TESTPID
+coredumpctl dump $TESTPID -o /tmp/test.coredump
+file /tmp/test.coredump
+```
+
+`info`でシグナル種別・実行コマンドライン・スタックトレース概要を確認し、`dump`で取り出したファイルを`gdb`等での詳細解析に引き渡せます。
+
+### 5. 容量と保存件数を確認する
+
+```bash
+du -sh /var/lib/systemd/coredump/
+coredumpctl list | wc -l
+sudo systemctl show systemd-coredump -p ExecStart
+```
+
+`MaxUse={{ max_use }}`の上限に近づいていないか確認します。
+
+## 動作確認
+
+- `coredumpctl list`にテストクラッシュ(`{{ test_binary }}`)のエントリが表示されること
+- `coredumpctl dump`でcoreファイルが取り出せ、`file`コマンドでELF coreファイルと認識されること
+- `/var/lib/systemd/coredump/`の使用量が`{{ max_use }}`を超えていないこと
+
+## 注意事項
+
+- coreファイルにはプロセスのメモリ内容(環境変数・場合によっては機密情報)がそのまま含まれる。`/var/lib/systemd/coredump/`のパーミッションを確認し、開発者への引き渡しは必要な範囲に限定する。
+- `Storage=none`にすると障害調査に必要な情報が一切残らなくなる。逆に無制限保存(`MaxUse`未設定)はディスク逼迫の原因になるため、必ず上限を設定する。
+- {{ retention_note }}保存期間を過ぎたコアダンプに依存した調査ができないため、重要なクラッシュは早期に`coredumpctl dump`で別途保全する。

@@ -1,0 +1,6 @@
+title: 夜間レポートcronジョブの不発調査
+job_name: nightly-report
+crontab_owner: appuser
+schedule: "0 2 * * *"
+script_path: /opt/app/bin/nightly_report.sh
+expected_evidence: "journalctl -u cron や /var/log/syslog に CRON (appuser) CMD の記録が残っているはず"

@@ -1,0 +1,79 @@
+# iptables によるパケットフィルタ基礎
+
+CSV で定義した {{ csv_rows | length }} 件のルールを、iptables のチェーン
+構造を理解しながら安全な順序で投入します。ロックアウトを避けるため、
+必ず現在のセッションを維持したまま作業してください。
+
+## 目的
+
+iptables のチェーン構造（INPUT/FORWARD/OUTPUT）と評価順序を理解した
+うえで、基本ポリシーと許可ルール一覧を安全な順序で投入し、既存の
+SSH セッションを切断せずに反映できるようになることを目指します。
+
+## 用語解説
+
+- **INPUT/FORWARD/OUTPUT**: それぞれ自ホスト宛て・中継・自ホスト発の通信を扱うチェーン
+- **関連セッション許可**: ESTABLISHED,RELATED を許可し、応答パケットを通す仕組み
+- **デフォルトポリシー**: どのルールにも一致しなかった場合の既定動作（ACCEPT/DROP）
+- **ステートフルフィルタリング**: 接続の状態（NEW/ESTABLISHED等）に基づき通過可否を判定する方式
+
+## シナリオ設定
+
+投入するルールは次の {{ csv_rows | length }} 件です。
+
+| chain | action | protocol | source | dport | state | comment |
+|-------|--------|----------|--------|-------|-------|---------|
+{% for r in csv_rows %}| {{ r["chain"] }} | {{ r["action"] }} | {{ r["protocol"] }} | {{ r["source"] }} | {{ r["dport"] }} | {{ r["state"] }} | {{ r["comment"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 現状のルールとカウンタを確認する
+
+```bash
+iptables -L -n -v
+```
+
+### 2. ロックアウトしない投入順序を計画する
+
+先に ESTABLISHED,RELATED の許可ルールと必要な許可ルールを投入し、最後に
+DROP のデフォルトポリシー相当のルールを追加する順序で進めます。既存の
+SSH セッションは、新しいルールを投入している間も維持されたままです。
+
+```bash
+iptables -L INPUT -n --line-numbers
+```
+
+### 3. ルールを一括投入する
+
+```bash
+{% for r in csv_rows %}iptables -A {{ r["chain"] }}{% if r["protocol"] != "all" %} -p {{ r["protocol"] }}{% endif %} -s {{ r["source"] }}{% if r["dport"] != "-" %} --dport {{ r["dport"] }}{% endif %} -m state --state {{ r["state"] }} -j {{ r["action"] }} -m comment --comment "{{ r["comment"] }}"
+{% endfor %}```
+
+### 4. カウンタで検証する
+
+```bash
+iptables -L -n -v --line-numbers
+```
+
+意図した通信を発生させ、対応するルールのパケットカウンタが増加すること
+を確認します。
+
+### 5. 設定を永続化する
+
+```bash
+iptables-save > /etc/iptables/rules.v4
+```
+
+## 動作確認
+
+- `iptables -L -n -v` に投入した全ルールが順序通り反映されていること
+- 許可したはずの通信（SSH、HTTPS等）が成功し、DROP対象の新規通信が失敗すること
+- 既存のSSHセッションが投入作業中も切断されないこと
+- 再起動後も `iptables-save` の内容が復元されること
+
+## 注意事項
+
+- SSH等、自分の接続に使っているポートへのACCEPTルールを最後に回すと、DROPルール投入直後にロックアウトするおそれがある。必ず許可ルールを先に投入する。
+- `iptables -F` でチェーンを全消去すると、ポリシーがACCEPTでない限り一時的に全通信が遮断される可能性がある。
+- `iptables-save` を実施しないと、再起動時に投入したルールが失われる。

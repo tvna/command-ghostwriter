@@ -1,0 +1,82 @@
+# nmapによる自組織ネットワークのポート監査
+
+許可を得た自組織セグメントを対象に`nmap`でポートスキャンを行い、期待している公開ポートと実態の差分から意図しない公開を検出する定期監査手順です。
+
+## 目的と実施条件
+
+対象ホストの想定公開ポートと実態を突合し、意図しないサービス公開を早期に是正できるようになることを目指します。**本手順は必ず自組織が管理し、スキャンの許可を得たセグメント・ホストに対してのみ実施してください。**許可のないホストへのスキャンは不正アクセスとみなされる可能性があります。
+
+## 用語解説
+
+- **-sT(TCPコネクトスキャン)**: OSのTCPスタックを使い、通常のコネクト処理(3ウェイハンドシェイク)を完了させて判定するスキャン方式。権限昇格が不要で最も基本的
+- **-sS(SYNスキャン)**: SYNパケットのみを送り、応答だけで開閉を判定する半開スキャン。高速だがraw socket権限(root)が必要
+- **-sV(バージョン検出)**: 開いているポートに対して追加のプローブを送り、稼働しているサービス・バージョンを推定する
+- **owner**: そのホストの管理責任者。差分発見時の連絡先として使う
+- **last_audit**: 直近の監査実施日。定期化の抜け漏れを台帳上で確認するために記録する
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 台を監査対象とします。
+
+| target_host | expected_open_ports | scan_profile | owner | last_audit |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["target_host"] }} | {{ r["expected_open_ports"] }} | {{ r["scan_profile"] }} | {{ r["owner"] }} | {{ r["last_audit"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. スキャン種別を確認する
+
+対象ごとに指定された`scan_profile`の内容を確認します。`-sS`を使う場合はroot権限(sudo)が必要です。
+
+```bash
+{% for r in csv_rows %}echo "{{ r["target_host"] }}: {{ r["scan_profile"] }}"
+{% endfor %}```
+
+### 2. 期待ポートを明示してスキャンを実行する
+
+```bash
+{% for r in csv_rows %}nmap {{ r["scan_profile"] }} -p {{ r["expected_open_ports"] }},1-1024 {{ r["target_host"] }} -oN /var/tmp/nmap-{{ r["target_host"] }}.txt
+{% endfor %}```
+
+期待ポート以外に主要な予約ポート帯(1-1024)も併せてスキャンし、想定外の公開がないか確認します。
+
+### 3. スキャン結果から開いているポート一覧を抽出する
+
+```bash
+{% for r in csv_rows %}grep -E '^[0-9]+/tcp\s+open' /var/tmp/nmap-{{ r["target_host"] }}.txt
+{% endfor %}```
+
+### 4. 期待値との差分を抽出する
+
+`expected_open_ports`に含まれないポートが`open`として出ていないかを目視で突合します。
+
+```bash
+{% for r in csv_rows %}echo "expected: {{ r["expected_open_ports"] }} / owner: {{ r["owner"] }} / last_audit: {{ r["last_audit"] }}"
+{% endfor %}```
+
+### 5. 意図しない公開を是正する
+
+差分が見つかった場合、対象ホストで不要サービスの停止またはファイアウォールでの遮断を行い、再スキャンで解消を確認します。
+
+```bash
+{% for r in csv_rows %}nmap {{ r["scan_profile"] }} -p {{ r["expected_open_ports"] }} {{ r["target_host"] }}
+{% endfor %}```
+
+### 6. 記録して次回監査を定期化する
+
+```bash
+{% for r in csv_rows %}echo "$(date +%F) {{ r["target_host"] }} audited by {{ r["owner"] }} (previous: {{ r["last_audit"] }})" >> /var/log/port-audit-history.log
+{% endfor %}```
+
+## 動作確認
+
+- 各対象ホストのスキャン結果で`open`と表示されるポートが`expected_open_ports`の範囲に収まっていること
+- 差分是正後の再スキャンで、追加公開されていたポートが`closed`または`filtered`になっていること
+- `/var/log/port-audit-history.log`に今回分の監査記録が追記されていること
+
+## 注意事項
+
+- 許可のないホスト・セグメントへのスキャンは絶対に行わない。監査対象は事前に owner と範囲を合意した上で実施する。
+- `-sV`を付けるとプローブ回数が増え、対象サービスに一時的な負荷をかける場合がある。本番稼働中のホストでは実施時間帯を owner と調整する。
+- スキャン結果(`/var/tmp/nmap-*.txt`)には稼働サービスの詳細が含まれるため、監査終了後は保存場所と保持期間を管理し、不要になれば削除する。

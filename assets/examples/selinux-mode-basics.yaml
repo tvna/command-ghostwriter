@@ -1,0 +1,5 @@
+target_service: httpd
+web_root: /var/www/html
+expected_context: httpd_sys_content_t
+boolean_name: httpd_can_network_connect
+mode_policy: enforcing

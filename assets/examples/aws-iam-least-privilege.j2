@@ -1,0 +1,92 @@
+# AWS CLIによるIAMユーザーと最小権限ポリシー管理
+
+用途別のIAMユーザーを作成し、それぞれに最小権限ポリシーを付与・検証したうえで、アクセスキーの棚卸しまで行う手順です。AWS CLIで実施します。
+
+## 目的
+
+「最小権限の原則」をIAMユーザー設計に落とし込み、ポリシー付与から拒否確認、アクセスキー棚卸しまでを一連の運用として実施できるようになることを目指します。
+
+## 用語解説
+
+- **ポリシー**: IAMのアクセス許可をJSONで定義したもの。管理ポリシー(AWS管理/カスタマー管理)とインラインポリシーがある
+- **最小権限**: 業務遂行に必要な操作・リソースだけを許可し、それ以外は明示的に許可しない設計方針
+- **アクセスキー**: プログラムからAWS APIを呼び出す際に使う認証情報(アクセスキーID/シークレットキー)。長期間有効なため定期的なローテーションが必要
+- **MFA**: Multi-Factor Authentication。パスワードに加えワンタイムコード等で本人確認を行う仕組み
+- **ルートアカウント**: AWSアカウント作成時の最上位権限を持つ認証情報。日常運用には使用せず保護する対象
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 件のIAMユーザーを作成します。
+
+| iam_user | purpose | policy_scope | mfa_required | key_rotation_days |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["iam_user"] }} | {{ r["purpose"] }} | {{ r["policy_scope"] }} | {{ r["mfa_required"] }} | {{ r["key_rotation_days"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. IAMユーザーを作成する
+
+```bash
+{% for r in csv_rows %}aws iam create-user --user-name {{ r["iam_user"] }} --tags Key=purpose,Value="{{ r["purpose"] }}"
+{% endfor %}```
+
+### 2. ポリシーを付与する
+
+`policy_scope`列に記載のポリシーをアタッチします(管理ポリシーの場合は`attach-user-policy`、カスタム定義が必要な場合は`put-user-policy`を使用)。
+
+```bash
+{% for r in csv_rows %}# {{ r["iam_user"] }}: {{ r["policy_scope"] }}
+aws iam list-attached-user-policies --user-name {{ r["iam_user"] }}
+{% endfor %}```
+
+### 3. 権限の動作検証と拒否確認を行う
+
+`simulate-principal-policy`で、許可されるべき操作と拒否されるべき操作の両方を確認します。
+
+```bash
+{% for r in csv_rows %}aws iam simulate-principal-policy \
+  --policy-source-arn "arn:aws:iam::123456789012:user/{{ r["iam_user"] }}" \
+  --action-names "iam:CreateUser" \
+  --output text
+{% endfor %}```
+
+`iam:CreateUser`のような権限外操作の結果が`implicitDeny`または`explicitDeny`であることを確認してください。
+
+### 4. アクセスキーを発行しMFA要件を確認する
+
+```bash
+{% for r in csv_rows %}{% if r["mfa_required"] == "true" %}aws iam enable-mfa-device --user-name {{ r["iam_user"] }} --serial-number "arn:aws:iam::123456789012:mfa/{{ r["iam_user"] }}" --authentication-code1 000000 --authentication-code2 111111
+{% endif %}aws iam create-access-key --user-name {{ r["iam_user"] }}
+{% endfor %}```
+
+MFAが必要なユーザー(`mfa_required=true`)は、有効化を確認してからアクセスキーを払い出してください。
+
+### 5. アクセスキーを棚卸しする
+
+`key_rotation_days`を超えて未更新のキーがないか確認します。
+
+```bash
+{% for r in csv_rows %}aws iam list-access-keys --user-name {{ r["iam_user"] }} --query 'AccessKeyMetadata[].{Id:AccessKeyId,Created:CreateDate}'
+{% endfor %}```
+
+### 6. ルートアカウントの保護状態を確認する
+
+```bash
+aws iam get-account-summary --query 'SummaryMap.AccountMFAEnabled'
+aws iam generate-credential-report
+aws iam get-credential-report --query 'Content' --output text | base64 -d | head -n 1
+```
+
+## 動作確認
+
+- `aws iam list-users`に作成した {{ csv_rows | length }} 件のユーザーが表示されること
+- 各ユーザーで権限外操作(`iam:CreateUser`等)が`Deny`判定になること
+- `mfa_required=true`のユーザーでMFAデバイスが有効化されていること
+- `list-access-keys`で発行日から`key_rotation_days`以内のキーのみが存在すること
+
+## 注意事項
+
+- アクセスキーのシークレット値は`create-access-key`の応答にのみ表示され再取得できない。作業ログやチャット、コミットへの貼り付けを行わない。
+- `AdministratorAccess`のような広範なポリシーを安易に付与しない。`policy_scope`列で定めた範囲に限定する。
+- ルートアカウントのアクセスキーは発行しない。日常運用は本手順で作成したIAMユーザーのみで行う。

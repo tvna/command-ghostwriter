@@ -1,0 +1,6 @@
+title: php-fpmワーカーでのゾンビプロセス滞留
+zombie_threshold: 50
+suspect_parent: /usr/sbin/php-fpm8.2
+service_name: php-fpm
+restart_window: "深夜2:00-2:15 (定期メンテナンス窓)"
+recurrence_check: "翌日同時刻に ps aux | awk '$8 ~ /Z/' で件数を再確認し、0件を維持できているかを記録する"

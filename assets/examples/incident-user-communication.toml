@@ -1,0 +1,6 @@
+service_name = "決済API"
+impact_description = "クレジットカード決済のリクエストが失敗し、購入が完了できない"
+first_notice_deadline = "検知から15分以内"
+update_interval = "30分ごと"
+channels = ["ステータスページ", "メール配信", "Slack #status-external"]
+status_levels = ["調査中", "原因特定", "復旧作業中", "復旧", "監視強化"]

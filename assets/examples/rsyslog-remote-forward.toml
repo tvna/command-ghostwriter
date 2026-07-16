@@ -1,0 +1,6 @@
+central_server = "10.0.0.20"
+protocol = "tcp"
+port = 6514
+forward_selector = "*.*"
+queue_size = 100000
+receiver_template = "/var/log/remote/%HOSTNAME%/%PROGRAMNAME%.log"

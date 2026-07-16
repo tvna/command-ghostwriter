@@ -1,0 +1,73 @@
+# ollamaのモデル管理と容量運用
+
+台帳（CSV）に基づき、ollamaのモデル取得・一覧・削除と量子化バリアントの選択、保存先の容量管理を行います。
+
+## 目的
+
+量子化バリアントの違いとVRAM消費の関係を理解し、台帳に基づいてモデルを取得・棚卸し・削除できるようになることを目指します。
+
+## 用語解説
+
+- **量子化(quantization)**: モデルの重みを低ビット精度に変換し、VRAM消費とファイルサイズを削減する手法。`Q4_K_M` など数字が小さいほど軽量だが精度は低下する
+- **タグ(tag)**: 同一モデル名の中でパラメータ規模やバリアントを区別するための識別子（例: `8b`, `13b`）
+- **モデルの保存先**: ollamaが取得したモデルを保存するディレクトリ(既定では `~/.ollama/models` または `OLLAMA_MODELS` 環境変数で指定した場所)
+- **keep_policy**: 台帳上でモデルの保持方針を示す列（例: 常時保持、月次見直し、不要なら削除）
+
+## シナリオ設定
+
+台帳には {{ csv_rows | length }} 件のモデルが登録されています。
+
+| model_name | tag | quantization | size_gb | use_case | keep_policy |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["model_name"] }} | {{ r["tag"] }} | {{ r["quantization"] }} | {{ r["size_gb"] }} | {{ r["use_case"] }} | {{ r["keep_policy"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 台帳のモデルを取得する
+
+```bash
+{% for r in csv_rows %}ollama pull {{ r["model_name"] }}:{{ r["tag"] }}
+{% endfor %}```
+
+### 2. 一覧と詳細を確認する
+
+```bash
+ollama list
+{% for r in csv_rows %}ollama show {{ r["model_name"] }}:{{ r["tag"] }}
+{% endfor %}```
+
+### 3. 量子化バリアントを選ぶ(VRAMとの関係)
+
+利用可能なVRAMに対して、モデルサイズが大きく上回らないバリアントを選びます。台帳の `size_gb` 列を目安にします。
+
+```bash
+nvidia-smi --query-gpu=memory.total,memory.used,memory.free --format=csv
+```
+
+### 4. 不要モデルを削除し容量を確認する
+
+`keep_policy` が「不要なら削除」のモデルを棚卸しの対象とします。
+
+```bash
+{% for r in csv_rows %}{% if r["keep_policy"] == "不要なら削除" %}ollama rm {{ r["model_name"] }}:{{ r["tag"] }}
+{% endif %}{% endfor %}du -sh $(ollama list | awk 'NR>1{print $1}' | head -1) 2>/dev/null || true
+```
+
+### 5. モデルを更新する
+
+```bash
+{% for r in csv_rows %}{% if r["keep_policy"] == "常時保持" %}ollama pull {{ r["model_name"] }}:{{ r["tag"] }}
+{% endif %}{% endfor %}```
+
+## 動作確認
+
+- `ollama list` が台帳（Step 1 の表）と一致すること
+- 削除対象（`keep_policy` が「不要なら削除」）のモデルが `ollama list` から消えていること
+- `nvidia-smi` の空きメモリに対して、常時保持モデルのロードが収まること
+
+## 注意事項
+
+- `ollama rm` は元に戻せないため、削除前に `keep_policy` 列を必ず確認する。
+- 量子化を下げるほど応答速度・容量は改善するが、精度が低下するため用途(`use_case`)に応じて選定する。
+- 本手順は初期構築(dgx-spark-ollama)とは異なり、既存環境でのモデルライフサイクル管理に焦点を絞る。

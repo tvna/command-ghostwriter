@@ -1,0 +1,6 @@
+device_name: core-sw01
+backup_server: 10.10.1.50
+protocol: scp
+backup_dir: /srv/net-backup/configs
+naming_rule: "<hostname>_<YYYYMMDD>.cfg"
+schedule: "0 2 * * *"

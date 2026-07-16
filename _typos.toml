@@ -4,3 +4,6 @@ RTO = "RTO"
 # chage = the real Linux command for managing password expiry
 # (`man chage` / `change user password expiry information`).
 chage = "chage"
+# exportfs = the real Linux NFS command that maintains the table of exported
+# file systems (`man exportfs`); not a misspelling of "exports".
+exportfs = "exportfs"

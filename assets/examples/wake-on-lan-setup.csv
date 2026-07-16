@@ -1,0 +1,4 @@
+hostname,mac_address,segment,wol_enabled,sender_host
+build-srv01,aa:bb:cc:dd:ee:11,segment-A,true,mgmt01
+build-srv02,aa:bb:cc:dd:ee:12,segment-A,true,mgmt01
+render-node03,aa:bb:cc:dd:ee:13,segment-B,false,mgmt02

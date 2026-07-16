@@ -1,0 +1,122 @@
+# OpenVPNサーバの構築とクライアント配布
+
+easy-rsaで証明書局(CA)を用意し、OpenVPNサーバの構築からクライアント設定ファイル(`.ovpn`)の配布・接続検証・失効運用までを一巡します。root権限(sudo)で実施してください。
+
+## 目的
+
+TLS認証を用いたOpenVPNサーバを構築し、クライアント証明書の発行・配布・接続検証、そして失効(revoke)までの一連の運用フローを実施できるようになることを目指します。
+
+## 用語解説
+
+- **TLS認証**: OpenVPNがサーバ・クライアント間の通信路確立に使う認証方式。CA発行の証明書で相互に検証する
+- **easy-rsa**: OpenSSLをラップしてCA・サーバ証明書・クライアント証明書の発行を簡便に行うスクリプト集
+- **tunデバイス**: OpenVPNが作成する仮想ネットワークインターフェース。IPパケット単位でカプセル化するL3トンネル
+- **push**: サーバからクライアントへ、DNSサーバやルート情報などの設定を配信するOpenVPNの命令(`push "dhcp-option DNS ..."`等)
+- **CRL(証明書失効リスト)**: 失効させた証明書の一覧。サーバはCRLに載った証明書での接続を拒否する
+
+## シナリオ設定
+
+サブネット`{{ server_subnet }}`、ポート`{{ port }}`、プロトコル`{{ proto }}`でサーバを構成します。クライアントには`{{ dns_push }}`をDNSサーバとしてpushします。最初のクライアント`{{ client_name }}`向けに証明書を発行します。
+
+## 手順
+
+### 1. easy-rsaでCAとサーバ証明書を発行する
+
+```bash
+sudo apt install -y openvpn easy-rsa
+make-cadir ~/easy-rsa && cd ~/easy-rsa
+./easyrsa init-pki
+./easyrsa build-ca nopass
+./easyrsa gen-req server nopass
+./easyrsa sign-req server server
+./easyrsa gen-dh
+```
+
+### 2. server.confを設定する
+
+`server`ディレクティブはCIDR表記(`{{ server_subnet }}`)をネットワークアドレスとサブネットマスクに分けて記述する必要があります(`/24`なら`255.255.255.0`)。
+
+```bash
+sudo tee /etc/openvpn/server/server.conf <<EOF
+port {{ port }}
+proto {{ proto }}
+dev tun
+ca ca.crt
+cert server.crt
+key server.key
+dh dh.pem
+server $(echo {{ server_subnet }} | cut -d/ -f1) 255.255.255.0
+push "dhcp-option DNS {{ dns_push }}"
+push "redirect-gateway def1 bypass-dhcp"
+keepalive 10 120
+persist-key
+persist-tun
+EOF
+sudo systemctl enable --now openvpn-server@server
+```
+
+### 3. クライアント証明書を発行する
+
+```bash
+cd ~/easy-rsa
+./easyrsa gen-req {{ client_name }} nopass
+./easyrsa sign-req client {{ client_name }}
+```
+
+### 4. クライアント用.ovpnファイルを作成する
+
+```bash
+tee {{ client_name }}.ovpn <<EOF
+client
+dev tun
+proto {{ proto }}
+remote <SERVER_PUBLIC_IP> {{ port }}
+resolv-retry infinite
+nobind
+persist-key
+persist-tun
+remote-cert-tls server
+<ca>
+$(cat pki/ca.crt)
+</ca>
+<cert>
+$(cat pki/issued/{{ client_name }}.crt)
+</cert>
+<key>
+$(cat pki/private/{{ client_name }}.key)
+</key>
+EOF
+```
+
+### 5. 接続とルーティングを検証する
+
+```bash
+sudo systemctl status openvpn-server@server --no-pager
+sudo ip addr show tun0
+ping -c 3 {{ dns_push }}
+```
+
+### 6. クライアント証明書を失効させる
+
+{{ revoke_note }}
+
+```bash
+cd ~/easy-rsa
+./easyrsa revoke {{ client_name }}
+./easyrsa gen-crl
+sudo cp pki/crl.pem /etc/openvpn/server/
+sudo systemctl restart openvpn-server@server
+```
+
+## 動作確認
+
+- サーバの`tun0`インターフェースが`{{ server_subnet }}`内のIPで起動していること
+- `{{ client_name }}`の`.ovpn`で接続後、pushされたDNS(`{{ dns_push }}`)経由で名前解決できること
+- `journalctl -u openvpn-server@server`に接続確立ログ(`Peer Connection Initiated`等)が記録されること
+- 失効後に`{{ client_name }}`の証明書で接続を試みると拒否されること
+
+## 注意事項
+
+- CAの秘密鍵(`pki/private/ca.key`)は証明書発行の最重要データであるため、`~/easy-rsa`外の安全な場所へバックアップし、アクセスを最小権限に絞る。
+- `redirect-gateway def1`はクライアントの全トラフィックをVPN経由にするため、帯域・プライバシー要件を確認したうえで有効化する。
+- `wireguard-vpn-server`(本カタログ)は鍵ペア方式でCAを持たないのに対し、本手順はPKI(CA)基盤を前提とするため、証明書管理の運用コストが異なる。

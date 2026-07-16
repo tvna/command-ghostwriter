@@ -1,0 +1,88 @@
+# 権威・キャッシュDNSの死活と応答監視の構築手順
+
+CSV で洗い出した {{ csv_rows | length }} 件の監視項目について、`dig` ベースの定期クエリで死活・応答時間・期待応答を監視する仕組みを作ります。
+
+## 目的
+
+DNS サーバの障害を「引けなくなってから気づく」のではなく、死活・遅延・応答内容のずれを定期監視で早期に検知できるようになることを目指します。
+
+## 用語解説
+
+- **死活監視**: 対象の DNS サーバが問い合わせに応答できる状態かどうかを定期的に確認すること
+- **応答時間**: クエリを送ってから応答が返るまでの時間。閾値を超えると劣化の兆候とみなす
+- **期待応答**: 正常時にそのクエリが返すべき既知の値。実際の応答と突き合わせて内容の正しさを検証する
+- **SOA シリアル**: ゾーンの更新回数を表す番号。プライマリとセカンダリで一致していれば同期が取れている目安になる
+- **クエリタイプ**: `A` や `AAAA`、`SOA` など、問い合わせるレコードの種類
+
+## シナリオ設定
+
+監視対象は {{ csv_rows | length }} 件です。
+
+| dns_server | query_fqdn | query_type | expected_answer | check_interval(秒) | alert_dest |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["dns_server"] }} | {{ r["query_fqdn"] }} | {{ r["query_type"] }} | {{ r["expected_answer"] }} | {{ r["check_interval"] }} | {{ r["alert_dest"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 監視観点を整理する
+
+「死活（応答が返るか）」「遅延（応答時間）」「応答内容（期待値と一致するか）」の3観点で監視することを前提に、監視項目一覧を上記の表として確定させます。
+
+### 2. dig ベースの監視スクリプトを作成する
+
+各行についてクエリを実行し、期待応答と一致するかを判定するシェルスクリプトを作成します。
+
+```bash
+cat > /usr/local/bin/dns_healthcheck.sh <<'EOF'
+#!/bin/bash
+set -euo pipefail
+{% for r in csv_rows %}
+# {{ r["dns_server"] }} への {{ r["query_fqdn"] }} ({{ r["query_type"] }}) 監視
+answer=$(dig @{{ r["dns_server"] }} {{ r["query_fqdn"] }} {{ r["query_type"] }} +short +time=2 +tries=1)
+if [ "$answer" != "{{ r["expected_answer"] }}" ]; then
+    echo "ALERT: {{ r["dns_server"] }} {{ r["query_fqdn"] }} expected={{ r["expected_answer"] }} actual=${answer:-<no answer>}" | mail -s "DNS監視アラート" {{ r["alert_dest"] }}
+fi
+{% endfor %}
+EOF
+chmod +x /usr/local/bin/dns_healthcheck.sh
+```
+
+### 3. cron に組み込み、監視項目ごとの間隔で実行する
+
+監視項目ごとに `check_interval` が異なるため、最小間隔（{{ csv_rows | map(attribute="check_interval") | map("int") | min }} 秒）を基準に cron を組み、スクリプト内で項目別の間隔判定は必要に応じて調整します。
+
+```bash
+cat >> /etc/crontab <<'EOF'
+* * * * * root /usr/local/bin/dns_healthcheck.sh
+EOF
+```
+
+### 4. プライマリ・セカンダリのSOAシリアルを突き合わせる
+
+複数の権威サーバを監視している場合、SOA シリアルが一致しているかも合わせて確認します。
+
+```bash
+{% for r in csv_rows %}dig @{{ r["dns_server"] }} {{ r["query_fqdn"] }} SOA +short | awk '{print $3}'
+{% endfor %}```
+
+### 5. 手動実行して通知経路を検証する
+
+期待応答をわざと不一致にする、または対象を一時的に止めるなどしてアラートが `alert_dest` に届くことを確認します。
+
+```bash
+/usr/local/bin/dns_healthcheck.sh
+```
+
+## 動作確認
+
+- 全 {{ csv_rows | length }} 件の監視項目で `dig` が実行でき、正常時にはアラートが発報されないこと
+- 意図的に不一致を起こした際、対応する `alert_dest` にアラートメールが届くこと
+- 複数の権威サーバ間で SOA シリアルが一致していること
+- cron が `check_interval` に見合った頻度でスクリプトを実行し続けていること
+
+## 注意事項
+
+- `check_interval` を短く設定しすぎると監視対象サーバへの負荷や誤検知が増えるため、対象の重要度に応じた値にすること。
+- `expected_answer` はレコードの正当な変更後に必ず更新すること。更新を忘れると変更のたびに誤アラートが出続ける。
+- 監視スクリプト自体の実行ホストがダウンした場合は監視も止まるため、本監視だけに依存せず外形監視など別経路も併用すること。

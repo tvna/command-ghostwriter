@@ -1,0 +1,84 @@
+# データベース接続エラーの切り分け — {{ db_host }}
+
+接続拒否・タイムアウト・認証失敗・接続数上限をエラーメッセージから分類し、原因を特定します。
+
+## 目的
+
+**{{ error_text }}** というエラーに対し、{{ db_type }} への接続失敗の原因を「拒否」「タイムアウト」「認証」「接続数上限」に分類し、正しい対処を選べるようになることを目指します。
+
+## 用語解説
+
+- **接続拒否(refused)**: プロセス未起動やポート未待受で、TCP接続自体が確立できない状態
+- **too many clients(接続数上限)**: DB側の `max_connections` に達し、新規接続がすべて拒否される状態
+- **認証失敗**: ユーザー名・パスワード・pg_hba.conf(または相当の設定)による許可条件を満たしていない状態
+- **接続プール(connection pool)**: アプリケーション側が保持する接続の再利用機構。設定不備で接続がリークすると上限に達しやすい
+- **max_connections**: DBサーバが同時に受け付ける接続数の上限設定
+
+## シナリオ設定
+
+`{{ db_type }}` サーバ `{{ db_host }}:{{ db_port }}` への接続で `{{ error_text }}` というエラーが発生しています。DB側の `max_connections` は {{ max_connections }}、アプリケーション側のプールサイズは {{ app_pool_size }} です。
+
+## 手順
+
+### 1. エラーメッセージを分類する
+
+```bash
+echo "{{ error_text }}"
+```
+
+→ `refused`(拒否)/ `timeout`(タイムアウト)/ `authentication failed`(認証)/ `too many clients`(上限)のいずれに該当するかを一次判定します。
+
+### 2. プロセスとポート待受を確認する
+
+```bash
+ssh {{ db_host }} "systemctl is-active {{ db_type }}"
+ssh {{ db_host }} "ss -tlnp | grep {{ db_port }}"
+```
+
+→ プロセスが停止している、またはポートが待受していない場合は「拒否」系の原因です。
+
+### 3. ネットワーク・FW経路を確認する
+
+```bash
+nc -zv {{ db_host }} {{ db_port }}
+traceroute {{ db_host }}
+```
+
+→ アプリケーション側からポートに到達できない場合はFW・経路の問題を疑います。
+
+### 4. 認証・権限を確認する
+
+```bash
+ssh {{ db_host }} "tail -n 50 /var/log/{{ db_type }}/{{ db_type }}.log | grep -i auth"
+```
+
+→ 認証失敗ログにユーザー名・IPアドレスの不一致がないかを確認します。
+
+### 5. 接続数上限と接続リークを確認する
+
+```bash
+ssh {{ db_host }} "{{ db_type }} -h {{ db_host }} -p {{ db_port }} -c \"SELECT count(*) FROM pg_stat_activity;\""
+```
+
+→ 現在の接続数が `max_connections`({{ max_connections }})に近い場合、アプリケーション側プール({{ app_pool_size }})の接続リークや複数アプリからの多重接続を疑います。
+
+### 6. 復旧し再発防止を行う
+
+```bash
+ssh {{ db_host }} "{{ db_type }} -h {{ db_host }} -p {{ db_port }} -c \"SELECT pid, state, query_start FROM pg_stat_activity WHERE state = 'idle in transaction';\""
+```
+
+→ アイドル状態の放置接続を特定し、アプリケーション側の接続クローズ処理・プール設定を見直します。
+
+## 動作確認
+
+- `{{ db_host }}:{{ db_port }}` への `nc -zv` が成功すること
+- 現在の接続数が `max_connections`({{ max_connections }})を下回り、余裕があること
+- アプリケーションからの再接続で `{{ error_text }}` が再現しないこと
+- 「idle in transaction」の放置接続が解消されていること
+
+## 注意事項
+
+- 稼働中の接続を強制切断する操作(`pg_terminate_backend`等)は業務影響があるため、対象PIDを確認してから実施する。
+- `max_connections` の安易な引き上げはメモリ使用量増加につながるため、根本原因(プール設定・接続リーク)の是正を優先する。
+- 認証情報や接続文字列をログ・報告に含める際はパスワード等の機微情報を記載しない。

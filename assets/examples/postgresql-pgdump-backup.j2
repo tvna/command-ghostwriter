@@ -1,0 +1,85 @@
+# pg_dumpによるPostgreSQL論理バックアップ
+
+`pg_dump` によるデータベース単位の論理バックアップ取得・世代管理と、`pg_restore` を使った別データベースへの復元検証までを一巡します。
+
+## 目的
+
+論理バックアップの特性を理解し、`{{ format }}` フォーマットでの取得から圧縮・世代管理、そして復元テストによる「取れているつもりのバックアップ」を防ぐ検証運用ができるようになることを目指します。
+
+## 用語解説
+
+- **論理バックアップ**: SQL文やDBMS独自形式で、データベースの内容を再構築可能な形にエクスポートするバックアップ方式（物理バックアップはファイル単位のコピー）
+- **customフォーマット**: `pg_dump -Fc` で出力される圧縮済み・並列復元対応のPostgreSQL独自バイナリ形式
+- **pg_restore**: customフォーマット等のバックアップから、指定データベースへデータを復元するコマンド
+- **世代管理（retention）**: 一定期間より古いバックアップを削除し、ディスク使用量と復旧可能な過去時点のバランスを取る運用
+
+## シナリオ設定
+
+データベース `{{ db_name }}` を、ユーザー `{{ db_user }}` の権限で `{{ backup_dir }}` に `{{ format }}` フォーマットで取得します。保存期間は `{{ retention_days }}` 日とし、復元検証は `{{ restore_test_db }}` に対して行います。
+
+## 手順
+
+### 1. バックアップ先ディレクトリを準備する
+
+```bash
+sudo -u {{ db_user }} mkdir -p {{ backup_dir }}
+sudo -u {{ db_user }} chmod 700 {{ backup_dir }}
+```
+
+### 2. pg_dumpでバックアップを取得する
+
+```bash
+TS=$(date +%Y%m%d_%H%M%S)
+sudo -u {{ db_user }} pg_dump -Fc -d {{ db_name }} -f {{ backup_dir }}/{{ db_name }}_${TS}.dump
+ls -lh {{ backup_dir }}/{{ db_name }}_${TS}.dump
+```
+
+`{{ format }}` フォーマット（`-Fc`）は取得時点で圧縮され、並列復元（`pg_restore -j`）にも対応します。
+
+### 3. 古い世代を整理する
+
+```bash
+find {{ backup_dir }} -name "{{ db_name }}_*.dump" -mtime +{{ retention_days }} -print
+find {{ backup_dir }} -name "{{ db_name }}_*.dump" -mtime +{{ retention_days }} -delete
+```
+
+削除前に `-print` で対象を必ず確認してから `-delete` を実行します。
+
+### 4. 別データベースへ復元し整合性を検証する
+
+```bash
+LATEST=$(ls -t {{ backup_dir }}/{{ db_name }}_*.dump | head -n1)
+sudo -u {{ db_user }} dropdb --if-exists {{ restore_test_db }}
+sudo -u {{ db_user }} createdb {{ restore_test_db }}
+sudo -u {{ db_user }} pg_restore -d {{ restore_test_db }} "$LATEST"
+```
+
+### 5. 復元結果を検証する
+
+```bash
+sudo -u {{ db_user }} psql -d {{ restore_test_db }} -c "\dt"
+sudo -u {{ db_user }} psql -d {{ db_name }} -c "SELECT count(*) FROM pg_stat_user_tables;"
+sudo -u {{ db_user }} psql -d {{ restore_test_db }} -c "SELECT count(*) FROM pg_stat_user_tables;"
+```
+
+元DBと復元先DBのテーブル数・件数を突き合わせ、復元が完全であることを確認します。
+
+### 6. cronへの組み込み
+
+```bash
+( sudo -u {{ db_user }} crontab -l 2>/dev/null; echo "0 2 * * * pg_dump -Fc -d {{ db_name }} -f {{ backup_dir }}/{{ db_name }}_\$(date +\%Y\%m\%d).dump" ) | sudo -u {{ db_user }} crontab -
+sudo -u {{ db_user }} crontab -l
+```
+
+## 動作確認
+
+- `{{ backup_dir }}` に日時付きの `.dump` ファイルが作成されていること
+- `{{ retention_days }}` 日を超えた古いバックアップが `find` の `-delete` で削除されること
+- `{{ restore_test_db }}` への復元後、`\dt` でテーブル一覧が元DBと一致すること
+- 元DBと復元先DBの `pg_stat_user_tables` 件数が一致すること
+
+## 注意事項
+
+- バックアップは取得しただけでは検証されていない。定期的に `{{ restore_test_db }}` への復元テストを行い、実際に使えるバックアップであることを確認する。
+- `dropdb --if-exists {{ restore_test_db }}` は検証専用データベースを対象とする。本番データベース名を誤って指定しないよう、変数名を必ず確認してから実行する。
+- 認証情報を平文でスクリプトに埋め込まず、`.pgpass` やロール権限（`sudo -u {{ db_user }}`）による実行に留める。

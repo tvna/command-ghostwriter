@@ -1,0 +1,5 @@
+affected_device: "/dev/sdb"
+await_baseline: "5"
+util_percent: "97"
+top_io_process: "postgres"
+storage_type: "SSD (NVMe RAID10)"

@@ -1,0 +1,90 @@
+# YAMAHAルータの拠点間IPsec VPN構築
+
+RTX系ルータ2台を使い、拠点間をIPsecトンネルで接続します。両拠点のパラメータを事前に突き合わせたうえで、片方ずつではなく対応するペアとして設定してください。
+
+## 目的
+
+IKE(鍵交換)とIPsecトンネルの役割分担を理解した上で、拠点間IPsecトンネルを構築し、拠点間の経路とフィルタを整えて相互疎通を検証できるようになることを目指します。
+
+## 用語解説
+
+- **IKE(Internet Key Exchange)**: IPsecで使う暗号鍵を安全に交換するためのプロトコル。事前共有鍵(PSK)や証明書で対向機器を認証する
+- **トンネルインターフェース**: RTXでは`tunnel select`で選択する仮想インターフェース上にIPsec設定を行い、通常のインターフェースと同様に経路(`ip route`)やフィルタを適用できる
+- **NATトラバーサル**: 経路上にNAT機器が存在する場合でもIPsecパケットを正しく通過させる仕組み。拠点側がグローバルIPを直接持たない構成では有効化が必要になることがある
+- **IKEバージョン**: IKEv1とIKEv2があり、両拠点で同じバージョンを使う必要がある
+- **事前共有鍵(PSK)**: 両拠点のルータに同一の文字列を設定し、IKEでの相互認証に使う鍵。設定ファイルや台帳への平文保存は避ける
+
+## シナリオ設定
+
+自拠点WAN側アドレス `{{ local_wan_ip }}` と対向拠点WAN側アドレス `{{ remote_wan_ip }}` の間にIKEバージョン{{ ike_version }}でIPsecトンネルを確立し、自拠点LAN `{{ local_lan }}` と対向拠点LAN `{{ remote_lan }}` を相互疎通させます。{{ pre_shared_key_note }}
+
+## 手順
+
+### 1. 両拠点のパラメータを突き合わせる
+
+対向拠点の管理者と、WAN側アドレス・LANアドレス帯・事前共有鍵・IKEバージョンが食い違っていないか確認します。片方だけ変更すると確立できません。
+
+```bash
+show status pp
+show ip route
+```
+
+### 2. トンネルインターフェースを設定する(自拠点側)
+
+administratorモードでトンネル1番を作成します。対向拠点側では`{{ local_wan_ip }}`と`{{ remote_wan_ip }}`を入れ替えた設定を投入してもらいます。
+
+```bash
+tunnel select 1
+ ipsec tunnel 1
+  ipsec sa policy 101 1 esp aes-cbc sha-hmac
+  ipsec ike keepalive use 1 on
+  ipsec ike local address 1 {{ local_wan_ip }}
+  ipsec ike pre-shared-key 1 text ********
+  ipsec ike remote address 1 {{ remote_wan_ip }}
+  ipsec ike version 1 {{ ike_version }}
+ ip tunnel tcp mss limit auto
+ tunnel enable 1
+```
+
+事前共有鍵の実際の値は、コンソール入力時のみ台帳(鍵管理システム)から参照し、設定表示や保存先には平文で残さないようにします。
+
+### 3. 経路とフィルタを設定する
+
+対向拠点LAN宛の経路をトンネル経由に向け、トンネルインターフェースに最小限のフィルタを適用します。
+
+```bash
+ip route {{ remote_lan }} gateway tunnel 1
+ip tunnel secure filter in 200000 200099
+ip tunnel secure filter out 200100 200199
+ip filter 200000 pass {{ remote_lan }} {{ local_lan }} * * *
+ip filter 200099 reject * * * * *
+ip filter 200100 pass {{ local_lan }} {{ remote_lan }} * * *
+ip filter 200199 reject * * * * *
+save
+```
+
+### 4. show ipsec saと拠点間疎通を検証する
+
+```bash
+show ipsec sa
+show status tunnel 1
+```
+
+`show ipsec sa`でSA(Security Association)が確立(`Established`相当の状態)していることを確認したうえで、対向拠点LAN側の端末へpingを実行します。
+
+```bash
+ping {{ remote_lan }}
+```
+
+## 動作確認
+
+- `show status tunnel 1`でトンネル1のステータスが`Up`(接続確立)であること
+- `show ipsec sa`に、自拠点`{{ local_wan_ip }}`と対向拠点`{{ remote_wan_ip }}`の間のSAが表示され、暗号化アルゴリズムが意図通り(aes-cbc等)であること
+- 自拠点LAN`{{ local_lan }}`の端末から対向拠点LAN`{{ remote_lan }}`の端末へpingが成功すること
+- WANまたはLAN側のインターフェースを一時的に見ても、トンネルを経由しない直接ルートが優先されていないこと(`show ip route`で経路を確認)
+
+## 注意事項
+
+- 事前共有鍵は両拠点で完全に一致していないとIKEが確立しない。コピー&ペーストではなく台帳の同一値を参照するなど、入力ミスを防ぐ運用にする。
+- WAN側の設定変更中にコンソールへの経路が失われないよう、必ずLAN内から作業しコンソール接続を確保しておく(既存のトンネルを経由した遠隔作業の場合は特に注意)。
+- `save`コマンドを忘れると再起動時に設定が失われる。対向拠点側の担当者にも同様に`save`実施を依頼する。

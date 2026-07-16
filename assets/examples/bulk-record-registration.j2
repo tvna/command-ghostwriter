@@ -1,0 +1,87 @@
+# DNSレコードの一括登録と事前検証手順
+
+CSV で整理した {{ csv_rows | length }} 件のレコード変更依頼を、重複・構文チェックを経てゾーンへ一括反映し、登録後に全件を `dig` で検証します。
+
+## 目的
+
+大量のレコード追加・削除依頼を、思いつきで1件ずつ流し込むのではなく、事前チェック・一括反映・全件検証という決まった手順で安全に処理できるようになることを目指します。
+
+## 用語解説
+
+- **CNAME 衝突**: 同じ名前に CNAME と他のレコード種別が併存してしまう、DNS 上許可されない状態
+- **nsupdate**: 動的更新プロトコル（RFC 2136）でゾーンレコードを追加・削除するコマンド
+- **SOA シリアル**: ゾーンの更新回数を表す番号。レコード変更のたびに増やす必要がある
+- **action**: 依頼が追加（add）か削除（delete）かを示す区分
+- **requester**: レコード変更を依頼した申請者。追跡・問い合わせ用に記録する
+
+## シナリオ設定
+
+今回処理する変更依頼は {{ csv_rows | length }} 件です。
+
+| name | type | value | ttl | action | requester |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["name"] }} | {{ r["type"] }} | {{ r["value"] }} | {{ r["ttl"] }} | {{ r["action"] }} | {{ r["requester"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 重複・構文の事前チェックを行う
+
+同じ `name` に対して `add` と `delete` が重複していないか、CNAME と他のレコードが同じ名前に衝突していないかを一覧で目視確認します。
+
+```bash
+awk -F, 'NR>1 {print $1}' bulk-record-registration.csv | sort | uniq -c | sort -rn
+```
+
+### 2. nsupdate 用のコマンドファイルを生成する
+
+依頼一覧から `action` に応じた `nsupdate` の追加・削除コマンドを生成します。
+
+```bash
+{% for r in csv_rows %}{% if r["action"] == "add" %}echo "update add {{ r["name"] }} {{ r["ttl"] }} {{ r["type"] }} {{ r["value"] }}" >> nsupdate_batch.txt
+{% elif r["action"] == "delete" %}echo "update delete {{ r["name"] }} {{ r["type"] }} {{ r["value"] }}" >> nsupdate_batch.txt
+{% endif %}{% endfor %}echo "send" >> nsupdate_batch.txt
+```
+
+### 3. nsupdate でゾーンへ一括反映する
+
+```bash
+nsupdate -k /etc/named/update.key nsupdate_batch.txt
+```
+
+### 4. SOA シリアルの更新とゾーン再読込を確認する
+
+```bash
+dig {{ csv_rows[0]["name"] }} SOA +short
+rndc reload
+```
+
+### 5. 全件を dig で登録後検証する
+
+依頼内容どおりに反映されたか、1件ずつ確認します。
+
+```bash
+{% for r in csv_rows %}{% if r["action"] == "add" %}dig {{ r["name"] }} {{ r["type"] }} +short
+{% elif r["action"] == "delete" %}dig {{ r["name"] }} {{ r["type"] }} +short  # 何も返らないことを確認
+{% endif %}{% endfor %}```
+
+### 6. 失敗時の切り戻しに備えて反映内容を記録する
+
+反映前後の状態と申請者を記録に残し、切り戻しが必要になった場合に速やかに逆操作できるようにします。
+
+```bash
+{% for r in csv_rows %}echo "{{ r["action"] }},{{ r["name"] }},{{ r["type"] }},{{ r["value"] }},requester={{ r["requester"] }}" >> bulk_registration_log.csv
+{% endfor %}```
+
+## 動作確認
+
+- 事前チェックで重複・CNAME衝突が検出されないこと（検出された場合は反映前に依頼元へ差し戻す）
+- `add` 対象の {{ csv_rows | selectattr("action", "equalto", "add") | list | length }} 件が `dig` で期待どおりの値を返すこと
+- `delete` 対象の {{ csv_rows | selectattr("action", "equalto", "delete") | list | length }} 件が `dig` で何も返さないこと
+- SOA シリアルが反映のたびに増加していること
+
+## 注意事項
+
+- 一括反映は必ず事前チェック（手順1）を通過してから行うこと。重複や衝突を残したまま流すとゾーンが破損する。
+- `nsupdate` の更新鍵（TSIG key）は権限を絞り、実行後は履歴に鍵の値そのものを残さないこと。
+- 反映後に問題が見つかった場合は、手順6の記録を元に逆の `action`（add と delete を入れ替え）で切り戻すこと。

@@ -1,0 +1,6 @@
+share_name = "sales"
+share_path = "/srv/samba/sales"
+valid_group = "sales-team"
+writable = true
+create_mask = "0660"
+server_string = "Sales Department File Server"

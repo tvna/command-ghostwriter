@@ -1,0 +1,6 @@
+title: 認証エラーを引き起こすサーバ時刻ずれ
+drift_seconds: 42
+ntp_source: ntp.nict.jp
+affected_services: "Kerberos認証, TLSハンドシェイク, 分散ログの時系列順序"
+step_allowed: true
+vm_host_note: "ハイパーバイザ側でVMが一時サスペンド/ライブマイグレーションされた可能性がある"

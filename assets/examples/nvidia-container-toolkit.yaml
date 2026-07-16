@@ -1,0 +1,5 @@
+runtime: "docker"
+toolkit_version: "1.15.0"
+test_image: "nvidia/cuda:12.4.1-base-ubuntu22.04"
+gpus_option: "all"
+compose_example_note: "Docker Composeではservicesにdeploy.resources.reservations.devicesでGPUを指定する"

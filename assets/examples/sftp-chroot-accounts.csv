@@ -1,0 +1,4 @@
+username,chroot_dir,upload_subdir,group,purpose
+partner-a,/srv/sftp/partner-a,upload,sftp-partners,パートナーA社とのデータ交換
+partner-b,/srv/sftp/partner-b,upload,sftp-partners,パートナーB社とのデータ交換
+vendor-c,/srv/sftp/vendor-c,incoming,sftp-vendors,ベンダーC社からの納品物受領

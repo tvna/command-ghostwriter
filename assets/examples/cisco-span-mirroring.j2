@@ -1,0 +1,77 @@
+# CiscoスイッチのSPANによるポートミラーリング
+
+トラブル解析のため、特定ポートの通信を宛先ポートへ複製(ミラーリング)するSPANセッションを設定します。監視端末をつなぐだけでは何も見えないため、SPANセッションの投入まで含めて実施してください。
+
+## 目的
+
+SPANによるポートミラーリングの仕組みと宛先ポートの制約を理解した上で、監視対象ポートの通信をキャプチャ端末へ複製し、解析後に設定を確実に撤去できるようになることを目指します。
+
+## 用語解説
+
+- **SPAN(Switched Port Analyzer)**: 指定した送信元ポート(またはVLAN)の通信を、同一スイッチ内の宛先ポートへ複製する機能
+- **RSPAN(Remote SPAN)**: 送信元と宛先が別スイッチにまたがる場合に、専用VLANを介して通信を複製する機能。本手順は同一スイッチ内のローカルSPANを対象とする
+- **送信元(source)ポート**: ミラーしたい通信が流れているポート。通常業務を継続したまま監視できる
+- **宛先(destination)ポート**: 複製された通信を受信する専用ポート。このポートは通常のスイッチングに参加できなくなる制約がある
+- **source_direction(rx/tx/both)**: ミラー対象を受信(rx)・送信(tx)・双方向(both)のどれにするかの指定
+
+## シナリオ設定
+
+セッション {{ session_id }} として、以下の送信元ポートを {{ source_direction }} 方向でミラーリングします。
+
+{% for p in source_ports %}- `{{ p }}`
+{% endfor %}
+複製した通信は宛先ポート `{{ destination_port }}` へ送信します。{{ capture_host_note }}
+
+## 手順
+
+### 1. 現行のSPAN設定を確認する
+
+既存のセッションと衝突しないか、宛先ポートが他用途で使われていないかを確認します。
+
+```bash
+enable
+show monitor session all
+show interfaces {{ destination_port }} status
+```
+
+### 2. monitor sessionを設定する
+
+```bash
+configure terminal
+{% for p in source_ports %}monitor session {{ session_id }} source interface {{ p }} {{ source_direction }}
+{% endfor %}monitor session {{ session_id }} destination interface {{ destination_port }}
+end
+write memory
+```
+
+### 3. キャプチャ端末で受信を確認する
+
+宛先ポートに接続したキャプチャ端末側でWireshark等を起動し、送信元ポートで発生させたテスト通信(ping等)が届くことを確認します。
+
+```bash
+show monitor session {{ session_id }} detail
+```
+
+### 4. 解析終了後、設定を撤去する
+
+解析目的が終わったら宛先ポートを通常のスイッチポートに戻すため、SPANセッションを削除します。
+
+```bash
+configure terminal
+no monitor session {{ session_id }}
+end
+write memory
+show monitor session all
+```
+
+## 動作確認
+
+- `show monitor session {{ session_id }} detail` で、送信元ポート {{ source_ports | join(', ') }} と宛先ポート `{{ destination_port }}` が意図通り登録されていること
+- キャプチャ端末で送信元ポートのテスト通信(ping等)のパケットが受信できること
+- 解析終了後に `show monitor session all` を実行し、セッション {{ session_id }} が表示されなくなっていること
+
+## 注意事項
+
+- 宛先ポートは通常のスイッチングに参加できなくなり、そのポートに接続した端末は他ポートと直接通信できなくなる。作業中に該当ポートを別用途で使っていないか事前に確認する。
+- 送信元ポートの本数やトラフィック量によっては、宛先ポートの帯域(リンク速度)を超えてパケットが破棄されることがある。高負荷なポートを複数束ねる場合は帯域超過に注意する。
+- SPANで複製した通信には認証情報や個人情報を含む生パケットがそのまま流れる。キャプチャ端末とキャプチャデータの取り扱いを限定し、解析終了後は速やかに手順4でセッションを撤去する。

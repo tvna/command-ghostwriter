@@ -1,0 +1,88 @@
+# コンテナ再起動ループの調査 — {{ container_name }}
+
+`{{ container_name }}`（`restart: {{ restart_policy }}`）が終了コード `{{ exit_code }}` で即時終了を繰り返しています。ログ・設定・直近の変更点から原因を特定し、安定化させる手順です。
+
+## 目的
+
+終了コードの意味とdocker logs/inspectの読み方を理解し、直近の変更点（イメージ・環境変数・ボリューム）を切り分けて、クラッシュループの根本原因に到達できるようになることを目指します。
+
+## 用語解説
+
+- **クラッシュループ(CrashLoop)**: コンテナが起動直後に異常終了し、再起動ポリシーにより再起動が繰り返される状態
+- **restart policy**: コンテナ終了時にDockerが自動再起動するかどうかを決める設定（`always`, `on-failure`等）
+- **終了コード**: プロセスが終了した理由を表す番号。`137`はSIGKILL(9)相当、`1`はアプリケーション側の異常終了を示すことが多い
+- **entrypoint**: コンテナ起動時に最初に実行されるコマンド
+- **RestartCount**: `docker inspect` で確認できる、当該コンテナがこれまで再起動された回数
+
+## シナリオ設定
+
+{{ container_name }}（イメージ: {{ image_tag }}）が終了コード {{ exit_code }} でクラッシュループしています。直近の変更点は次の通りです。
+
+{% for c in recent_changes %}
+- {{ c }}
+{% endfor %}
+
+これらの変更点を踏まえ、原因を特定して安定稼働させてください。
+
+## 手順
+
+### 1. 再起動状況を確認する
+
+```bash
+docker ps -a --filter "name={{ container_name }}"
+docker inspect {{ container_name }} --format '{% raw %}{{.RestartCount}} {{.State.ExitCode}}{% endraw %}'
+```
+
+RestartCountの増加ペースと、記録されている終了コード（想定: `{{ exit_code }}`）を確認します。
+
+### 2. 終了コードの意味を確認する
+
+終了コード `{{ exit_code }}` は、`137`ならOOM KillerまたはヘルスチェックによるSIGKILL、`1`ならアプリケーション内部の異常終了を示す可能性が高いことを踏まえて調査方針を決めます。
+
+### 3. ログとinspectで原因を確認する
+
+```bash
+docker logs --tail 200 {{ container_name }}
+docker inspect {{ container_name }} --format '{% raw %}{{json .State}}{% endraw %}'
+```
+
+直前に出力されたエラーメッセージと、`OOMKilled`フラグの有無を確認します。
+
+### 4. 直近の変更点を調査する
+
+{% for c in recent_changes %}
+```bash
+echo "変更点の確認: {{ c }}"
+```
+{% endfor %}
+
+上記の変更点それぞれについて、クラッシュとの因果関係がないか個別に検証します。
+
+### 5. entrypointを一時的に変更して内部調査する
+
+```bash
+docker run --rm -it --entrypoint /bin/sh {{ image_tag }}
+```
+
+コンテナ内でアプリケーションを手動起動し、通常のログには出ないスタックトレースや設定エラーを直接確認します。
+
+### 6. 修正し安定化を確認する
+
+```bash
+docker restart {{ container_name }}
+docker inspect {{ container_name }} --format '{% raw %}{{.RestartCount}}{% endraw %}'
+```
+
+原因（イメージ・環境変数・ボリュームのいずれか）を是正したうえで再起動し、RestartCountが増加しなくなることを確認します。
+
+## 動作確認
+
+- `docker ps` で {{ container_name }} が `Up` のまま一定時間再起動していないこと
+- `docker inspect` の `RestartCount` が調査開始時点から増加していないこと
+- `docker logs` に Step 3 で確認したエラーが再発していないこと
+
+## 注意事項
+
+- 本番相当のコンテナに対する entrypoint 変更調査（Step 5）は、影響のない一時コンテナ（`--rm`）で行い、本体は停止させない。
+- 直近の変更点（Step 4）は1つずつ切り戻して検証し、複数を同時に変更しない。
+- 原因が特定できず安定化しない場合は、変更前バージョンへのロールバックを {{ escalation }} と検討する。

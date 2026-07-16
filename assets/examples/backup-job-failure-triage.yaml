@@ -1,0 +1,7 @@
+title: 夜間バックアップジョブ失敗の調査
+job_name: nightly-db-backup
+failure_message: "rsync error: Disk quota exceeded (code 25)"
+last_success: "2026-07-15T02:10:00"
+dest_free_space: 残り 1.2GB (バックアップ先パーティション使用率98%)
+rerun_window: 本日06:00までに再実行が完了すれば当日分のRPOを維持できる
+escalation: インフラ基盤チーム (内線 1201)

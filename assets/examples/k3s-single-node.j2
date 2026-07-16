@@ -1,0 +1,89 @@
+# k3sによるシングルノードKubernetes構築 — {{ node_name }}
+
+サーバー **{{ node_name }}** 1台に軽量Kubernetesディストリビューションのk3sを導入し、`kubectl` によるデプロイ・公開・削除まで小規模なKubernetes運用を一巡します。
+
+## 目的
+
+k3sをシングルノードで導入し、`kubectl` を使ってDeploymentの作成・NodePortでの公開・後片付けという最小限のKubernetes運用の流れを体験できるようになることを目指します。
+
+## 用語解説
+
+- **k3s**: Rancher Labsが開発する軽量Kubernetesディストリビューション。単一バイナリでシングルノードから運用可能
+- **Pod**: Kubernetesにおけるコンテナ実行の最小単位。1つ以上のコンテナをまとめて配置する
+- **Deployment**: Podのレプリカ数や更新方式を宣言的に管理するリソース。指定した数のPodを維持する
+- **Service**: Podの集合へ固定のアクセス経路を提供するリソース
+- **NodePort**: ノードの特定ポート（30000-32767番）を経由してService内のPodへ外部からアクセスできる公開方式
+
+## シナリオ設定
+
+`{{ node_name }}` にk3sを導入し、インストールオプション `{{ install_options }}` を付与します。イメージ `{{ app_image }}` を {{ app_replicas }} レプリカでDeploymentとして起動し、NodePort {{ nodeport }} で公開します。
+
+## 手順
+
+### 1. k3sをインストールする
+
+```bash
+curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="{{ install_options }}" sh -
+sudo systemctl status k3s --no-pager
+```
+
+### 2. kubectlでの疎通を確認する
+
+```bash
+sudo kubectl get nodes -o wide
+```
+
+`{{ node_name }}` が `Ready` 状態で表示されることを確認します。
+
+### 3. Deploymentを作成する
+
+```bash
+sudo kubectl create deployment web --image={{ app_image }} --replicas={{ app_replicas }}
+sudo kubectl get pods -o wide
+```
+
+### 4. NodePortでServiceを公開する
+
+```bash
+sudo kubectl expose deployment web --type=NodePort --port=80
+sudo kubectl patch service web -p '{"spec":{"ports":[{"port":80,"nodePort":{{ nodeport }}}]}}'
+sudo kubectl get service web
+```
+
+### 5. 公開されたアプリへ疎通確認する
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' http://localhost:{{ nodeport }}
+```
+
+### 6. ログを確認する
+
+```bash
+sudo kubectl logs deployment/web --tail=20
+```
+
+### 7. リソースを削除する
+
+```bash
+sudo kubectl delete service web
+sudo kubectl delete deployment web
+```
+
+### 8. 不要になった場合はk3sをアンインストールする
+
+```bash
+sudo /usr/local/bin/k3s-uninstall.sh
+```
+
+## 動作確認
+
+- `kubectl get nodes` に `{{ node_name }}` が `Ready` で表示されること
+- `kubectl get pods` で {{ app_replicas }} 個のPodが `Running` になること
+- `curl http://localhost:{{ nodeport }}` が200を返すこと
+- `kubectl delete` 後、`kubectl get pods` および `kubectl get service` から該当リソースが消えること
+
+## 注意事項
+
+- NodePortはノードの30000-32767番の範囲内でのみ指定でき、範囲外を指定するとpatch適用時にエラーになる。
+- `k3s-uninstall.sh` はノード上の全Kubernetesリソース・データを削除する破壊的操作であり、演習専用ノード以外では実行しない。
+- シングルノード構成であり、ノード障害時の可用性は無い点を理解した上で用途を限定する。docker-basic-ops(既存)は単一コンテナの直接操作であり、本手順はオーケストレーション層(Deployment/Service)の管理に焦点を置く。

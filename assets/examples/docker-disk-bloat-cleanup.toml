@@ -1,0 +1,5 @@
+threshold_percent = 85
+protect_volumes = ["pgdata", "redis-data"]
+protect_images = ["myapp:latest", "postgres:16"]
+log_max_size = "10m"
+prune_scope = "dangling"

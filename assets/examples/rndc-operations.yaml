@@ -1,0 +1,9 @@
+rndc_key_path: /etc/rndc.key
+allowed_operations: "reload, reconfig, flush, freeze, thaw, status"
+target_zones: "example.com, example.jp"
+freeze_use_case: "動的更新中のゾーンファイルを手動編集する前に一時停止する"
+status_checklist:
+  - "version"
+  - "server is up and running"
+  - "number of zones"
+  - "recursive clients"

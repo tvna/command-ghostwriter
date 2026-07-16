@@ -1,0 +1,102 @@
+# SSHブルートフォース攻撃検知時の対応 — {{ attack_window }}
+
+SSHへのブルートフォース攻撃を検知した際に、攻撃状況を定量化し、侵入成否の確認・攻撃元の遮断・標的アカウントの保護・報告までの一次対応を行います。
+
+## 目的
+
+**{{ detection_source }}** による検知をきっかけに、{{ attack_window }} に発生したSSH認証攻撃について、侵入が成功していないかを確認し、攻撃元の遮断と標的アカウントの保護を速やかに実施できるようになることを目指します。
+
+## 用語解説
+
+- **ブルートフォース攻撃**: ユーザー名・パスワードの組み合わせを機械的に大量に試行し、認証突破を狙う攻撃手法
+- **lastb**: ログイン失敗（bad login)の履歴を表示するコマンド。攻撃元IPと対象アカウントの一覧化に使う
+- **last**: ログイン成功の履歴を表示するコマンド。攻撃期間中に不審な成功ログインがないか確認するために使う
+- **fail2ban**: 認証失敗を監視し、閾値を超えた送信元を自動的に一時遮断(ban)するツール
+- **一次対応(初動対応)**: インシデント発生直後に行う、被害拡大の阻止と証跡確保を優先した暫定的な対応
+
+## シナリオ設定
+
+{{ detection_source }} により、{{ attack_window }} の期間にSSHブルートフォース攻撃が検知されました。主な攻撃元IPは {{ top_source_ips }} で、標的にされたアカウントは {{ targeted_accounts }} です。遮断方針は「{{ block_method }}」とします。
+
+## 手順
+
+### 1. 検知内容を確認し攻撃状況を定量化する
+
+```bash
+sudo lastb | awk -v start="2026-07-16" '$0 ~ start' | wc -l
+sudo journalctl -u sshd --since "$(echo '{{ attack_window }}' | awk '{print $1, $2}')" | grep -c "Failed password"
+```
+
+→ {{ detection_source }} の内容と実際の失敗ログ件数を突き合わせ、攻撃規模（試行回数・継続時間）を把握します。
+
+### 2. 侵入成功の有無を確認する
+
+```bash
+sudo last -n 30
+sudo journalctl -u sshd --since "$(echo '{{ attack_window }}' | awk '{print $1, $2}')" | grep "Accepted"
+```
+
+→ 攻撃元IP {{ top_source_ips }} からの `Accepted` ログインが存在する場合、侵入成功として扱い対応を格上げします。
+
+### 3. 攻撃元を遮断する
+
+方針「{{ block_method }}」に沿って遮断します。
+
+```bash
+for ip in $(echo "{{ top_source_ips }}" | tr ',' ' '); do
+  sudo iptables -I INPUT -s "${ip}" -j DROP
+done
+sudo fail2ban-client status sshd
+```
+
+→ {{ block_method }}
+
+### 4. 標的アカウントを保護する
+
+```bash
+for user in $(echo "{{ targeted_accounts }}" | tr ',' ' '); do
+  echo "=== ${user} ==="
+  sudo passwd -S "${user}"
+  sudo ls -la "/home/${user}/.ssh/authorized_keys" 2>/dev/null
+done
+```
+
+→ {{ targeted_accounts }} について、パスワード認証の無効化状況、authorized_keysの改変有無を確認し、疑わしい場合はロックまたは鍵の再発行を行います。
+
+### 5. 遮断状況を検証する
+
+```bash
+sudo iptables -L INPUT -n | grep -E "$(echo '{{ top_source_ips }}' | tr ',' '|')"
+sudo journalctl -u sshd -f --since "1 minute ago" &
+sleep 30
+kill %1 2>/dev/null
+```
+
+→ 遮断後に対象IPからの新規接続試行がログに現れないことを確認します。
+
+### 6. 記録と恒久対策への引き継ぎを行う
+
+攻撃の検知時刻・攻撃元・侵入成否の判定結果・実施した遮断内容を記録し、fail2banの閾値見直しなど恒久対策の検討へ引き継ぎます。
+
+```bash
+{
+  echo "detection_source: {{ detection_source }}"
+  echo "attack_window: {{ attack_window }}"
+  echo "top_source_ips: {{ top_source_ips }}"
+  echo "targeted_accounts: {{ targeted_accounts }}"
+  echo "block_method: {{ block_method }}"
+} | sudo tee -a /var/log/incident-ssh-bruteforce.log
+```
+
+## 動作確認
+
+- {{ top_source_ips }} からの新規SSH接続試行がログに現れなくなっていること
+- {{ targeted_accounts }} について侵入成功の痕跡（不審な`Accepted`ログや鍵改変）がないこと、またはあれば保護措置済みであること
+- `fail2ban-client status sshd` で対象IPがban状態として反映されていること
+- 攻撃概要と対応内容がインシデント記録として残されていること
+
+## 注意事項
+
+- 遮断対象IPには社内プロキシやNAT越しの正当な接続元が含まれていないか事前に確認する。誤って正規ユーザーを遮断すると業務影響が生じる。
+- 侵入成功の兆候（不審な成功ログイン、authorized_keysの改変等)を発見した場合は、この一次対応にとどめず、より深い調査（account-compromise-response等)へエスカレーションする。
+- iptablesでの即時遮断は再起動で失われる暫定措置であるため、恒久的なブロックリストやfail2banの設定へ反映する。

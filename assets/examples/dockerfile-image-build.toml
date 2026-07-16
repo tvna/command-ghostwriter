@@ -1,0 +1,6 @@
+base_image = "node:20-slim"
+app_dir = "/app"
+build_stage_image = "node:20-slim"
+runtime_user = "appuser"
+expose_port = 3000
+image_tag = "myorg/sample-app:1.0.0"

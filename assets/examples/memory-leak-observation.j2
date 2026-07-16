@@ -1,0 +1,95 @@
+# メモリリーク疑いプロセスの経過観測
+
+`{{ target_process }}` のRSS(常駐メモリ量)を定点記録してリーク傾向を判定し、計画的再起動によるリスク低減と開発側への報告材料をまとめます。
+
+## 目的
+
+単発の高メモリ観測だけで断定せず、`{{ sampling_interval }}` 間隔・{{ observation_period }} にわたるRSS推移を記録して単調増加か定常かを判定し、閾値 `{{ rss_threshold }}MB` を踏まえた暫定運用(計画再起動)と開発側への報告をまとめられるようになることを目指します。
+
+## 用語解説
+
+- **RSS(Resident Set Size)**: プロセスが実際に占有している物理メモリ量。スワップ分は含まない
+- **メモリリーク**: 不要になったメモリが解放されず、時間経過とともにRSSが単調増加し続ける現象
+- **定点観測**: 同一プロセスを一定間隔でサンプリングし、値の推移を時系列で記録すること
+- **smem**: プロセスごとのRSS・PSS(共有メモリを按分した実効使用量)を確認できるツール
+- **計画的再起動**: リーク自体は未修正のまま、閾値到達前に定期的にプロセスを再起動してRSSをリセットする暫定運用
+
+## シナリオ設定
+
+`{{ target_process }}` のRSSが増加傾向にあるため、`{{ sampling_interval }}` 間隔で {{ observation_period }} にわたり観測します。閾値は `{{ rss_threshold }}MB` とし、暫定運用として「{{ restart_plan }}」を予定しています。
+
+## 手順
+
+### 1. 初期状態を確認する
+
+```bash
+ps -C {{ target_process }} -o pid,rss,vsz,etime,cmd
+smem -P {{ target_process }} -c "pid rss pss"
+```
+
+→ 現在のRSSと起動からの経過時間(`etime`)を記録し、観測開始時点の基準値とします。
+
+### 2. 定点観測スクリプトを設置する
+
+```bash
+sudo tee /usr/local/bin/rss-watch.sh >/dev/null <<'EOF'
+#!/bin/bash
+PROC="{{ target_process }}"
+LOG="/var/log/rss-watch-${PROC}.csv"
+ps -C "$PROC" -o rss= | awk -v proc="$PROC" '{printf "%s,%s,%s\n", strftime("%Y-%m-%dT%H:%M:%S"), proc, $1}' >> "$LOG"
+EOF
+sudo chmod +x /usr/local/bin/rss-watch.sh
+```
+
+→ サンプリング間隔 `{{ sampling_interval }}` でcronまたはsystemdタイマーからこのスクリプトを実行するよう登録します。
+
+### 3. 観測期間中のデータを収集する
+
+```bash
+tail -f /var/log/rss-watch-{{ target_process }}.csv
+```
+
+→ 観測期間 {{ observation_period }} が経過するまで、`{{ sampling_interval }}` ごとの記録が蓄積されるのを確認します。
+
+### 4. 推移データを判定する
+
+```bash
+awk -F, '{print $3}' /var/log/rss-watch-{{ target_process }}.csv | sort -n | tail -1
+awk -F, '{print $3}' /var/log/rss-watch-{{ target_process }}.csv | tail -20
+```
+
+→ 直近の値が観測開始時より一貫して増加し続けている場合はリーク傾向、増減を繰り返して一定範囲に収まっている場合は定常状態と判定します。閾値 `{{ rss_threshold }}MB` への到達見込み時刻も推定します。
+
+### 5. 暫定運用として計画再起動を設定する
+
+```bash
+echo "{{ restart_plan }}"
+sudo systemctl edit --force --full {{ target_process }}-restart.timer
+```
+
+→ 「{{ restart_plan }}」の内容に沿って `OnCalendar` を設定し、閾値到達前にRSSがリセットされるようにします。
+
+### 6. 開発側への報告材料を整理する
+
+```bash
+cat <<EOF
+対象プロセス: {{ target_process }}
+観測間隔: {{ sampling_interval }} / 観測期間: {{ observation_period }}
+判定結果: (手順4の推移グラフ・傾向を記入)
+閾値: {{ rss_threshold }}MB
+暫定運用: {{ restart_plan }}
+EOF
+```
+
+## 動作確認
+
+- `/var/log/rss-watch-{{ target_process }}.csv` に {{ observation_period }} 分の連続した記録があること
+- RSS推移が単調増加か定常かの判定結果が記録されていること
+- 計画再起動のタイマーが `systemctl list-timers` に登録され、次回実行時刻が閾値到達見込みより前であること
+- 開発側へ渡す報告material(推移データ・判定結果・暫定運用内容)が揃っていること
+
+## 注意事項
+
+- 計画再起動はリークの根本修正ではなく暫定措置であるため、開発側への報告と修正着手の依頼を必ずセットで行う。
+- 業務時間中の再起動は処理中トランザクションへ影響し得るため、`{{ restart_plan }}` の実行時刻は低負荷帯に設定する。
+- 観測ログ(`rss-watch-*.csv`)は無期限に増え続けるため、観測終了後は収集ジョブを停止するかログローテーションを設定する。

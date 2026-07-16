@@ -1,0 +1,6 @@
+jump_or_target_host = "bastion.example.internal"
+forward_type = "local"
+local_port = 15432
+remote_host = "db-primary.internal"
+remote_port = 5432
+duration_policy = "作業完了後は必ず切断し、30分以上放置した接続は自動検知して警告する"

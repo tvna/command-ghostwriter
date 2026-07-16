@@ -1,0 +1,92 @@
+# Squidによるフォワードプロキシ構築
+
+社内から外部へのHTTP/HTTPSアクセスを中継するSquidを構築し、ACLによる送信元制御・特定ドメインのブロック・アクセスログ確認までを行います。root権限(sudo)で実施してください。
+
+## 目的
+
+Squidをフォワードプロキシとして構築し、ACLで許可された送信元ネットワークのみが利用でき、意図しないオープンプロキシ化を防いだ状態で運用できるようになることを目指します。
+
+## 用語解説
+
+- **フォワードプロキシ**: クライアントに代わって外部サーバへリクエストを中継する仕組み。社内からインターネットへの出口として使われる
+- **ACL(アクセス制御リスト)**: Squidの設定で送信元・宛先・時間帯などの条件を定義し、`http_access`と組み合わせて許可・拒否を制御する
+- **CONNECT**: HTTPSトンネリングのためにクライアントがプロキシへ送るメソッド。SquidはCONNECT先のポートもACLで制限できる
+- **オープンプロキシ**: 送信元制限なく誰でも利用できてしまうプロキシ。スパム中継や不正アクセスの踏み台に悪用される
+- **access.log**: Squidが記録するアクセスログ。送信元IP・宛先URL・ステータスコード等が記録される
+
+## シナリオ設定
+
+ポート`{{ listen_port }}`で待ち受け、`{{ allowed_src_networks }}`からのアクセスのみ許可します。`{{ blocked_domains }}`は明示的にブロックし、キャッシュ容量は`{{ cache_size }}`とします。{{ log_note }}。
+
+## 手順
+
+### 1. Squidを導入する
+
+```bash
+sudo apt install -y squid
+squid -v
+```
+
+### 2. squid.confを設定する
+
+```bash
+sudo cp /etc/squid/squid.conf /etc/squid/squid.conf.bak
+sudo tee /etc/squid/squid.conf <<'EOF'
+http_port {{ listen_port }}
+
+acl allowed_src src {{ allowed_src_networks }}
+acl blocked_domains dstdomain {% for d in blocked_domains.split(",") %}.{{ d }} {% endfor %}
+
+http_access deny blocked_domains
+http_access allow allowed_src
+http_access deny all
+
+cache_dir ufs /var/spool/squid 1000 16 256
+cache_mem {{ cache_size }}
+access_log /var/log/squid/access.log squid
+EOF
+```
+
+### 3. ACLの順序を検証する
+
+```bash
+sudo squid -k parse
+```
+
+`http_access`は上から順に評価されるため、`blocked_domains`の拒否が`allowed_src`の許可より先に来ていることを確認します。
+
+### 4. Squidを起動し、クライアントから疎通確認する
+
+```bash
+sudo systemctl enable --now squid
+curl -x http://localhost:{{ listen_port }} -I https://example.com
+```
+
+### 5. ブロック対象ドメインへのアクセスが拒否されることを確認する
+
+```bash
+{% for d in blocked_domains.split(",") %}curl -x http://localhost:{{ listen_port }} -s -o /dev/null -w "%{http_code}\n" http://{{ d }}
+{% endfor %}```
+
+`403 Forbidden`が返ることを確認します。
+
+### 6. access.logを確認する
+
+```bash
+sudo tail -n 20 /var/log/squid/access.log
+```
+
+{{ log_note }}
+
+## 動作確認
+
+- `{{ allowed_src_networks }}`からのアクセスは許可され、`curl`が正常なHTTPレスポンスを返すこと
+- `{{ allowed_src_networks }}`以外の送信元からのアクセスが拒否されること(別ネットワークからの検証を推奨)
+- `{{ blocked_domains }}`へのアクセスがすべて`403`で拒否されること
+- `access.log`にリクエストの送信元IP・宛先・ステータスコードが記録されること
+
+## 注意事項
+
+- `http_access allow allowed_src`の前に`deny all`を置くとすべて拒否されてしまうため、ACLの記述順序を必ず確認する。順序を誤るとオープンプロキシ化(誰でも利用可能な状態)のリスクがある。
+- キャッシュ容量(`{{ cache_size }}`)はディスク容量に応じて設定し、`cache_dir`のパスに十分な空き容量があることを事前に確認する。
+- `incident-proxy`(既存)はプロキシ関連の障害対応runbookであり、本手順は構築・ACL設計の初期構築に焦点を当てる。

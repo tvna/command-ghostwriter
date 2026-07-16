@@ -1,0 +1,5 @@
+myhostname = "mail.example.internal"
+relayhost = "[smtp.relay.example.com]:587"
+mynetworks = "127.0.0.0/8 [::1]/128"
+inet_interfaces = "loopback-only"
+notify_from = "noreply@example.com"

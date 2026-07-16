@@ -1,0 +1,8 @@
+zone_name: example.jp
+old_provider: "旧DNS事業者A社"
+new_provider: "新DNS事業者B社"
+ns_records_new:
+  - ns1.newprovider.example
+  - ns2.newprovider.example
+parallel_period: "72時間"
+rollback_plan: "レジストラのNSレコードを旧事業者のns1.oldprovider.example / ns2.oldprovider.exampleへ戻す"

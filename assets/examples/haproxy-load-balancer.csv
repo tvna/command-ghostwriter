@@ -1,0 +1,4 @@
+backend_name,server_host,server_port,weight,check_option
+web01,10.0.1.11,8080,100,check inter 2000 rise 2 fall 3
+web02,10.0.1.12,8080,100,check inter 2000 rise 2 fall 3
+web03,10.0.1.13,8080,50,check inter 2000 rise 2 fall 3 backup

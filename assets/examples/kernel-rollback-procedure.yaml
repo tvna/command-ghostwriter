@@ -1,0 +1,8 @@
+title: カーネル更新後の不具合切り戻し演習
+hostname: batch-worker-05
+bad_kernel_version: 6.8.0-45-generic
+good_kernel_version: 6.8.0-40-generic
+symptom: 更新後にNICドライバがロードされず全ネットワークインターフェースが認識されない
+grub_menu_access: 物理コンソール(IPMI経由のシリアルコンソール)にアクセス可能
+hold_method: apt-mark hold linux-image-6.8.0-45-generic
+escalation: インフラ基盤チーム (内線 1201)

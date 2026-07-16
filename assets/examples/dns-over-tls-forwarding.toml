@@ -1,0 +1,5 @@
+resolver_software = "unbound"
+upstream_dot_servers = ["1.1.1.1@853#cloudflare-dns.com", "1.0.0.1@853#cloudflare-dns.com"]
+tls_auth_name = "cloudflare-dns.com"
+fallback_policy = "no-fallback"
+verify_method = "tcpdump -i eth0 -n 'port 53 or port 853'"

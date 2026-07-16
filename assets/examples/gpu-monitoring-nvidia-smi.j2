@@ -1,0 +1,76 @@
+# nvidia-smiによるGPU使用状況の監視
+
+`nvidia-smi` を使い、GPU使用率・メモリ・温度・プロセスを定期記録し、異常検知の基準を作ります。
+
+## 目的
+
+`nvidia-smi` の出力項目を正しく読み、`--query-gpu` による定期記録としきい値判定を組み合わせて、GPU異常の早期検知ができるようになることを目指します。
+
+## 用語解説
+
+- **utilization.gpu**: GPUコアの使用率(%)。処理待ちがなければ低い値でも正常
+- **utilization.memory**: GPUメモリ帯域の使用率(%)。VRAM使用量そのものとは別の指標
+- **temperature.gpu**: GPUコア温度(摂氏)。継続的に高いとサーマルスロットリングが発生する
+- **power.draw**: 現在の消費電力(W)。電力上限(power limit)に対する余裕を見る指標
+- **--query-gpu**: `nvidia-smi` でCSV形式の指定項目のみを出力させるオプション
+
+## シナリオ設定
+
+`{{ sampling_interval }}` 秒間隔で `{{ watch_metrics | join(", ") }}` を記録し、出力先は `{{ log_output_path }}` です。しきい値は GPU使用率 {{ alert_thresholds.gpu_util_percent }}%、メモリ使用率 {{ alert_thresholds.memory_percent }}%、温度 {{ alert_thresholds.temp_celsius }}℃ です。
+
+## 手順
+
+### 1. nvidia-smiの読み方を確認する
+
+```bash
+nvidia-smi
+nvidia-smi --query-gpu={{ watch_metrics | join(",") }} --format=csv
+```
+
+### 2. --query-gpuによるCSV定期記録を設定する
+
+```bash
+sudo mkdir -p $(dirname {{ log_output_path }})
+sudo tee /usr/local/bin/gpu-metrics-collect.sh <<'EOF'
+#!/bin/bash
+nvidia-smi --query-gpu=timestamp,{{ watch_metrics | join(",") }} \
+  --format=csv,noheader >> {{ log_output_path }}
+EOF
+sudo chmod +x /usr/local/bin/gpu-metrics-collect.sh
+(crontab -l 2>/dev/null; echo "* * * * * sleep $(( RANDOM \% {{ sampling_interval }} )); /usr/local/bin/gpu-metrics-collect.sh") | crontab -
+```
+
+{% if process_watch %}
+### 3. プロセス別使用状況を把握する
+
+```bash
+nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv
+```
+{% endif %}
+
+### 4. しきい値と異常判定基準を設定する
+
+```bash
+nvidia-smi --query-gpu=utilization.gpu,memory.used,temperature.gpu --format=csv,noheader,nounits | \
+  awk -F', *' '{ if ($1 > {{ alert_thresholds.gpu_util_percent }} || $3 > {{ alert_thresholds.temp_celsius }}) print "ALERT: " $0 }'
+```
+
+### 5. 監視システムへ取り込む
+
+記録した `{{ log_output_path }}` を node_exporter の textfile collector や Zabbix の外部チェックに読み込ませ、ダッシュボード化します。
+
+```bash
+tail -n 5 {{ log_output_path }}
+```
+
+## 動作確認
+
+- `{{ log_output_path }}` が {{ sampling_interval }} 秒程度の間隔で追記され続けること
+- `nvidia-smi --query-gpu` の出力列が `{{ watch_metrics | join(", ") }}` と一致すること
+- しきい値超過時に手順4のコマンドが `ALERT:` 行を出力すること
+
+## 注意事項
+
+- CSVログはローテーションしないと肥大化するため、logrotate等での容量管理を別途行う。
+- しきい値(GPU使用率 {{ alert_thresholds.gpu_util_percent }}%、温度 {{ alert_thresholds.temp_celsius }}℃)は用途や冷却環境によって調整が必要で、固定値のまま鵜呑みにしない。
+- 本手順は監視基盤の構築(node_exporter等)そのものは対象外とし、nvidia-smiによる収集と判定基準の作成に焦点を絞る。

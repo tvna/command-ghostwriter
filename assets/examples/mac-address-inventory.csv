@@ -1,0 +1,5 @@
+mac_address,device_name,expected_switch,expected_port,vlan,owner
+00:1a:2b:3c:4d:5e,fileserver01,sw-core-01,Gi1/0/5,10,infra-team
+00:1a:2b:3c:4d:6f,printer-3f,sw-access-03,Gi0/12,20,facilities
+00:1a:2b:3c:4d:70,cam-entrance,sw-access-02,Gi0/24,30,security-team
+00:1a:2b:3c:4d:71,dev-laptop-05,sw-access-01,Gi0/8,10,dev-team

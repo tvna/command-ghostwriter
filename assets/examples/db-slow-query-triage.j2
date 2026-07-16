@@ -1,0 +1,92 @@
+# スロークエリによるDB性能劣化の調査
+
+スロークエリログの有効化と収集から、実行計画の確認・インデックス改善候補の特定までを行います。
+
+## 目的
+
+スロークエリログの読み方を理解し、収集したクエリ一覧から実行時間・スキャン行数の大きいものを優先順位付けし、`EXPLAIN` による実行計画確認からインデックス改善候補を提案できるようになることを目指します。
+
+## 用語解説
+
+- **スロークエリログ**: 指定した閾値を超えた実行時間のクエリを記録するログ機能
+- **query_digest**: パラメータ値を `?` に正規化した、クエリの型を表す文字列
+- **rows_examined**: クエリ実行時にストレージエンジンが走査した行数。インデックスが効いていないと肥大化する
+- **EXPLAIN**: クエリの実行計画(どのインデックスを使うか、フルスキャンかなど)を表示するコマンド
+- **フルスキャン(full scan)**: インデックスを使わずテーブル全行を走査すること。`rows_examined` が大きい主因になりやすい
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 件のスロークエリを調査対象とします。
+
+| query_digest | avg_time_ms | rows_examined | frequency | suspected_table |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["query_digest"] }} | {{ r["avg_time_ms"] }} | {{ r["rows_examined"] }} | {{ r["frequency"] }} | {{ r["suspected_table"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. スロークエリログを有効化する
+
+```bash
+mysql -e "SET GLOBAL slow_query_log = 'ON'; SET GLOBAL long_query_time = 1;"
+mysql -e "SHOW VARIABLES LIKE 'slow_query%';"
+```
+
+### 2. ログを収集し集計する
+
+`pt-query-digest` や `mysqldumpslow` で、実行回数・平均実行時間ごとに集計します。
+
+```bash
+mysqldumpslow -s t -t 10 /var/log/mysql/mysql-slow.log
+```
+
+→ 集計結果と本シナリオの {{ csv_rows | length }} 件のダイジェストを突き合わせます。
+
+### 3. EXPLAINで実行計画を確認する
+
+`suspected_table` ごとに実行計画を確認し、`type` が `ALL`(フルスキャン)になっていないかを確認します。
+
+```bash
+{% for r in csv_rows %}mysql -e "EXPLAIN {{ r["query_digest"] }};" # 対象テーブル: {{ r["suspected_table"] }}
+{% endfor %}```
+
+### 4. インデックス・クエリ改善候補を整理する
+
+`avg_time_ms` と `rows_examined` が特に大きいものを優先度上位とします。
+
+```bash
+{% for r in csv_rows %}{% if r["avg_time_ms"] | int > 1000 %}echo "最優先: {{ r["suspected_table"] }} (avg {{ r["avg_time_ms"] }}ms, examined {{ r["rows_examined"] }} rows, {{ r["frequency"] }} 回/日)"
+{% else %}echo "要観察: {{ r["suspected_table"] }} (avg {{ r["avg_time_ms"] }}ms, examined {{ r["rows_examined"] }} rows, {{ r["frequency"] }} 回/日)"
+{% endif %}{% endfor %}```
+
+### 5. インデックスを適用し効果測定する
+
+優先度上位のテーブルに検証環境でインデックスを追加し、再度 `EXPLAIN` と実行時間を測定します。
+
+```bash
+{% for r in csv_rows %}{% if r["avg_time_ms"] | int > 1000 %}mysql -e "SHOW INDEX FROM {{ r["suspected_table"] }};"
+{% endif %}{% endfor %}```
+
+### 6. 結果を報告する
+
+```bash
+cat <<EOF
+調査対象クエリ数: {{ csv_rows | length }}
+最優先テーブル: (手順4の出力を要約して記入)
+適用したインデックス: (手順5の出力を要約して記入)
+改善後の平均実行時間: (再測定結果を記入)
+EOF
+```
+
+## 動作確認
+
+- 対象クエリの `EXPLAIN` 結果で `type` が `ALL` から `ref`/`range` 等の効率的なアクセス方式に改善していること
+- 改善後の平均実行時間が調査前の `avg_time_ms` より短縮していること
+- `rows_examined` が大幅に減少していること
+- 改善結果と適用内容が報告記録に残っていること
+
+## 注意事項
+
+- インデックス追加はテーブルサイズによってはロックや書き込み負荷増加を伴うため、まず検証環境で効果を確認してから本番へ適用する。
+- インデックスは書き込み性能とのトレードオフがあるため、`frequency` が低いクエリのために追加しすぎない。
+- `long_query_time` を下げすぎるとログが急増するため、調査後は元の閾値に戻すか運用方針を決めておく。

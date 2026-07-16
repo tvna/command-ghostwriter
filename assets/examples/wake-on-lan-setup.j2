@@ -1,0 +1,94 @@
+# Wake-on-LANによる遠隔起動の設定
+
+対象機のWoL有効化からマジックパケット送信・疎通確認まで、遠隔起動運用を構築する手順です。
+
+## 目的
+
+マジックパケットによる遠隔起動の仕組みを理解し、対象機のWoL有効化から送信・起動確認までを一連の運用として構築できるようになることを目指します。
+
+## 用語解説
+
+- **Wake-on-LAN(WoL)**: 特定のパケットを受信すると電源オフ状態からでもNICが起動信号をマザーボードに送り、機器を起動させる仕組み
+- **マジックパケット**: 対象機のMACアドレスを6回連続で含む特殊な構造のUDPパケット。これを受信するとWoLが発火する
+- **ブロードキャスト到達性**: マジックパケットは通常サブネット内のブロードキャストアドレス宛に送るため、送信元と対象機が別セグメントの場合は届かない
+- **BIOS/UEFIのWoL設定**: OS側の設定に加え、ファームウェア側で「電源オフ時のWoLを許可する」設定が有効化されている必要がある
+- **ethtool**: LinuxでNICのWoL対応状況の確認・有効化を行うコマンド
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 台を遠隔起動の対象とします。送信元ホストは主に `{{ csv_rows[0]["sender_host"] }}` です。
+
+| hostname | mac_address | segment | wol_enabled | sender_host |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["hostname"] }} | {{ r["mac_address"] }} | {{ r["segment"] }} | {{ r["wol_enabled"] }} | {{ r["sender_host"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 対象機のNICがWoLに対応しているか確認する
+
+対象機上で実行します。
+
+```bash
+{% for r in csv_rows %}# {{ r["hostname"] }} ({{ r["mac_address"] }})
+sudo ethtool eth0 | grep -E "Supports Wake-on|Wake-on"
+{% endfor %}```
+
+`Supports Wake-on: g` のように `g`(マジックパケット)が含まれていることを確認します。
+
+### 2. BIOS/UEFIとOS側でWoLを有効化する
+
+BIOS/UEFIの電源管理設定で「Wake on LAN」または「PCIe Wake」を有効化したうえで、OS側も設定します。
+
+```bash
+{% for r in csv_rows %}{% if r["wol_enabled"] == "true" %}sudo ethtool -s eth0 wol g   # {{ r["hostname"] }}
+{% endif %}{% endfor %}```
+
+`wol_enabled` が `false` の機器(例: {{ csv_rows[2]["hostname"] }})は今回は対象外とし、後日個別に検討します。
+
+### 3. 設定を永続化する
+
+再起動やNetworkManagerの再起動でWoL設定が消えないよう、永続化します。
+
+```bash
+sudo tee /etc/NetworkManager/dispatcher.d/99-wol <<'EOF'
+#!/bin/sh
+[ "$2" = "up" ] && /usr/sbin/ethtool -s "$1" wol g
+EOF
+sudo chmod +x /etc/NetworkManager/dispatcher.d/99-wol
+```
+
+### 4. 送信元ホストからマジックパケットを送る
+
+```bash
+{% for r in csv_rows %}{% if r["wol_enabled"] == "true" %}# {{ r["sender_host"] }} から {{ r["hostname"] }} ({{ r["segment"] }}) へ
+wakeonlan {{ r["mac_address"] }}
+{% endif %}{% endfor %}```
+
+### 5. 起動を確認する
+
+```bash
+{% for r in csv_rows %}{% if r["wol_enabled"] == "true" %}until ping -c1 -W1 {{ r["hostname"] }} >/dev/null 2>&1; do sleep 5; done; echo "{{ r["hostname"] }} up"
+{% endif %}{% endfor %}```
+
+### 6. 別セグメントからの送信課題を確認する
+
+送信元とセグメントが異なる機器についてはブロードキャストが届かないため、対象セグメントのゲートウェイやディレクテッドブロードキャストの許可状況を確認します。
+
+```bash
+{% for r in csv_rows %}echo "{{ r["hostname"] }}: segment={{ r["segment"] }}"
+{% endfor %}```
+
+同一セグメント内に中継用の送信元ホストを置くか、ルータでディレクテッドブロードキャストを許可する設計を検討します。
+
+## 動作確認
+
+- `ethtool eth0` の出力で `wol_enabled=true` の {{ csv_rows | selectattr("wol_enabled", "equalto", "true") | list | length }} 台がマジックパケット対応(`g`)を示していること
+- `wakeonlan` 送信後、対象機がpingに応答する状態まで起動すること
+- 別セグメントの機器({{ csv_rows[2]["hostname"] }} 等)については、対策なしでは起動しないことを確認済みであること
+
+## 注意事項
+
+- マジックパケットの送信自体はブロードキャストであり対象機を破壊するものではないが、意図しない機器を一斉起動させないようMACアドレスの取り違えに注意する。
+- 常時WoLを有効にしておくと、悪意あるマジックパケット送信で意図せず機器が起動するリスクがある。管理セグメントからのみ許可するなどFW側の制御も併用する。
+- 本手順はWoLの有効化と起動確認が対象であり、起動後のOS内自動処理(ジョブ起動等)は別途の運用手順で管理する。

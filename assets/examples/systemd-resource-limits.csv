@@ -1,0 +1,4 @@
+service_name,limit_nofile,memory_max,cpu_quota,reason
+nginx,65535,512M,50%,同時接続数増加に伴うFD枯渇の防止
+app-worker,4096,1G,100%,バッチ処理時のメモリ暴走からホストを保護
+redis,10240,256M,30%,キャッシュ用途のためメモリ上限を厳格化

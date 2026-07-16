@@ -1,0 +1,88 @@
+# ユーザー別ディスククォータの設定
+
+`/home`のようなユーザー領域で、1人あたりのディスク使用量に上限を設けます。ext4のusrquota機能を使い、soft/hard制限と猶予期間(grace period)を設計します。root権限(sudo)で実施してください。
+
+## 目的
+
+soft/hardという2段階の制限と猶予期間の意味を理解し、`quotacheck`/`quotaon`/`setquota`によるユーザー別クォータ運用を一巡できるようになることを目指します。
+
+## 用語解説
+
+- **soft limit**: 超過しても即座には書き込み拒否されないが、猶予期間内に是正しないとhard limit同様に書き込み不可となる制限値
+- **hard limit**: 超過した時点で即座に書き込みが拒否される絶対的な上限値
+- **grace period(猶予期間)**: soft limit超過後、hard limitに達するまでの猶予として与えられる期間
+- **quotacheck**: ファイルシステムをスキャンし、クォータ管理用のデータベースファイルを作成・更新するコマンド
+- **repquota**: ファイルシステム全体のクォータ使用状況を一覧表示するコマンド
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 件のユーザーに対し、`{{ csv_rows[0]["filesystem"] }}` 上でディスククォータを設定します。
+
+| username | filesystem | soft_limit | hard_limit | grace_note |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["username"] }} | {{ r["filesystem"] }} | {{ r["soft_limit"] }} | {{ r["hard_limit"] }} | {{ r["grace_note"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. quotaパッケージを導入する
+
+```bash
+apt-get install -y quota || dnf install -y quota
+```
+
+### 2. `/etc/fstab`にusrquotaオプションを追加し再マウントする
+
+```bash
+cp /etc/fstab /etc/fstab.bak.$(date +%Y%m%d)
+grep -n " {{ csv_rows[0]["filesystem"] }} " /etc/fstab
+# 該当行の options 列(例: defaults)の末尾に ,usrquota を追記する。編集後は内容を必ず目視確認する。
+${EDITOR:-vi} /etc/fstab
+mount -o remount {{ csv_rows[0]["filesystem"] }}
+mount | grep "{{ csv_rows[0]["filesystem"] }} "
+```
+
+remount後、マウントオプションに`usrquota`が含まれていることを確認します。
+
+### 3. クォータデータベースを作成する
+
+```bash
+quotacheck -cum {{ csv_rows[0]["filesystem"] }}
+quotaon -v {{ csv_rows[0]["filesystem"] }}
+```
+
+### 4. ユーザーごとにsoft/hard制限を設定する
+
+```bash
+{% for r in csv_rows %}setquota -u {{ r["username"] }} {{ r["soft_limit"] }} {{ r["hard_limit"] }} 0 0 {{ r["filesystem"] }}
+{% endfor %}```
+
+inode数の制限は本手順書では対象外とし、ブロック(容量)制限のみ`0 0`で無制限としています。
+
+### 5. `repquota`で設定内容を確認する
+
+```bash
+repquota -u {{ csv_rows[0]["filesystem"] }}
+```
+
+`BLOCK LIMITS`欄に、CSVで定義した`soft_limit`/`hard_limit`が反映されていることを確認します。
+
+### 6. soft limit超過時の挙動を確認する
+
+```bash
+{% for r in csv_rows %}quota -u {{ r["username"] }}
+{% endfor %}```
+
+soft limitを超過したユーザーは`quota`コマンドの出力に猶予期限が表示されます。猶予期間内に是正されない場合はhard limit同様に書き込みが拒否されます。
+
+## 動作確認
+
+- `mount | grep {{ csv_rows[0]["filesystem"] }}` にマウントオプション `usrquota` が含まれること
+- `repquota -u {{ csv_rows[0]["filesystem"] }}` の出力に、各ユーザーの `soft_limit`/`hard_limit` が定義通り表示されること
+- soft limitを超過したユーザーに対し `quota -u <username>` で猶予期限が表示されること
+
+## 注意事項
+
+- `/etc/fstab`はremount前に必ずバックアップを取り、`sed`置換後は`mount -o remount`前に内容を目視確認する。誤った編集は次回起動時のマウント失敗につながる。
+- soft limit超過はユーザーに事前案内せずに運用すると問い合わせが増える。`{{ csv_rows[0]["grace_note"] }}`のように、超過時の通知・猶予ルールを利用者へ周知してから有効化する。
+- クォータ対象のファイルシステムを別領域(データベース領域等)と誤って混同しないよう、`{{ csv_rows[0]["filesystem"] }}`のようにパスを明示して作業する。

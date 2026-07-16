@@ -1,0 +1,14 @@
+repo_path: "/srv/borg-repo"
+encryption_mode: "repokey-blake2"
+source_paths:
+  - "/etc"
+  - "/var/www"
+  - "/home"
+exclude_patterns:
+  - "*/.cache/*"
+  - "*/node_modules/*"
+  - "*.tmp"
+prune_policy:
+  daily: 7
+  weekly: 4
+  monthly: 6

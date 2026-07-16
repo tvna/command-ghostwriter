@@ -1,0 +1,7 @@
+exporter_version: "1.8.2"
+listen_address: "0.0.0.0:9100"
+textfile_dir: "/var/lib/node_exporter/textfile_collector"
+service_user: "node_exporter"
+firewall_allow_from:
+  - "10.0.0.10"
+  - "10.0.0.11"

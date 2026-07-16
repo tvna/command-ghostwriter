@@ -1,0 +1,83 @@
+# 障害・セキュリティ事案の証跡保全
+
+調査に必要なログ・システム状態を改変せず収集し、ハッシュ付きで保全する手順です。証跡は後の原因究明や監査で唯一の裏付けとなるため、原本を変更しない収集手順を厳守します。
+
+## 目的
+
+証跡保全の原則を理解し、揮発情報を優先的に採取した上で、ログ・システム状態をハッシュ付きで改変なく保全できるようになることを目指します。
+
+## 用語解説
+
+- **証跡保全**: 調査・監査のために、ログやシステム状態を改変せず記録・保管すること
+- **揮発情報**: プロセス一覧やネットワーク接続など、再起動やシャットダウンで失われる情報
+- **journalctlエクスポート**: systemdジャーナルのログを外部ファイルへ書き出すこと
+- **sosreport**: システム状態を一括採取するRed Hat系ディストリビューション標準の診断収集ツール
+- **保管台帳**: 保全した証跡ファイルとそのハッシュ値・採取時刻を記録した一覧
+- **チェーン・オブ・カストディ**: 証跡がいつ誰の手を経て保管されたかを追跡できる状態を保つ考え方
+
+## シナリオ設定
+
+事案 `{{ incident_id }}` の対象ホストは `{{ target_host }}` です。保全対象は {{ evidence_items | join("、") }} の {{ evidence_items | length }} 項目で、保全先ディレクトリは `{{ preservation_dir }}`、ハッシュアルゴリズムは `{{ hash_algorithm }}` を使用します。
+
+## 手順
+
+### 1. 保全の原則を確認し、作業ログを開始する
+
+原本を変更しないこと、すべての操作の実施時刻を記録することを徹底します。
+
+```bash
+mkdir -p {{ preservation_dir }}
+echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') 保全開始: {{ incident_id }} on {{ target_host }}" | tee -a {{ preservation_dir }}/work.log
+```
+
+### 2. 揮発情報を優先的に採取する
+
+再起動で失われる情報を最初に採取します。
+
+```bash
+ssh {{ target_host }} "ps auxww" > {{ preservation_dir }}/ps-auxww.txt
+ssh {{ target_host }} "ss -tunap" > {{ preservation_dir }}/ss-tunap.txt
+echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') 揮発情報採取完了" | tee -a {{ preservation_dir }}/work.log
+```
+
+### 3. journalctlエクスポートとログコピーを行う
+
+```bash
+ssh {{ target_host }} "journalctl --since '-72h' -o export" > {{ preservation_dir }}/journal-72h.export
+{% for item in evidence_items %}echo "対象: {{ item }}"
+{% endfor %}```
+
+### 4. sosreport等で一括採取する
+
+```bash
+ssh {{ target_host }} "sudo sos report --batch --tmp-dir /tmp"
+scp {{ target_host }}:/tmp/sosreport-*.tar.xz {{ preservation_dir }}/
+```
+
+### 5. ハッシュを計算し、保管台帳に記録する
+
+```bash
+cd {{ preservation_dir }} && {{ hash_algorithm }}sum * > preservation-ledger.{{ hash_algorithm }}
+cat preservation-ledger.{{ hash_algorithm }}
+```
+
+### 6. 引き渡しと保管期限を記録する
+
+```bash
+cat <<EOF >> {{ preservation_dir }}/work.log
+$(date -u '+%Y-%m-%dT%H:%M:%SZ') 保全完了。引き渡し先・保管期限を記録すること。
+EOF
+```
+
+## 動作確認
+
+- `{{ preservation_dir }}` 配下に採取した全ファイルが存在すること
+- `preservation-ledger.{{ hash_algorithm }}` に全ファイルのハッシュ値が記録されていること
+- `work.log` に採取開始・完了それぞれの時刻が記録されていること
+
+## 注意事項
+
+- 対象ホスト `{{ target_host }}` 上のファイルを直接編集・削除しない。原本は変更せず、コピーに対して作業する。
+- log-integrity-hash（平時の改ざん検知）とは異なり、本手順は事案発生後の一回限りの証跡採取・保全を目的とする。
+- 保全した証跡には個人情報や認証情報が含まれる可能性があるため、`{{ preservation_dir }}` へのアクセス権限を関係者のみに限定する。
+- 保管期限を過ぎた証跡の削除は、関係者の承認を得てから行う。

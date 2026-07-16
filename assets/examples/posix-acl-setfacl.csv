@@ -1,0 +1,5 @@
+target_path,entry_type,entry_name,perms,default_acl,reason
+/srv/projects/alpha,user,tanaka,rwx,true,プロジェクトリーダーへの個別書き込み許可
+/srv/projects/alpha,group,auditors,r-x,false,監査チームへの一時的な閲覧許可
+/srv/projects/alpha/reports,user,sato,rw-,false,レポート担当者への例外的な書き込み許可
+/srv/projects/alpha/incoming,group,contractors,rwx,true,外部委託先グループへの受け渡し領域許可

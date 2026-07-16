@@ -1,0 +1,88 @@
+# Cisco機器のsyslog転送とNTP同期の基準設定
+
+ネットワーク機器群全台のログ転送先と時刻同期を統一し、障害調査でログの時系列を突き合わせられる状態を作るベースライン設定です。
+
+## 目的
+
+ログと時刻の信頼性がトラブル対応の前提条件であることを踏まえ、機器群のsyslog転送先・ログレベル・NTP同期・タイムゾーン設定を統一し、全機器で同期状態を確認できるようになることを目指します。
+
+## 用語解説
+
+- **logging host**: syslogメッセージの転送先サーバを指定するCisco IOSのコマンド
+- **logging trapレベル**: syslogサーバへ転送するメッセージの重要度しきい値(`emergencies`から`debugging`まで8段階)。指定したレベル以上(緊急寄り)のメッセージのみ転送される
+- **NTP(Network Time Protocol)**: 機器間で時刻を同期させるプロトコル。複数機器のログを突き合わせる調査では時刻のずれが致命的になる
+- **stratum**: NTPサーバの時刻源からの階層距離。数値が小さいほど時刻源に近い
+- **service timestamps**: ログメッセージにタイムスタンプを付与するかどうか、および書式(日時・タイムゾーン・ミリ秒)を制御する設定
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 台の機器に、共通のベースライン(syslog転送・NTP同期・タイムゾーン)を投入します。
+
+| device_name | mgmt_ip | syslog_server | logging_level | ntp_server | timezone |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["device_name"] }} | {{ r["mgmt_ip"] }} | {{ r["syslog_server"] }} | {{ r["logging_level"] }} | {{ r["ntp_server"] }} | {{ r["timezone"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 各機器へ管理IPで接続し現状を確認する
+
+```bash
+{% for r in csv_rows %}ssh admin@{{ r["mgmt_ip"] }}
+show logging | include Logging to
+show ntp status
+{% endfor %}```
+
+### 2. logging hostとレベルを設定する
+
+```bash
+{% for r in csv_rows %}! {{ r["device_name"] }} ({{ r["mgmt_ip"] }})
+configure terminal
+logging host {{ r["syslog_server"] }}
+logging trap {{ r["logging_level"] }}
+service timestamps log datetime msec localtime show-timezone
+end
+write memory
+{% endfor %}```
+
+### 3. NTPサーバを設定し同期を確認する
+
+```bash
+{% for r in csv_rows %}! {{ r["device_name"] }}
+configure terminal
+clock timezone {{ r["timezone"] }} 9
+ntp server {{ r["ntp_server"] }}
+end
+show ntp status
+show ntp associations
+{% endfor %}```
+
+`show ntp status`の出力で`Clock is synchronized`となるまで数分待つ場合があります。
+
+### 4. タイムスタンプ書式を確認する
+
+```bash
+show clock detail
+show logging | begin Log Buffer
+```
+
+ログの各行に、設定したタイムゾーン付きのタイムスタンプが付与されていることを確認します。
+
+### 5. 全機器への展開状況を一覧で確認する
+
+```bash
+{% for r in csv_rows %}echo -n "{{ r["device_name"] }}: " ; ssh admin@{{ r["mgmt_ip"] }} "show ntp status | include synchronized"
+{% endfor %}```
+
+## 動作確認
+
+- 対象 {{ csv_rows | length }} 台すべてで `show ntp status` が `Clock is synchronized` を示すこと
+- 各機器の `show logging` 出力に、設定した `syslog_server` 宛のログ転送(`Logging to`)が表示されること
+- syslogサーバ側で、全機器からのログが同一のタイムゾーン基準で到着し、時系列で突き合わせられること
+- 意図的に発生させたイベント(インターフェースのshutdown/no shutdown等)のログが、発生源機器とsyslogサーバの双方で同一時刻として記録されていること
+
+## 注意事項
+
+- `logging trap`のレベルを`debugging`等の詳細寄りに設定すると、ログ量が急増しsyslogサーバやリンク帯域を圧迫する。既存の運用実績があるレベル(`informational`や`notifications`)から開始し、必要に応じて見直す。
+- NTP同期前に手動で時刻を大きくずらすと、既存ログのタイムスタンプと逆転が生じる。既に稼働中の機器へ導入する場合は、切替前後でログの連続性が保たれているか確認する。
+- 全機器へ同一設定を展開する際は、まず1台で動作確認してから残りへ展開すること。一括投入前の単体検証を省略しない。

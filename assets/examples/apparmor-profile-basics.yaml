@@ -1,0 +1,10 @@
+target_binary: /usr/sbin/nginx
+profile_path: /etc/apparmor.d/usr.sbin.nginx
+mode: complain
+allow_paths:
+  - "/var/www/html/** r"
+  - "/var/log/nginx/*.log w"
+  - "/run/nginx.pid rw"
+deny_paths:
+  - "/etc/shadow r"
+  - "/root/** rw"

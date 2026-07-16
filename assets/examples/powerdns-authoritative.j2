@@ -1,0 +1,96 @@
+# PowerDNSによる権威DNSサーバ構築 — {{ zone_name }}
+
+PowerDNS Authoritative Server と `{{ backend }}` バックエンドで **{{ zone_name }}** の権威DNSサーバを構築し、`pdnsutil` によるゾーン・レコード管理を行う手順です。
+
+## 目的
+
+BINDのようなゾーンファイル方式ではなく、データベースバックエンドと `pdnsutil` コマンドでゾーンを管理するPowerDNSの運用モデルを理解し、ゾーン作成からレコード追加・検証までを実施できるようになることを目指します。
+
+## 用語解説
+
+- **PowerDNS Authoritative Server**: データベース等のバックエンドにゾーンデータを保持する権威DNSサーバソフトウェア
+- **バックエンド方式**: PowerDNSがゾーンデータをどこに保存するかの方式。本手順では `{{ backend }}`（SQLite）を使用する
+- **pdnsutil**: ゾーンの作成・レコード追加・検証など、ゾーン管理を行うためのコマンドラインツール
+- **APIによる管理**: PowerDNSの組み込みHTTP APIを有効化すると、外部ツールからゾーンやレコードを操作できるようになる仕組み
+- **SOAレコード**: ゾーンの管理情報（プライマリNS・管理者・シリアル等）を持つレコード
+
+## シナリオ設定
+
+- 対象ゾーン: `{{ zone_name }}`
+- バックエンド: `{{ backend }}`
+- SOA内容: `{{ soa_content }}`
+- API有効化: {{ api_enabled }}
+- 初期投入レコード（{{ initial_records | length }}件）:
+{% for r in initial_records %}  - {{ r.name }} {{ r.type }} {{ r.content }}
+{% endfor %}
+
+## 手順
+
+### 1. PowerDNSとバックエンドをインストールする
+
+```bash
+sudo apt-get update
+sudo apt-get install -y pdns-server pdns-backend-sqlite3
+```
+
+### 2. バックエンドを初期化する
+
+`{{ backend }}` バックエンド用のスキーマを初期化し、`pdns.conf` にバックエンドを指定します。
+
+```bash
+sudo mkdir -p /var/lib/powerdns
+sqlite3 /var/lib/powerdns/pdns.sqlite3 < /usr/share/doc/pdns-backend-sqlite3/schema.sqlite3.sql
+cat >> /etc/powerdns/pdns.conf <<'EOF'
+launch={{ backend }}
+gsqlite3-database=/var/lib/powerdns/pdns.sqlite3
+EOF
+```
+
+### 3. ゾーンを作成する
+
+`pdnsutil` でゾーンを作成し、SOAレコードを設定します。
+
+```bash
+sudo pdnsutil create-zone {{ zone_name }} ns1.example.jp
+sudo pdnsutil replace-rrset {{ zone_name }} {{ zone_name }} SOA "{{ soa_content }}"
+```
+
+### 4. 初期レコードを追加する
+
+```bash
+{% for r in initial_records %}sudo pdnsutil add-record {{ zone_name }} {{ r.name }} {{ r.type }} {{ r.content }}
+{% endfor %}```
+
+### 5. PowerDNSを起動し、digで応答を確認する
+
+```bash
+sudo systemctl enable --now pdns
+{% for r in initial_records %}dig @127.0.0.1 {{ r.name }} {{ r.type }} +short
+{% endfor %}```
+
+### 6. check-zoneで整合性を検証する
+
+```bash
+sudo pdnsutil check-zone {{ zone_name }}
+```
+
+### 7. APIの有効化状態を確認する
+
+シナリオ設定どおり `api_enabled = {{ api_enabled }}` となるよう `pdns.conf` を確認します。
+
+```bash
+grep -E "^api" /etc/powerdns/pdns.conf
+```
+
+## 動作確認
+
+- `pdnsutil check-zone {{ zone_name }}` がエラーなく終了すること
+- 追加した {{ initial_records | length }} 件のレコードすべてが `dig @127.0.0.1` で正しい値を返すこと
+- `systemctl status pdns` がactiveであること
+- `pdns.conf` のAPI設定がシナリオ設定（{{ api_enabled }}）と一致していること
+
+## 注意事項
+
+- BINDのゾーンファイルのようにテキストを直接編集するのではなく、必ず `pdnsutil` またはAPI経由でレコードを操作する。データベースを直接書き換えると整合性が崩れる可能性がある。
+- APIを有効化する場合はAPIキーを設定し、外部からアクセス可能な範囲を最小限に絞る。
+- 本番投入前に `pdnsutil check-zone` で必ず検証し、エラーがある状態でサービスを再起動しない。

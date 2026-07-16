@@ -1,0 +1,5 @@
+mount_point: /mnt/shared-data
+nfs_server: nfs01.internal.example
+export_path: /export/shared-data
+affected_processes: "rsync(PID 8821), app-worker(PID 9104)"
+remount_window: 平日22:00-23:00(利用者最少時間帯)

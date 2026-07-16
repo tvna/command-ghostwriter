@@ -1,0 +1,5 @@
+denied_service: httpd
+target_path: /srv/webapp/uploads
+audit_log_excerpt: 'type=AVC msg=audit(1752624000.123:456): avc: denied { write } for pid=1234 comm="httpd" name="uploads" dev="xvda1" ino=98765 scontext=system_u:system_r:httpd_t:s0 tcontext=unconfined_u:object_r:var_t:s0 tclass=dir'
+expected_context: httpd_sys_rw_content_t
+boolean_candidate: httpd_can_network_connect

@@ -1,0 +1,4 @@
+server_name,document_root,admin_email,log_prefix,notes
+shop.example.com,/var/www/shop,webmaster@example.com,shop,ECサイト本番
+blog.example.com,/var/www/blog,webmaster@example.com,blog,社内向けブログ
+docs.example.com,/var/www/docs,webmaster@example.com,docs,ドキュメントサイト

@@ -1,0 +1,8 @@
+vcs: git
+commit_author: "Infra Team <infra-team@example.com>"
+daily_autocommit: true
+sensitive_ignore_paths:
+  - "/etc/shadow"
+  - "/etc/ssl/private"
+  - "/etc/ssh/ssh_host_*_key"
+review_command: "git -C /etc log --oneline -n 20"

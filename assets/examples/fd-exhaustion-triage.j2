@@ -1,0 +1,89 @@
+# ファイルディスクリプタ枯渇(Too many open files)の対応 — {{ affected_service }}
+
+{{ affected_service }} で `Too many open files` エラーが発生しています。発生プロセスを特定し、リークか正当な高負荷かを判定したうえで復旧します。
+
+## 目的
+
+ファイルディスクリプタ(FD)の上限とプロセスごとの使用状況の調べ方を理解し、リーク由来の枯渇と正当な高負荷を切り分けて、応急処置と恒久対策を判断できるようになることを目指します。
+
+## 用語解説
+
+- **ファイルディスクリプタ(FD)**: プロセスが開いているファイル・ソケット・パイプ等を識別する番号
+- **ソフトリミット/ハードリミット**: `ulimit -n` で確認できるプロセスあたりのFD数上限。ソフトはハードを超えて設定できない
+- **LimitNOFILE**: systemdサービス単位でFD上限を設定するディレクティブ
+- **FDリーク**: 開いたFDを `close()` し忘れ、プロセス終了までFDが解放されず溜まり続ける不具合
+- **lsof**: プロセスが開いているファイル・ソケットの一覧を表示するコマンド
+
+## シナリオ設定
+
+{{ affected_service }} のログに `Too many open files` エラーが記録され、応答が不安定になっています。現在のFD上限は {{ current_limit }} です。`{{ leak_suspect }}` という仮説を検証しつつ復旧してください。
+
+## 手順
+
+### 1. 症状を確認する
+
+```bash
+journalctl -u {{ affected_service }} --since "-30min" | grep -i "too many open files"
+```
+
+エラーの発生時刻と頻度を把握します。
+
+### 2. プロセス別のFD数を計測する
+
+```bash
+systemctl show {{ affected_service }} -p MainPID
+{{ fd_count_command | safe }}
+lsof -p <PID> | wc -l
+```
+
+現在のFD使用数を上限 {{ current_limit }} と比較します。
+
+### 3. リークか正当な高負荷かを判定する
+
+```bash
+lsof -p <PID> | awk '{print $5}' | sort | uniq -c | sort -rn | head
+```
+
+同一種別(例: ソケットや一時ファイル)のFDが時間経過とともに単調増加していればリークを疑います。`{{ leak_suspect }}` の仮説をコード上の該当箇所と突き合わせて検証します。
+
+### 4. 応急処置として再起動し影響を確認する
+
+```bash
+systemctl restart {{ affected_service }}
+systemctl is-active {{ affected_service }}
+```
+
+再起動でFDは解放されますが、リークが原因の場合は時間経過とともに再発する点を関係者に共有します。
+
+### 5. LimitNOFILEを恒久的に引き上げる
+
+```bash
+mkdir -p /etc/systemd/system/{{ affected_service }}.service.d
+cat <<'EOF' > /etc/systemd/system/{{ affected_service }}.service.d/override.conf
+[Service]
+LimitNOFILE={{ new_limit }}
+EOF
+systemctl daemon-reload
+systemctl restart {{ affected_service }}
+```
+
+上限引き上げはあくまで猶予確保であり、リークが原因の場合は根本修正が必要であることに注意します。
+
+### 6. 再発監視を仕込む
+
+```bash
+watch -n 60 "{{ fd_count_command | safe }}"
+```
+
+一定間隔でFD数を観測し、単調増加が続く場合はリーク修正が完了していないと判断します。
+
+## 動作確認
+
+- {{ affected_service }} が `active (running)` であり、`Too many open files` の新規発生がないこと
+- 新しいFD上限 {{ new_limit }} が `LimitNOFILE` として反映されていること(`systemctl show {{ affected_service }} -p LimitNOFILE`)
+- リーク仮説(`{{ leak_suspect }}`)について、コード修正の要否が判断・記録されていること
+
+## 注意事項
+
+- FD上限の引き上げは対症療法であり、リークが根本原因の場合はいずれ新しい上限にも到達する。恒久対策として原因コードの修正を追跡する。
+- 上限を過大に設定するとリーク発生時にメモリ・カーネルリソースを大量消費する恐れがあるため、`{{ new_limit }}` のように妥当な範囲にとどめる。

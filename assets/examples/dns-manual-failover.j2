@@ -1,0 +1,89 @@
+# 障害時の手動DNSフェイルオーバー実施手順 — {{ service_fqdn }}
+
+主系サーバの障害を受け、**{{ service_fqdn }}** の名前解決先を待機系へ手動で切り替えます。発動判断・切替実施・伝搬確認・切り戻しまでを、判断基準を明確にした上で安全に行います。
+
+## 目的
+
+「なんとなく心配だから切り替える」ではなく、明文化した判断基準に沿って発動・切り戻しを判断し、TTL を踏まえた伝搬確認まで含めてフェイルオーバーを完遂できるようになることを目指します。
+
+## 用語解説
+
+- **フェイルオーバー**: 主系の障害時に、サービスを継続するため待機系へ切り替えること
+- **スイッチバック**: フェイルオーバー後、主系が復旧した際に元の系へ戻すこと
+- **TTL**: DNS レコードのキャッシュ有効期間（秒）。この値が残っている間は旧レコードを参照するクライアントが残り得る
+- **発動判断基準**: フェイルオーバーを実施するかどうかを機械的に判断するための明文化された条件
+- **切り戻し判断基準**: スイッチバックを実施してよいと判断するための明文化された条件
+
+## シナリオ設定
+
+対象サービスは `{{ service_fqdn }}`。主系IPは `{{ primary_ip }}`、待機系IPは `{{ standby_ip }}`、現在のTTLは `{{ current_ttl }}` 秒です。発動判断基準は「{{ failover_criteria }}」、切り戻し判断基準は「{{ switchback_criteria }}」とします。
+
+## 手順
+
+### 1. 発動判断基準に照らして状況を確認する
+
+「{{ failover_criteria }}」に該当しているかを、監視ログや複数拠点からの疎通結果で確認します。基準に満たない場合は主系の復旧を優先し、切替は実施しません。
+
+```bash
+dig @8.8.8.8 {{ service_fqdn }} A +short
+curl -m 5 -o /dev/null -s -w "%{http_code}\n" https://{{ service_fqdn }}/healthz
+```
+
+### 2. 待機系が受け入れ可能な状態か確認する
+
+待機系（`{{ standby_ip }}`）が実際にトラフィックを受けられる状態かを、切替前に直接確認します。
+
+```bash
+curl -m 5 -o /dev/null -s -w "%{http_code}\n" -H "Host: {{ service_fqdn }}" https://{{ standby_ip }}/healthz
+```
+
+### 3. DNSレコードを待機系IPへ切り替える
+
+権威サーバ上で `{{ service_fqdn }}` の A レコードを `{{ primary_ip }}` から `{{ standby_ip }}` へ書き換え、SOA シリアルを更新します。
+
+```bash
+# ゾーンファイルを編集
+# {{ service_fqdn }}    IN A    {{ primary_ip }} -> {{ standby_ip }}
+named-checkzone {{ service_fqdn }} /var/named/db.$(echo {{ service_fqdn }} | cut -d. -f2-)
+rndc reload
+```
+
+### 4. 伝搬状況と旧IPへの残留アクセスを確認する
+
+現在のTTL（`{{ current_ttl }}` 秒）が経過するまでは旧レコードを参照するクライアントが残り得るため、時間を置きつつ両面を確認します。
+
+```bash
+dig @8.8.8.8 {{ service_fqdn }} A +short
+# 主系側（{{ primary_ip }}）のアクセスログで残留アクセスの減少を確認
+tail -f /var/log/nginx/access.log | grep {{ primary_ip }}
+```
+
+### 5. 切り戻し判断基準に基づき主系の復旧を評価する
+
+「{{ switchback_criteria }}」を満たしているかを確認したうえで、満たしていればスイッチバックの手順に進みます。満たしていない間は待機系のまま運用を継続します。
+
+```bash
+curl -m 5 -o /dev/null -s -w "%{http_code}\n" https://{{ primary_ip }}/healthz
+```
+
+### 6. スイッチバックを実施する（判断基準を満たした場合のみ）
+
+```bash
+# ゾーンファイルを編集
+# {{ service_fqdn }}    IN A    {{ standby_ip }} -> {{ primary_ip }}
+named-checkzone {{ service_fqdn }} /var/named/db.$(echo {{ service_fqdn }} | cut -d. -f2-)
+rndc reload
+```
+
+## 動作確認
+
+- 切替後、公開リゾルバへの問い合わせで `{{ service_fqdn }}` が `{{ standby_ip }}` を返すこと
+- 待機系（`{{ standby_ip }}`）がサービスを正常に提供できていること
+- 現在のTTL（`{{ current_ttl }}` 秒）経過後、主系への残留アクセスが収束していること
+- スイッチバック実施後は `{{ primary_ip }}` が再び返り、待機系への新規アクセスが収束すること
+
+## 注意事項
+
+- 発動判断基準「{{ failover_criteria }}」を満たさないうちに切り替えると、正常な主系を不要に切り離すことになる。判断を急がないこと。
+- 現在のTTL（`{{ current_ttl }}` 秒）が長い場合、伝搬完了まで時間がかかることを事前に関係者へ周知すること。
+- 本手順は緊急時の手動対応であり、恒久対応ではない。事態収束後は根本原因の是正と、必要であれば平時のTTL設計の見直しを行うこと。

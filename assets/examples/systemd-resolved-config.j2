@@ -1,0 +1,91 @@
+# systemd-resolvedによるスタブリゾルバ設定
+
+systemd-resolvedのDNSサーバ・検索ドメイン・`/etc/resolv.conf`の扱いを整理し、`resolvectl`で名前解決の実態を検証します。root権限(sudo)で実施してください。
+
+## 目的
+
+スタブリゾルバの仕組みと`/etc/resolv.conf`の複数モードの違いを理解し、`resolved.conf`でDNSサーバ・検索ドメインを恒久設定できるようになることを目指します。
+
+## 用語解説
+
+- **スタブリゾルバ**: アプリケーションからのDNS問い合わせを一旦受け付け、実際の問い合わせを代行するローカルの仲介プロセス
+- **127.0.0.53**: systemd-resolvedがスタブリゾルバとしてlistenする既定のループバックアドレス
+- **searchドメイン**: 短縮ホスト名を解決する際に自動的に補完されるドメイン名の候補リスト
+- **fallback DNS**: 通常のDNSサーバが応答しない場合に使われる予備のDNSサーバ
+- **resolv.confのモード**: `stub`(127.0.0.53を指す)、`uplink`(実DNSを直接指す)など、`/etc/resolv.conf`の生成方式の違い
+
+## シナリオ設定
+
+DNSサーバ{% for d in dns_servers %}`{{ d }}`{% if not loop.last %}, {% endif %}{% endfor %}、検索ドメイン{% for s in search_domains %}`{{ s }}`{% if not loop.last %}, {% endif %}{% endfor %}を設定し、`resolv_conf_mode = {{ resolv_conf_mode }}`で運用します。
+
+## 手順
+
+### 1. 現状のDNS設定を確認する
+
+```bash
+resolvectl status
+cat /etc/resolv.conf
+readlink -f /etc/resolv.conf
+```
+
+`/etc/resolv.conf`がシンボリックリンクかどうか、どこを指しているかを確認します。
+
+### 2. `resolved.conf`を編集する
+
+```bash
+mkdir -p /etc/systemd/resolved.conf.d
+tee /etc/systemd/resolved.conf.d/10-custom.conf <<'EOF'
+[Resolve]
+DNS={{ dns_servers | join(' ') }}
+FallbackDNS={{ fallback_dns | join(' ') }}
+Domains={% for s in search_domains %}~{{ s }}{% if not loop.last %} {% endif %}{% endfor %}
+DNSStubListener={{ stub_listener }}
+EOF
+```
+
+`Domains=`の先頭に`~`を付けると、そのドメイン宛のみを優先ルーティングするルーティングドメインとして扱われます(検索ドメインとしても機能します)。
+
+### 3. `/etc/resolv.conf`のシンボリックリンクを整理する
+
+`resolv_conf_mode`が`stub`の場合、`/etc/resolv.conf`を`/run/systemd/resolve/stub-resolv.conf`へのシンボリックリンクにします。
+
+```bash
+{% if resolv_conf_mode == "stub" %}ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+{% else %}ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
+{% endif %}```
+
+### 4. サービスを再起動し設定を反映する
+
+```bash
+systemctl restart systemd-resolved
+resolvectl status
+```
+
+`DNS Servers`欄・`DNS Domain`欄に設定した値が反映されていることを確認します。
+
+### 5. `resolvectl query`で名前解決を検証する
+
+```bash
+{% for s in search_domains %}resolvectl query www.{{ s }}
+{% endfor %}resolvectl query example.com
+```
+
+### 6. スタブリスナーの待受を確認する
+
+```bash
+ss -lntu | grep 127.0.0.53
+```
+
+`DNSStubListener={{ stub_listener }}`の場合、127.0.0.53:53でlistenしていることを確認します。
+
+## 動作確認
+
+- `resolvectl status` の `DNS Servers` に {% for d in dns_servers %}`{{ d }}`{% if not loop.last %}, {% endif %}{% endfor %} が表示されること
+- `resolvectl status` の `DNS Domain` に {% for s in search_domains %}`~{{ s }}`{% if not loop.last %}, {% endif %}{% endfor %} が表示されること
+- `readlink -f /etc/resolv.conf` の出力が `resolv_conf_mode = {{ resolv_conf_mode }}` の想定先を指していること
+
+## 注意事項
+
+- `/etc/resolv.conf`を静的ファイルとして直接編集すると、次回`systemd-resolved`再起動時に上書きされる。必ずシンボリックリンク経由で運用する。
+- DHCPやNetworkManagerが`/etc/systemd/resolved.conf`を直接上書きする環境では、ドロップイン(`resolved.conf.d/`)での設定が競合しないか事前に確認する。
+- DNSサーバの変更は既存の名前解決キャッシュに影響するため、`resolvectl flush-caches`で明示的にキャッシュをクリアしてから検証すると切り分けやすい。

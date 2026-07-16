@@ -1,0 +1,96 @@
+# Ciscoスイッチのポートセキュリティ設定
+
+台帳(CSV)に基づき、アクセスポートへMACアドレス数の上限と違反時動作を一括設定し、意図的な違反発生からerr-disabled状態の確認・復旧までを検証します。設定はコンソール接続で実施してください。
+
+## 目的
+
+`switchport port-security`によるMACアドレス制限を一覧から一括投入し、violationモードごとの挙動の違いを理解した上で、違反検知後の復旧手順まで一連で実施できるようになることを目指します。
+
+## 用語解説
+
+- **port-security**: アクセスポートに接続可能なMACアドレス数や特定のMACアドレスを制限する機能
+- **sticky MAC**: 動的に学習した最初のMACアドレスをrunning-configへ自動的に固定登録する設定。ケーブル差し替えのたびに手動登録する手間を省ける
+- **violationモード(shutdown)**: 違反検知時にポートを`err-disabled`状態にして完全に停止する最も厳しいモード
+- **violationモード(restrict)**: 違反フレームを破棄しSNMPトラップ/ログを残すが、ポート自体は稼働を継続するモード
+- **violationモード(protect)**: 違反フレームを黙って破棄するのみで、ログやトラップも残さない最も緩いモード
+- **err-disabled**: エラー検知によりCiscoが自動的にポートを無効化した状態。手動での`shutdown`/`no shutdown`が必要
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} ポートにport-securityを設定します。
+
+| interface | max_mac | violation_action | sticky | description |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["interface"] }} | {{ r["max_mac"] }} | {{ r["violation_action"] }} | {{ r["sticky"] }} | {{ r["description"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 対象ポートの現状を確認する
+
+```bash
+enable
+{% for r in csv_rows %}show interfaces {{ r["interface"] }} status
+{% endfor %}```
+
+対象ポートがすでにトランクや別用途で使われていないか確認します。
+
+### 2. port-securityを設定投入する
+
+```bash
+configure terminal
+{% for r in csv_rows %}interface {{ r["interface"] }}
+ description {{ r["description"] }}
+ switchport mode access
+ switchport port-security
+ switchport port-security maximum {{ r["max_mac"] }}
+ switchport port-security violation {{ r["violation_action"] }}
+{% if r["sticky"] == "true" %} switchport port-security mac-address sticky
+{% endif %}exit
+{% endfor %}end
+write memory
+```
+
+### 3. 違反を擬似的に発生させてerr-disabledを確認する
+
+`violation_action` が `shutdown` のポート(`{{ csv_rows[0]["interface"] }}`)に、上限を超える台数の端末を接続するか、別MACアドレスのPCへ差し替えて違反を発生させます。
+
+```bash
+show port-security interface {{ csv_rows[0]["interface"] }}
+show interfaces {{ csv_rows[0]["interface"] }} status
+show interfaces status err-disabled
+```
+
+`Port Status`が`secure-shutdown`、`show interfaces status err-disabled`にポートが一覧されれば違反が検知されています。
+
+### 4. err-disabledポートを復旧する
+
+原因(誤接続・意図しない機器)を取り除いた上で、手動でポートを再有効化します。
+
+```bash
+configure terminal
+interface {{ csv_rows[0]["interface"] }}
+ shutdown
+ no shutdown
+end
+```
+
+### 5. 全ポートのport-security状態を検証する
+
+```bash
+{% for r in csv_rows %}show port-security interface {{ r["interface"] }}
+{% endfor %}show port-security address
+```
+
+## 動作確認
+
+- `show port-security interface`の`Maximum MAC Addresses`が台帳の`max_mac`列と一致していること
+- `sticky`が`true`のポートで、`show running-config`に`switchport port-security mac-address sticky`とともに学習済みMACアドレスが自動登録されていること
+- `violation_action`が`shutdown`のポートで、違反発生後に`err-disabled`となり、`shutdown`/`no shutdown`で復旧できること
+- `restrict`/`protect`のポートでは、違反発生時もポート自体が停止しないこと
+
+## 注意事項
+
+- `shutdown`モードのポートは違反発生のたびに手動復旧が必要になる。頻繁に発生する運用ではerrdisable自動復旧(`errdisable recovery cause psecure-violation`)の併用を検討する。
+- stickyでMACアドレスを学習した状態で`write memory`すると、そのMACがrunning-config/startup-configに恒久保存される。機器交換時は事前に`no switchport port-security mac-address sticky`等で不要なエントリを整理する。
+- max_macの上限をIP電話配下のPC等、正当な複数MAC構成の実態より小さく設定すると、通常利用でも違反扱いになる。設定前に接続予定の機器構成を確認する。

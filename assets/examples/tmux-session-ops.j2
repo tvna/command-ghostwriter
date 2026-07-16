@@ -1,0 +1,90 @@
+# tmuxによる切断耐性のある作業セッション運用
+
+SSH切断でも作業が失われないよう、tmuxでセッションを作成・デタッチ・引き継ぎし、長時間ジョブの操作ログを残す運用手順です。
+
+## 目的
+
+tmuxのセッション・ウィンドウ・ペイン・デタッチの概念を理解し、SSH切断に強い長時間ジョブ実行と、複数人での作業引き継ぎができるようになることを目指します。
+
+## 用語解説
+
+- **セッション**: tmuxの作業単位全体。SSHが切断されてもバックグラウンドで生き続ける
+- **ウィンドウ**: セッション内の画面切り替え単位(タブに相当)
+- **ペイン**: ウィンドウ内をさらに分割した領域
+- **デタッチ(detach)**: セッションを終了させずに端末から切り離すこと(`Ctrl-b d`)
+- **アタッチ(attach)**: 既存セッションに再接続すること
+- **pipe-pane**: ペインの入出力をファイルやコマンドにパイプし、操作ログとして記録する機能
+
+## シナリオ設定
+
+セッション名は `{{ session_name }}`、実行する長時間ジョブは `{{ long_job_command }}` です。操作ログは `{{ log_pipe_path }}` に記録し、共有作業者 `{{ shared_user }}` と引き継ぎます。共通設定として以下を `~/.tmux.conf` に追加します。
+
+```
+{{ tmux_conf_snippet }}
+```
+
+## 手順
+
+### 1. セッションを作成する
+
+```bash
+tmux new-session -d -s {{ session_name }}
+tmux list-sessions
+```
+
+命名規約として、用途が分かる名前(`{{ session_name }}` のようにジョブ内容が推測できる名前)を付けます。
+
+### 2. 長時間ジョブをセッション内で実行し、デタッチする
+
+```bash
+tmux send-keys -t {{ session_name }} '{{ long_job_command }}' C-m
+tmux detach-client -s {{ session_name }}
+```
+
+デタッチ後もジョブはバックグラウンドで継続します。SSH接続を切断しても問題ありません。
+
+### 3. 操作ログを記録する
+
+```bash
+mkdir -p $(dirname {{ log_pipe_path }})
+tmux pipe-pane -t {{ session_name }} -o "cat >> {{ log_pipe_path }}"
+```
+
+`pipe-pane` を有効にすると、以降のペイン出力が `{{ log_pipe_path }}` に追記され続けます。
+
+### 4. 共有ユーザーがセッションに再接続(引き継ぎ)する
+
+```bash
+sudo -u {{ shared_user }} tmux attach-session -t {{ session_name }}
+```
+
+複数人で同時に同じセッションを見る場合は、両者が同じ `attach-session` を実行すると画面が共有されます(片方の操作がもう片方にも反映される点に注意)。
+
+### 5. 実行中のジョブの進捗を確認する
+
+```bash
+tmux capture-pane -t {{ session_name }} -p | tail -n 20
+```
+
+`capture-pane` はアタッチせずにペインの表示内容だけを取得できるため、進捗確認に向いています。
+
+### 6. ジョブ完了後にセッションを終了する
+
+```bash
+tmux list-sessions
+tmux kill-session -t {{ session_name }}
+tmux list-sessions
+```
+
+## 動作確認
+
+- SSH再接続後も `tmux attach-session -t {{ session_name }}` で作業が継続していること
+- `{{ log_pipe_path }}` にペインの出力が追記されていること
+- `{{ shared_user }}` から `attach-session` で同一セッションに参加できること
+- ジョブ完了後、`kill-session` でセッションが一覧から消えること
+
+## 注意事項
+
+- `kill-session` はセッション内の全プロセスを終了させる破壊的操作である。ジョブの完了を`capture-pane`等で確認してから実行する。
+- `pipe-pane` のログにはコマンド出力がそのまま残るため、パスワードなど機微情報を入力するペインでは有効化しない。
+- 共有アタッチは操作の衝突が起きやすいため、`{{ shared_user }}` との作業前に「今どちらが操作するか」を口頭やチャットで合意しておく。

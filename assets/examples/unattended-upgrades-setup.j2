@@ -1,0 +1,90 @@
+# unattended-upgradesによる自動セキュリティ更新
+
+Debian/Ubuntu環境で `unattended-upgrades` を導入し、オリジン `{{ allowed_origins }}` のセキュリティ更新のみを自動適用します。除外パッケージと再起動方針をあらかじめ設計し、意図しない再起動やパッケージ更新を防ぎます。
+
+## 目的
+
+セキュリティ更新のみを自動適用する範囲を明確にし、除外パッケージと自動再起動の有無を設計したうえで、`--dry-run` による事前検証を経て安全に運用開始できるようになることを目指します。
+
+## 用語解説
+
+- **security origin**: パッケージの取得元を識別するラベル。`{{ allowed_origins }}` のように指定し、セキュリティ更新のみに範囲を絞る
+- **除外リスト(Blacklist)**: 自動更新の対象から外すパッケージのパターン一覧。カーネルやDBサーバなど再起動・互換性影響が大きいものを指定する
+- **Unattended-Upgrade::Automatic-Reboot**: 更新後に再起動が必要な場合、自動的に再起動するかどうかの設定
+- **--dry-run**: 実際には適用せず、対象パッケージと実行予定の操作のみを表示するオプション
+
+## シナリオ設定
+
+許可オリジンは `{{ allowed_origins }}`、除外パッケージは `{{ blacklist_packages }}` です。自動再起動は `{{ auto_reboot | lower }}`、再起動時刻は `{{ reboot_time }}`、通知先メールアドレスは `{{ mail_to }}` とします。
+
+## 手順
+
+### 1. パッケージを導入する
+
+```bash
+sudo apt update
+sudo apt install -y unattended-upgrades apt-listchanges
+```
+
+### 2. 適用対象オリジンと除外パッケージを設定する
+
+`/etc/apt/apt.conf.d/50unattended-upgrades` を編集します。
+
+```bash
+sudo tee -a /etc/apt/apt.conf.d/50unattended-upgrades >/dev/null <<EOF
+Unattended-Upgrade::Allowed-Origins {
+        "{{ allowed_origins }}";
+};
+Unattended-Upgrade::Package-Blacklist {
+        "{{ blacklist_packages }}";
+};
+Unattended-Upgrade::Automatic-Reboot "{{ auto_reboot | lower }}";
+Unattended-Upgrade::Automatic-Reboot-Time "{{ reboot_time }}";
+Unattended-Upgrade::Mail "{{ mail_to }}";
+EOF
+```
+
+### 3. 自動更新の有効化フラグを設定する
+
+```bash
+sudo tee /etc/apt/apt.conf.d/20auto-upgrades >/dev/null <<'EOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+EOF
+```
+
+### 4. --dry-runで動作を検証する
+
+実際には更新せず、適用対象パッケージと除外の効き方を確認します。
+
+```bash
+sudo unattended-upgrade --dry-run --debug
+```
+
+### 5. 手動実行してログを確認する
+
+```bash
+sudo unattended-upgrade -v
+cat /var/log/unattended-upgrades/unattended-upgrades.log
+```
+
+### 6. 自動再起動方針を最終確認する
+
+```bash
+grep -A1 'Automatic-Reboot' /etc/apt/apt.conf.d/50unattended-upgrades
+```
+
+`auto_reboot` が `{{ auto_reboot | lower }}` であることを確認し、有効な場合は再起動時刻 `{{ reboot_time }}` が業務影響の少ない時間帯であることを関係者と合意しておきます。
+
+## 動作確認
+
+- `unattended-upgrade --dry-run --debug` の出力に `{{ allowed_origins }}` を含むオリジンのみが対象として現れ、`{{ blacklist_packages }}` に一致するパッケージが除外されていること
+- `/var/log/unattended-upgrades/unattended-upgrades.log` に実行履歴が記録されること
+- `Automatic-Reboot` の設定値が意図どおり `{{ auto_reboot | lower }}` になっていること
+- 更新完了・失敗の通知が `{{ mail_to }}` へ届くこと(メール送信基盤が別途設定済みの場合)
+
+## 注意事項
+
+- 自動再起動(`auto_reboot = true`)を有効にすると、業務時間中でも再起動が発生し得るため、`{{ reboot_time }}` を必ず業務影響の少ない時間帯に設定する。
+- 除外リストに登録したパッケージ(`{{ blacklist_packages }}`)はセキュリティ更新も自動適用されなくなるため、手動での定期パッチ適用計画を別途用意する。
+- `--dry-run` を経ずに本番投入すると意図しないパッケージが一括更新される恐れがあるため、必ず検証してから有効化する。

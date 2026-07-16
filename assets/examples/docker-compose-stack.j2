@@ -1,0 +1,99 @@
+# Docker Composeによる複数コンテナ構成の管理 — {{ project_name }}
+
+Webアプリ **{{ app_image }}** とデータベース **{{ db_image }}** の2サービス構成を `compose.yaml` で定義し、起動・更新・破棄までを一括管理します。
+
+## 目的
+
+複数のコンテナを1つのプロジェクトとして定義・起動・破棄する Docker Compose の基本操作を身につけ、単一コンテナ操作との違いを理解することを目指します。
+
+## 用語解説
+
+- **service**: compose.yaml内で定義する、コンテナ1つ分の起動設定の単位
+- **プロジェクト名 (-p)**: compose.yamlに属するリソース群をまとめて識別する名前。コンテナ名やネットワーク名の接頭辞になる
+- **volume**: コンテナ破棄後もデータを残すための永続化領域。名前付きボリュームはDockerが管理する
+- **depends_on**: サービス間の起動順序を制御する設定。ヘルスチェック完了までは待たない点に注意
+- **環境変数 (environment)**: コンテナ内プロセスに渡す設定値。認証情報などはComposeファイルへ直書きせず外部管理が望ましい
+- **up --force-recreate**: 設定変更を反映するため、既存コンテナを破棄して作り直すオプション
+
+## シナリオ設定
+
+プロジェクト名 `{{ project_name }}` で、アプリ `{{ app_image }}`（公開ポート {{ app_port }}）とDB `{{ db_image }}`（永続ボリューム `{{ db_volume }}`）の2サービスを構成します。環境変数は {{ env_vars | length }} 件を渡します。
+
+## 手順
+
+### 1. compose.yamlを作成する
+
+```bash
+mkdir -p ~/{{ project_name }}
+cat > ~/{{ project_name }}/compose.yaml <<'EOF'
+services:
+  app:
+    image: {{ app_image }}
+    ports:
+      - "{{ app_port }}:8080"
+    environment:
+{% for k, v in env_vars.items() %}      {{ k }}: "{{ v }}"
+{% endfor %}    depends_on:
+      - db
+  db:
+    image: {{ db_image }}
+    volumes:
+      - {{ db_volume }}:/var/lib/postgresql/data
+
+volumes:
+  {{ db_volume }}:
+EOF
+```
+
+### 2. 起動して状態を確認する
+
+```bash
+cd ~/{{ project_name }}
+docker compose -p {{ project_name }} up -d
+docker compose -p {{ project_name }} ps
+docker compose -p {{ project_name }} logs app --tail 20
+```
+
+### 3. アプリの応答を確認する
+
+```bash
+curl -i localhost:{{ app_port }}
+```
+
+### 4. 設定変更を反映する
+
+compose.yamlを編集した後は `--force-recreate` で確実に作り直します。単なる `up -d` では変更が反映されないことがあります。
+
+```bash
+docker compose -p {{ project_name }} up -d --force-recreate app
+docker compose -p {{ project_name }} ps
+```
+
+### 5. 停止と再開を確認する
+
+```bash
+docker compose -p {{ project_name }} stop
+docker compose -p {{ project_name }} start
+docker compose -p {{ project_name }} ps
+```
+
+### 6. スタックを破棄する
+
+```bash
+docker compose -p {{ project_name }} down
+docker volume ls | grep {{ db_volume }}
+```
+
+## 動作確認
+
+- `docker compose -p {{ project_name }} ps` で app / db 両サービスが `running` 状態であること
+- `curl localhost:{{ app_port }}` が応答すること
+- `--force-recreate` 後もアプリが正常に応答すること
+- `down` 後、`docker volume ls` に `{{ db_volume }}` が残っていること（データは保持される）
+
+## 注意事項
+
+- `docker compose down --volumes` は名前付きボリュームごと削除する破壊的操作であり、DBデータが失われる。データを残したい場合は `--volumes` を付けずに `down` する。
+- 環境変数に含まれる認証情報はデモ用の値であり、本番運用では `.env` ファイルやシークレット管理の仕組みに切り出す。
+- 本手順は単一コンテナ操作（docker-basic-ops）とは異なり、複数サービスの依存関係とライフサイクルの一括管理に焦点を当てる。
+- 演習後は `docker compose -p {{ project_name }} down --volumes` で完全に片付け、作業ディレクトリも削除する。

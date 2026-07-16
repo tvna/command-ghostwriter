@@ -1,0 +1,98 @@
+# Dockerfileによるアプリイメージのビルド — {{ image_tag }}
+
+レイヤキャッシュ・マルチステージビルド・非rootユーザー実行を踏まえた `Dockerfile` を作成し、`docker build` で検証します。
+
+## 目的
+
+イメージサイズと再ビルド速度、実行時の権限に配慮したDockerfileの書き方を身につけ、ビルドしたイメージが非rootユーザーで正しく起動することを確認できるようになることを目指します。
+
+## 用語解説
+
+- **レイヤ**: Dockerfileの各命令ごとに作られる差分の積み重ね。上位レイヤが変わらなければキャッシュが再利用される
+- **ビルドキャッシュ**: 変更されていない命令はレイヤを再利用し、ビルド時間を短縮する仕組み。依存関係のインストールを先に書くとキャッシュが効きやすい
+- **マルチステージビルド**: ビルド専用のステージと実行用ステージを分け、最終イメージにビルドツールを含めない手法
+- **非rootユーザー実行**: コンテナ内プロセスをroot以外のユーザーで起動し、コンテナ脱出時の被害を限定する対策
+- **.dockerignore**: ビルドコンテキストに含めないファイルを指定し、不要なファイルの転送とキャッシュ無効化を防ぐ
+
+## シナリオ設定
+
+`{{ app_dir }}` を作業ディレクトリとし、ビルドステージ `{{ build_stage_image }}` で依存解決とビルドを行い、実行時は `{{ base_image }}` をベースに非rootユーザー `{{ runtime_user }}` でポート {{ expose_port }} を公開するイメージ `{{ image_tag }}` を作成します。
+
+## 手順
+
+### 1. Dockerfileを作成する
+
+```bash
+mkdir -p {{ app_dir }}
+cat > {{ app_dir }}/Dockerfile <<'EOF'
+FROM {{ build_stage_image }} AS builder
+WORKDIR {{ app_dir }}
+COPY package*.json ./
+RUN npm ci --omit=dev
+COPY . .
+RUN npm run build
+
+FROM {{ base_image }}
+RUN groupadd -r {{ runtime_user }} && useradd -r -g {{ runtime_user }} {{ runtime_user }}
+WORKDIR {{ app_dir }}
+COPY --from=builder {{ app_dir }}/dist ./dist
+COPY --from=builder {{ app_dir }}/node_modules ./node_modules
+USER {{ runtime_user }}
+EXPOSE {{ expose_port }}
+CMD ["node", "dist/main.js"]
+EOF
+```
+
+### 2. .dockerignoreを作成する
+
+```bash
+cat > {{ app_dir }}/.dockerignore <<'EOF'
+node_modules
+.git
+*.log
+EOF
+```
+
+### 3. イメージをビルドしてタグ付けする
+
+```bash
+cd {{ app_dir }}
+docker build -t {{ image_tag }} .
+```
+
+### 4. イメージサイズと履歴を確認する
+
+```bash
+docker images {{ image_tag }}
+docker history {{ image_tag }}
+```
+
+### 5. 再ビルドでキャッシュが効くことを確認する
+
+ソースコードのみを変更し、依存関係インストール層のキャッシュが再利用されることを確認します。
+
+```bash
+touch {{ app_dir }}/src/dummy-change.txt
+docker build -t {{ image_tag }} .
+```
+
+### 6. 非rootユーザーでの起動を検証する
+
+```bash
+docker run -d --name build-check -p {{ expose_port }}:{{ expose_port }} {{ image_tag }}
+docker exec build-check whoami
+curl -i localhost:{{ expose_port }}
+```
+
+## 動作確認
+
+- `docker images {{ image_tag }}` にイメージが表示され、ビルドツールを含まない実行ステージのみでサイズが構成されていること
+- 2回目のビルドで `npm ci` 相当の層に `CACHED` と表示されること
+- `docker exec build-check whoami` の結果が `{{ runtime_user }}` であり、rootでないこと
+- `curl localhost:{{ expose_port }}` が応答すること
+
+## 注意事項
+
+- `COPY package*.json ./` を `COPY . .` より前に置くことでキャッシュ効率を保つ。順序を崩すとソース変更のたびに依存関係の再インストールが走る。
+- マルチステージビルドの `builder` ステージにはビルドツールや開発依存が残るが、最終イメージにはコピーされないため機密情報をbuilderステージに置かない。
+- 検証用コンテナ `build-check` は演習後 `docker rm -f build-check` で削除し、不要になった `{{ image_tag }}` イメージも `docker rmi` で片付ける。

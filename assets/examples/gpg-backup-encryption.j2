@@ -1,0 +1,89 @@
+# GPGによるバックアップファイルの暗号化
+
+GPGの鍵ペアを作成し、バックアップアーカイブを公開鍵暗号で保護します。復号リハーサルと秘密鍵のエスクロー保管まで含めて、鍵紛失時にもデータを失わない運用を整えます。
+
+## 目的
+
+公開鍵暗号と対称暗号の使い分けを理解し、GPGで鍵ペアを作成してバックアップを暗号化し、復号手順とエスクロー保管による鍵紛失対策までを一巡できるようになることを目指します。
+
+## 用語解説
+
+- **公開鍵暗号**: 公開鍵で暗号化し、対応する秘密鍵でのみ復号できる暗号方式。バックアップの保護に用いる
+- **対称暗号との使い分け**: GPGは内部で対称鍵(セッション鍵)を公開鍵で包んで運ぶため、大きなファイルでも高速に暗号化できる
+- **UID(ユーザーID)**: 鍵に紐づく識別情報(名前とメールアドレス)
+- **鍵のエスクロー保管**: 鍵の紛失に備え、信頼できる第三者や複数拠点に秘密鍵の複製を分散保管する仕組み
+- **パスフレーズ**: 秘密鍵自体を保護するための追加の合言葉
+
+## シナリオ設定
+
+鍵のUIDは `{{ key_uid | safe }}`、鍵タイプは `{{ key_type }}` とします。暗号化対象は `{{ backup_source }}`、暗号化後の出力先は `{{ encrypted_dest }}` です。パスフレーズ運用方針は「{{ passphrase_policy }}」、鍵の紛失対策は「{{ escrow_note }}」とします。
+
+## 手順
+
+### 1. GPG鍵ペアを生成する
+
+```bash
+gpg --batch --full-generate-key <<EOF
+Key-Type: RSA
+Key-Length: 4096
+Subkey-Type: RSA
+Subkey-Length: 4096
+Name-Real: {{ key_uid | safe }}
+Expire-Date: 2y
+%commit
+EOF
+gpg --list-keys "{{ key_uid | safe }}"
+```
+
+鍵タイプは `{{ key_type }}` を想定しています。実際に生成される鍵のパラメータ(長さ・アルゴリズム)がこれと一致するか `--list-keys` の出力で確認してください。
+
+### 2. バックアップ対象をtarでまとめ、公開鍵で暗号化する
+
+```bash
+tar -czf - -C "{{ backup_source }}" . \
+  | gpg --encrypt --recipient "{{ key_uid | safe }}" \
+        --output "{{ encrypted_dest }}" \
+        --trust-model always
+ls -lh "{{ encrypted_dest }}"
+```
+
+### 3. 復号リハーサルを行う
+
+```bash
+mkdir -p /tmp/restore-check
+gpg --decrypt "{{ encrypted_dest }}" \
+  | tar -xzf - -C /tmp/restore-check
+diff -rq "{{ backup_source }}" /tmp/restore-check
+```
+
+`diff -rq` に差分が出ないことを確認し、暗号化・復号の往復でデータが壊れていないことを検証します。
+
+### 4. 秘密鍵をエクスポートしエスクロー保管する
+
+```bash
+gpg --export-secret-keys --armor "{{ key_uid | safe }}" > /root/gpg-secret-key-backup.asc
+chmod 600 /root/gpg-secret-key-backup.asc
+```
+
+「{{ escrow_note }}」の方針に従い、上記ファイルをオフラインメディアへ複製し、拠点を分散して保管します。パスフレーズ運用は「{{ passphrase_policy }}」に従い、鍵ファイルとは別経路で管理してください。
+
+### 5. 復号リハーサル結果を片付ける
+
+```bash
+rm -rf /tmp/restore-check
+```
+
+## 動作確認
+
+- Step 1実行後、`gpg --list-keys` に `{{ key_uid | safe }}` の鍵が表示されること
+- `{{ encrypted_dest }}` が生成され、`gpg --decrypt` で正常に復号できること
+- Step 3の `diff -rq` が差分なしで完了し、元データ(`{{ backup_source }}`)と復号結果が一致すること
+- 秘密鍵ファイル `/root/gpg-secret-key-backup.asc` の権限が `600` になっていること
+
+## 注意事項
+
+- 秘密鍵は暗号化されたバックアップと同じ場所に保管しない。バックアップと鍵を同時に失うと復号手段そのものが失われる。
+- パスフレーズ方針(「{{ passphrase_policy }}」)を徹底し、パスフレーズをコードやドキュメントに平文で残さない。
+- 復号リハーサル用の一時ディレクトリ(`/tmp/restore-check`)は検証後に必ず削除し、機微データを残さない。
+- rsync-daily-backup(既存)は転送そのものを扱う手順であり、本手順は転送・保管されたバックアップの暗号化層を担う。
+- 鍵の有効期限(Step 1の `Expire-Date`)が近づいたら、事前に更新・再配布の計画を立てる。

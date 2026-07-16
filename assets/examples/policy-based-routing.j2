@@ -1,0 +1,78 @@
+# ポリシールーティングによる送信元別経路制御 — {{ rt_table_name }}
+
+`ip rule` と独立したルーティングテーブル `{{ rt_table_name }}` を使い、送信元アドレス `{{ rule_selector }}` からの通信だけを専用のゲートウェイへ振り分けます。マルチホーム環境や管理系ネットワークの経路分離に用います。
+
+## 目的
+
+`ip rule`・`rt_tables`・mainテーブルの関係を理解し、デフォルトルート(mainテーブル)を変更せずに特定の送信元だけ別経路を通す構成を安全に構築・検証できるようになることを目指します。
+
+## 用語解説
+
+- **ip rule**: パケットの送信元・宛先等の条件でどのルーティングテーブルを参照するかを決めるポリシー。優先度(priority)順に評価される
+- **rt_tables**: `/etc/iproute2/rt_tables` に定義するルーティングテーブルの名前とID対応表。mainテーブルとは独立したテーブルを追加できる
+- **mainテーブル**: `ip route` でデフォルトに操作されるテーブル。通常のデフォルトルートやスタティックルートが格納される
+- **非対称経路**: 送信は専用テーブル経由、応答はmainテーブル経由といった往復不一致が起きやすい構成。`rp_filter` が有効だとパケットが破棄されることがある
+
+## シナリオ設定
+
+送信元 `{{ rule_selector }}` を条件に、テーブル `{{ rt_table_name }}`（ゲートウェイ `{{ table_gateway }}`、インターフェース `{{ interface }}`）を参照するルールを優先度 `{{ priority }}` で追加します。
+
+## 手順
+
+### 1. テーブルを定義する
+
+```bash
+echo "200 {{ rt_table_name }}" | sudo tee -a /etc/iproute2/rt_tables
+cat /etc/iproute2/rt_tables
+```
+
+### 2. テーブルにデフォルト経路を追加する
+
+```bash
+sudo ip route add default via {{ table_gateway }} dev {{ interface }} table {{ rt_table_name }}
+ip route show table {{ rt_table_name }}
+```
+
+### 3. ip ruleを追加する
+
+```bash
+sudo ip rule add from {{ rule_selector }} table {{ rt_table_name }} priority {{ priority }}
+ip rule show
+```
+
+### 4. 経路解決を確認する
+
+```bash
+ip route get {{ table_gateway }} from {{ rule_selector }}
+```
+
+### 5. 永続化する
+
+```bash
+sudo tee /etc/sysconfig/network-scripts/route-{{ interface }} <<EOF
+default via {{ table_gateway }} dev {{ interface }} table {{ rt_table_name }}
+EOF
+sudo tee /etc/sysconfig/network-scripts/rule-{{ interface }} <<EOF
+from {{ rule_selector }} table {{ rt_table_name }} priority {{ priority }}
+EOF
+```
+
+### 6. 非対称経路とrp_filterを確認する
+
+```bash
+sysctl net.ipv4.conf.{{ interface }}.rp_filter
+sysctl net.ipv4.conf.all.rp_filter
+```
+
+## 動作確認
+
+- `ip rule show` に送信元 `{{ rule_selector }}`、テーブル `{{ rt_table_name }}`、優先度 `{{ priority }}` のルールが表示されること
+- `ip route get {{ table_gateway }} from {{ rule_selector }}` の出力で `table {{ rt_table_name }}` が使われていること
+- `{{ rule_selector }}` からの通信で意図した `{{ table_gateway }}` 経由の応答が確認できること
+- 他の送信元からの通信がmainテーブルの経路(既存のデフォルトルート)を継続して使用していること
+
+## 注意事項
+
+- 送信は `{{ rt_table_name }}` テーブル経由、応答は別インターフェース経由といった非対称経路になりやすく、`rp_filter` が `1`(strict)のままだと応答パケットが破棄される。必要に応じて対象インターフェースのみ `2`(loose)への緩和を検討する。
+- ルール追加を誤ると意図しない送信元まで巻き込んで通信断を起こすため、`{{ rule_selector }}` の範囲は最小限に絞る。
+- 本手順はポリシールーティングの追加に焦点を絞り、static-route-linux(本カタログ,単純な宛先別経路)とは送信元単位の分岐で差別化する。

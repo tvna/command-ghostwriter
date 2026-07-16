@@ -1,0 +1,5 @@
+affected_segment: フロア3 有線LAN (VLAN30)
+dhcp_server: dhcp01.internal.example
+relay_agent: floor3-sw01 (ip helper-address 設定)
+pool_range: 192.0.2.100-192.0.2.199
+lease_time: 8時間

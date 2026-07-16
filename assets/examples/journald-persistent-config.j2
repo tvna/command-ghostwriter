@@ -1,0 +1,79 @@
+# journaldの永続化と保存容量設定
+
+systemd-journaldのログをディスクへ永続化し、肥大化を防ぐための保存容量・保存期間・レート制限を設計します。root権限（sudo）で実施してください。
+
+## 目的
+
+journaldのログをvolatile(メモリのみ)からpersistent(ディスク保存)へ切り替え、容量上限・保存期間・レート制限を適切に設計できるようになることを目指します。
+
+## 用語解説
+
+- **volatile**: journaldのログを `/run/log/journal`（tmpfs、再起動で消える）にのみ保存するモード
+- **persistent**: journaldのログを `/var/log/journal`（ディスク、再起動後も残る）に保存するモード
+- **ローテーション**: 容量や期間の上限に達したログを古い順に破棄・分割していく仕組み
+- **SystemMaxUse**: journalディレクトリ全体が使用できるディスク容量の上限
+- **MaxRetentionSec**: 個々のログエントリを保持する最大期間
+- **RateLimitInterval / RateLimitBurst**: 指定した時間内に同一サービスから許容するログ件数の上限（超過分は間引かれる）
+
+## シナリオ設定
+
+保存モードを **{{ storage_mode }}** に設定し、容量上限 **{{ system_max_use }}**、保存期間 **{{ max_retention_sec }}**、レート制限は **{{ rate_limit_interval }}** あたり **{{ rate_limit_burst }}** 件までとします。
+
+## 手順
+
+### 1. 現状のディスク使用量を確認する
+
+```bash
+journalctl --disk-usage
+ls -ld /var/log/journal 2>/dev/null || echo "/var/log/journal は未作成（volatile状態の可能性）"
+```
+
+### 2. journald.conf を編集する
+
+```bash
+cp /etc/systemd/journald.conf /etc/systemd/journald.conf.bak
+sed -i \
+  -e 's/^#\?Storage=.*/Storage={{ storage_mode }}/' \
+  -e 's/^#\?SystemMaxUse=.*/SystemMaxUse={{ system_max_use }}/' \
+  -e 's/^#\?MaxRetentionSec=.*/MaxRetentionSec={{ max_retention_sec }}/' \
+  -e 's/^#\?RateLimitIntervalSec=.*/RateLimitIntervalSec={{ rate_limit_interval }}/' \
+  -e 's/^#\?RateLimitBurst=.*/RateLimitBurst={{ rate_limit_burst }}/' \
+  /etc/systemd/journald.conf
+```
+
+### 3. journaldディレクトリを作成し再起動する
+
+```bash
+mkdir -p /var/log/journal
+systemd-tmpfiles --create --prefix /var/log/journal
+systemctl restart systemd-journald
+```
+
+### 4. 反映を確認する
+
+```bash
+journalctl --disk-usage
+journalctl -b | tail -n 5
+```
+
+`--disk-usage` が `/var/log/journal` を参照し、前回起動分のログが `journalctl -b` で参照できることを確認します。
+
+### 5. 手動で容量を削減する（vacuum）
+
+```bash
+journalctl --vacuum-size={{ system_max_use }}
+journalctl --vacuum-time={{ max_retention_sec }}
+```
+
+## 動作確認
+
+- `journalctl --disk-usage` の参照先が `/var/log/journal`（persistent）になっていること
+- `/etc/systemd/journald.conf` の `Storage`/`SystemMaxUse`/`MaxRetentionSec`/`RateLimitIntervalSec`/`RateLimitBurst` が設定値どおりであること
+- 再起動後もログが `/var/log/journal` に残っていること
+- `journalctl --vacuum-size` / `--vacuum-time` が正常終了すること
+
+## 注意事項
+
+- `Storage=persistent` に切り替えるとディスク容量を消費し続けるため、`SystemMaxUse` を必ず設定し、パーティション容量に対して余裕のある値にする。
+- レート制限（RateLimitBurst）を厳しくしすぎると、障害時に必要なログまで間引かれる可能性があるため、通常運用時のログ量を確認してから調整する。
+- 本手順はjournald本体の保存設計に焦点を当てたものであり、rsyslog等が書き出すテキストログファイルのローテーション（logrotate-setup）とは対象が異なる。

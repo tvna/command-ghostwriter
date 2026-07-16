@@ -1,0 +1,4 @@
+username,filesystem,soft_limit,hard_limit,grace_note
+tanaka,/home,5G,6G,超過後7日間の猶予でアラート通知
+sato,/home,5G,6G,超過後7日間の猶予でアラート通知
+suzuki,/home,10G,12G,開発用途のため上限を広めに設定

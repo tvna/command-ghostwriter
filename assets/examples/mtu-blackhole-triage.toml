@@ -1,0 +1,5 @@
+path_description = "本社 -> クラウドDC間の IPsec VPNトンネル経由の通信"
+suspect_segment = "IPsec VPNトンネル区間 (vpn-gw01 <-> vpn-gw02)"
+current_mtu = 1500
+test_sizes = "1472, 1400, 1350, 1200"
+mss_clamp_note = "GW上で TCP MSS を 1360 にクランプする案を検討中"

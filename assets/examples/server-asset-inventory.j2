@@ -1,0 +1,70 @@
+# サーバ資産の棚卸しと台帳更新
+
+稼働サーバの実態調査と台帳の突合を行い、用途不明・期限切れサーバを検出して処置する棚卸し手順です。
+
+## 目的
+
+サーバ資産棚卸しの目的と範囲を理解し、実態情報と台帳を突合して差異を検出し、EOL・停止候補の判定と台帳更新まで実施できるようになることを目指します。
+
+## 用語解説
+
+- **台帳突合**: 台帳上の記載と、実際に稼働しているサーバの状態を照らし合わせて差異を洗い出すこと
+- **EOL(End of Life)**: OSやハードウェアのサポート終了日
+- **用途不明サーバ**: 台帳上の `purpose` が空欄または不明で、稼働理由が追跡できないサーバ
+- **owner(所有者)**: サーバの管理責任を持つ部署・担当者
+- **停止候補**: EOL超過または用途不明で、廃止を検討すべきサーバ
+
+## シナリオ設定
+
+今回棚卸し対象は {{ csv_rows | length }} 台です。台帳には `hostname` / `ip_address` / `os_version` / `owner` / `purpose` / `eol_date` / `status` を記録し、実態調査の結果と突合します。
+
+## 手順
+
+### 1. 棚卸しの目的と範囲を確認する
+
+```bash
+echo "棚卸し対象台数: {{ csv_rows | length }}"
+{% for r in csv_rows %}echo "- {{ r["hostname"] }} ({{ r["ip_address"] }})"
+{% endfor %}```
+
+### 2. 実態情報を収集する
+
+```bash
+{% for r in csv_rows %}ssh {{ r["hostname"] }} "hostnamectl; cat /etc/os-release" || echo "{{ r["hostname"] }}: 到達不可"
+{% endfor %}```
+
+### 3. 台帳との突合を行い、差異一覧を作成する
+
+```bash
+{% for r in csv_rows %}echo "{{ r["hostname"] }}: 台帳OS={{ r["os_version"] }} / owner={{ r["owner"] }} / purpose={{ r["purpose"] }}"
+{% endfor %}```
+
+### 4. 用途不明・所有者不明サーバを追跡する
+
+```bash
+{% for r in csv_rows %}{% if r["owner"] == "不明" or r["purpose"] == "不明" %}echo "要追跡: {{ r["hostname"] }} (owner={{ r["owner"] }}, purpose={{ r["purpose"] }})"
+{% endif %}{% endfor %}```
+
+### 5. EOL・停止候補を判定する
+
+```bash
+{% for r in csv_rows %}echo "{{ r["hostname"] }}: eol_date={{ r["eol_date"] }} status={{ r["status"] }}"
+{% endfor %}```
+
+### 6. 台帳を更新し、次回棚卸しの計画を立てる
+
+```bash
+{% for r in csv_rows %}echo "{{ r["hostname"] }},{{ r["ip_address"] }},{{ r["os_version"] }},{{ r["owner"] }},{{ r["purpose"] }},{{ r["eol_date"] }},{{ r["status"] }}" >> /tmp/server-inventory-updated.csv
+{% endfor %}```
+
+## 動作確認
+
+- 全 {{ csv_rows | length }} 台について実態調査の結果と台帳の記載を突合できていること
+- 所有者不明・用途不明サーバがすべて「要追跡」として一覧化されていること
+- EOLを過ぎたサーバ、または `status` が「停止候補」のサーバが判定リストに含まれていること
+
+## 注意事項
+
+- サーバの停止・削除は本手順の範囲外であり、所有者への確認と承認を経てから別途実施する。
+- account-audit（既存、アカウント台帳の棚卸し）とは対象が異なり、本手順はサーバという資産そのものを対象とする。
+- 到達不可のサーバは即座に停止候補と判断せず、まず所有者へ稼働状況を確認する。

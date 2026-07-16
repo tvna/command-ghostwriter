@@ -1,0 +1,5 @@
+ip_address,hostname,mac_address,owner,usage,static_or_dhcp,last_seen
+192.168.10.10,fs01,aa:bb:cc:dd:ee:01,情報システム部,ファイルサーバ,static,2026-07-10
+192.168.10.11,printer-3f,aa:bb:cc:dd:ee:02,総務部,複合機,static,2026-07-12
+192.168.10.50,unknown-device,aa:bb:cc:dd:ee:99,不明,不明,dhcp,2026-07-15
+192.168.10.20,ws-tanaka,aa:bb:cc:dd:ee:03,営業部,業務PC,dhcp,2026-07-14

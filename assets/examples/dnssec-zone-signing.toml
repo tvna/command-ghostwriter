@@ -1,0 +1,5 @@
+zone_name = "example.com"
+dnssec_policy_name = "default"
+ksk_algorithm = "ECDSAP256SHA256"
+ds_registration_note = "レジストラの管理画面からDSレコードを登録し、反映まで最大24時間程度かかる"
+validation_resolver = "8.8.8.8"

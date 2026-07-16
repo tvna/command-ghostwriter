@@ -1,0 +1,96 @@
+# 推論APIのAPIキー認証とレート制限の導入
+
+社内ネットワーク内であっても推論APIを無認証のまま公開せず、リバースプロキシ層でAPIキー認証と利用者別レート制限を追加します。
+
+## 目的
+
+推論サーバの手前にリバースプロキシを置き、利用者ごとのAPIキー発行・レート制限・利用モデルの制限を行うことで、無制限公開による過負荷・意図しない利用を防げるようになることを目指します。
+
+## 用語解説
+
+- **リバースプロキシでの認証**: 推論サーバ本体を直接公開せず、手前のプロキシでリクエストを検査してから転送する構成。推論サーバ自体に認証機構を持たせずに済む
+- **APIキー**: 利用者を識別するための秘匿トークン。CSVの`api_key_placeholder`列は実際の値に置き換えるプレースホルダ
+- **rate_limit_rpm**: 利用者ごとに許可する1分あたりのリクエスト数(requests per minute)。超過分は拒否する
+- **allowed_models**: 利用者が呼び出せるモデルの許可リスト。未許可モデルへのリクエストは拒否する
+- **キー失効(expiry)**: APIキーに設定する有効期限。期限超過後は自動的に無効化する運用が望ましい
+
+## シナリオ設定
+
+以下の{{ csv_rows | length }}件の利用者にAPIキーを発行します。
+
+| client_name | rate_limit_rpm | allowed_models | expiry |
+|---|---|---|---|
+{% for r in csv_rows %}| {{ r["client_name"] }} | {{ r["rate_limit_rpm"] }} | {{ r["allowed_models"] }} | {{ r["expiry"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. APIキーを発行し安全に配布する
+
+```bash
+{% for r in csv_rows %}echo "{{ r['client_name'] }}: 実際のキーを生成し {{ r['api_key_placeholder'] }} を置き換えて {{ r['client_name'] }} 担当者へ安全な経路(パスワードマネージャ等)で共有する"
+{% endfor %}```
+
+CSVの`api_key_placeholder`列はプレースホルダです。実際のキーはランダムな長い文字列で生成し、Gitリポジトリやチャットに平文で残さないでください。
+
+### 2. プロキシにAPIキー認証を設定する
+
+Nginxで`map`ディレクティブを使い、キーからクライアント名を解決します。
+
+```bash
+sudo tee /etc/nginx/conf.d/inference-api-keys.conf <<'EOF'
+map $http_x_api_key $api_client {
+    default "";
+{% for r in csv_rows %}    "{{ r['api_key_placeholder'] }}" "{{ r['client_name'] }}";
+{% endfor %}}
+EOF
+```
+
+### 3. 利用者別レート制限を設定する
+
+```bash
+sudo tee -a /etc/nginx/conf.d/inference-api-keys.conf <<'EOF'
+{% for r in csv_rows %}limit_req_zone $binary_remote_addr zone={{ r['client_name'] }}_zone:10m rate={{ r['rate_limit_rpm'] }}r/m;
+{% endfor %}EOF
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+### 4. 認証成功・失敗・制限超過を検証する
+
+```bash
+{% for r in csv_rows %}curl -s -o /dev/null -w "{{ r['client_name'] }} valid key: %{http_code}\n" \
+  -H "X-Api-Key: {{ r['api_key_placeholder'] }}" http://127.0.0.1/v1/models
+{% endfor %}INVALID_KEY="this-key-is-not-registered"
+curl -s -o /dev/null -w "invalid key: %{http_code}\n" \
+  -H "X-Api-Key: $INVALID_KEY" http://127.0.0.1/v1/models
+```
+
+### 5. 未許可モデルへのアクセスを拒否する
+
+```bash
+{% for r in csv_rows %}echo "{{ r['client_name'] }} の許可モデル: {{ r['allowed_models'] }}"
+{% endfor %}```
+
+各利用者のリクエストボディの`model`フィールドを、`allowed_models`列の許可リストと突き合わせ、リストにないモデルはプロキシ側で403を返すよう設定します。
+
+### 6. キーの失効と棚卸しを運用する
+
+```bash
+{% for r in csv_rows %}echo "{{ r['client_name'] }}: expiry={{ r['expiry'] }}"
+{% endfor %}date -I
+```
+
+`expiry`列を超過したキーは`map`定義から削除し、`nginx -t`確認後にリロードして即時失効させます。
+
+## 動作確認
+
+- 手順4で有効なキーはHTTP 200、無効なキー(`$INVALID_KEY`)はHTTP 401/403が返ること
+- 各利用者のレート制限(`rate_limit_rpm`)を超えるリクエストを送るとHTTP 429が返ること
+- `allowed_models`にないモデルを指定したリクエストが拒否されること
+- `expiry`超過後のキーでアクセスするとHTTP 401/403が返ること
+
+## 注意事項
+
+- APIキーはプロキシ設定ファイル(`inference-api-keys.conf`)に平文で記載されるため、ファイル権限とアクセス制御(root限定)を厳格にする。
+- キーをGitやチャットに残さない。棚卸し(手順6)は最低でも月次で実施し、期限切れ・不要になったキーを速やかに失効させる。
+- 本手順はプロキシ層でのAPIキー認証・レート制限に焦点を絞り、より強固なmTLSベースのゼロトラスト構成(zero-trust-access)とは認証層が異なる。

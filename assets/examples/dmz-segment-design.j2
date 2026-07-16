@@ -1,0 +1,111 @@
+# DMZセグメントの設計と通信ポリシー定義
+
+外部公開サーバを収容するDMZのアドレス設計と、内部・DMZ・外部それぞれの通信を「最小許可」の原則で定義し、ファイアウォールポリシーに落とし込みます。
+
+## 目的
+
+DMZの役割と「内部→DMZ→外部」の通信原則を理解し、公開サービスごとの通信フローを明文化したうえで、疎通と遮断の両方を検証できるようになることを目指します。
+
+## 用語解説
+
+- **DMZ(非武装地帯)**: インターネットに公開するサーバを内部ネットワークから隔離して置くセグメント。DMZが侵害されても内部への直接到達を防ぐ役割を持つ
+- **内→DMZ→外の原則**: 外部から内部ネットワークへの直接通信を許可せず、内部からDMZ、DMZから外部という一方向的な通信フローを基本とする設計原則
+- **最小許可**: 業務上必要な通信のみを個別に許可し、それ以外はデフォルトで拒否する方針
+- **1:1 NAT**: 1つのプライベートIPに1つのグローバルIPを固定的に対応付ける変換方式。DMZサーバの外部公開でよく使われる
+- **通信フロー表**: 送信元・宛先・プロトコル・ポート・許可理由を一覧化した表。ファイアウォールルールの根拠資料になる
+
+## シナリオ設定
+
+DMZのサブネットは `{{ dmz_subnet }}` です。公開サービスは以下の {{ public_services | length }} 件です。
+
+{% for s in public_services %}- **{{ s.name }}**: {{ s.protocol }}/{{ s.port }}
+{% endfor %}
+
+内部からDMZへの許可フローは以下の {{ internal_allowed_flows | length }} 件です。
+
+{% for f in internal_allowed_flows %}- {{ f.source }} → {{ f.destination }}({{ f.protocol }}/{{ f.port }})
+{% endfor %}
+
+DMZから外部への発信ポリシー: {{ outbound_policy }}
+NAT設計: {{ nat_design }}
+
+## 手順
+
+### 1. セグメントとアドレスを設計する
+
+```bash
+echo "DMZ subnet: {{ dmz_subnet }}"
+{% for s in public_services %}echo "service: {{ s.name }} ({{ s.protocol }}/{{ s.port }})"
+{% endfor %}
+```
+
+`{{ dmz_subnet }}` を既存の内部セグメント・グローバルアドレスブロックと重複しないよう確認し、公開サービスごとに必要なポートを洗い出します。
+
+### 2. 通信フロー表を作成する
+
+```bash
+cat <<'EOF' > dmz-flow-table.md
+| source | destination | protocol | port |
+|---|---|---|---|
+{% for f in internal_allowed_flows %}| {{ f.source }} | {{ f.destination }} | {{ f.protocol }} | {{ f.port }} |
+{% endfor %}EOF
+cat dmz-flow-table.md
+```
+
+内部からDMZへの通信は業務上必要なフローに限定し、DMZから内部への通信は原則として作らないことを確認します。
+
+### 3. ファイアウォールポリシーへ落とし込む(firewalld例)
+
+```bash
+sudo firewall-cmd --permanent --new-zone=dmz
+{% for s in public_services %}sudo firewall-cmd --permanent --zone=dmz --add-port={{ s.port }}/{{ s.protocol }}
+{% endfor %}sudo firewall-cmd --permanent --zone=dmz --add-source={{ dmz_subnet }}
+sudo firewall-cmd --reload
+```
+
+### 4. DMZから外部への発信ポリシーを適用する
+
+```bash
+# {{ outbound_policy }}
+sudo firewall-cmd --permanent --zone=dmz --add-rich-rule='rule family="ipv4" port port="443" protocol="tcp" accept'
+sudo firewall-cmd --permanent --zone=dmz --add-rich-rule='rule family="ipv4" port port="53" protocol="udp" accept'
+sudo firewall-cmd --permanent --zone=dmz --set-target=DROP
+sudo firewall-cmd --reload
+```
+
+### 5. NAT設計を適用する
+
+```bash
+# {{ nat_design }}
+sudo firewall-cmd --permanent --zone=dmz --add-forward-port=port=443:proto=tcp:toaddr=10.10.10.11
+```
+
+### 6. 許可フローの疎通を検証する
+
+```bash
+{% for f in internal_allowed_flows %}nc -zv {{ f.destination }} {{ f.port }}
+{% endfor %}
+```
+
+`{{ internal_allowed_flows[0].source }}` から `{{ internal_allowed_flows[0].destination }}` への疎通が成功することを確認します。
+
+### 7. 想定外の通信が遮断されることを検証する
+
+```bash
+nc -zv -w 3 10.10.10.11 22 || echo "blocked as expected"
+```
+
+内部管理ポート(SSHなど)へDMZ側から到達できないなど、許可していない通信が確実に拒否されることを確認します。
+
+## 動作確認
+
+- `{{ dmz_subnet }}` から発せられる通信が `{{ outbound_policy }}` の範囲に制限されていること
+- 通信フロー表に記載のない経路(DMZから内部への逆方向通信など)が遮断されること
+- 公開サービス({% for s in public_services %}{{ s.name }}{% if not loop.last %}, {% endif %}{% endfor %})が外部から到達可能であること
+- NAT設計通りにグローバルIPからDMZサーバへ到達できること
+
+## 注意事項
+
+- DMZから内部ネットワークへの通信を許可すると、DMZ侵害時に内部への足がかりを与えてしまう。原則として許可フロー表に無いDMZ→内部の通信は作らない。
+- ファイアウォールポリシーの変更は既存の正規通信を止めるリスクがあるため、`--reload`前に`firewall-cmd --permanent`の内容をレビューし、変更ウィンドウで実施する。
+- 通信フロー表は設計時点のスナップショットである。新しい公開サービスやフローを追加する際は必ずこの表を更新し、ファイアウォールルールとの乖離を防ぐ。

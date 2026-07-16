@@ -1,0 +1,5 @@
+listen_interfaces = ["127.0.0.1", "10.0.20.1"]
+allowed_clients = ["10.0.20.0/24", "127.0.0.0/8"]
+forward_or_recursion = "recursion"
+cache_size = "256m"
+dnssec_validation = true

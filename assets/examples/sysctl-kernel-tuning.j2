@@ -1,0 +1,86 @@
+# sysctlによるカーネルパラメータ調整
+
+ネットワーク・ファイルハンドル系のカーネルパラメータをsysctl.dで恒久設定し、再起動後も維持されることを検証します。root権限（sudo）で実施してください。
+
+## 目的
+
+sysctlパラメータの現在値と初期値の違いを理解し、`/etc/sysctl.d/` への恒久設定と反映検証、ロールバックまでを一連の作業として行えるようになることを目指します。
+
+## 用語解説
+
+- **sysctl**: 稼働中のカーネルパラメータを参照・変更するコマンド
+- **/proc/sys**: カーネルパラメータが仮想ファイルとして公開されているディレクトリ（sysctlはこの読み書きの窓口）
+- **/etc/sysctl.d/**: 起動時・`sysctl --system` 実行時に読み込まれる恒久設定のドロップインディレクトリ
+- **ドロップインファイル**: 既存設定を直接編集せず、個別ファイルとして追加する設定方式
+
+## シナリオ設定
+
+以下 {{ csv_rows | length }} 件のパラメータを恒久適用します。
+
+| parameter | value | current_default | purpose | risk |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["parameter"] }} | {{ r["value"] }} | {{ r["current_default"] }} | {{ r["purpose"] }} | {{ r["risk"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 現在値を確認する
+
+```bash
+{% for r in csv_rows %}sysctl {{ r["parameter"] }}
+{% endfor %}```
+
+`current_default`（{% for r in csv_rows %}{{ r["parameter"] }}={{ r["current_default"] }}{% if not loop.last %}, {% endif %}{% endfor %}）と実際の出力が一致するか確認します。環境によって初期値が異なる場合があります。
+
+### 2. `/etc/sysctl.d/` にドロップインファイルを作成する
+
+```bash
+cat > /etc/sysctl.d/90-custom-tuning.conf <<'EOF'
+{% for r in csv_rows %}# {{ r["purpose"] }}
+{{ r["parameter"] }} = {{ r["value"] }}
+{% endfor %}EOF
+```
+
+### 3. `sysctl --system` で即時反映する
+
+```bash
+sysctl --system
+```
+
+### 4. 反映結果を確認する
+
+```bash
+{% for r in csv_rows %}sysctl {{ r["parameter"] }}
+{% endfor %}```
+
+各パラメータが設定値（{% for r in csv_rows %}{{ r["parameter"] }}={{ r["value"] }}{% if not loop.last %}, {% endif %}{% endfor %}）になっていることを確認します。
+
+### 5. 再起動後の永続確認
+
+```bash
+reboot
+# 再ログイン後
+{% for r in csv_rows %}sysctl {{ r["parameter"] }}
+{% endfor %}```
+
+### 6. ロールバック手順
+
+```bash
+rm /etc/sysctl.d/90-custom-tuning.conf
+sysctl --system
+{% for r in csv_rows %}sysctl {{ r["parameter"] }}
+{% endfor %}```
+
+削除後、各パラメータが `current_default` の値に戻ることを確認します。
+
+## 動作確認
+
+- `sysctl --system` 実行直後に全パラメータが設定値へ変わっていること
+- 再起動後も設定値が維持されていること
+- ロールバック後、全パラメータが `current_default` の値に戻ること
+
+## 注意事項
+
+- `vm.swappiness` のように低く設定しすぎるとOOM Killerの発動が早まる場合があるため、risk列の内容を踏まえて本番投入前に検証環境で挙動を確認する。
+- ドロップインファイルは既存の `/etc/sysctl.conf` や他のドロップインと重複定義しないよう、事前に `sysctl --system` の読み込み順を確認しておく。
+- 破壊的な設定変更ではないが、`fs.file-max` のようなシステム全体の上限緩和は個々のプロセスの `ulimit` 設定とは独立している点に注意する。

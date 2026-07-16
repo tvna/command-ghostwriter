@@ -1,0 +1,9 @@
+model_dirs:
+  - /srv/models/qwen3-coder-30b
+  - /srv/models/gpt-oss-120b
+config_paths:
+  - /etc/vllm/config.yaml
+  - /etc/litellm/config.yaml
+backup_dest: /mnt/backup-nas/ai-assets/
+dedup_strategy: 再取得可能なベースモデル本体は最新世代のみ保持し、ファインチューン成果物とプロンプト資産は世代管理して複数世代を保持する
+restore_test_plan: 月次で最新バックアップを検証用ホストへリストアし、チェックサム照合とAPI疎通確認まで行う

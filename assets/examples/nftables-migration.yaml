@@ -1,0 +1,9 @@
+current_ruleset_source: "/etc/sysconfig/iptables"
+table_name: "inet filter"
+chains:
+  - name: "input"
+    priority: 0
+  - name: "forward"
+    priority: 0
+conversion_method: "iptables-translate と iptables-restore-translate による変換"
+cutover_window: "2026-07-20 01:00-02:00 JST"

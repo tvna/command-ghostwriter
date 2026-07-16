@@ -1,0 +1,10 @@
+default_user: "opsadmin"
+ssh_authorized_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyPlaceholderReplaceMe opsadmin@bastion"
+packages:
+  - curl
+  - vim
+  - unattended-upgrades
+timezone: "Asia/Tokyo"
+runcmd:
+  - "systemctl enable --now unattended-upgrades"
+  - "echo cloud-init first boot done > /var/log/cloud-init-first-boot.log"

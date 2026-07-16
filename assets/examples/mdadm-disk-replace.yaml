@@ -1,0 +1,5 @@
+array_device: "/dev/md0"
+failed_disk: "/dev/sdb"
+replacement_disk: "/dev/sdc"
+serial_check_command: "smartctl -i /dev/sdb"
+resync_eta_note: "1TBあたり約2時間"

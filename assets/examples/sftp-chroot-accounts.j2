@@ -1,0 +1,108 @@
+# SFTP専用chrootアカウントの作成
+
+シェルを与えずSFTPのみ許可するchroot専用アカウント群を作成し、指定ディレクトリの外へ出られないことを検証するまでを一巡します。
+
+## 目的
+
+`ForceCommand internal-sftp`と`ChrootDirectory`の仕組み、および`ChrootDirectory`が要求する所有権制約を理解し、外部パートナー向けの閉じ込めアカウントを安全に作成できるようになることを目指します。
+
+## 用語解説
+
+- **ForceCommand internal-sftp**: ログイン時に任意のシェルではなく、sshd内蔵のSFTPサブシステムだけを強制実行させる設定
+- **ChrootDirectory**: 指定ディレクトリをそのユーザーのファイルシステムルートとして扱わせ、上位階層へのアクセスを遮断する設定
+- **所有権要件**: `ChrootDirectory`に指定するディレクトリは、root所有かつグループ・他者に書き込み不可でなければsshdが起動時に拒否する
+- **アップロードサブディレクトリ**: chrootルート自体は書き込みできないため、その配下に対象ユーザーが書き込めるサブディレクトリを別途用意する
+- **Matchブロック**: `sshd_config`内で特定のユーザー・グループにだけ設定を上書き適用する条件分岐
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} アカウントをSFTP専用chrootアカウントとして作成します。
+
+| username | chroot_dir | upload_subdir | group | purpose |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["username"] }} | {{ r["chroot_dir"] }} | {{ r["upload_subdir"] }} | {{ r["group"] }} | {{ r["purpose"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. グループとユーザーを作成する
+
+シェルを与えず、SFTP専用グループに所属させます。
+
+```bash
+{% for r in csv_rows %}sudo groupadd -f {{ r["group"] }}
+{% endfor %}{% for r in csv_rows %}sudo useradd -d {{ r["chroot_dir"] }} -g {{ r["group"] }} -s /usr/sbin/nologin {{ r["username"] }}
+sudo passwd {{ r["username"] }}
+{% endfor %}
+```
+
+### 2. chrootディレクトリの所有権要件を満たす構成を準備する
+
+```bash
+{% for r in csv_rows %}sudo mkdir -p {{ r["chroot_dir"] }}/{{ r["upload_subdir"] }}
+sudo chown root:root {{ r["chroot_dir"] }}
+sudo chmod 755 {{ r["chroot_dir"] }}
+sudo chown {{ r["username"] }}:{{ r["group"] }} {{ r["chroot_dir"] }}/{{ r["upload_subdir"] }}
+sudo chmod 750 {{ r["chroot_dir"] }}/{{ r["upload_subdir"] }}
+{% endfor %}
+```
+
+`{{ csv_rows[0]["chroot_dir"] }}`自体はroot所有・書き込み不可のままにし、書き込みは`{{ csv_rows[0]["upload_subdir"] }}`配下に限定します。
+
+### 3. sshd_configにMatchブロックを追加する
+
+```bash
+{% for r in csv_rows %}sudo tee -a /etc/ssh/sshd_config.d/sftp-{{ r["username"] }}.conf <<EOF
+Match User {{ r["username"] }}
+    ForceCommand internal-sftp
+    ChrootDirectory {{ r["chroot_dir"] }}
+    AllowTcpForwarding no
+    X11Forwarding no
+EOF
+{% endfor %}
+```
+
+### 4. 設定を検証しsshdへ反映する
+
+```bash
+sudo sshd -t
+sudo systemctl reload sshd
+```
+
+`sshd -t`がエラーなく終了することを確認してから反映します。
+
+### 5. SFTP接続してアップロードサブディレクトリへの書き込みを確認する
+
+```bash
+{% for r in csv_rows %}sftp {{ r["username"] }}@localhost <<EOF
+cd {{ r["upload_subdir"] }}
+put /etc/hostname test-upload.txt
+ls
+EOF
+{% endfor %}
+```
+
+### 6. シェル脱出や上位階層アクセスができないことを確認する
+
+```bash
+{% for r in csv_rows %}ssh {{ r["username"] }}@localhost 'echo should-not-print' || echo "{{ r["username"] }}: シェルログイン拒否を確認"
+{% endfor %}
+sftp {{ csv_rows[0]["username"] }}@localhost <<EOF
+cd /
+ls
+EOF
+```
+
+`cd /`実行後の`ls`が、実サーバのルートディレクトリではなく`{{ csv_rows[0]["chroot_dir"] }}`直下の内容だけを表示することを確認します。
+
+## 動作確認
+
+- {{ csv_rows | length }} アカウントいずれも`ssh`での対話ログインが拒否され、SFTPでのみ接続できること
+- 各ユーザーが`upload_subdir`配下にはファイルを書き込めるが、chrootルート直下には書き込めないこと
+- `sftp`セッション内で`cd ..`を繰り返しても、指定した`chroot_dir`より上位へは出られないこと
+
+## 注意事項
+
+- `ChrootDirectory`に指定するディレクトリの所有権・パーミッション要件を満たさないと、sshdはそのユーザーのログイン自体を拒否する。エラー時はまず`journalctl -u ssh`でsshdのログを確認する。
+- グループ・他者に書き込み可能な状態で`chroot_dir`を放置しない。定期的に`find {{ csv_rows[0]["chroot_dir"] }} -maxdepth 0 -perm -022`等で緩んだ権限がないか点検する。
+- 本手順はシェル・鍵管理の一般的なベストプラクティス(`ssh-key-hygiene`)とは別に、アカウント自体を閉じ込める設計に焦点を当てている。鍵配布や運用ルールは別途整備すること。

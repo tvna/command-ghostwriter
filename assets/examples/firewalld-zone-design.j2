@@ -1,0 +1,84 @@
+# firewalld ゾーン設計とインターフェース割当
+
+CSV で定義した {{ csv_rows | length }} 件の割当に基づき、firewalld の
+ゾーンを設計してインターフェース・送信元へ割り当てます。用途別にゾーンを
+分けることで、意図した境界を明確に作ります。
+
+## 目的
+
+用途別のゾーンを設計し、インターフェースや送信元ネットワークへ正しく
+割り当てたうえで、許可するサービス・ポートを整理し、firewalld の
+zone/target の概念を理解した上で意図した通信境界を構築できるように
+なることを目指します。
+
+## 用語解説
+
+- **zone（ゾーン）**: 信頼度に応じて通信ルールをまとめる単位
+- **target**: ゾーンに一致しない通信のデフォルト挙動（default/ACCEPT/DROP等）
+- **デフォルトゾーン**: インターフェースを明示的に割り当てなかった場合に使われるゾーン
+- **permanent/runtime**: --permanent は再起動後も残る設定、runtime は現在有効な状態
+
+## シナリオ設定
+
+今回設計する割当は次の {{ csv_rows | length }} 件です。
+
+| zone | interface/source | allowed_services | allowed_ports | target | 用途 |
+|------|-------------------|-------------------|----------------|--------|------|
+{% for r in csv_rows %}| {{ r["zone"] }} | {{ r["interface_or_source"] }} | {{ r["allowed_services"] }} | {{ r["allowed_ports"] }} | {{ r["target_policy"] }} | {{ r["purpose"] }} |
+{% endfor %}
+
+表中の `-` は該当なし・未指定を表します（例: サービス指定なし、ポート指定なし）。
+
+## 手順
+
+### 1. 現状のゾーン割当を確認する
+
+```bash
+firewall-cmd --get-active-zones
+firewall-cmd --get-default-zone
+```
+
+### 2. ゾーンを作成する
+
+まだ存在しないゾーンを作成します。
+
+```bash
+{% for r in csv_rows %}firewall-cmd --permanent --new-zone={{ r["zone"] }} 2>/dev/null || true
+{% endfor %}```
+
+### 3. インターフェース・送信元を割り当てる
+
+```bash
+{% for r in csv_rows %}firewall-cmd --permanent --zone={{ r["zone"] }} --add-source={{ r["interface_or_source"] }} 2>/dev/null || firewall-cmd --permanent --zone={{ r["zone"] }} --add-interface={{ r["interface_or_source"] }}
+{% endfor %}```
+
+### 4. サービス・ポートの許可を投入する
+
+```bash
+{% for r in csv_rows %}{% if r["allowed_services"] != "-" %}firewall-cmd --permanent --zone={{ r["zone"] }} --add-service={{ r["allowed_services"] }}
+{% endif %}{% if r["allowed_ports"] != "-" %}firewall-cmd --permanent --zone={{ r["zone"] }} --add-port={{ r["allowed_ports"] }}
+{% endif %}firewall-cmd --permanent --zone={{ r["zone"] }} --set-target={{ r["target_policy"] }}
+{% endfor %}```
+
+### 5. 設定を反映して疎通検証する
+
+```bash
+firewall-cmd --reload
+firewall-cmd --list-all-zones
+```
+
+各ゾーンで想定した用途の通信のみが許可されていることを、対象セグメント
+から実際の疎通で確認します。
+
+## 動作確認
+
+- `firewall-cmd --get-active-zones` に想定したインターフェース・送信元がそれぞれ正しいゾーンで表示されること
+- `firewall-cmd --list-all-zones` に各ゾーンのサービス・ポート許可が反映されていること
+- 許可した用途（例: HTTPS、SSH保守アクセス）の通信が成功すること
+- 意図しないゾーン間の通信が遮断されていること
+
+## 注意事項
+
+- `--permanent` のみでは即時反映されない。必ず `firewall-cmd --reload` まで実施してから動作確認する。
+- リモート作業中に管理アクセス用のゾーン・送信元設定を誤ると、自分自身の接続が切断されるおそれがある。
+- target を `ACCEPT` にしたゾーンは明示ルール以外も通過しうるため、割り当てる送信元を最小限に留める。

@@ -1,0 +1,87 @@
+# systemdユニットへのリソース制限設定
+
+サービス単位でファイルディスクリプタ・メモリ・CPUの上限をsystemdディレクティブで設定し、cgroup経由で強制させます。sudo権限で実施してください。
+
+## 目的
+
+`LimitNOFILE`/`MemoryMax`/`CPUQuota`の各ディレクティブとcgroupの関係を理解し、サービスごとに適切なリソース上限を設定・検証できるようになることを目指します。
+
+## 用語解説
+
+- **LimitNOFILE**: プロセスが同時に開けるファイルディスクリプタ数の上限
+- **MemoryMax**: cgroup v2経由でサービスに割り当てるメモリ使用量の上限。超過するとOOM Killerにより該当cgroup内のプロセスが終了させられる
+- **CPUQuota**: サービスが使用できるCPU時間の割合(100%が論理コア1個分)
+- **cgroup**: Linuxカーネルがプロセスグループ単位でリソース(CPU・メモリ・IO等)を制限・計測する仕組み。systemdはユニットごとにcgroupを自動作成する
+- **ドロップイン設定**: `systemctl edit`等で`/etc/systemd/system/<unit>.d/*.conf`に追加設定を配置し、元のユニットファイルを直接編集せずに上書きする方式
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 件のサービスにリソース制限を設定します。
+
+| service_name | limit_nofile | memory_max | cpu_quota | reason |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["service_name"] }} | {{ r["limit_nofile"] }} | {{ r["memory_max"] }} | {{ r["cpu_quota"] }} | {{ r["reason"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 現在の制限値を確認する
+
+```bash
+{% for r in csv_rows %}systemctl show {{ r["service_name"] }} -p LimitNOFILE -p MemoryMax -p CPUQuotaPerSecUSec
+{% endfor %}```
+
+未設定の場合、`LimitNOFILE`はディストリビューションのデフォルト値、`MemoryMax`は`infinity`、CPUQuotaは無制限として表示されます。
+
+### 2. ドロップインで制限を追加する
+
+```bash
+{% for r in csv_rows %}sudo mkdir -p /etc/systemd/system/{{ r["service_name"] }}.service.d
+sudo tee /etc/systemd/system/{{ r["service_name"] }}.service.d/resource-limits.conf <<'EOF'
+[Service]
+LimitNOFILE={{ r["limit_nofile"] }}
+MemoryMax={{ r["memory_max"] }}
+CPUQuota={{ r["cpu_quota"] }}
+EOF
+{% endfor %}```
+
+`reason`列に基づき、それぞれのサービス特性(接続数・バッチ負荷・キャッシュ用途)に応じた値を設定しています。
+
+### 3. daemon-reloadと再起動を行う
+
+```bash
+sudo systemctl daemon-reload
+{% for r in csv_rows %}sudo systemctl restart {{ r["service_name"] }}
+{% endfor %}```
+
+ドロップイン設定はサービス再起動後でないと反映されません。
+
+### 4. systemd-cglsとstatusで検証する
+
+```bash
+systemd-cgls /system.slice
+{% for r in csv_rows %}systemctl show {{ r["service_name"] }} -p LimitNOFILE -p MemoryMax -p CPUQuotaPerSecUSec
+systemctl status {{ r["service_name"] }} --no-pager
+{% endfor %}```
+
+`systemctl show`の出力が設定値と一致していることを確認します。
+
+### 5. 制限値到達時の挙動を確認する
+
+```bash
+{% for r in csv_rows %}journalctl -u {{ r["service_name"] }} --since "10 minutes ago" | grep -i -E "oom|killed" || true
+{% endfor %}```
+
+メモリ上限に到達した場合、`journalctl`に`oom-kill`関連のログが記録されます。
+
+## 動作確認
+
+- {{ csv_rows | length }} 件全てのサービスで`systemctl show`が設定した`LimitNOFILE`/`MemoryMax`/`CPUQuota`を返すこと
+- 各サービスが`daemon-reload`と再起動後も`active (running)`であること
+- `systemd-cgls`でサービスごとのcgroup階層が確認できること
+
+## 注意事項
+
+- `MemoryMax`を実運用のピーク使用量より低く設定すると、正常時でもOOM Killerによりサービスが強制終了される。事前に平常時のメモリ使用量を計測してから制限値を決める。
+- `CPUQuota`を厳しく絞りすぎると、負荷増加時に処理が滞留してレスポンス遅延を招く。急なトラフィック増加が想定されるサービスは余裕を持った値にする。
+- ドロップイン設定はサービス単位で個別に管理されるため、複数サービスへ同じ値を適用する場合でもコピー漏れがないか{{ csv_rows | length }}件すべてを確認する。

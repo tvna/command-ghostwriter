@@ -1,0 +1,5 @@
+acl_id,type,action,source,destination,port,remark
+101,extended,permit,10.10.20.0 0.0.0.255,host 10.10.10.5,443,アプリサーバから管理HTTPSへの許可
+101,extended,permit,10.10.20.0 0.0.0.255,10.10.10.0 0.0.0.255,22,管理セグメントへのSSH許可
+101,extended,deny,any,10.10.10.0 0.0.0.255,any,管理セグメントへのその他アクセスの明示拒否
+10,standard,permit,10.10.30.0 0.0.0.255,any,any,監視サブネットからのVTYアクセス許可

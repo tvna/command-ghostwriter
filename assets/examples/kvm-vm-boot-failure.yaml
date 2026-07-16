@@ -1,0 +1,7 @@
+title: KVM仮想マシン起動不能の切り分け
+vm_name: app-db-02
+virsh_error: "error: Failed to start domain app-db-02: Could not open '/var/lib/libvirt/images/app-db-02.qcow2': Permission denied"
+disk_image_path: /var/lib/libvirt/images/app-db-02.qcow2
+host_free_resources: 空きメモリ1.8GB / 空きディスク5GB (VM要求メモリ4GB)
+xml_backup: /root/libvirt-backup/app-db-02.xml
+escalation: 仮想化基盤チーム (内線 1205)

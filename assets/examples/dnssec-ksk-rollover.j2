@@ -1,0 +1,75 @@
+# DNSSECのKSKロールオーバー実施
+
+計画的なKSK更新を、新旧鍵の同時公開とDS切替、十分な待機時間を守って安全に実施し、検証失敗を起こさない手順です。
+
+## 目的
+
+DNSSECのKSKロールオーバーが持つリスク(手順を誤るとゾーン全体が検証失敗する)を理解したうえで、ダブルシグネチャ方式による新旧鍵の同時公開・DS更新・待機・旧鍵削除という正しい順序で鍵更新を実施できるようになることを目指します。
+
+## 用語解説
+
+- **KSKロールオーバー**: 鍵署名鍵(KSK)を計画的に新しい鍵へ切り替える作業
+- **ダブルシグネチャ方式**: 新旧2つのKSKを一定期間同時に公開し、検証の空白を作らずに切り替える方式
+- **待機時間(TTL待ち)**: DSレコードや鍵情報がキャッシュから消えるまで安全のために待つ期間
+- **DSレコード**: 親ゾーンに登録する子ゾーンKSKのハッシュ値
+- **検証失敗(SERVFAIL)**: 手順を誤った場合にゾーン全体が名前解決不能になるDNSSEC特有のリスク
+
+## シナリオ設定
+
+ゾーン `{{ zone_name }}` の現行KSK(鍵ID `{{ current_key_id }}`)を{{ rollover_method }}で更新します。DSレコードのTTLは {{ ds_ttl }} 秒であり、親ゾーンへの反映手順は「{{ parent_update_procedure }}」です。
+
+## 手順
+
+### 1. 現行鍵とリスクを確認する
+
+```bash
+dig {{ zone_name }} DNSKEY +short
+rndc dnssec -status {{ zone_name }}
+```
+
+### 2. 新しいKSKを生成し公開する
+
+```bash
+dnssec-keygen -f KSK -a ECDSAP256SHA256 -K /var/named/keys {{ zone_name }}
+rndc dnssec -rollover -key {{ current_key_id }} -alg ECDSAP256SHA256 {{ zone_name }}
+```
+
+### 3. 新旧KSKが同時に公開されていることを確認する
+
+```bash
+# {{ rollover_method }} により新旧2件のKSKが返ることを確認する
+dig {{ zone_name }} DNSKEY +short
+```
+
+### 4. 親ゾーンへ新しいDSレコードを登録する
+
+```bash
+dnssec-dsfromkey -f /var/named/db.{{ zone_name }} {{ zone_name }}
+# {{ parent_update_procedure }}
+```
+
+### 5. TTL経過を待ってから旧鍵を削除する
+
+```bash
+# DSレコードのTTL({{ ds_ttl }}秒)の2倍以上待機してから実施する
+rndc dnssec -rollover -key {{ current_key_id }} -when now {{ zone_name }}
+```
+
+### 6. 各段階で検証する
+
+```bash
+delv {{ zone_name }} SOA
+dig {{ zone_name }} DNSKEY +short
+```
+
+## 動作確認
+
+- ロールオーバー中は `dig {{ zone_name }} DNSKEY +short` で新旧KSKの両方が確認できること
+- 親ゾーンのDS更新後も `delv {{ zone_name }} SOA` が `fully validated` を返し続けること
+- 旧鍵削除後は新しいKSKのみが公開され、検証エラーが発生していないこと
+
+## 注意事項
+
+- {{ rollback_note }}
+- DSレコードのTTL({{ ds_ttl }}秒)を待たずに旧鍵を削除すると、キャッシュに残った旧DSと新DNSKEYが不整合を起こし検証失敗(SERVFAIL)につながる。
+- 本手順は運用中ゾーンの鍵更新に焦点を絞る。署名の初期導入は別の手順(dnssec-zone-signing)で扱う。

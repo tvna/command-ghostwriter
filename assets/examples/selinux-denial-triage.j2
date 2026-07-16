@@ -1,0 +1,106 @@
+# SELinux起因のPermission denied切り分け — {{ denied_service }}
+
+パーミッションは正しいのに拒否される事象をaudit.logから特定し、`setenforce 0`による恒久無効化に頼らずrestoreconやbooleanで正しく解消します。
+
+## 目的
+
+`{{ denied_service }}` が `{{ target_path }}` へのアクセスで拒否される事象について、DAC権限の確認からausearch/audit2whyでの原因特定、restorecon・semanage fcontextによる是正までを、SELinuxを無効化せずに実施できるようになることを目指します。
+
+## 用語解説
+
+- **AVC(Access Vector Cache)拒否**: SELinuxポリシー違反が発生した際にaudit.logへ記録されるイベント。DAC(通常のパーミッション)とは独立した判定
+- **DAC(Discretionary Access Control)**: chmod/chownによる通常のUNIXパーミッション。SELinuxはこれとは別レイヤーで追加のアクセス制御を行う
+- **scontext / tcontext**: AVCログに現れる、動作したプロセスのコンテキスト(scontext)とアクセス対象のコンテキスト(tcontext)
+- **audit2why**: audit.logのAVC拒否がなぜ発生したか(ポリシー由来かコンテキスト不整合か)を解釈するツール
+- **semanage fcontext**: ファイルパスに紐づく既定コンテキストのルール自体を登録・変更するコマンド(restoreconはこのルールに従って復元するのみ)
+- **boolean**: ポリシー変更なしで個別機能のオン・オフを切り替えられるスイッチ
+
+## シナリオ設定
+
+`{{ denied_service }}` から `{{ target_path }}` への書き込みが拒否されています。audit.logの該当行は以下の通りです。
+
+```
+type=AVC msg=audit(1752624000.123:456): avc: denied { write } for pid=1234 comm="httpd" name="uploads" dev="xvda1" ino=98765 scontext=system_u:system_r:httpd_t:s0 tcontext=unconfined_u:object_r:var_t:s0 tclass=dir
+```
+
+期待コンテキストは `{{ expected_context }}` で、切り分けの過程で `{{ boolean_candidate }}` の状態も確認します。
+
+## 手順
+
+### 1. DAC権限が正常かを確認する
+
+```bash
+ls -ld {{ target_path }}
+stat {{ target_path }}
+```
+
+→ 通常のUNIXパーミッション・所有者が想定通りであることを先に確認します。DAC自体に問題がなければSELinuxが原因の候補として残ります。
+
+### 2. setenforce 0で一時的に切り分ける(恒久化しない)
+
+```bash
+sudo setenforce 0
+# ここでアプリの操作を再現し、Permissiveでは成功するかを確認する
+sudo setenforce 1
+```
+
+→ Permissiveモードで問題が解消すればSELinuxが原因と確定できます。確認後は必ず`setenforce 1`でEnforcingへ戻し、Permissiveのまま放置しません。
+
+### 3. ausearchとaudit2whyで原因を特定する
+
+```bash
+sudo ausearch -m avc -ts recent
+sudo ausearch -m avc -ts recent | audit2why
+```
+
+→ 記録された拒否は以下の通りです。
+
+```
+type=AVC msg=audit(1752624000.123:456): avc: denied { write } for pid=1234 comm="httpd" name="uploads" dev="xvda1" ino=98765 scontext=system_u:system_r:httpd_t:s0 tcontext=unconfined_u:object_r:var_t:s0 tclass=dir
+```
+
+`tcontext` が `{{ expected_context }}` と異なっている場合はコンテキスト不整合、`audit2why`が特定のポリシールール不足を示す場合はboolean変更やポリシーモジュール追加が必要と判断します。
+
+### 4. restoreconとsemanage fcontextで是正する
+
+```bash
+ls -Z {{ target_path }}
+sudo semanage fcontext -a -t {{ expected_context }} "{{ target_path }}(/.*)?"
+sudo restorecon -Rv {{ target_path }}
+ls -Z {{ target_path }}
+```
+
+→ `semanage fcontext`でパス配下の既定コンテキストを`{{ expected_context }}`として登録し、`restorecon`で実際のラベルをそれに合わせて復元します。
+
+### 5. booleanで機能単位の許可を確認する
+
+```bash
+getsebool {{ boolean_candidate }}
+sudo setsebool -P {{ boolean_candidate }} on
+getsebool {{ boolean_candidate }}
+```
+
+→ コンテキスト是正だけでは解消しない場合、関連するboolean `{{ boolean_candidate }}` がオフになっていないかを確認します。`-P`を付けて再起動後も設定が保持されるようにします。
+
+### 6. Enforcingへ復帰し検証する
+
+```bash
+sudo getenforce
+sudo systemctl restart {{ denied_service }}
+sudo ausearch -m avc -ts recent
+```
+
+→ `getenforce`が`Enforcing`であることを確認したうえでサービスを再起動し、直近のAVC拒否が再発していないことを確認します。
+
+## 動作確認
+
+- `getenforce` が `Enforcing` に復帰していること(Permissiveのまま放置していないこと)
+- `ls -Z {{ target_path }}` が `{{ expected_context }}` を示すこと
+- `{{ denied_service }}` 再起動後、直近の `ausearch -m avc` に新規の拒否記録がないこと
+- 元々失敗していた操作(`{{ target_path }}` への書き込み)が成功すること
+
+## 注意事項
+
+- `setenforce 0`や`SELINUX=disabled`による恒久無効化は行わない。切り分けに使った場合は原因特定後、必ずEnforcingへ戻す。
+- `restorecon`は既定ポリシーへの復元であり、意図的なカスタムコンテキストを設定している場合は上書きされる点に注意する。修正前に`semanage fcontext -l`で既存ルールを確認する。
+- booleanの有効化は機能単位の許可拡大である。`{{ boolean_candidate }}`のように用途が明確なものに限定し、原因と無関係なbooleanを試行錯誤的に有効化しない。

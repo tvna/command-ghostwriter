@@ -1,0 +1,5 @@
+swap_file_path = "/swapfile"
+swap_size = "4G"
+swappiness = 10
+fstab_entry = "/swapfile none swap sw 0 0"
+memory_total = "8G"

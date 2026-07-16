@@ -1,0 +1,85 @@
+# smartctlによるディスク健全性の点検
+
+`smartmontools` で物理ディスクのSMART属性を点検し、`smartd` による定期監視・通知まで設定して、故障予兆を運用前に検知できるようにします。
+
+## 目的
+
+主要なSMART属性の意味を理解し、`smartctl` による手動点検から `smartd` による継続監視・通知設定までを一巡し、故障予兆を早期に判断できるようになることを目指します。
+
+## 用語解説
+
+- **SMART**: ディスクが内部的に記録している自己診断属性の総称(Self-Monitoring, Analysis and Reporting Technology)
+- **Reallocated_Sector_Ct**: 代替処理された不良セクタ数。増加傾向は物理的な劣化の兆候
+- **Current_Pending_Sector**: 読み書き不安定で再確認待ちのセクタ数。0以外が続く場合は要注意
+- **Percentage_Used**: NVMeの寿命消費率(0〜100%を超えると保証寿命超過)を示す属性
+- **セルフテスト**: `smartctl -t short/long` でディスク内部の診断を実行する仕組み。short は数分、long は数十分〜数時間
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 台のディスクを点検・監視対象とします。
+
+| device | type | role | check_focus | schedule |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["device"] }} | {{ r["type"] }} | {{ r["role"] }} | {{ r["check_focus"] }} | {{ r["schedule"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. smartmontoolsを導入しデバイスを確認する
+
+```bash
+sudo apt install -y smartmontools || sudo dnf install -y smartmontools
+sudo smartctl --scan
+```
+
+### 2. smartctl -H・-aで点検する
+
+```bash
+{% for r in csv_rows %}sudo smartctl -H {{ r["device"] }}
+sudo smartctl -a {{ r["device"] }} | grep -i "{{ r["check_focus"] }}"
+{% endfor %}
+```
+
+### 3. セルフテストを実行し結果を確認する
+
+```bash
+{% for r in csv_rows %}sudo smartctl -t short {{ r["device"] }}
+{% endfor %}
+sleep 120
+{% for r in csv_rows %}sudo smartctl -l selftest {{ r["device"] }}
+{% endfor %}
+```
+
+### 4. smartdで定期監視・通知を設定する
+
+`schedule` が `daily` のディスクは日次short test、それ以外は週次long testで監視します。
+
+```bash
+{% for r in csv_rows %}{% if r["schedule"] == "daily" %}echo "{{ r["device"] }} -a -o on -S on -s (S/../.././02) -m root -M exec /usr/share/smartmontools/smartd-runner" | sudo tee -a /etc/smartd.conf
+{% else %}echo "{{ r["device"] }} -a -o on -S on -s (L/../../7/03) -m root -M exec /usr/share/smartmontools/smartd-runner" | sudo tee -a /etc/smartd.conf
+{% endif %}{% endfor %}sudo systemctl enable --now smartd
+sudo systemctl restart smartd
+```
+
+### 5. 故障予兆の判断基準で読み解く
+
+```bash
+{% for r in csv_rows %}sudo smartctl -A {{ r["device"] }} | grep -i "{{ r["check_focus"] }}"
+{% endfor %}
+journalctl -u smartd -n 50 --no-pager
+```
+
+`Reallocated_Sector_Ct` や `Current_Pending_Sector` はRAW値が0から増加し続ける場合、`Percentage_Used` は100に近づく場合に要注意です。単発の非ゼロ値ではなく増加トレンドで判断します。
+
+## 動作確認
+
+- `smartctl -H` の総合判定(SMART overall-health)が全デバイスで `PASSED` であること
+- セルフテスト完了後、`smartctl -l selftest` に `Completed without error` が記録されること
+- `/etc/smartd.conf` に {{ csv_rows | length }} 台分のエントリが投入され、`smartd` が起動していること
+- `journalctl -u smartd` に監視開始のログが記録されること
+
+## 注意事項
+
+- `smartctl -t long` はディスクサイズによっては数時間かかり、実行中は性能低下を伴うため、業務影響の少ない時間帯に実施する。
+- SMART値は予兆であって確定診断ではない。`check_focus` の属性が増加傾向にある場合は交換計画を早めに立て、バックアップの世代を確保しておく。
+- `disk-usage-triage`(既存)は空き容量の逼迫対応であり、本手順は物理的な故障予兆の点検・監視で焦点が異なる。

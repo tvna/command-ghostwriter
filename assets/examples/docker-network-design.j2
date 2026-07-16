@@ -1,0 +1,77 @@
+# Dockerユーザー定義ネットワークの設計 — {{ network_name }}
+
+ユーザー定義ブリッジ **{{ network_name }}**（サブネット `{{ subnet }}`）を作成し、コンテナ間の名前解決とネットワーク分離、ポート公開方針を設計します。
+
+## 目的
+
+デフォルトbridgeネットワークとの違いを理解し、ユーザー定義ネットワーク上でコンテナ名による名前解決が働くこと、また分離により不要な通信経路を作らないことを確認できるようになることを目指します。
+
+## 用語解説
+
+- **デフォルトbridge**: `docker0` に接続される既定のネットワーク。コンテナ名によるDNS解決が働かず、`--link` 等の旧式手段が必要だった
+- **ユーザー定義ブリッジ**: `docker network create` で作成する独自ネットワーク。接続したコンテナ同士はコンテナ名で名前解決できる
+- **内蔵DNS**: Dockerデーモンが提供する127.0.0.11のDNSサーバ。ユーザー定義ネットワーク内でのみコンテナ名を解決する
+- **サブネット**: ネットワークに割り当てるIPアドレス範囲。`{{ subnet }}` のようにCIDR表記で指定する
+- **ポート公開 (-p)**: ホストからコンテナへのアクセス経路。公開しないコンテナはネットワーク内部からのみ到達可能
+
+## シナリオ設定
+
+サブネット `{{ subnet }}` を持つネットワーク `{{ network_name }}` を作成し、フロントエンド `{{ frontend_container }}` とバックエンド `{{ backend_container }}` を接続します。ホストへ公開するポートは {{ published_ports | length }} 件です。
+
+## 手順
+
+### 1. 既存のネットワークを確認する
+
+```bash
+docker network ls
+docker network inspect bridge
+```
+
+### 2. ユーザー定義ネットワークを作成する
+
+```bash
+docker network create --subnet {{ subnet }} {{ network_name }}
+docker network inspect {{ network_name }}
+```
+
+### 3. バックエンドコンテナを接続する
+
+バックエンドはホストへポート公開せず、ネットワーク内部からのみアクセス可能にします。
+
+```bash
+docker run -d --name {{ backend_container }} --network {{ network_name }} nginx:1.27
+```
+
+### 4. フロントエンドコンテナを接続してポート公開する
+
+```bash
+{% for p in published_ports %}docker run -d --name {{ frontend_container }} --network {{ network_name }} -p {{ p }} nginx:1.27
+{% endfor %}```
+
+### 5. コンテナ名による名前解決を検証する
+
+```bash
+docker exec {{ frontend_container }} getent hosts {{ backend_container }}
+docker exec {{ frontend_container }} curl -sI http://{{ backend_container }}
+```
+
+### 6. デフォルトbridgeとの分離を確認する
+
+デフォルトbridge上のコンテナからは `{{ backend_container }}` へ名前解決できないことを確認します。
+
+```bash
+docker run --rm --network bridge busybox nslookup {{ backend_container }} || echo "想定どおり解決できません"
+```
+
+## 動作確認
+
+- `docker network inspect {{ network_name }}` に `{{ frontend_container }}` と `{{ backend_container }}` の両方が接続コンテナとして表示されること
+- `{{ frontend_container }}` から `{{ backend_container }}` へコンテナ名で名前解決・通信できること
+- デフォルトbridgeネットワークからは `{{ backend_container }}` へ名前解決できないこと（分離の確認）
+- ホストから公開ポート経由で `{{ frontend_container }}` に到達できること
+
+## 注意事項
+
+- ポート公開はホストへ露出させる必要のあるコンテナ（本例では `{{ frontend_container }}`）に限定し、`{{ backend_container }}` のようなバックエンドは公開しないことでアタックサーフェスを最小化する。
+- サブネット `{{ subnet }}` が既存ネットワークや社内アドレス体系と重複していないか、作成前に `docker network ls` と `ip route` で確認する。
+- 演習後は `docker rm -f {{ frontend_container }} {{ backend_container }}` でコンテナを削除し、`docker network rm {{ network_name }}` でネットワークを片付ける。

@@ -1,0 +1,112 @@
+# BINDの再帰問い合わせ制限とアクセス制御手順
+
+BIND がオープンリゾルバとして第三者に悪用されないよう、再帰問い合わせの許可範囲とゾーン転送の許可先を制限します。
+
+## 目的
+
+再帰問い合わせを信頼できるクライアントのみに限定し、ゾーン転送も許可した宛先のみに絞ることで、DDoS の踏み台化やゾーンデータの漏えいを防げるようになることを目指します。
+
+## 用語解説
+
+- **オープンリゾルバ**: 誰からの再帰問い合わせにも応答してしまう DNS サーバ。DNS リフレクション攻撃の踏み台に悪用される
+- **acl（アクセス制御リスト）**: `named.conf` で使い回せるクライアント条件のグループ定義
+- **allow-recursion**: 再帰問い合わせ（フルリゾルバとしての動作）を許可するクライアントを制限する設定
+- **allow-query**: ゾーンへの問い合わせ自体を許可するクライアントを制限する設定
+- **allow-transfer**: ゾーン転送（AXFR）を許可する宛先を制限する設定
+- **response-rate-limit（RRL）**: 同一の応答を短時間に大量送出しないよう制御し、DNS 増幅攻撃への加担を抑える機能
+
+## シナリオ設定
+
+信頼済みネットワークは `{{ trusted_networks }}` とし、再帰問い合わせの許可状態は `{{ recursion_allowed }}` を目標とします。問い合わせ許可方針は「{{ allow_query_policy }}」、ゾーン転送の許可先は `{{ allow_transfer_targets }}` のみとし、レート制限は「{{ rate_limit_note }}」とします。
+
+## 手順
+
+### 1. 現状の設定を確認する
+
+まず既存の `allow-recursion` / `allow-query` / `allow-transfer` が未設定または広すぎないかを確認します。
+
+```bash
+named-checkconf -p /etc/named.conf | grep -E "allow-recursion|allow-query|allow-transfer"
+```
+
+### 2. trusted acl を定義する
+
+信頼できるネットワークをまとめて `acl` として定義し、以降の設定で使い回せるようにします。
+
+```bash
+cat >> /etc/named.conf <<'EOF'
+acl "trusted" {
+    {{ trusted_networks }};
+};
+EOF
+```
+
+### 3. allow-recursion と allow-query を options に設定する
+
+再帰は `{{ recursion_allowed }}` の方針に沿って trusted 限定とし、問い合わせ許可は「{{ allow_query_policy }}」に沿って設定します。
+
+```bash
+# /etc/named.conf の options ブロックに以下を追記
+# options {
+#     recursion {{ recursion_allowed }};
+#     allow-recursion { trusted; };
+#     allow-query { trusted; any; };
+# };
+vi /etc/named.conf
+```
+
+### 4. allow-transferをゾーンごとに制限する
+
+ゾーン転送は `{{ allow_transfer_targets }}` のみに限定し、第三者への漏えいを防ぎます。
+
+```bash
+# 各 zone ブロックに以下を追記
+# allow-transfer { {{ allow_transfer_targets }}; };
+vi /etc/named.conf
+```
+
+### 5. response-rate-limitを設定する
+
+「{{ rate_limit_note }}」の方針で RRL を設定し、DNS 増幅攻撃への加担リスクを下げます。
+
+```bash
+cat >> /etc/named.conf <<'EOF'
+options {
+    rate-limit {
+        responses-per-second 10;
+    };
+};
+EOF
+```
+
+### 6. 構文チェックして反映する
+
+```bash
+named-checkconf
+rndc reload
+```
+
+### 7. 外部からの再帰拒否を検証する
+
+trusted に含まれないアドレス（もしくは外部ホスト）から再帰問い合わせを行い、拒否されることを確認します。
+
+```bash
+# trusted外のホストから実行し REFUSED になることを確認
+dig @<自サーバのIP> example.com A
+
+# trusted内のホストから実行し正常応答することを確認
+dig @<自サーバのIP> example.com A +short
+```
+
+## 動作確認
+
+- trusted ネットワーク外からの再帰問い合わせが `REFUSED` になること
+- trusted ネットワーク内からは正常に再帰応答が返ること
+- `{{ allow_transfer_targets }}` 以外からのゾーン転送要求が拒否されること
+- `named-checkconf` がエラーなく通ること
+
+## 注意事項
+
+- `allow-recursion { any; }` は絶対に設定しないこと。オープンリゾルバ化し、自社サーバが攻撃の踏み台になる。
+- 変更は必ず構文チェック後に反映し、反映直後は社内からの名前解決が正常か即座に確認すること。
+- レート制限のしきい値は実際のクエリ量を見ながら調整し、正規クライアントの応答まで落とさないよう注意する。

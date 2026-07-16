@@ -1,0 +1,97 @@
+# MTU不一致による特定通信のみ失敗する障害の切り分け — {{ suspect_segment | safe }}
+
+pingなど小さなパケットは通るのに、ファイル転送や特定ページの読み込みだけが止まる・ハングする事象を、MTUブラックホールとして切り分け、解消します。
+
+## 目的
+
+**{{ path_description | safe }}** において、疑わしい区間 **{{ suspect_segment | safe }}** のMTU不一致（現在値 {{ current_mtu }} バイト）が原因かどうかを `ping -M do` で特定し、MTU調整またはMSSクランプで解消できるようになることを目指します。
+
+## 用語解説
+
+- **MTU(Maximum Transmission Unit)**: 1回の送信で運べるパケットの最大サイズ。経路上のどこか一箇所でも小さいと問題が起きる
+- **MTUブラックホール**: 大きなパケットが経路上で無言で破棄され、送信側にエラーも返らずタイムアウトだけが起きる状態
+- **PMTUD(Path MTU Discovery)**: 経路上の最小MTUを自動検出する仕組み。ICMP「Fragmentation Needed」が届かないと機能しない
+- **DF(Don't Fragment)ビット**: パケットを分割せず、収まらない場合は破棄させるフラグ。`ping -M do` はこれを立てて送信する
+- **MSSクランプ(MSS Clamping)**: TCPのMSS値をゲートウェイ上で強制的に小さく書き換え、断片化やブラックホールを回避する対策
+
+## シナリオ設定
+
+{{ path_description | safe }} で、小さな通信は成功するのに大きなデータを含む通信だけが応答なしになる事象が発生しています。疑わしい区間は {{ suspect_segment | safe }} で、現在のMTU設定は {{ current_mtu }} バイトです。切り分け用のテストサイズ候補は {{ test_sizes }} バイトです。{{ mss_clamp_note }}
+
+## 手順
+
+### 1. 症状の特徴を確認する
+
+小さな通信（ping、SSHログインなど）は成功するが、大きな通信（ファイル転送、特定ページ）だけがハングすることを確認します。
+
+```bash
+ping -c 3 $(echo "{{ suspect_segment | safe }}" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || echo "target-host")
+```
+
+→ 通常サイズのpingが成功する一方、大容量転送だけ失敗するなら、MTUブラックホールを疑う典型パターンです。
+
+### 2. ping -M do -s でパスMTUを探索する
+
+DFビットを立てたpingでサイズを段階的に下げ、通過できる最大サイズを特定します。
+
+```bash
+for size in {{ test_sizes }}; do
+  echo "=== size=${size} ==="
+  ping -M do -c 2 -s "${size}" target-host
+done
+```
+
+→ ある閾値を境に「Frag needed」または無応答に転じるサイズが、実際に通過可能な最大ペイロードサイズです。
+
+### 3. トンネル・VPN区間のオーバーヘッドを確認する
+
+トンネル化(IPsec、GRE、VPN)は、外側ヘッダ分だけ実効MTUを消費します。
+
+```bash
+ip link show | grep -A1 -E "tun|vpn|ipsec"
+ip link show dev vpn0 2>/dev/null | grep mtu
+```
+
+→ 物理インタフェースのMTU({{ current_mtu }})に対し、トンネルインタフェースのMTUがオーバーヘッド分小さく設定されているか確認します。
+
+### 4. ICMPフィルタとPMTUDの失敗を確認する
+
+経路上でICMP「Fragmentation Needed」がフィルタされていると、PMTUDが機能せずブラックホール化します。
+
+```bash
+sudo tcpdump -ni any icmp and 'icmp[icmptype]=3 and icmp[icmpcode]=4' -c 5
+```
+
+→ 大きなパケット送信中にこのICMPが一切観測されない場合、経路上のどこかでICMPが遮断されている可能性が高いです。
+
+### 5. MTU調整またはMSSクランプで対処する
+
+原因区間のMTUを実効値に合わせるか、ゲートウェイでMSSをクランプします。
+
+```bash
+sudo ip link set dev vpn0 mtu 1400
+sudo iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+```
+
+→ {{ mss_clamp_note }}
+
+### 6. 対処後に再検証し記録する
+
+```bash
+for size in {{ test_sizes }}; do
+  ping -M do -c 2 -s "${size}" target-host
+done
+```
+
+## 動作確認
+
+- {{ test_sizes }} バイトすべてのサイズで `ping -M do` が成功すること
+- 実際のファイル転送・大容量ページ読み込みがハングせず完了すること
+- `tcpdump` でICMP Fragmentation Neededの遮断が解消されている、またはMSSクランプにより発生しなくなっていること
+- 変更後の {{ suspect_segment | safe }} のMTU設定値が想定どおり反映されていること
+
+## 注意事項
+
+- MTU値を安易に下げるとスループット低下につながるため、まず経路上のどこが制約になっているかを特定してから最小限の調整を行う。
+- MSSクランプはトンネル終端のゲートウェイでのみ有効であり、経路上の別区間で新たなブラックホールが発生していないか確認する。
+- 恒久対応後は変更内容と根本原因（ICMPフィルタ設定、トンネルMTU設計ミス等)を記録し、同様の経路構成への横展開を検討する。

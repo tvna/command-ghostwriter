@@ -1,0 +1,5 @@
+affected_mount: /var/lib/mysql
+device: /dev/sdb1
+dmesg_excerpt: "EXT4-fs error (device sdb1): ext4_find_entry:1455: inode #131: comm mysqld: reading directory lblock 0"
+backup_status: 昨夜 02:00 のフルバックアップまで取得済み(過去24時間分は未反映)
+maintenance_window: 本日 22:00-23:00 に確保済み

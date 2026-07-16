@@ -1,0 +1,4 @@
+gpu_index,mig_profile,instance_count,assigned_workload,owner
+0,1g.10gb,3,推論API(小型モデル),ai-platform-team
+0,3g.40gb,1,ファインチューニング検証,ml-research-team
+1,2g.20gb,2,バッチ推論ジョブ,data-eng-team

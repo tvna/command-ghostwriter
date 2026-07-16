@@ -1,0 +1,97 @@
+# SSHへのワンタイムパスワード二要素認証導入
+
+`google-authenticator`とPAMでSSHにTOTP二要素認証を導入し、ロックアウトを防ぎながら検証するまでを一巡します。
+
+## 目的
+
+TOTPとPAMの連携、および`AuthenticationMethods`による多要素の組み合わせ指定を理解し、既存の公開鍵認証を壊さずに二要素認証を追加できるようになることを目指します。
+
+## 用語解説
+
+- **TOTP(Time-based One-Time Password)**: 共有シークレットと現在時刻から一定間隔で変化するワンタイムパスワードを生成する方式
+- **PAM(Pluggable Authentication Modules)**: Linuxの認証処理を差し替え可能なモジュールとして構成する仕組み。`pam_google_authenticator.so`をここに組み込む
+- **AuthenticationMethods**: sshd_configで「公開鍵認証 *かつ* keyboard-interactive認証」のように、複数の認証を両方要求する組み合わせを指定する設定
+- **緊急コード(scratch codes)**: TOTPデバイスを紛失した際に使える使い捨ての予備コード
+- **exempt_group**: 復旧用の緊急アカウントなど、意図的に二要素認証の対象から除外するグループ
+
+## シナリオ設定
+
+対象ユーザーは `{{ target_user }}`、要求する認証の組み合わせは `{{ auth_methods }}` です。TOTP入力の試行回数制限は `{{ rate_limit }}`、除外グループは `{{ exempt_group }}` とし、緊急コードは次の方針で保管します: {{ emergency_codes_note }}。
+
+## 手順
+
+### 1. google-authenticatorでTOTPシークレットを初期化する
+
+**必ず対象ユーザー自身のセッションで実行します。**
+
+```bash
+ssh {{ target_user }}@localhost
+google-authenticator -t -d -f -r 3 -R 30 -W
+```
+
+`-r 3 -R 30`は「30秒間に3回まで」という試行制限(`{{ rate_limit }}`相当)を意味します。表示されたQRコードを認証アプリに登録し、緊急コードを控えます。
+
+### 2. PAMにTOTPモジュールを組み込む
+
+```bash
+sudo sed -i '1i auth required pam_google_authenticator.so' /etc/pam.d/sshd
+grep pam_google_authenticator /etc/pam.d/sshd
+```
+
+### 3. sshd_configで認証の組み合わせを要求する
+
+```bash
+sudo tee /etc/ssh/sshd_config.d/totp-2fa.conf <<EOF
+KbdInteractiveAuthentication yes
+AuthenticationMethods {{ auth_methods }}
+
+Match Group {{ exempt_group }}
+    AuthenticationMethods publickey
+EOF
+sudo sshd -t
+```
+
+`Match Group {{ exempt_group }}`ブロックにより、復旧用グループは公開鍵のみでログインでき、二要素認証の設定ミスで完全ロックアウトになることを防ぎます。
+
+### 4. 別セッションを維持したまま反映・検証する
+
+**現在のSSHセッションは切断せず、別ターミナルを開いた状態で進めます。**
+
+```bash
+sudo systemctl reload sshd
+ssh {{ target_user }}@localhost
+```
+
+公開鍵認証の後にTOTPコードの入力を求められることを確認します。ここで失敗しても、最初のセッションが残っていれば復旧できます。
+
+### 5. 緊急コードを保管する
+
+```bash
+cat ~/.google_authenticator | head -n1
+echo "緊急コード保管方針: {{ emergency_codes_note }}"
+```
+
+TOTPシークレット自体(`~/.google_authenticator`の1行目)と緊急コードは、パスワードマネージャーや金庫など、サーバ本体とは別の場所に保管します。
+
+### 6. ロックアウト時の復旧手順を確認する
+
+```bash
+ssh -o PreferredAuthentications=publickey {{ exempt_group }}-recovery@localhost
+sudo rm /etc/ssh/sshd_config.d/totp-2fa.conf
+sudo systemctl reload sshd
+```
+
+`{{ exempt_group }}`に属する復旧用アカウントで接続し、設定ファイルを一時的に取り除いてsshdをreloadすることで、二要素認証を無効化して復旧できます。
+
+## 動作確認
+
+- `{{ target_user }}`での接続時に、公開鍵認証に続けてTOTPコードの入力が要求されること
+- `{{ exempt_group }}`に属するアカウントは公開鍵のみでログインできること
+- `sudo sshd -t`が構文エラーなく完了すること
+- 誤ったTOTPコードを`{{ rate_limit }}`の回数以上入力すると、一定時間ロックされること
+
+## 注意事項
+
+- 設定変更は必ず既存セッションを維持したまま行う。TOTP設定に不備があると`{{ exempt_group }}`以外の全ユーザーがロックアウトされる可能性がある。
+- 緊急コードとTOTPシークレットはサーバ上に平文で残しておかず、初期化直後に安全な場所へ退避する。
+- `{{ exempt_group }}`は復旧専用とし、通常業務のログインには使用しない。利用があった場合は速やかに原因を確認する。

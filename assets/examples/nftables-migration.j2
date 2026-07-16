@@ -1,0 +1,89 @@
+# iptables から nftables への移行
+
+既存の iptables ルールセット（`{{ current_ruleset_source }}`）を nftables
+形式へ変換し、テーブル構造を理解したうえで安全に切替・検証します。作業は
+`{{ cutover_window }}` の時間帯に実施してください。
+
+## 目的
+
+iptables の既存ルールをnftablesのtable/chain/hook構造へ変換し、
+`{{ conversion_method }}` を用いて移行したうえで、旧設定への切り戻し手段
+を確保しながら安全に切替できるようになることを目指します。
+
+## 用語解説
+
+- **table**: nftablesにおけるチェーンの集合。ファミリー（inet,ip等）を持つ
+- **chain**: パケットを処理するルールの並び。base chainはhookに紐づく
+- **hook**: input/forward/output等、パケットがどの段階で処理されるかを示す接続点
+- **priority**: 同一hookに複数chainがある場合の評価順序
+- **set**: 複数の値（IPアドレス等）をまとめて1ルールで扱う集約機能
+
+## シナリオ設定
+
+移行元は `{{ current_ruleset_source }}` に保存された既存ルールで、変換後は
+テーブル `{{ table_name }}` に集約します。定義する base chain は
+{{ chains | length }} 件（{% for c in chains %}{{ c.name }}: priority {{ c.priority }}{% if not loop.last %}, {% endif %}{% endfor %}）です。
+変換方式は「{{ conversion_method }}」を用い、切替は `{{ cutover_window }}`
+の時間帯に行います。
+
+## 手順
+
+### 1. 既存ルールを棚卸しする
+
+```bash
+iptables-save > {{ current_ruleset_source }}.bak
+cat {{ current_ruleset_source }}.bak
+```
+
+### 2. iptables-translate で変換する
+
+「{{ conversion_method }}」を用いて既存ルールを nft 記法へ変換します。
+
+```bash
+iptables-restore-translate -f {{ current_ruleset_source }}.bak > /tmp/nftables-migrated.nft
+```
+
+### 3. テーブル・チェーンの骨組みを作成する
+
+```bash
+nft add table {{ table_name }}
+{% for c in chains %}nft add chain {{ table_name }} {{ c.name }} '{ type filter hook {{ c.name }} priority {{ c.priority }} ; }'
+{% endfor %}```
+
+### 4. 変換済みルールを取り込む
+
+```bash
+nft -f /tmp/nftables-migrated.nft
+```
+
+### 5. 動作検証する
+
+```bash
+nft list table {{ table_name }}
+```
+
+`{{ cutover_window }}` の時間帯に、旧環境で許可・拒否されていた通信が
+nftables側でも同じ挙動になることを確認します。
+
+### 6. 旧設定を無効化し切り戻し手段を確保する
+
+検証OK後、iptablesサービスを停止してnftablesへ一本化します。切り戻しが
+必要な場合は `{{ current_ruleset_source }}.bak` から復元します。
+
+```bash
+systemctl disable --now iptables
+systemctl enable --now nftables
+```
+
+## 動作確認
+
+- `nft list table {{ table_name }}` に変換後の全chain・ルールが表示されること
+- 移行前と同じ通信許可・拒否の挙動が維持されていること
+- `{{ current_ruleset_source }}.bak` から旧iptablesルールへ復元できることを確認済みであること
+- `systemctl status nftables` がactiveであること
+
+## 注意事項
+
+- 変換ツールは全構文を完全に変換できるとは限らないため、変換後の出力を必ず目視で確認する。
+- 切替作業中に一時的にルールが空になる瞬間が生じうるため、リモート作業時は事前にコンソールアクセスを確保する。
+- `{{ cutover_window }}` を過ぎて長時間の並行稼働をしないよう、旧iptablesサービスは検証完了後速やかに無効化する。

@@ -1,0 +1,4 @@
+username,primary_group,secondary_groups,shell,home_dir,purpose
+sato,sales,"sales,vpn-users",/bin/bash,/home/sato,営業部一般ユーザー
+suzuki,dev,"dev,docker",/bin/bash,/home/suzuki,開発部エンジニア
+yamada,dev,"dev,sudo",/bin/bash,/home/yamada,開発部リーダー(管理者権限あり)

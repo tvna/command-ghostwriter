@@ -1,0 +1,99 @@
+# AWS CLIによるCloudWatchアラームの一括設定
+
+EC2のCPU使用率やステータスチェックなどのCloudWatchアラームをAWS CLIで一括作成し、SNS通知先まで検証する手順です。
+
+## 目的
+
+メトリクス・評価期間・SNS通知の関係を理解し、複数のCloudWatchアラームを一括投入したうえで通知経路まで動作確認できるようになることを目指します。
+
+## 用語解説
+
+- **メトリクス**: CPUUtilizationのような、AWSリソースの状態を表す時系列の測定値
+- **評価期間(period)**: メトリクスを集計する時間単位(秒)。アラームはこの期間ごとの値をしきい値と比較する
+- **しきい値(threshold)**: アラーム状態(ALARM)に遷移する境界値
+- **SNSトピック**: Simple Notification Service上の通知の宛先チャネル。メールやLambda等の購読者へ配信する
+- **アラーム状態**: `OK` / `ALARM` / `INSUFFICIENT_DATA`の3状態。`set-alarm-state`で手動遷移させ通知テストができる
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 件のアラームを作成します。
+
+| alarm_name | metric_name | instance_id | threshold | period(秒) | sns_topic |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["alarm_name"] }} | {{ r["metric_name"] }} | {{ r["instance_id"] }} | {{ r["threshold"] }} | {{ r["period"] }} | {{ r["sns_topic"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. SNSトピックの購読状況を確認する
+
+```bash
+{% for r in csv_rows %}aws sns list-subscriptions-by-topic --topic-arn {{ r["sns_topic"] }}
+{% endfor %}```
+
+通知先メールアドレス等が`Confirmed`になっていることを確認してください。未確認の場合はアラーム発報時に通知が届きません。
+
+### 2. アラームを一括投入する
+
+```bash
+{% for r in csv_rows %}aws cloudwatch put-metric-alarm \
+  --alarm-name "{{ r["alarm_name"] }}" \
+  --namespace "AWS/EC2" \
+  --metric-name "{{ r["metric_name"] }}" \
+  --dimensions Name=InstanceId,Value={{ r["instance_id"] }} \
+  --statistic Average \
+  --period {{ r["period"] }} \
+  --threshold {{ r["threshold"] }} \
+  --comparison-operator GreaterThanOrEqualToThreshold \
+  --evaluation-periods 2 \
+  --alarm-actions {{ r["sns_topic"] }}
+{% endfor %}```
+
+### 3. describe-alarmsで投入結果を確認する
+
+```bash
+{% for r in csv_rows %}aws cloudwatch describe-alarms --alarm-names "{{ r["alarm_name"] }}" --query 'MetricAlarms[].{Name:AlarmName,State:StateValue}'
+{% endfor %}```
+
+### 4. set-alarm-stateで通知テストを行う
+
+```bash
+{% for r in csv_rows %}aws cloudwatch set-alarm-state \
+  --alarm-name "{{ r["alarm_name"] }}" \
+  --state-value ALARM \
+  --state-reason "manual notification test"
+{% endfor %}```
+
+SNSトピック `{{ csv_rows[0]["sns_topic"] }}` の購読先に通知が届くことを確認したら、状態を元に戻します。
+
+```bash
+{% for r in csv_rows %}aws cloudwatch set-alarm-state \
+  --alarm-name "{{ r["alarm_name"] }}" \
+  --state-value OK \
+  --state-reason "reset after notification test"
+{% endfor %}```
+
+### 5. 誤報を防ぐため実際のメトリクス推移を確認する
+
+```bash
+{% for r in csv_rows %}aws cloudwatch get-metric-statistics \
+  --namespace "AWS/EC2" \
+  --metric-name {{ r["metric_name"] }} \
+  --dimensions Name=InstanceId,Value={{ r["instance_id"] }} \
+  --start-time "$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%S)" \
+  --end-time "$(date -u +%Y-%m-%dT%H:%M:%S)" \
+  --period {{ r["period"] }} \
+  --statistics Average
+{% endfor %}```
+
+## 動作確認
+
+- `describe-alarms`で {{ csv_rows | length }} 件全てのアラームが`StateValue`を持って表示されること
+- `set-alarm-state`でALARMに遷移させた際、SNSトピックの購読先(メール等)に通知が届くこと
+- テスト後、各アラームの状態が`OK`に戻っていること
+
+## 注意事項
+
+- `evaluation-periods`と`period`の組み合わせが短すぎると、一時的なスパイクで誤報(フラッピング)が頻発する。実運用前に過去のメトリクス推移を確認して調整する。
+- `set-alarm-state`によるテスト通知は実際のアラームアクション(Auto Scaling連動等)も同時に発火する場合がある。本番稼働中のインスタンスに紐づくアラームでテストする際は影響範囲を確認する。
+- SNSトピックの購読が`PendingConfirmation`のままだと通知が届かない。事前に確認メールの承認を済ませておく。

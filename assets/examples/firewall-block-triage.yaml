@@ -1,0 +1,7 @@
+src_host: 10.0.3.15
+dst_host: 10.0.5.20
+dst_port: 8443
+fw_type: nftables
+recent_rule_changes:
+  - "2026-07-14 dstポート8443向けのドロップルールを追加(本来はVPN区間限定のはずだった)"
+  - "2026-07-15 nftables rulesetを復元スクリプトで再適用"

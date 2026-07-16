@@ -1,0 +1,82 @@
+# aptリポジトリ追加とピン留め・バージョン固定
+
+サードパーティaptリポジトリを安全な鍵管理で追加し、`preferences.d` によるピン留めと `apt-mark hold` を使い分けて、特定パッケージのバージョンを統制します。
+
+## 目的
+
+`signed-by` による鍵の限定と `Pin-Priority` の設計を理解し、意図しない自動アップグレードを防ぎながら必要なパッケージだけを固定・優先制御できるようになることを目指します。
+
+## 用語解説
+
+- **signed-by**: `sources.list` エントリに個別のGPG鍵ファイルを紐付け、リポジトリの署名検証範囲を限定するオプション
+- **Pin-Priority**: `apt-cache policy` で使われる優先度。1000超はダウングレードも許可、990以下は候補として通常扱い、100以下はほぼ選ばれない
+- **apt-mark hold**: パッケージを `apt upgrade` の対象から完全に除外する仕組み。ピン留めより強力だが、セキュリティ更新も止まる
+- **apt policy**: 実効的なPin-Priorityとインストール候補バージョンを確認するコマンド
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 件のパッケージを統制対象とします。
+
+| package | repo_source | pin_priority | hold | reason |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["package"] }} | {{ r["repo_source"] }} | {{ r["pin_priority"] }} | {{ r["hold"] }} | {{ r["reason"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 統制対象と方針を確認する
+
+上記の表で `pin_priority` と `hold` の組み合わせを確認します。`hold=true` の対象はピン留めより優先してバージョンが固定されます。
+
+### 2. 鍵を配置しsources.list.dへ追加する
+
+```bash
+sudo install -d -m 0755 /etc/apt/keyrings
+{% for r in csv_rows %}sudo curl -fsSL {{ r["repo_source"] }}/gpg -o /etc/apt/keyrings/{{ r["package"] }}-archive-keyring.asc
+echo "deb [signed-by=/etc/apt/keyrings/{{ r["package"] }}-archive-keyring.asc] {{ r["repo_source"] }} stable main" | sudo tee /etc/apt/sources.list.d/{{ r["package"] }}.list
+{% endfor %}sudo apt update
+```
+
+### 3. preferences.dでピン設定を投入する
+
+```bash
+{% for r in csv_rows %}sudo tee /etc/apt/preferences.d/{{ r["package"] }}.pref <<EOF
+Package: {{ r["package"] }}
+Pin: origin $(echo {{ r["repo_source"] }} | awk -F/ '{print $3}')
+Pin-Priority: {{ r["pin_priority"] }}
+EOF
+{% endfor %}
+```
+
+### 4. apt-mark holdを使い分ける
+
+```bash
+{% for r in csv_rows %}{% if r["hold"] == "true" %}sudo apt-mark hold {{ r["package"] }}
+{% endif %}{% endfor %}apt-mark showhold
+```
+
+### 5. apt policyで検証する
+
+```bash
+{% for r in csv_rows %}apt-cache policy {{ r["package"] }}
+{% endfor %}
+```
+
+### 6. 更新阻害の棚卸しを行う
+
+```bash
+apt-mark showhold
+apt list --upgradable 2>/dev/null
+```
+
+## 動作確認
+
+- 各パッケージの `apt-cache policy` で、表の `pin_priority` と一致する優先度が表示されること
+- `hold=true` の対象パッケージが `apt-mark showhold` に表示されること
+- `sudo apt update` が鍵検証エラーなく完了すること
+
+## 注意事項
+
+- `signed-by` を指定せず共通の `sources.list` に鍵を追加すると、他のリポジトリの署名検証にもその鍵が使われてしまう。鍵は個別ファイルに分離する。
+- `pin_priority` を1000超に設定すると、明示的にバージョンを指定しない `apt install` でもダウングレードが発生し得るため、通常運用では990以下を基本とする。
+- `apt-mark hold` した対象はセキュリティ更新も止まるため、`reason` 列の妥当性を定期的に棚卸しし、不要になったholdは解除する。

@@ -1,0 +1,87 @@
+# Trivyによるコンテナイメージ脆弱性スキャン
+
+利用中の {{ csv_rows | length }} 件のイメージをTrivyでスキャンし、重要度(CVE severity)に応じて更新判断を行う定期スキャン運用を構築します。
+
+## 目的
+
+利用中イメージの一覧を台帳化し、Trivyによる脆弱性スキャンを定期実行できる状態にした上で、検出結果から優先度をつけて対応判断できるようになることを目指します。
+
+## 用語解説
+
+- **CVE**: 脆弱性に付与される共通識別番号(Common Vulnerabilities and Exposures)
+- **severity(重要度)**: CVEの深刻度。CRITICAL / HIGH / MEDIUM / LOW / UNKNOWNの段階で示される
+- **ベースイメージ**: アプリイメージの土台となる公開イメージ。脆弱性の多くはOSパッケージ由来でベースイメージ更新により解消する
+- **Trivy**: OSパッケージ・言語ライブラリの既知脆弱性をスキャンするOSSツール
+- **criticality(用途重要度)**: 台帳側で定義する、そのイメージが担うサービスの重要度。severityと合わせて対応優先度を決める材料にする
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 件のイメージを対象にスキャンします。
+
+| image_name | tag | used_by | criticality | scan_policy |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["image_name"] }} | {{ r["tag"] }} | {{ r["used_by"] }} | {{ r["criticality"] }} | {{ r["scan_policy"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. Trivyを導入する
+
+```bash
+sudo apt-get update
+sudo apt-get install -y trivy
+trivy --version
+```
+
+### 2. 対象イメージを取得する
+
+```bash
+{% for r in csv_rows %}docker pull {{ r["image_name"] }}:{{ r["tag"] }}
+{% endfor %}```
+
+### 3. 一覧スキャンを実行する
+
+`criticality` が `critical` / `high` のイメージはCRITICALとHIGHのみを対象に厳格判定します。
+
+```bash
+{% for r in csv_rows %}echo "=== {{ r["image_name"] }}:{{ r["tag"] }} ({{ r["used_by"] }}, {{ r["criticality"] }}) ==="
+trivy image --severity CRITICAL,HIGH {{ r["image_name"] }}:{{ r["tag"] }}
+{% endfor %}```
+
+### 4. 結果をレポート形式で保存する
+
+```bash
+mkdir -p ~/trivy-reports
+{% for r in csv_rows %}trivy image --format json -o ~/trivy-reports/{{ r["image_name"] }}_{{ r["tag"] }}.json {{ r["image_name"] }}:{{ r["tag"] }}
+{% endfor %}```
+
+### 5. ベースイメージを更新して再スキャンする
+
+CRITICAL/HIGHが検出されたイメージは最新タグを取得し直して差分を確認します。
+
+```bash
+docker pull nginx:1.27
+trivy image --severity CRITICAL,HIGH nginx:1.27
+```
+
+### 6. 定期実行をcronに登録する
+
+`scan_policy` 列に基づき、`daily` は毎日、`weekly` は週次でスキャンします。
+
+```bash
+{% for r in csv_rows %}{% if r["scan_policy"] == "daily" %}( crontab -l 2>/dev/null; echo "0 3 * * * trivy image --severity CRITICAL,HIGH {{ r["image_name"] }}:{{ r["tag"] }} >> /var/log/trivy-scan.log 2>&1" ) | crontab -
+{% else %}( crontab -l 2>/dev/null; echo "0 3 * * 1 trivy image --severity CRITICAL,HIGH {{ r["image_name"] }}:{{ r["tag"] }} >> /var/log/trivy-scan.log 2>&1" ) | crontab -
+{% endif %}{% endfor %}```
+
+## 動作確認
+
+- 対象 {{ csv_rows | length }} 件すべてで `trivy image` が実行完了し、`~/trivy-reports/` にJSONレポートが生成されていること
+- CRITICAL/HIGHが検出されたイメージについて、更新後の再スキャンで件数が減少していること
+- `crontab -l` に各イメージの定期スキャン行が `scan_policy` 通りの頻度で登録されていること
+
+## 注意事項
+
+- Trivyの脆弱性データベースは初回実行時にダウンロードされるため、オフライン環境では事前にDB取得(`trivy image --download-db-only`)が必要になる。
+- 検出結果をそのまま鵜呑みにせず、`used_by` で示すサービスへの影響有無を確認してから更新作業に着手する。
+- 本手順はコンテナイメージのCVEスキャンに焦点を当てており、OSパッケージ単位の脆弱性トリアージ(vuln-patch-triage)とは対象レイヤが異なる。
+- 定期スキャンのログ(`/var/log/trivy-scan.log`)は肥大化するため、logrotate等での保存期間管理を別途検討する。

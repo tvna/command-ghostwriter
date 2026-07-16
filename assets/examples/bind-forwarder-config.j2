@@ -1,0 +1,77 @@
+# BINDのフォワーダ構成と条件付き転送
+
+BIND を上位リゾルバへのフォワーダとして構成し、特定の内部ゾーンだけを別サーバへ転送する条件付き転送を設定します。
+
+## 目的
+
+BIND をフルリゾルバとして自ら解決させるのではなく、上位DNSサーバへ委譲するフォワーダ構成を理解し、特定ドメインのみ別サーバへ転送する条件付き転送を安全に設定・検証できるようになることを目指します。
+
+## 用語解説
+
+- **フォワーダ**: 自身では解決せず上位のDNSサーバへ問い合わせを転送する構成
+- **forward only / forward first**: only はフォワーダにのみ問い合わせ失敗時も自己解決しない、first はフォワーダ失敗時に自己解決を試みるポリシー
+- **条件付き転送**: 特定のゾーンのみ通常のフォワーダとは別のサーバへ転送する設定
+- **named-checkconf**: 設定ファイルの構文を反映前に検証するコマンド
+- **rndc reload**: 稼働中の named に設定・ゾーンの再読込を指示するコマンド
+
+## シナリオ設定
+
+グローバルフォワーダは {{ global_forwarders | join(", ") }} で、転送ポリシーは `{{ forward_policy }}` です。ゾーン `{{ conditional_zone }}` のみ {{ conditional_forwarders | join(", ") }} へ条件付きで転送します。{{ cache_note }}
+
+## 手順
+
+### 1. 現在の named.conf を確認する
+
+```bash
+named-checkconf -p | grep -A5 forwarders
+```
+
+### 2. グローバルフォワーダを設定する
+
+```bash
+cat >> /etc/named.conf <<'EOF'
+options {
+    forwarders { {% for f in global_forwarders %}{{ f }}; {% endfor %}};
+    forward {{ forward_policy }};
+};
+EOF
+```
+
+### 3. 条件付き転送ゾーンを設定する
+
+```bash
+cat >> /etc/named.conf <<'EOF'
+zone "{{ conditional_zone }}" IN {
+    type forward;
+    forward only;
+    forwarders { {% for f in conditional_forwarders %}{{ f }}; {% endfor %}};
+};
+EOF
+```
+
+### 4. 構文チェックと反映を行う
+
+```bash
+named-checkconf
+rndc reload
+```
+
+### 5. digで転送動作を検証する
+
+```bash
+dig {{ conditional_zone }} SOA +short
+dig example.com A +short
+```
+
+## 動作確認
+
+- `named-checkconf` がエラーなく通ること
+- `{{ conditional_zone }}` への問い合わせが {{ conditional_forwarders | join(", ") }} 経由で解決されること
+- それ以外のドメインへの問い合わせが {{ global_forwarders | join(", ") }} 経由で解決されること
+- `rndc reload` 実行後に named プロセスが再起動せず、設定のみ反映されること
+
+## 注意事項
+
+- `forward only` はフォワーダ障害時に自己解決へフォールバックしないため、フォワーダの可用性を別途監視すること。
+- {{ cache_note }}
+- dns-zone(既存,ゾーン管理)は権威サーバとしての正引き構成であり、本手順は上位・条件付き転送というリゾルバ側の構成に焦点を絞る。

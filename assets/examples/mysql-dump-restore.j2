@@ -1,0 +1,91 @@
+# mysqldumpによるMySQLバックアップと復元
+
+`mysqldump` による一貫性オプション付きのバックアップ取得と、別データベースへの復元検証を一巡します。認証情報はオプションファイル経由で扱い、平文でコマンド履歴に残しません。
+
+## 目的
+
+`--single-transaction` によるロック方式の違いを理解し、認証情報を安全に扱いながらバックアップ取得・世代管理・復元検証・cron化までの一連の運用を構築できるようになることを目指します。
+
+## 用語解説
+
+- **--single-transaction**: InnoDBに対し、テーブルロックをかけずにトランザクション分離レベルを利用して一貫性のあるスナップショットを取得するオプション
+- **ロックの違い**: `--single-transaction` を付けない場合は `FLUSH TABLES WITH READ LOCK` 相当の全体ロックがかかり、取得中は書き込みが止まる。MyISAM混在環境では `--single-transaction` だけでは不十分な場合がある
+- **option file（オプションファイル）**: `~/.my.cnf` 等に認証情報を記述し、コマンドライン引数やシェル履歴にパスワードを残さずに接続する仕組み
+- **論理バックアップ**: SQL文としてデータベースの内容を出力する方式。DBMSバージョン間の移行にも使いやすい
+
+## シナリオ設定
+
+データベース `{{ db_name }}` を、ユーザー `{{ db_user }}` の権限で `{{ backup_dir }}` にバックアップします。`--single-transaction` は `{{ single_transaction | lower }}` とし、保存期間は `{{ retention_days }}` 日、復元検証先は `{{ restore_test_db }}` です。
+
+## 手順
+
+### 1. オプションファイルで認証情報を安全に扱う
+
+```bash
+install -m 600 /dev/null ~/.my.cnf
+cat <<'EOF' > ~/.my.cnf
+[client]
+user={{ db_user }}
+password=CHANGE_ME_BEFORE_RUN
+EOF
+```
+
+`CHANGE_ME_BEFORE_RUN` は実際のパスワードに置き換えてください。パスワードをコマンドライン引数に直接書かないことで、`ps` やシェル履歴への露出を防ぎます。
+
+### 2. バックアップ先ディレクトリを準備する
+
+```bash
+mkdir -p {{ backup_dir }}
+chmod 700 {{ backup_dir }}
+```
+
+### 3. mysqldumpでバックアップを取得する
+
+```bash
+TS=$(date +%Y%m%d_%H%M%S)
+{% if single_transaction %}mysqldump --single-transaction --routines --triggers {{ db_name }} > {{ backup_dir }}/{{ db_name }}_${TS}.sql
+{% else %}mysqldump --lock-tables --routines --triggers {{ db_name }} > {{ backup_dir }}/{{ db_name }}_${TS}.sql
+{% endif %}gzip {{ backup_dir }}/{{ db_name }}_${TS}.sql
+ls -lh {{ backup_dir }}/{{ db_name }}_${TS}.sql.gz
+```
+
+### 4. 古い世代を整理する
+
+```bash
+find {{ backup_dir }} -name "{{ db_name }}_*.sql.gz" -mtime +{{ retention_days }} -print
+find {{ backup_dir }} -name "{{ db_name }}_*.sql.gz" -mtime +{{ retention_days }} -delete
+```
+
+### 5. 別データベースへ復元し検証する
+
+```bash
+LATEST=$(ls -t {{ backup_dir }}/{{ db_name }}_*.sql.gz | head -n1)
+mysql -e "DROP DATABASE IF EXISTS {{ restore_test_db }}; CREATE DATABASE {{ restore_test_db }};"
+gunzip -c "$LATEST" | mysql {{ restore_test_db }}
+mysql -e "SELECT table_name, table_rows FROM information_schema.tables WHERE table_schema='{{ db_name }}';"
+mysql -e "SELECT table_name, table_rows FROM information_schema.tables WHERE table_schema='{{ restore_test_db }}';"
+```
+
+元DBと復元先DBのテーブル・行数概算を突き合わせて整合性を確認します。
+
+### 6. cron化と失敗検知
+
+```bash
+( crontab -l 2>/dev/null; echo "0 3 * * * mysqldump --defaults-extra-file=$HOME/.my.cnf {% if single_transaction %}--single-transaction {% endif %}{{ db_name }} | gzip > {{ backup_dir }}/{{ db_name }}_\$(date +\%Y\%m\%d).sql.gz || echo 'mysqldump failed' | mail -s 'backup failure: {{ db_name }}' root" ) | crontab -
+crontab -l
+```
+
+`||` で失敗時に通知を出すことで、無音失敗（サイレントフェイル）を防ぎます。
+
+## 動作確認
+
+- `{{ backup_dir }}` に日時付きの `.sql.gz` ファイルが作成されていること
+- `{{ retention_days }}` 日を超えた古いバックアップが削除されること
+- `{{ restore_test_db }}` への復元後、テーブル一覧・行数概算が元DB（`{{ db_name }}`）とおおむね一致すること
+- cron登録後、失敗時にメール通知が飛ぶ経路が構成されていること
+
+## 注意事項
+
+- `~/.my.cnf` はパーミッション600で作成し、パスワードをコマンドライン引数やシェル履歴に残さない。作業完了後もファイルの権限を緩めない。
+- `single_transaction` が `false`（本設定は `{{ single_transaction | lower }}`）の場合、取得中はテーブルロックにより書き込みが止まる。業務影響時間帯を避けてスケジュールする。
+- 復元検証は `{{ restore_test_db }}` のみを対象とする。`DROP DATABASE` 文を実行する前に、対象データベース名が検証用であることを必ず確認する。

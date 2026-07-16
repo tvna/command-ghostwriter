@@ -1,0 +1,5 @@
+hostname,ip_address,os_version,owner,purpose,eol_date,status
+web01,10.0.1.11,Rocky Linux 9.3,インフラ課,Webサーバ,2032-05-31,稼働中
+db01,10.0.1.21,Rocky Linux 8.9,インフラ課,DBサーバ,2029-05-31,稼働中
+old-batch01,10.0.1.55,CentOS 7.9,不明,不明,2024-06-30,要確認
+test-vm03,10.0.2.14,Ubuntu 20.04,開発課,検証用,2025-04-30,停止候補

@@ -1,0 +1,85 @@
+# GPUサーバ受入時のバーンインテスト
+
+新規導入・修理後のGPUサーバに対し、`{{ test_tool }}` による高負荷連続運転で安定性と冷却性能を検証する受入試験手順です。
+
+## 目的
+
+{{ duration_hours }}時間の連続高負荷運転を通じて、初期不良・冷却不足・電源容量不足を出荷前後に炙り出し、合否を客観的な基準で判定できるようになることを目指します。
+
+## 用語解説
+
+- **バーンインテスト**: 新規・修理後の機器に意図的に高負荷を長時間かけ、初期不良(early failure)を早期に発見する試験
+- **サーマルスロットリング**: GPU温度が上限に達し、性能を犠牲にしてクロックを自動的に下げる保護動作
+- **ECC (Error Correcting Code)**: GPUメモリの1ビット誤りを自動訂正する機構。訂正可能・不可能エラー数はどちらも記録される
+- **Xidエラー**: NVIDIAドライバがカーネルログに出力するGPU異常コード。ハードウェア故障の兆候を含む
+- **合否判定(pass criteria)**: 試験開始前に定める客観的な合格条件。試験後に基準を緩めない
+
+## シナリオ設定
+
+`{{ test_tool }}` を用いて {{ duration_hours }}時間の連続負荷をかけます。温度上限は{{ temp_ceiling }}℃とし、{% if ecc_check %}ECCエラーの有無を試験前後で比較します{% else %}ECCチェックは対象外です{% endif %}。合格基準は「{{ pass_criteria }}」です。
+
+## 手順
+
+### 1. 試験前の状態を記録する
+
+```bash
+nvidia-smi -q > /tmp/gpu-burnin-before.log
+nvidia-smi --query-gpu=index,ecc.errors.corrected.volatile.total,ecc.errors.uncorrected.volatile.total --format=csv
+```
+
+### 2. バーンインツールを導入する
+
+```bash
+sudo apt install -y build-essential
+git clone https://github.com/wilicc/gpu-burn.git /opt/{{ test_tool }}
+cd /opt/{{ test_tool }} && make
+```
+
+### 3. 高負荷連続運転を実行する
+
+{{ duration_hours }}時間({{ duration_hours * 3600 }}秒)、全GPUに対して負荷をかけ続けます。
+
+```bash
+cd /opt/{{ test_tool }}
+./gpu_burn -d {{ duration_hours * 3600 }} 2>&1 | tee /tmp/gpu-burnin-run.log
+```
+
+### 4. 温度・クロック・スロットリングを監視する
+
+試験実行中、別ターミナルで温度上限({{ temp_ceiling }}℃)超過とスロットリング発生の有無を継続監視します。
+
+```bash
+nvidia-smi --query-gpu=index,temperature.gpu,clocks_throttle_reasons.active,power.draw --format=csv -l 10 | \
+  awk -F', *' -v ceiling={{ temp_ceiling }} '{ if ($2+0 > ceiling) print "ALERT over ceiling: " $0 }'
+```
+
+{% if ecc_check %}
+### 5. ECC・Xidエラーを確認する
+
+```bash
+nvidia-smi --query-gpu=index,ecc.errors.corrected.volatile.total,ecc.errors.uncorrected.volatile.total --format=csv > /tmp/gpu-burnin-after.log
+diff /tmp/gpu-burnin-before.log /tmp/gpu-burnin-after.log || true
+dmesg | grep -i xid || echo "Xidエラーなし"
+```
+{% endif %}
+
+### 6. 合否を判定し記録する
+
+```bash
+tail -n 20 /tmp/gpu-burnin-run.log
+```
+
+「{{ pass_criteria }}」を満たすか、手順3〜5の記録に基づいて判定し、試験ホスト名・実施日時・合否結果を受入記録として保存します。
+
+## 動作確認
+
+- `/tmp/gpu-burnin-run.log`に{{ duration_hours }}時間分の実行ログが完走まで記録されていること(途中終了・クラッシュがないこと)
+- 手順4の監視で温度上限({{ temp_ceiling }}℃)超過によるスロットリングが発生していないこと
+{% if ecc_check %}- 試験前後のECCエラー数(`/tmp/gpu-burnin-before.log`と`/tmp/gpu-burnin-after.log`)に増加がないこと
+{% endif %}- `dmesg`にXidエラーが記録されていないこと
+
+## 注意事項
+
+- {{ duration_hours }}時間の連続高負荷運転は消費電力・発熱ともに最大クラスになるため、事前に電源容量(PSU/PDU)と室温・空調能力を確認する。
+- 試験中は他の重要ワークロードを同一サーバ・同一ラック電源系統に同居させない。
+- 合否基準(「{{ pass_criteria }}」)は試験開始前に固定し、試験結果を見てから緩めない。不合格の場合はハードウェアベンダーへの返品・修理判断の根拠として記録を保全する。

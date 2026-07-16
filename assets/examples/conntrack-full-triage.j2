@@ -1,0 +1,94 @@
+# conntrackテーブル溢れによる通信断の対応
+
+`nf_conntrack: table full` によるパケット破棄を検知し、上限値の調整とセッション過多の原因対処を行います。
+
+## 目的
+
+conntrackテーブルの上限到達によって新規接続が破棄される事象について、現在値の確認から上限・タイムアウトの調整、大量セッションの発生源対処までを行い、恒久的な監視を追加できるようになることを目指します。
+
+## 用語解説
+
+- **conntrack(connection tracking)**: カーネルがNAT・ステートフルファイアウォールのために保持する、通信セッションの状態管理テーブル
+- **nf_conntrack: table full**: 保持数が上限(`{{ current_max }}`)に達し、新規セッションのトラッキングができずパケットが破棄される際にdmesgへ出力されるメッセージ
+- **timeout established**: TCPのESTABLISHED状態のエントリを保持し続ける秒数。長すぎると不要なエントリが溜まりテーブルを圧迫する
+- **conntrack -L**: 現在保持されているセッションの一覧を表示し、内訳を分析するためのコマンド
+
+## シナリオ設定
+
+現在のconntrack上限は `{{ current_max }}` で、`{{ current_count_command }}` で現在数を確認できます。ESTABLISHEDのタイムアウトは `{{ timeout_established }}` 秒に設定されています。疑わしいトラフィックは「{{ suspect_traffic }}」で、対処後の新しい上限は `{{ new_max }}` を予定しています。
+
+## 手順
+
+### 1. 症状を確認する
+
+```bash
+dmesg | grep -i "nf_conntrack: table full"
+sudo journalctl -k --since "1 hour ago" | grep -i conntrack
+```
+
+→ `nf_conntrack: table full, dropping packet` が出力されていれば、conntrackテーブルの上限到達が原因と確定できます。
+
+### 2. 現在数と上限値を確認する
+
+```bash
+{{ current_count_command }}
+sudo sysctl net.netfilter.nf_conntrack_max
+```
+
+→ `{{ current_count_command }}` の結果が上限 `{{ current_max }}` に近い、または到達している場合、上限緩和とセッション削減の両方を検討します。
+
+### 3. セッション内訳を分析する
+
+```bash
+sudo conntrack -L | awk '{print $4}' | sed -E 's/src=([0-9.]+)\/.*/\1/' | cut -d= -f2 | sort | uniq -c | sort -rn | head -20
+```
+
+→ 特定の送信元からの接続が突出していないか確認します。今回の疑わしいトラフィックは「{{ suspect_traffic }}」です。
+
+### 4. 上限とタイムアウトを調整する
+
+```bash
+sudo sysctl -w net.netfilter.nf_conntrack_max={{ new_max }}
+sudo sysctl -w net.netfilter.nf_conntrack_tcp_timeout_established={{ timeout_established }}
+```
+
+→ 恒久化のため `/etc/sysctl.d/99-conntrack.conf` にも同じ値を記載します。
+
+```bash
+cat <<EOF | sudo tee /etc/sysctl.d/99-conntrack.conf
+net.netfilter.nf_conntrack_max = {{ new_max }}
+net.netfilter.nf_conntrack_tcp_timeout_established = {{ timeout_established }}
+EOF
+sudo sysctl --system
+```
+
+### 5. 大量セッションの発生源を対処する
+
+```bash
+# 発生源側での対処例(アプリのコネクションプール設定見直し等)
+echo "suspect_traffic: {{ suspect_traffic }}"
+```
+
+→ 上限緩和は応急処置であり、「{{ suspect_traffic }}」のような発生源自体(ヘルスチェック頻度、コネクションプール設定など)の是正が根本対応です。
+
+### 6. 恒久設定と監視を追加する
+
+```bash
+sudo sysctl net.netfilter.nf_conntrack_max
+{{ current_count_command }}
+```
+
+→ 上限緩和後も定期的に使用率(現在数 ÷ 上限)を監視対象に加え、閾値超過でアラートが上がるようにします。
+
+## 動作確認
+
+- `dmesg` に新たな `nf_conntrack: table full` が出力されていないこと
+- `sysctl net.netfilter.nf_conntrack_max` が `{{ new_max }}` になっていること
+- `/etc/sysctl.d/99-conntrack.conf` の内容が再起動後も維持されていること
+- `{{ current_count_command }}` の結果が新しい上限 `{{ new_max }}` に対して余裕のある水準に収まっていること
+
+## 注意事項
+
+- 上限(`net.netfilter.nf_conntrack_max`)の引き上げはメモリ使用量の増加を伴う。値を大きくしすぎるとメモリ逼迫の別の問題を招くため、ホストの空きメモリと相談して決定する。
+- タイムアウト値(`{{ timeout_established }}`秒)を短くしすぎると、正常な長時間接続まで切断される可能性があるため、アプリの通信特性を確認してから調整する。
+- 応急処置(上限緩和)だけで終わらせず、「{{ suspect_traffic }}」のような発生源側の是正を必ず追跡し、再発を防止する。

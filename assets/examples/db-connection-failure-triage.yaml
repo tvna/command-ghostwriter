@@ -1,0 +1,6 @@
+db_type: "postgresql"
+db_host: "db01.internal.example"
+db_port: 5432
+error_text: "FATAL: sorry, too many clients already"
+max_connections: 100
+app_pool_size: 80

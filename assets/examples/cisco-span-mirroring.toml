@@ -1,0 +1,5 @@
+session_id = 1
+source_ports = ["GigabitEthernet0/5", "GigabitEthernet0/6"]
+source_direction = "both"
+destination_port = "GigabitEthernet0/24"
+capture_host_note = "解析用ノートPC(Wiresharkインストール済み)をGi0/24へ直結して受信する"

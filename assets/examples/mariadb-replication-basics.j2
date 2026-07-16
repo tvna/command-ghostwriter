@@ -1,0 +1,113 @@
+# MariaDBレプリケーションの基本構築
+
+バイナリログを使ったプライマリ/レプリカ構成を構築し、遅延と整合性の有無を確認します。すべてroot権限相当のDB管理ユーザーで実施してください。
+
+## 目的
+
+`binlog`とレプリケーションユーザーによる非同期レプリケーションの仕組みを理解し、プライマリ/レプリカ構成を構築して`SHOW REPLICA STATUS`で健全性を検証できるようになることを目指します。
+
+## 用語解説
+
+- **binlog（バイナリログ）**: プライマリ側で発生したデータ変更を記録するログ。レプリカはこれを取得・再生してデータを追従させる
+- **GTID**: Global Transaction ID。トランザクションに一意なIDを付与し、バイナリログファイル名・位置に依存しないレプリケーション開始点指定を可能にする仕組み
+- **server-id**: レプリケーション構成内でサーバを一意に識別する数値。プライマリ・レプリカで重複させてはならない
+- **レプリカ遅延**: プライマリでの変更がレプリカに反映されるまでの時間差。`Seconds_Behind_Master`で確認する
+- **CHANGE MASTER TO**: レプリカに対し、接続先プライマリの情報とレプリケーション開始点を設定するSQL文
+
+## シナリオ設定
+
+プライマリ `{{ primary_host }}`（server_id={{ server_id_primary }}）とレプリカ `{{ replica_host }}`（server_id={{ server_id_replica }}）の間で、レプリケーション専用ユーザー `{{ repl_user }}`、binlog形式 `{{ binlog_format }}` により非同期レプリケーションを構築します。
+
+## 手順
+
+### 1. プライマリ側でbinlogとserver-idを設定する
+
+```bash
+sudo tee /etc/mysql/mariadb.conf.d/60-replication.cnf <<'EOF'
+[mariadb]
+server-id = {{ server_id_primary }}
+log_bin = /var/log/mysql/mariadb-bin
+binlog_format = {{ binlog_format }}
+EOF
+sudo systemctl restart mariadb
+```
+
+### 2. プライマリ側でレプリケーションユーザーを作成する
+
+```sql
+CREATE USER '{{ repl_user }}'@'{{ replica_host }}' IDENTIFIED BY 'CHANGE_ME_BEFORE_RUN';
+GRANT REPLICATION SLAVE ON *.* TO '{{ repl_user }}'@'{{ replica_host }}';
+FLUSH PRIVILEGES;
+SHOW MASTER STATUS;
+```
+
+`CHANGE_ME_BEFORE_RUN`は実際のパスワードに置き換えてください。`SHOW MASTER STATUS`で表示されるファイル名・位置は次の初期同期で使用します。
+
+### 3. 初期データを同期する
+
+```bash
+mysqldump --single-transaction --master-data=2 --all-databases > /tmp/primary_snapshot.sql
+scp /tmp/primary_snapshot.sql {{ replica_host }}:/tmp/
+ssh {{ replica_host }} "mysql < /tmp/primary_snapshot.sql"
+```
+
+`--master-data=2`により、ダンプ内にコメントとしてバイナリログの座標が記録されます。
+
+### 4. レプリカ側でserver-idを設定しCHANGE MASTER TOを実行する
+
+```bash
+ssh {{ replica_host }} "sudo tee /etc/mysql/mariadb.conf.d/60-replication.cnf <<'EOF'
+[mariadb]
+server-id = {{ server_id_replica }}
+relay_log = /var/log/mysql/mariadb-relay-bin
+EOF
+sudo systemctl restart mariadb"
+```
+
+```sql
+CHANGE MASTER TO
+  MASTER_HOST='{{ primary_host }}',
+  MASTER_USER='{{ repl_user }}',
+  MASTER_PASSWORD='CHANGE_ME_BEFORE_RUN',
+  MASTER_USE_GTID=slave_pos;
+START REPLICA;
+```
+
+### 5. SHOW REPLICA STATUSで健全性を検証する
+
+```sql
+SHOW REPLICA STATUS\G
+```
+
+以下を確認します。
+
+```bash
+echo "Slave_IO_Running: Yes / Slave_SQL_Running: Yes / Seconds_Behind_Master: 0 に近いこと"
+```
+
+### 6. プライマリで書き込み、レプリカへの反映を確認する
+
+```sql
+-- プライマリ側
+CREATE DATABASE IF NOT EXISTS repl_check;
+CREATE TABLE repl_check.probe (id INT PRIMARY KEY, ts DATETIME);
+INSERT INTO repl_check.probe VALUES (1, NOW());
+```
+
+```sql
+-- レプリカ側
+SELECT * FROM repl_check.probe;
+```
+
+## 動作確認
+
+- レプリカの`SHOW REPLICA STATUS`で`Slave_IO_Running`と`Slave_SQL_Running`が共に`Yes`であること
+- `Seconds_Behind_Master`が0または業務許容範囲内であること
+- プライマリの`repl_check.probe`への書き込みが、遅延範囲内でレプリカ側にも反映されること
+- プライマリとレプリカの`server-id`（{{ server_id_primary }} と {{ server_id_replica }}）が重複していないこと
+
+## 注意事項
+
+- レプリケーションユーザーのパスワードは、この手順書の`CHANGE_ME_BEFORE_RUN`をそのまま使わず、必ず固有の値に置き換える。
+- `Slave_IO_Running`または`Slave_SQL_Running`が`No`になった場合、アプリケーションからの書き込みをプライマリに限定したまま原因調査を行う。レプリカへの直接書き込みはデータ不整合の原因になるため停止する。
+- レプリケーションはバックアップの代替にはならない。プライマリの誤操作（`DROP TABLE`等）は即座にレプリカへ伝播する。

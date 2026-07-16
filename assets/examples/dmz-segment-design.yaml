@@ -1,0 +1,15 @@
+dmz_subnet: 203.0.113.0/28
+public_services:
+  - name: web
+    protocol: tcp
+    port: 443
+  - name: mail-relay
+    protocol: tcp
+    port: 25
+internal_allowed_flows:
+  - source: internal-app-tier
+    destination: dmz-web
+    protocol: tcp
+    port: 8443
+outbound_policy: DMZから外部への発信はHTTPS(443)とDNS(53)のみ許可し、それ以外はデフォルト拒否とする
+nat_design: DMZの各サーバはグローバルIPを1:1 NATで個別に割り当て、内部セグメントからはプライベートIPで到達させる

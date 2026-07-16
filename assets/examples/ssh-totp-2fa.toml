@@ -1,0 +1,5 @@
+target_user = "opsadmin"
+auth_methods = "publickey,keyboard-interactive:pam"
+emergency_codes_note = "緊急コードは金庫内の封筒に保管し、発行日をラベルに記載する"
+rate_limit = "3回/30秒"
+exempt_group = "break-glass"

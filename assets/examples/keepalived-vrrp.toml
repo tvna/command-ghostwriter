@@ -1,0 +1,7 @@
+vip = "192.168.10.100/24"
+vrid = 51
+master_host = "lb01"
+backup_host = "lb02"
+priority_master = 150
+advert_interval = 1
+track_script_note = "curl -sf http://127.0.0.1/healthz が失敗したらpriorityを20下げてBACKUPへ降格させる"

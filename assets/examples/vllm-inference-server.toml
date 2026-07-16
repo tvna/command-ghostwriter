@@ -1,0 +1,6 @@
+model_id = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+gpu_memory_utilization = 0.90
+max_model_len = 8192
+tensor_parallel_size = 1
+api_port = 8000
+served_model_name = "llama3.1-8b-instruct"

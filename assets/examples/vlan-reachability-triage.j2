@@ -1,0 +1,100 @@
+# VLAN間通信不能の切り分け — {{ src_vlan }} → {{ dst_vlan }}
+
+VLAN設定・トランクポート・ゲートウェイ(SVI)設定のどこでVLAN間通信が途切れているかを、同一VLAN内の疎通確認から順に切り分けます。
+
+## 目的
+
+**{{ src_vlan }}** から **{{ dst_vlan }}** への通信ができないという事象を、端末側のVLAN/IP設定・トランクの許可VLAN・SVI(ゲートウェイ)の状態・ACLの4段階に分解して原因箇所を特定できるようになることを目指します。
+
+## 用語解説
+
+- **VLAN (Virtual LAN)**: 物理構成に依らず論理的にネットワークセグメントを分割する仕組み
+- **トランクポート**: 複数VLANのフレームをタグ付きで通す、スイッチ間接続用のポート
+- **許可VLANリスト**: トランクポート上で通過を許可するVLAN IDの一覧。ここに含まれないVLANのフレームは破棄される
+- **SVI (Switched Virtual Interface)**: L3スイッチ上でVLANごとに設定する仮想インターフェース。VLAN間ルーティングのゲートウェイとして機能する
+- **ACL (Access Control List)**: 特定の送信元・宛先間の通信を許可/拒否するフィルタルール
+
+## シナリオ設定
+
+{{ src_vlan }} の端末から {{ dst_vlan }} への通信ができないという報告があります。ゲートウェイは {{ gateway_ip }}、経路上のトランクリンクは {{ trunk_links }} です。直近の変更として「{{ recent_changes }}」があり、これが疑わしいポイントです。
+
+## 手順
+
+### 1. 同一VLAN内の疎通を確認し範囲を絞り込む
+
+まず同一セグメント内の通信が正常かを確認し、問題がVLAN間に限定されるか切り分けます。
+
+```bash
+ping -c 3 {{ gateway_ip }}
+```
+
+### 2. 端末側のVLAN・IP設定を確認する
+
+```bash
+ip addr show
+ip route show
+```
+
+→ 端末が想定するVLAN（{{ src_vlan }}）のサブネットに属し、デフォルトゲートウェイが {{ gateway_ip }} になっているか確認します。
+
+### 3. トランクポートの許可VLANを確認する
+
+{{ trunk_links }} のトランクポートで、{{ src_vlan }} と {{ dst_vlan }} の両方が許可VLANリストに含まれているか確認します。
+
+```bash
+show interfaces trunk
+show running-config interface Gi1/0/24 | include switchport trunk allowed
+```
+
+→ 直近の変更「{{ recent_changes }}」で対象VLANが除外されていないか確認します。
+
+### 4. SVI(ゲートウェイ)の状態を確認する
+
+```bash
+show ip interface brief
+show interface vlan20
+```
+
+→ SVIがdown状態、またはIPアドレスが未設定になっていないか確認します。
+
+### 5. ゲートウェイからの疎通とルーティングを確認する
+
+```bash
+ping -c 3 {{ gateway_ip }}
+show ip route {{ dst_vlan }}
+```
+
+### 6. ACL・フィルタの適用有無を確認する
+
+{{ src_vlan }} から {{ dst_vlan }} への通信を拒否するACLが設定されていないか確認します。
+
+```bash
+show access-lists
+show running-config interface vlan10 | include access-group
+```
+
+### 7. 是正し段階的に再検証する
+
+トランクの許可VLAN、SVIの状態、ACLのいずれかを是正した後、手順1から順に再確認します。
+
+```bash
+ping -c 3 {{ gateway_ip }}
+ping -c 3 <対象VLAN内の疎通確認先IP>
+```
+
+### 8. 復旧確認と変更記録を残す
+
+原因箇所（トランク許可VLAN/SVI/ACLのいずれか）、実施した是正内容、変更前後の設定差分を記録します。
+
+## 動作確認
+
+- {{ src_vlan }} の端末から {{ gateway_ip }} への `ping` が成功すること
+- {{ src_vlan }} から {{ dst_vlan }} 宛の通信が成功すること
+- `show interfaces trunk` で {{ trunk_links }} の許可VLANに両VLANが含まれていること
+- `show ip interface brief` でSVIがupかつIPアドレス設定済みであること
+
+## 注意事項
+
+- トランクポートの許可VLANリストを変更する際は、対象VLAN以外を誤って除外しないよう変更前の設定を必ず記録してから実施する。
+- ACLの変更は他のVLAN間通信にも影響しうるため、影響範囲を洗い出してから適用する。
+- 直近の変更「{{ recent_changes }}」が原因と特定できた場合は、変更管理プロセスに沿って再発防止策を記録する。

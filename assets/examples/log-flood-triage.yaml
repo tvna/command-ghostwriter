@@ -1,0 +1,6 @@
+title: アプリログ暴走によるディスク圧迫
+flooding_log_path: /var/log/app/error.log
+growth_rate: "1分あたり約500MB"
+source_service: app-worker
+rate_limit_config: "$SystemLogRateLimitInterval 10\n$SystemLogRateLimitBurst 200"
+truncate_policy: "cp /dev/null で切り詰める。rm による削除はプロセスがファイルハンドルを保持したまま容量が解放されないため行わない"

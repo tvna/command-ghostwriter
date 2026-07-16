@@ -1,0 +1,5 @@
+log_dir = "/var/log/named"
+query_log_enabled = true
+channel_definitions = "query_logチャネル(queries.log)とdefaultチャネル(named.log)を分離"
+severity = "info"
+versions_and_size = "versions 5, size 100m で世代管理"

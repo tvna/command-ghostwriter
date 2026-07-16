@@ -1,0 +1,81 @@
+# DNSSECによるゾーン署名の導入
+
+BIND の dnssec-policy を使ってゾーンに署名を導入し、親ゾーンへのDSレコード登録と検証状態の確認までを行います。
+
+## 目的
+
+DNSSECの鍵構造(KSK/ZSK)と信頼の連鎖の仕組みを理解し、dnssec-policyによる署名の自動化からDSレコード登録・検証確認までを一連の流れとして実施できるようになることを目指します。
+
+## 用語解説
+
+- **KSK/ZSK**: 鍵署名鍵(KSK)と通常のゾーン署名鍵(ZSK)。KSKのハッシュをDSレコードとして親ゾーンに登録する
+- **RRSIG**: 各リソースレコードセットに付与される署名レコード
+- **DSレコード**: 子ゾーンのKSKのハッシュを親ゾーンに登録し、信頼の連鎖を確立するレコード
+- **信頼の連鎖(Chain of Trust)**: ルートゾーンから子ゾーンまで署名を辿って検証できる仕組み
+- **dnssec-policy**: BINDが鍵生成・署名・ロールオーバーを自動管理する設定ブロック
+
+## シナリオ設定
+
+ゾーン `{{ zone_name }}` に dnssec-policy `{{ dnssec_policy_name }}`(KSKアルゴリズム `{{ ksk_algorithm }}`)を適用します。検証には `{{ validation_resolver }}` を使用します。{{ ds_registration_note }}
+
+## 手順
+
+### 1. dnssec-policy を定義する
+
+```bash
+cat >> /etc/named.conf <<'EOF'
+dnssec-policy "{{ dnssec_policy_name }}" {
+    keys {
+        ksk key-directory lifetime unlimited algorithm {{ ksk_algorithm }};
+        zsk key-directory lifetime P30D algorithm {{ ksk_algorithm }};
+    };
+};
+
+zone "{{ zone_name }}" IN {
+    type master;
+    file "/var/named/db.{{ zone_name }}";
+    dnssec-policy "{{ dnssec_policy_name }}";
+};
+EOF
+```
+
+### 2. 設定を反映し署名を開始する
+
+```bash
+named-checkconf
+rndc reload {{ zone_name }}
+```
+
+### 3. 署名状態を確認する
+
+```bash
+rndc dnssec -status {{ zone_name }}
+```
+
+### 4. 親ゾーンへDSレコードを登録する
+
+```bash
+dig {{ zone_name }} DNSKEY +short
+dnssec-dsfromkey -f /var/named/db.{{ zone_name }} {{ zone_name }}
+# {{ ds_registration_note }}
+```
+
+### 5. 署名結果を検証する
+
+```bash
+dig @{{ validation_resolver }} {{ zone_name }} SOA +dnssec
+delv @{{ validation_resolver }} {{ zone_name }} SOA
+```
+
+## 動作確認
+
+- `rndc dnssec -status {{ zone_name }}` で署名完了(Signed)と表示されること
+- `dig @{{ validation_resolver }} {{ zone_name }} SOA +dnssec` の応答にRRSIGが含まれること
+- `delv @{{ validation_resolver }} {{ zone_name }} SOA` が `fully validated` を返すこと
+- DSレコード登録後、外部の公開DNSSECバリデータでもエラーが発生しないこと
+
+## 注意事項
+
+- DSレコードの登録内容を誤ると、そのゾーン全体が名前解決不能(SERVFAIL)になる。登録前に必ずハッシュ値を再確認すること。
+- 鍵ファイルは named の実行ユーザーのみが読める権限で保管し、外部に持ち出さないこと。
+- 本手順は署名の初期導入に限定する。鍵の定期更新(ロールオーバー)は別の手順(dnssec-ksk-rollover)で扱う。

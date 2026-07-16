@@ -1,0 +1,4 @@
+iam_user,purpose,policy_scope,mfa_required,key_rotation_days
+deploy-bot,CI/CDからのS3デプロイ専用,arn:aws:iam::aws:policy/AmazonS3FullAccess を絞ったインラインポリシー,false,90
+backup-operator,EBSスナップショットの取得・世代整理,arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccessとカスタムsnapshotポリシー,true,60
+readonly-auditor,月次のリソース棚卸し閲覧,arn:aws:iam::aws:policy/ReadOnlyAccess,true,180

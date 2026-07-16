@@ -1,0 +1,5 @@
+channel_group = 1
+member_interfaces = ["GigabitEthernet0/1", "GigabitEthernet0/2"]
+lacp_mode = "active"
+trunk_vlans = [10, 20, 30]
+load_balance_method = "src-dst-ip"

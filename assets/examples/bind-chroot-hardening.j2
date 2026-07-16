@@ -1,0 +1,89 @@
+# BINDの堅牢化(権限分離・情報秘匿)設定手順
+
+権威 DNS サーバの攻撃面を減らすため、BIND の実行権限分離・バージョン秘匿・権威専用機での再帰無効化・最小応答化をまとめて設定します。
+
+## 目的
+
+バージョン探索や再帰悪用、不要な情報の応答といった攻撃の足がかりを塞ぎ、権威サーバとして必要最小限の情報しか外部に見せない構成にできるようになることを目指します。
+
+## 用語解説
+
+- **権限分離**: `named` プロセスを root ではなく専用の非特権ユーザーで実行し、乗っ取られた際の被害を限定すること
+- **バージョン秘匿**: `dig CH TXT version.bind` 等で取得できるソフトウェアバージョン文字列を隠し、既知の脆弱性を狙った探索を難しくすること
+- **minimal-responses**: 応答に不要な追加セクションを含めず、必要最小限の情報のみを返す設定
+- **再帰と権威の分離**: 権威専用サーバでは再帰問い合わせ機能自体を無効化し、キャッシュポイズニングや増幅攻撃への加担リスクを断つ考え方
+- **攻撃面（アタックサーフェス）**: 攻撃者が探索・悪用できる可能性のある機能や情報の総体
+
+## シナリオ設定
+
+`named` の実行ユーザーは `{{ run_user }}`、外部に見せるバージョン文字列は「{{ version_string }}」とします。ホスト名秘匿は `{{ hide_hostname }}`、権威専用機での再帰無効化は `{{ disable_recursion_on_auth }}`、最小応答化は `{{ minimal_responses }}` を目標とします。
+
+## 手順
+
+### 1. 現在の攻撃面を確認する
+
+まず外部から取得できる情報と、再帰の許可状況を確認します。
+
+```bash
+dig @localhost CH TXT version.bind +short
+dig @localhost CH TXT hostname.bind +short
+named-checkconf -p /etc/named.conf | grep -E "recursion|run-as|version"
+```
+
+### 2. 実行ユーザーとバージョン秘匿をoptionsに設定する
+
+`named` プロセスを非特権ユーザー `{{ run_user }}` で実行し、外部に見せるバージョン文字列を「{{ version_string }}」に差し替えます。
+
+```bash
+cat >> /etc/named.conf <<'EOF'
+options {
+    run-as-user "{{ run_user }}";
+    version "{{ version_string }}";
+{% if hide_hostname %}    hostname "{{ version_string }}";
+{% endif %}};
+EOF
+```
+
+### 3. 権威専用機での再帰無効化とminimal-responsesを設定する
+
+再帰無効化は `{{ disable_recursion_on_auth }}`、最小応答化は `{{ minimal_responses }}` の方針に沿って設定します。
+
+```bash
+cat >> /etc/named.conf <<'EOF'
+options {
+{% if disable_recursion_on_auth %}    recursion no;
+    allow-recursion { none; };
+{% endif %}{% if minimal_responses %}    minimal-responses yes;
+{% endif %}};
+EOF
+```
+
+### 4. 構文チェックして反映する
+
+```bash
+named-checkconf
+rndc reload
+```
+
+### 5. 設定内容を外部視点で確認する
+
+自サーバに対して外部相当のホストから問い合わせ、秘匿・無効化が効いていることを確認します。
+
+```bash
+dig @<自サーバのIP> CH TXT version.bind +short
+dig @<自サーバのIP> example.com A
+ps -o user= -C named
+```
+
+## 動作確認
+
+- `dig CH TXT version.bind` の応答が実バージョンではなく「{{ version_string }}」になっていること
+- `ps -o user= -C named` の実行ユーザーが `{{ run_user }}` になっていること
+- 権威専用機であれば、外部からの再帰問い合わせが `REFUSED` になること
+- `named-checkconf` がエラーなく通ること
+
+## 注意事項
+
+- バージョン秘匿はあくまで探索を難しくする対策であり、パッチ適用を代替しない。セキュリティアップデートは別途継続すること。
+- 再帰を無効化する対象は権威専用機に限ること。フルリゾルバとして使っているサーバで無効化すると社内の名前解決が止まる。
+- `run-as-user` 変更後はゾーンファイルやログディレクトリの所有権・パーミッションも `{{ run_user }}` から読み書きできる状態か確認すること。

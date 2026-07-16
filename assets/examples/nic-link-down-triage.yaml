@@ -1,0 +1,5 @@
+interface: eno2
+link_speed_expected: 1000Mb/s (Full Duplex)
+flap_count: 37
+switch_port: sw-core01 Gi1/0/24
+cable_note: SFPモジュールの交換予備あり(在庫棚A-3)。RJ45ケーブルは新品に交換済みだが再発あり。

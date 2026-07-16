@@ -1,0 +1,83 @@
+# 依存サービス連鎖障害の切り分け — {{ hostname }}
+
+{{ hostname }} で {{ visible_failed_service }} が failed 状態になったとの通知がありました。表面的に落ちているユニットの奥に本当の障害点が隠れていることが多いため、依存関係ツリーを遡って根本ユニットを特定し、正しい順序で復旧します。
+
+## 目的
+
+systemdの依存関係ツリーを読み解き、表面の症状に飛びつかず根本で落ちているユニットを特定した上で、依存順に正しく復旧できるようになることを目指します。
+
+## 用語解説
+
+- **ユニット**: systemdが管理するサービス・ターゲット等の管理単位
+- **依存関係ツリー**: あるユニットが起動前提とする他ユニットの連鎖構造
+- **After/Requires**: ユニット定義に記述する起動順序・依存関係の指定
+- **カスケード障害(連鎖障害)**: 1つのユニット障害が依存する上位ユニットへ連鎖して波及する障害
+- **root cause(根本原因)**: 障害連鎖の起点となっている本当の原因ユニット
+- **依存順の復旧**: 依存される側(下位)から先に復旧しないと上位が再度失敗する起動順序の原則
+
+## シナリオ設定
+
+{{ hostname }} の監視から `{{ visible_failed_service }}` の failed 通知を受けました。表面上失敗しているのは `{{ visible_failed_service }}` ですが、依存関係を遡ると本当の障害点は別のユニットにある可能性があります。
+
+## 手順
+
+### 1. failed状態のユニット一覧を確認する
+
+```bash
+systemctl --failed
+```
+
+`{{ visible_failed_service }}` 以外にも failed のユニットがないか確認します。
+
+### 2. 対象ユニットの依存関係ツリーを把握する
+
+```bash
+systemctl list-dependencies {{ visible_failed_service }} --all
+```
+
+依存チェーンは次の順に連なっています。
+
+{% for u in dependency_chain %}{{ loop.index }}. {{ u }}
+{% endfor %}
+
+### 3. 根本ユニットを特定する
+
+表面の症状(`{{ visible_failed_service }}`)に飛びつかず、依存チェーンを遡って原因ユニットのログを確認します。
+
+```bash
+systemctl status {{ root_candidate }}
+journalctl -u {{ root_candidate }} -e --no-pager
+```
+
+今回の根本候補は `{{ root_candidate }}` です。
+
+### 4. 依存順に復旧する
+
+下位(依存される側)から順に起動し直します。
+
+```bash
+{% for s in start_order %}systemctl restart {{ s }}
+{% endfor %}```
+
+### 5. 全体の健全性を確認する
+
+```bash
+{% for c in verify_commands %}{{ c }}
+{% endfor %}```
+
+### 6. 依存関係と監視の見直しを提案する
+
+再発防止のため、`After`/`Requires` の記述が実態と合っているか、また監視が表面ユニットだけでなく依存ユニットの状態も捉えられているかを見直し、恒久対応を {{ escalation }} と協議します。
+
+## 動作確認
+
+- `systemctl --failed` に対象ユニットが表示されないこと
+- Step 5 の全確認コマンドが正常応答を返すこと
+- `{{ visible_failed_service }}` が active かつ依存先 `{{ root_candidate }}` も active であること
+- 依存関係の見直し内容が記録・共有されていること
+
+## 注意事項
+
+- `systemctl restart` は対象サービスを一時停止させる破壊的操作のため、影響範囲を確認してから実施する。
+- 依存順を誤ると再度失敗を繰り返すだけなので、必ず下位ユニットから起動する。
+- systemd-service-recovery(既存)は単一サービス内のログ調査を扱うのに対し、本手順は複数ユニットにまたがる依存連鎖の切り分けに焦点を当てる。

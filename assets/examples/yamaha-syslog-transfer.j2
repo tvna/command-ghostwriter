@@ -1,0 +1,88 @@
+# YAMAHA RTX の syslog 転送と絞り込み設定
+
+RTX 系ルータのログを集約先の syslog サーバへ転送し、notice/info/debug の
+出し分けを設計します。administrator モードで実施してください。
+
+## 目的
+
+RTX ルータ上に蓄積されるログを外部 syslog サーバへ転送し、ログレベルの
+出し分けとフィルタログ・NAT ログの要否を整理したうえで、機器再起動後も
+ログが失われない体制を構築できるようになることを目指します。
+
+## 用語解説
+
+- **syslog host**: ログの転送先サーバを指定する RTX の設定単位
+- **facility**: ログの発生元カテゴリを分類する識別子（local0〜local7 等）
+- **notice/info/debug**: ログの重要度レベル。debug に近づくほど出力量が増える
+- **フィルタログ**: IP フィルタで通過・拒否されたパケットを記録するログ
+- **NAT ログ**: NAT/IP マスカレードの変換内容を記録するログ
+
+## シナリオ設定
+
+転送先の syslog サーバは `{{ syslog_host }}`、facility は
+`{{ syslog_facility }}` を使用します。ログレベルの方針は
+「{{ log_level_policy }}」とし、フィルタログの有効化は
+`{{ filter_log_enabled }}` です。受信側の保存方針は
+「{{ rotation_note }}」を前提とします。
+
+## 手順
+
+### 1. 現在のログ設定を確認する
+
+```bash
+show config | grep syslog
+```
+
+### 2. 転送先サーバを設定する
+
+```bash
+syslog host {{ syslog_host }}
+syslog facility {{ syslog_facility }}
+```
+
+### 3. フィルタログ・NAT ログの有効化を判断する
+
+「{{ log_level_policy }}」の方針に沿って、必要なログ種別のみ有効化します。
+
+```bash
+{% if filter_log_enabled %}syslog filter on
+{% else %}syslog filter off
+{% endif %}
+```
+
+### 4. 設定を保存する
+
+```bash
+save
+```
+
+### 5. サーバ側での受信を確認する
+
+受信側 syslog サーバ（{{ syslog_host }}、facility={{ syslog_facility }}）で
+ログが届いているか確認します。
+
+```bash
+tail -f /var/log/{{ syslog_facility }}.log
+```
+
+### 6. ログ量と絞り込みを調整する
+
+```bash
+show status syslog
+```
+
+出力が多すぎる場合は、対象を notice 以上に絞るなど「{{ log_level_policy }}」
+の方針に沿って再調整します。
+
+## 動作確認
+
+- `show config | grep syslog` に転送先ホストと facility が反映されていること
+- サーバ側で `{{ syslog_host }}` からのログを受信できること
+- フィルタログの有効/無効が意図通り（{{ filter_log_enabled }}）になっていること
+- ログ量が「{{ rotation_note }}」の保存方針で許容できる範囲であること
+
+## 注意事項
+
+- debug レベルまで転送すると出力量が急増し、サーバ・回線を圧迫するおそれがある。必要な範囲に絞ること。
+- `save` を忘れると再起動時に設定が失われる。
+- 受信側サーバがダウンしている間はログが失われるため、サーバ側の保存方針（{{ rotation_note }}）と可用性も合わせて確認する。

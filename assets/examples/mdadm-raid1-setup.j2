@@ -1,0 +1,80 @@
+# mdadmによるソフトウェアRAID1の構築
+
+`mdadm` で2本のディスクからRAID1アレイを構築し、設定の永続化(`mdadm.conf`・`fstab`)と監視通知までを一巡します。
+
+## 目的
+
+RAID1の冗長化の仕組みと再同期(resync)の考え方を理解し、アレイ作成から永続化・監視設定・状態確認までを安全に実施できるようになることを目指します。
+
+## 用語解説
+
+- **RAID1**: 同一データを複数ディスクへミラーリングして書き込む方式。1本の障害ではデータを失わない
+- **再同期(resync)**: アレイ作成直後やディスク交換後に、ミラー間のデータを一致させる処理
+- **degraded**: メンバーディスクの一部が欠けた状態でアレイが稼働していること。この状態では冗長性がない
+- **mdadm.conf**: アレイ構成をUUID付きで記録し、再起動後もアレイを正しく組み立てるための設定ファイル
+- **/proc/mdstat**: 現在稼働中のRAIDアレイの状態・再同期進捗を確認する仮想ファイル
+
+## シナリオ設定
+
+`{{ member_disks | join(", ") }}` の {{ member_disks | length }} 本から `{{ array_device }}` としてRAID1を構築し、`{{ filesystem }}` でフォーマットして `{{ mount_point }}` にマウントします。監視通知先は `{{ monitor_mail }}` です。
+
+## 手順
+
+### 1. ディスクを確認しパーティション情報を消去する
+
+対象ディスクを取り違えると既存データを失うため、`lsblk` で必ず確認してから進めます。
+
+```bash
+lsblk
+{% for d in member_disks %}sudo wipefs -a {{ d }}
+{% endfor %}
+```
+
+### 2. mdadm --createでRAID1アレイを作成する
+
+```bash
+sudo mdadm --create {{ array_device }} --level=1 --raid-devices={{ member_disks | length }} {% for d in member_disks %}{{ d }} {% endfor %}
+
+sudo mdadm --detail {{ array_device }}
+```
+
+### 3. /proc/mdstatで再同期の進捗を確認する
+
+```bash
+cat /proc/mdstat
+```
+
+`resync` の進捗が100%になるまで待ちます。容量によっては数時間かかる場合があります。
+
+### 4. mdadm.confとfstabで永続化する
+
+```bash
+sudo mkdir -p /etc/mdadm
+sudo mdadm --detail --scan | sudo tee -a /etc/mdadm/mdadm.conf
+sudo mkfs.{{ filesystem }} {{ array_device }}
+sudo mkdir -p {{ mount_point }}
+echo "{{ array_device }} {{ mount_point }} {{ filesystem }} defaults 0 2" | sudo tee -a /etc/fstab
+sudo mount -a
+df -h {{ mount_point }}
+```
+
+### 5. 監視通知を設定する
+
+```bash
+sudo grep -q '^MAILADDR' /etc/mdadm/mdadm.conf && sudo sed -i "s/^MAILADDR.*/MAILADDR {{ monitor_mail }}/" /etc/mdadm/mdadm.conf || echo "MAILADDR {{ monitor_mail }}" | sudo tee -a /etc/mdadm/mdadm.conf
+sudo systemctl enable --now mdmonitor
+sudo mdadm --monitor --scan --test --oneshot
+```
+
+## 動作確認
+
+- `mdadm --detail {{ array_device }}` の `State` が `clean` であること(構築直後は `resyncing` を経て `clean` になる)
+- `cat /proc/mdstat` に {{ member_disks | length }} 本すべてが `[UU]`(全メンバー正常)として表示されること
+- 再起動後も `{{ mount_point }}` が自動マウントされること
+- `mdadm --monitor --test` 実行時に `{{ monitor_mail }}` 宛のテストメールイベントが発報されること
+
+## 注意事項
+
+- `wipefs` はディスク上の既存データを完全に消去する破壊的操作。対象ディスクが `member_disks` の値と一致することを `lsblk` で必ず確認してから実行する。
+- RAID1はハードウェア障害への冗長化であり、誤削除・ランサムウェア・論理破損には無力。バックアップの代替にはならない。
+- 1本が `degraded` になった場合は速やかに交換し、`mdadm --add` で再同期する。degradedのまま放置すると残る1本の障害でデータを失う。

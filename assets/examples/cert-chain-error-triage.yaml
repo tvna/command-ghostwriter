@@ -1,0 +1,5 @@
+target_url: "https://api.example.com"
+error_message: "unable to get local issuer certificate"
+cert_path: "/etc/nginx/ssl/api.example.com.crt"
+intermediate_ca: "/etc/nginx/ssl/intermediate-ca.pem"
+expected_san: "api.example.com"

@@ -1,0 +1,19 @@
+backend = "gsqlite3"
+zone_name = "example.jp"
+soa_content = "ns1.example.jp admin.example.jp 2026071601 10800 3600 604800 3600"
+api_enabled = true
+
+[[initial_records]]
+name = "example.jp"
+type = "NS"
+content = "ns1.example.jp"
+
+[[initial_records]]
+name = "www.example.jp"
+type = "A"
+content = "203.0.113.10"
+
+[[initial_records]]
+name = "mail.example.jp"
+type = "A"
+content = "203.0.113.20"

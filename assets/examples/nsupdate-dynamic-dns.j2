@@ -1,0 +1,101 @@
+# nsupdateとTSIGによる動的DNS更新手順 — {{ zone_name }}
+
+TSIG 鍵で認証された `nsupdate` により、**{{ zone_name }}** のレコードをスクリプトや自動化ツールから安全に更新できるようにします。
+
+## 目的
+
+TSIG による認証の仕組みを理解し、許可された鍵を持つクライアントのみが動的にレコードを追加・削除できる、安全な自動更新運用を構築できるようになることを目指します。
+
+## 用語解説
+
+- **動的更新（Dynamic Update）**: ゾーンファイルを手動編集せず、プロトコル経由でレコードを追加・削除する仕組み
+- **TSIG（Transaction SIGnature）**: 共有鍵による問い合わせ・更新メッセージの署名認証方式
+- **update-policy**: どの鍵がどのレコード種別を更新できるかをゾーン単位で制限する BIND の設定
+- **ジャーナルファイル（.jnl）**: 動的更新の差分を記録するファイル。ゾーンファイル本体とは別に管理され、更新のたびに追記される
+- **nsupdate**: TSIG 鍵を使ってレコードの追加・削除コマンドを対話的またはスクリプトで送信するクライアントツール
+
+## シナリオ設定
+
+対象ゾーンは `{{ zone_name }}`。TSIG 鍵の名前は `{{ tsig_key_name }}`、アルゴリズムは `{{ tsig_algorithm }}` とします。更新を許可するレコード種別は `{{ allowed_update_records }}` に限定し、更新を行うクライアントは `{{ update_client_host }}` を想定します。
+
+## 手順
+
+### 1. tsig-keygenでTSIG鍵を生成する
+
+```bash
+tsig-keygen -a {{ tsig_algorithm }} {{ tsig_key_name }} > /etc/named/{{ tsig_key_name }}.key
+cat /etc/named/{{ tsig_key_name }}.key
+```
+
+### 2. named.confに鍵を読み込み、update-policyを設定する
+
+生成した鍵を `named.conf` に取り込み、対象ゾーンの `update-policy` で許可レコード種別（`{{ allowed_update_records }}`）を制限します。
+
+```bash
+cat >> /etc/named.conf <<'EOF'
+include "/etc/named/{{ tsig_key_name }}.key";
+
+zone "{{ zone_name }}" IN {
+    type master;
+    file "/var/named/dynamic/db.{{ zone_name }}";
+    allow-update { key {{ tsig_key_name }}; };
+    update-policy {
+        grant {{ tsig_key_name }} zonesub A;
+        grant {{ tsig_key_name }} zonesub TXT;
+    };
+};
+EOF
+```
+
+### 3. 構文チェックして反映する
+
+```bash
+named-checkconf
+rndc reload {{ zone_name }}
+```
+
+### 4. nsupdateで追加・削除を実行する
+
+`{{ update_client_host }}` からのクライアントとして、鍵ファイルを指定して更新を送信します。
+
+```bash
+nsupdate -k /etc/named/{{ tsig_key_name }}.key <<EOF
+server 127.0.0.1
+zone {{ zone_name }}
+update add host1.{{ zone_name }} 300 A {{ update_client_host }}
+send
+EOF
+```
+
+削除する場合は以下のように送信します。
+
+```bash
+nsupdate -k /etc/named/{{ tsig_key_name }}.key <<EOF
+server 127.0.0.1
+zone {{ zone_name }}
+update delete host1.{{ zone_name }} A
+send
+EOF
+```
+
+### 5. digで反映を確認し、ジャーナルファイルとの関係を把握する
+
+```bash
+dig @127.0.0.1 host1.{{ zone_name }} A +short
+ls -l /var/named/dynamic/db.{{ zone_name }}.jnl
+```
+
+動的更新の内容はまずジャーナルファイル（`.jnl`）に記録され、ゾーンファイル本体には `rndc sync` またはサーバ停止時にまとめて反映されます。ゾーンファイルを直接編集する場合は、先に `rndc freeze` で更新を止める必要があります。
+
+## 動作確認
+
+- 許可された鍵（`{{ tsig_key_name }}`）を使った更新のみが成功し、鍵を指定しない更新や誤った鍵での更新は拒否されること
+- `update-policy` で許可した `{{ allowed_update_records }}` 以外のレコード種別（例: NS）への更新が拒否されること
+- 更新後に `dig` で即座に反映内容が引けること
+- `.jnl` ファイルが生成され、更新差分が記録されていること
+
+## 注意事項
+
+- TSIG 鍵ファイルはゾーンデータへの書き込み権限そのものに等しいため、権限を絞って保管し、バージョン管理システムなどに平文でコミットしないこと。
+- `update-policy` の `grant` 対象を限定しないと、鍵を持つクライアントが任意のレコード種別・任意の名前まで更新できてしまう。必要最小限の許可にとどめること。
+- ゾーンファイルを手動編集する際は、動的更新との競合を避けるため必ず `rndc freeze` してから編集し、完了後に `rndc thaw` すること。

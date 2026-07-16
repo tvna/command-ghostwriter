@@ -1,0 +1,5 @@
+param_to_add = "cgroup_enable=memory swapaccount=1"
+param_reason = "コンテナのメモリcgroup計測を有効化するため"
+grub_file = "/etc/default/grub"
+fallback_note = "変更前のGRUB_CMDLINE_LINUXをバックアップし、起動不能時はGRUBメニューから一時的に外して起動する"
+console_access = true

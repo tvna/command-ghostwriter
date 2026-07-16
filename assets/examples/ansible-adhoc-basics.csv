@@ -1,0 +1,4 @@
+hostname,ansible_host,group,ansible_user,purpose
+web01,10.0.1.11,webservers,deploy,アプリケーションサーバ
+web02,10.0.1.12,webservers,deploy,アプリケーションサーバ
+db01,10.0.2.11,dbservers,deploy,データベースサーバ

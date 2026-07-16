@@ -1,0 +1,87 @@
+# AppArmorプロファイルの適用と調整
+
+`aa-status` での状態確認から、complainモードでの学習運用、プロファイル編集とenforce切替までをUbuntu環境で一巡します。
+
+## 目的
+
+AppArmorのenforce/complainモードの違いを理解し、既存プロファイルを安全に調整・適用できるようになることを目指します。いきなりenforceにせず、complainで挙動を学習してから切り替える手順を身につけます。
+
+## 用語解説
+
+- **enforce**: プロファイルの制限を実際に適用し、違反する動作をブロックするモード
+- **complain**: 違反をブロックせず、ログに記録するだけの学習用モード
+- **プロファイル**: バイナリごとにアクセス可能なファイル・権限を定義した設定ファイル(`/etc/apparmor.d/` 配下)
+- **apparmor_parser**: プロファイルをカーネルに読み込む(コンパイル・ロードする)コマンド
+- **拒否ログ(DENIED)**: `dmesg` や `/var/log/syslog` に記録されるAppArmorの拒否イベント
+
+## シナリオ設定
+
+対象バイナリは `{{ target_binary }}`、プロファイルは `{{ profile_path }}` に配置し、現在のモードは `{{ mode }}` です。許可するパスは以下の {{ allow_paths | length }} 件、明示的に拒否するパスは {{ deny_paths | length }} 件です。
+
+許可パス:
+{% for p in allow_paths %}- `{{ p }}`
+{% endfor %}
+拒否パス:
+{% for p in deny_paths %}- `{{ p }}`
+{% endfor %}
+
+## 手順
+
+### 1. AppArmorの現在の状態を確認する
+
+```bash
+sudo aa-status
+```
+
+`{{ target_binary }}` のプロファイルが `enforce` と `complain` のどちらのリストに載っているか確認します。
+
+### 2. complainモードに切り替えて学習運用する
+
+```bash
+sudo aa-complain {{ target_binary }}
+sudo aa-status | grep {{ target_binary }}
+```
+
+complainモードでは違反がブロックされずログにのみ記録されるため、通常業務を一定期間動かして必要なアクセスを洗い出します。
+
+### 3. プロファイルを編集し、必要なパスを反映する
+
+```bash
+sudo tee -a {{ profile_path }} <<'EOF'
+{% for p in allow_paths %}  {{ p }},
+{% endfor %}{% for p in deny_paths %}  deny {{ p }},
+{% endfor %}EOF
+```
+
+### 4. 編集内容を反映する
+
+```bash
+sudo apparmor_parser -r {{ profile_path }}
+sudo aa-status | grep {{ target_binary }}
+```
+
+### 5. enforceモードに切り替える
+
+```bash
+sudo aa-enforce {{ target_binary }}
+sudo aa-status | grep {{ target_binary }}
+```
+
+### 6. 拒否ログを確認する
+
+```bash
+sudo dmesg | grep -i apparmor | grep -i denied | tail -n 20
+sudo journalctl -k --since "10 min ago" | grep -i 'apparmor="DENIED"'
+```
+
+## 動作確認
+
+- `aa-status` に `{{ target_binary }}` が enforce モードのプロファイルとして表示されること
+- 許可パス({% for p in allow_paths %}`{{ p }}`{% if not loop.last %}, {% endif %}{% endfor %})への正常なアクセスがブロックされないこと
+- 拒否パス({% for p in deny_paths %}`{{ p }}`{% if not loop.last %}, {% endif %}{% endfor %})へのアクセス試行が `DENIED` としてログに残ること
+
+## 注意事項
+
+- いきなり `aa-enforce` にせず、必ず `aa-complain` で一定期間ログを観察してから切り替える。学習期間を飛ばすと、正規のアクセスまでブロックしてサービス障害を招く。
+- プロファイル無効化(`aa-disable`)は最終手段とし、恒久的な回避策にしない。
+- プロファイル編集後は必ず `apparmor_parser -r` で再ロードする。ファイル編集だけではカーネル側の制限は更新されない。

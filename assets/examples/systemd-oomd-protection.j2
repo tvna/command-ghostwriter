@@ -1,0 +1,92 @@
+# systemd-oomdによるメモリ逼迫時の保護設定
+
+`systemd-oomd`でスライス単位のメモリ圧力を監視し、重要サービス`{{ protected_service }}`を守りながら`{{ expendable_slice }}`側を先に犠牲にする順序を設計します。sudo権限で実施してください。
+
+## 目的
+
+PSI(Pressure Stall Information)に基づく`systemd-oomd`の監視方式とカーネルOOM Killerとの違いを理解し、重要サービスを保護しつつ低優先度スライスを先に終了させる設定を構築・検証できるようになることを目指します。
+
+## 用語解説
+
+- **PSI(Pressure Stall Information)**: カーネルがCPU・メモリ・IOの資源不足でプロセスが待たされている割合を継続的に計測する仕組み。`systemd-oomd`はこの値を監視する
+- **カーネルOOM Killerとの違い**: カーネルOOM Killerはメモリが完全に枯渇してから発動するのに対し、`systemd-oomd`はPSIの圧力上昇を検知し、枯渇前の早い段階で介入する
+- **ManagedOOMSwap/ManagedOOMMemoryPressure**: ユニット・スライス単位でoomdによる管理を有効化するディレクティブ
+- **スライス**: 複数のサービスをグループ化するcgroup階層の単位。優先度や犠牲順序をスライス単位で設計できる
+- **oomctl**: `systemd-oomd`が現在監視しているcgroupと圧力状況を表示するコマンド
+
+## シナリオ設定
+
+保護対象は`{{ protected_service }}`、犠牲順序を優先する対象は`{{ expendable_slice }}`です。メモリ圧力閾値`{{ memory_pressure_limit }}`、スワップ使用率閾値`{{ swap_used_limit }}`を超えた場合に`{{ expendable_slice }}`側を先に終了させます。検証には`{{ verify_scenario }}`を使用します。
+
+## 手順
+
+### 1. systemd-oomdの有効化状況を確認する
+
+```bash
+systemctl status systemd-oomd --no-pager
+systemctl is-enabled systemd-oomd
+```
+
+### 2. 保護対象サービスにManagedOOM設定を投入する
+
+```bash
+sudo mkdir -p /etc/systemd/system/{{ protected_service }}.d
+sudo tee /etc/systemd/system/{{ protected_service }}.d/oomd-protect.conf <<'EOF'
+[Service]
+ManagedOOMMemoryPressure=auto
+ManagedOOMPreference=avoid
+EOF
+```
+
+`ManagedOOMPreference=avoid`により、他に選択肢がある限り`{{ protected_service }}`は犠牲対象から除外されます。
+
+### 3. 犠牲スライス側にManagedOOM設定を投入する
+
+```bash
+sudo mkdir -p /etc/systemd/system/{{ expendable_slice }}.d
+sudo tee /etc/systemd/system/{{ expendable_slice }}.d/oomd-kill.conf <<'EOF'
+[Slice]
+ManagedOOMMemoryPressure=kill
+ManagedOOMMemoryPressureLimit={{ memory_pressure_limit }}
+ManagedOOMSwap=kill
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart systemd-oomd
+```
+
+### 4. oomctlで監視状況を確認する
+
+```bash
+oomctl
+```
+
+`System Context`のスワップ使用率と、`{{ expendable_slice }}`が監視対象(`Kill`設定)として表示されていることを確認します。
+
+### 5. stress-ngで挙動を検証する
+
+```bash
+sudo systemctl start {{ expendable_slice }}
+{{ verify_scenario }}
+journalctl -u systemd-oomd --since "5 minutes ago" --no-pager
+```
+
+メモリ圧力がスワップ使用率`{{ swap_used_limit }}`や圧力閾値`{{ memory_pressure_limit }}`に達した際、`{{ expendable_slice }}`配下のプロセスが先に終了し、`{{ protected_service }}`が生き残ることを確認します。
+
+### 6. 保護対象サービスの生存を確認する
+
+```bash
+systemctl status {{ protected_service }} --no-pager
+systemctl is-active {{ protected_service }}
+```
+
+## 動作確認
+
+- `journalctl -u systemd-oomd`に`{{ expendable_slice }}`配下のプロセス終了ログが記録されていること
+- 検証シナリオ実行後も`{{ protected_service }}`が`active`のままであること
+- `oomctl`の出力に監視対象スライスと閾値設定が反映されていること
+
+## 注意事項
+
+- 検証シナリオ(`{{ verify_scenario }}`)は意図的にメモリ圧力をかける破壊的操作のため、本番相当の共有環境では実施しない。検証専用ホストか、影響範囲を隔離できるスライス内で行う。
+- `ManagedOOMPreference=avoid`は「優先されない」保証であり「絶対に殺されない」保証ではない。他に犠牲にできる対象が全くない場合は保護対象も終了され得る点に注意する。
+- カーネルOOM Killer(既存のoom-memory-triage runbook)は事後の障害調査を扱うのに対し、本手順はPSIベースで事前に介入する予防設定である。両者は併用可能で競合しない。

@@ -1,0 +1,95 @@
+# dnf-automaticによる自動更新の構成
+
+RHEL系(RHEL/AlmaLinux/Rocky等)で `dnf-automatic` を構成し、セキュリティ更新のみを自動適用しつつ、通知とログで適用状況を追跡できるようにします。
+
+## 目的
+
+`updateinfo` に基づくセキュリティ更新のみを自動適用し、適用結果を通知・ログで確認できる状態を、除外パッケージを踏まえて構築できるようになることを目指します。
+
+## 用語解説
+
+- **updateinfo**: リポジトリが配布するパッケージ更新のメタデータ。severity(security等)の分類はここに基づく
+- **dnf-automatic**: dnfのバックエンドを使い、更新の確認・ダウンロード・適用を自動化するコマンド群
+- **dnf-automatic.timer**: systemdのタイマーユニット。既定では1日1回起動し、`automatic.conf` の設定に従って動作する
+- **apply_updates**: `automatic.conf` の `[commands]` セクションのキー。`no` の場合はダウンロードのみで適用しないドライラン運用になる
+- **emit_via**: 結果通知の送信方法。`stdio`(journalへの出力)・`email`・`motd` などから選択する
+
+## シナリオ設定
+
+upgrade_type は `{{ upgrade_type }}`、apply_updates は `{{ apply_updates }}`、emit_via は `{{ emit_via }}` とします。タイマーは `{{ timer_schedule }}` に実行し、`{{ exclude_packages }}` は更新対象から除外します。
+
+## 手順
+
+### 1. dnf-automaticを導入する
+
+```bash
+sudo dnf install -y dnf-automatic
+rpm -q dnf-automatic
+```
+
+### 2. automatic.confを設定する
+
+```bash
+sudo cp /etc/dnf/automatic.conf /etc/dnf/automatic.conf.bak
+sudo sed -i 's/^upgrade_type = .*/upgrade_type = {{ upgrade_type }}/' /etc/dnf/automatic.conf
+{% if apply_updates %}sudo sed -i 's/^apply_updates = .*/apply_updates = yes/' /etc/dnf/automatic.conf
+{% else %}sudo sed -i 's/^apply_updates = .*/apply_updates = no/' /etc/dnf/automatic.conf
+{% endif %}sudo sed -i 's/^emit_via = .*/emit_via = {{ emit_via }}/' /etc/dnf/automatic.conf
+sudo sed -i 's/^exclude=.*/exclude={{ exclude_packages }}/' /etc/dnf/automatic.conf
+grep -E '^(upgrade_type|apply_updates|emit_via|exclude)' /etc/dnf/automatic.conf
+```
+
+### 3. タイマーを有効化しスケジュールを設定する
+
+```bash
+sudo systemctl enable --now dnf-automatic.timer
+sudo systemctl edit dnf-automatic.timer
+```
+
+エディタが開いたら次を追記します(既定値を空にしてから上書きする必要があります)。
+
+```ini
+[Timer]
+OnCalendar=
+OnCalendar={{ timer_schedule }}
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart dnf-automatic.timer
+systemctl list-timers dnf-automatic.timer
+```
+
+### 4. 手動実行で動作を確認する
+
+```bash
+sudo dnf-automatic --timer
+journalctl -u dnf-automatic -n 50 --no-pager
+```
+
+### 5. 適用ログを確認する
+
+```bash
+sudo tail -n 50 /var/log/dnf.log
+sudo dnf history list | head
+```
+
+### 6. 除外設定を確認する
+
+```bash
+grep '^exclude=' /etc/dnf/automatic.conf
+dnf history list | grep -F "{{ exclude_packages }}" || echo "除外対象は履歴に現れていないことを確認"
+```
+
+## 動作確認
+
+- `automatic.conf` の `upgrade_type` `apply_updates` `emit_via` `exclude` が設定値どおりになっていること
+- `systemctl list-timers dnf-automatic.timer` に表示され、次回実行が `{{ timer_schedule }}` に沿っていること
+- `journalctl -u dnf-automatic` に実行結果のログが記録されること
+- `{{ exclude_packages }}` に一致するパッケージが `dnf history` の適用履歴に現れないこと
+
+## 注意事項
+
+- `apply_updates` を `no` から `yes` に切り替える前に、`dnf-automatic --timer` を一度手動実行し、適用対象パッケージをログで確認してから運用する。
+- `exclude_packages` のワイルドカード指定(`kernel*` 等)は想定より広い範囲を除外する恐れがあるため、対象を定期的に見直す。
+- `unattended-upgrades-setup`(本カタログ)はDebian/Ubuntu系のAPTベース自動更新であり、本手順はRHEL系のDNFベースで対象ディストリビューションが異なる。

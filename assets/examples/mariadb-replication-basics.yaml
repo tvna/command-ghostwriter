@@ -1,0 +1,6 @@
+primary_host: "db-primary.internal"
+replica_host: "db-replica.internal"
+repl_user: "repl_agent"
+server_id_primary: 1
+server_id_replica: 2
+binlog_format: "ROW"

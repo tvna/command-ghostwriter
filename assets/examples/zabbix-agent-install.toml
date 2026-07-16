@@ -1,0 +1,5 @@
+zabbix_server_ip = "10.0.0.5"
+hostname = "web-01"
+listen_port = 10050
+template_name = "Linux by Zabbix agent"
+psk_note = "PSK鍵は /etc/zabbix/zabbix_agentd.psk に600権限で配置し、鍵の値自体はチケットや構成管理には残さない"

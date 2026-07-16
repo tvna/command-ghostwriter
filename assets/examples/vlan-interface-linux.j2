@@ -1,0 +1,98 @@
+# LinuxでのVLANタグ付きインターフェース設定
+
+802.1QのVLANサブインターフェースをLinuxサーバに作成し、複数セグメントへ同時に接続します。root権限(sudo)で実施してください。
+
+## 目的
+
+タグVLANとトランクポートの関係を理解し、1本の物理NICから複数VLANセグメントへ`ip link`でサブインターフェースを作成・永続化できるようになることを目指します。
+
+## 用語解説
+
+- **タグVLAN**: イーサネットフレームに802.1Qタグ(VLAN ID)を付与し、1本の物理配線上で複数の仮想セグメントを識別・分離する仕組み
+- **トランクポート**: 複数VLANのタグ付きフレームをそのまま通すスイッチポートの設定モード。アクセスポート(単一VLANのみ)と対比される
+- **802.1Q**: VLANタグ付けを規定するIEEE標準規格。フレームに4バイトのVLANタグを挿入する
+- **サブインターフェース**: `eth0.10`のように、物理インターフェースに紐づく形で作成される仮想インターフェース。特定VLAN IDのタグ付き/なしフレームのみを扱う
+- **parent_interface**: VLANサブインターフェースの元になる物理(またはボンディング)インターフェース
+
+## シナリオ設定
+
+親インターフェース`{{ csv_rows[0]["parent_interface"] }}`に、以下の {{ csv_rows | length }} 個のVLANサブインターフェースを作成します。
+
+| vlan_id | parent_interface | ip_address | segment_name | purpose |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["vlan_id"] }} | {{ r["parent_interface"] }} | {{ r["ip_address"] }} | {{ r["segment_name"] }} | {{ r["purpose"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. スイッチ側の前提条件を確認する
+
+対向スイッチポートがトランクモードで、対象VLAN IDをすべて許可(タグ付きで通過)する設定になっていることを、ネットワーク管理者と事前に確認します。
+
+```bash
+{% for r in csv_rows %}echo "VLAN {{ r["vlan_id"] }} ({{ r["segment_name"] }}) をトランクで許可済みか確認"
+{% endfor %}```
+
+### 2. 8021qモジュールを読み込む
+
+```bash
+sudo modprobe 8021q
+lsmod | grep 8021q
+```
+
+### 3. ip linkでVLANサブインターフェースを作成する
+
+```bash
+{% for r in csv_rows %}sudo ip link add link {{ r["parent_interface"] }} name {{ r["parent_interface"] }}.{{ r["vlan_id"] }} type vlan id {{ r["vlan_id"] }}
+sudo ip addr add {{ r["ip_address"] }} dev {{ r["parent_interface"] }}.{{ r["vlan_id"] }}
+sudo ip link set {{ r["parent_interface"] }}.{{ r["vlan_id"] }} up
+{% endfor %}```
+
+### 4. netplanで永続化する
+
+再起動後もVLAN設定が維持されるよう、netplan設定として恒久化します。
+
+```bash
+sudo tee /etc/netplan/90-vlans.yaml <<'EOF'
+network:
+  version: 2
+  vlans:
+{% for r in csv_rows %}    {{ r["parent_interface"] }}.{{ r["vlan_id"] }}:
+      id: {{ r["vlan_id"] }}
+      link: {{ r["parent_interface"] }}
+      addresses: [{{ r["ip_address"] }}]
+{% endfor %}EOF
+sudo netplan try
+```
+
+`netplan try`は一定時間内に確定操作(Enter)がないと自動的に設定を巻き戻すため、リモート作業でも安全に検証できます。
+
+### 5. セグメントごとの疎通を検証する
+
+```bash
+{% for r in csv_rows %}ip -4 addr show {{ r["parent_interface"] }}.{{ r["vlan_id"] }}
+{% endfor %}```
+
+```bash
+{% for r in csv_rows %}ping -c 3 -I {{ r["parent_interface"] }}.{{ r["vlan_id"] }} $(echo {{ r["ip_address"] }} | cut -d/ -f1 | sed 's/\.[0-9]*$/.1/') # {{ r["segment_name"] }}のゲートウェイ想定
+{% endfor %}```
+
+### 6. VLAN間分離を確認する
+
+タグなし(ネイティブVLAN)側や別VLANのセグメントへ、意図せず到達していないことを確認します。
+
+```bash
+{% for r in csv_rows %}ip route get {{ r["ip_address"] }} 2>&1 | grep -q "{{ r["parent_interface"] }}.{{ r["vlan_id"] }}" && echo "{{ r["segment_name"] }}: 経路OK"
+{% endfor %}```
+
+## 動作確認
+
+- `ip -4 addr show`で {{ csv_rows | length }} 個すべてのVLANサブインターフェースが`UP`状態で対応する`ip_address`を保持していること
+- 各VLANセグメント宛の通信が対応するサブインターフェース経由で経路解決されること(`ip route get`)
+- サーバ再起動後も`netplan`の設定どおりに全VLANサブインターフェースが再作成されること
+
+## 注意事項
+
+- スイッチ側のトランク設定がVLAN IDを許可していない状態で作業すると、タグ付きフレームがスイッチ側で破棄され疎通しない。作業前に必ずネットワーク管理者と設定を突合する。
+- 誤ったVLAN IDやIPアドレスを投入すると、他セグメントとの誤接続やIP重複を招く。`ip_address`は事前に台帳(IPアドレス管理表)と重複がないか確認してから投入する。
+- `ip link`による手動作成は再起動で消える一時的な確認用途に留め、恒久適用は必ず`netplan try`での検証を経てから確定する。

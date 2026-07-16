@@ -1,0 +1,94 @@
+# プライベートDockerレジストリの構築 — {{ registry_host }}
+
+`registry` コンテナとBasic認証・TLSで社内向けプライベートレジストリ **{{ registry_host }}:{{ registry_port }}** を立て、push/pullを検証します。
+
+## 目的
+
+社内限定のイメージ配布拠点として、認証とTLSで保護されたプライベートレジストリを構築し、`insecure-registry` に頼らない安全な運用を確立できるようになることを目指します。
+
+## 用語解説
+
+- **レジストリ**: Dockerイメージをタグ単位で保管・配布するサーバ。Docker Hubの社内版に相当する
+- **htpasswd**: Basic認証用のユーザー名・パスワードハッシュを保存するファイル形式
+- **insecure-registryの危険**: TLSなしの通信をDockerデーモンに許可する設定。平文で認証情報やイメージが流れるため社内であっても原則避ける
+- **ガベージコレクション(GC)**: タグ削除後も残る未参照レイヤを回収し、ストレージを解放する処理
+- **タグ付け(docker tag)**: ローカルイメージにレジストリのホスト名を含む名前を付け直し、push先を明示する操作
+
+## シナリオ設定
+
+`{{ data_dir }}` にイメージデータを永続化し、ユーザー `{{ auth_user }}` のBasic認証と証明書 `{{ tls_cert_path }}` によるTLSで `{{ registry_host }}:{{ registry_port }}` を保護します。ガベージコレクションは `{{ gc_policy }}` の方針で運用します。
+
+## 手順
+
+### 1. 認証情報とTLS証明書を準備する
+
+```bash
+mkdir -p {{ data_dir }} $(dirname {{ tls_cert_path }})
+docker run --rm --entrypoint htpasswd httpd:2.4 -Bbn {{ auth_user }} change_me_in_secrets_manager > /etc/docker-registry/htpasswd
+```
+
+> `{{ tls_cert_path }}` の証明書・秘密鍵は社内CA（openssl-private-ca手順等）で事前に発行しておく前提です。
+
+### 2. レジストリコンテナを起動する
+
+```bash
+docker run -d --name private-registry \
+  -p {{ registry_port }}:5000 \
+  -v {{ data_dir }}:/var/lib/registry \
+  -v /etc/docker-registry/htpasswd:/auth/htpasswd:ro \
+  -v {{ tls_cert_path }}:/certs/registry.crt:ro \
+  -v $(dirname {{ tls_cert_path }})/registry.key:/certs/registry.key:ro \
+  -e REGISTRY_AUTH=htpasswd \
+  -e REGISTRY_AUTH_HTPASSWD_REALM="{{ registry_host }}" \
+  -e REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd \
+  -e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/registry.crt \
+  -e REGISTRY_HTTP_TLS_KEY=/certs/registry.key \
+  registry:2
+docker ps --filter name=private-registry
+```
+
+### 3. クライアント側に信頼を配布する
+
+```bash
+sudo mkdir -p /etc/docker/certs.d/{{ registry_host }}:{{ registry_port }}
+sudo cp {{ tls_cert_path }} /etc/docker/certs.d/{{ registry_host }}:{{ registry_port }}/ca.crt
+```
+
+### 4. ログインしてpush/pullを検証する
+
+```bash
+docker login {{ registry_host }}:{{ registry_port }} -u {{ auth_user }}
+docker pull nginx:1.27
+docker tag nginx:1.27 {{ registry_host }}:{{ registry_port }}/nginx:1.27
+docker push {{ registry_host }}:{{ registry_port }}/nginx:1.27
+docker rmi {{ registry_host }}:{{ registry_port }}/nginx:1.27
+docker pull {{ registry_host }}:{{ registry_port }}/nginx:1.27
+```
+
+### 5. 保存されたタグを確認する
+
+```bash
+curl -u {{ auth_user }}:change_me_in_secrets_manager https://{{ registry_host }}:{{ registry_port }}/v2/_catalog
+curl -u {{ auth_user }}:change_me_in_secrets_manager https://{{ registry_host }}:{{ registry_port }}/v2/nginx/tags/list
+```
+
+### 6. ガベージコレクションを実行する
+
+```bash
+docker exec private-registry bin/registry garbage-collect /etc/docker/registry/config.yml --dry-run
+docker exec private-registry bin/registry garbage-collect /etc/docker/registry/config.yml
+```
+
+## 動作確認
+
+- `docker login {{ registry_host }}:{{ registry_port }}` が認証情報で成功すること
+- pushしたイメージが `curl .../v2/_catalog` の一覧に表示されること
+- pull後のイメージがローカルに再展開され、`docker run` で正常に起動すること
+- GCの `--dry-run` と実行後で未参照レイヤの回収対象が一致すること
+
+## 注意事項
+
+- `docker login` で使うパスワードはデモ値であり、実運用ではシークレット管理の仕組み（Vault等）から取得し、コマンド履歴やログに残さない。
+- TLSを外して `insecure-registries` に頼る運用は認証情報とイメージ内容が平文で流れるため、社内ネットワークであっても避ける。
+- ガベージコレクションはレジストリを一時的に読み取り専用にする必要があり、実行方針(`{{ gc_policy }}`)に沿って計画的に実施する。実行中のpush/pullと同時に走らせない。
+- 演習後は `docker rm -f private-registry` でコンテナを削除し、`{{ data_dir }}` の残存データも不要であれば削除する。

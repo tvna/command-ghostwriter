@@ -1,0 +1,89 @@
+# サブドメインの委任設定手順 — {{ child_zone }}
+
+親ゾーン **{{ parent_zone }}** の配下にある子ゾーン **{{ child_zone }}** の管理を、別のネームサーバ群へ委任します。NS レコードの投入からグルーレコードの要否確認、`dig +trace` による委任経路の検証までを行います。
+
+## 目的
+
+子ゾーンの管理権限を委任先チームへ正しく引き渡し、`dig +trace` で親から子まで委任経路がたどれること、応答に矛盾がない（lame delegation になっていない）ことを確認できるようになることを目指します。
+
+## 用語解説
+
+- **委任（delegation）**: 親ゾーンが子ゾーンの管理権限を、子ゾーンを権威的に答える別のネームサーバへ NS レコードで引き渡すこと
+- **グルーレコード**: 委任先の NS ホスト名が委任される子ゾーン自身の中にある場合に、循環参照を避けるため親ゾーン側に併せて登録する A/AAAA レコード
+- **lame delegation**: 親ゾーンの NS レコードが指すサーバが、実際にはその子ゾーンを権威的に答えられない（設定漏れ等の）不整合な委任状態
+- **NS レコード**: あるゾーンの権威サーバのホスト名を示すレコード
+- **権威サーバ**: 対象ゾーンのレコードを直接管理し、正式な回答を返す DNS サーバ
+
+## シナリオ設定
+
+親ゾーンは `{{ parent_zone }}`、委任する子ゾーンは `{{ child_zone }}` です。委任先ネームサーバは {{ child_ns_records | length }} 件（{% for ns in child_ns_records %}`{{ ns }}`{% if not loop.last %}, {% endif %}{% endfor %}）、グルーレコードの要否は `{{ glue_needed }}`、子ゾーン側の管理連絡先は `{{ child_admin_contact }}` です。
+
+## 手順
+
+### 1. 子ゾーン側の準備状況を確認する
+
+委任先チーム（連絡先: `{{ child_admin_contact }}`）が、委任予定のネームサーバで `{{ child_zone }}` を権威的に答えられる状態になっていることを先に確認します。
+
+```bash
+{% for ns in child_ns_records %}dig @{{ ns }} {{ child_zone }} SOA +short
+{% endfor %}```
+
+### 2. 親ゾーンに NS レコードを追加する
+
+親ゾーン（`{{ parent_zone }}`）のゾーンファイルに、子ゾーンの委任先 NS を追記します。
+
+```bash
+cat >> /var/named/db.{{ parent_zone }} <<'EOF'
+{% for ns in child_ns_records %}{{ child_zone }}.    IN NS    {{ ns }}.
+{% endfor %}EOF
+```
+
+### 3. グルーレコードの要否を判断し、必要なら登録する
+
+委任先 NS のホスト名が委任対象の子ゾーン自身に含まれる場合、循環参照を避けるためグルーレコードが必要です。今回の判定は `glue_needed = {{ glue_needed }}` です。
+
+```bash
+{% if glue_needed %}# 委任先NSのホスト名が {{ child_zone }} 配下にあるため、グルーレコード（A/AAAA）を親ゾーンに追加する
+# 例: ns1.{{ child_zone }}.    IN A    <委任先NSのIPアドレス>
+vi /var/named/db.{{ parent_zone }}
+{% else %}# 委任先NS（{% for ns in child_ns_records %}{{ ns }}{% if not loop.last %}, {% endif %}{% endfor %}）は
+# {{ child_zone }} の外側にあるため、グルーレコードは不要
+echo "グルーレコード不要（親ゾーン外のNSホスト名のため）"
+{% endif %}
+```
+
+### 4. SOA シリアルを更新し、親ゾーンへ反映する
+
+```bash
+named-checkzone {{ parent_zone }} /var/named/db.{{ parent_zone }}
+rndc reload {{ parent_zone }}
+```
+
+### 5. dig +trace で委任経路を検証する
+
+ルートから順にたどり、`{{ parent_zone }}` から `{{ child_zone }}` への委任が正しくつながっていることを確認します。
+
+```bash
+dig +trace {{ child_zone }} NS
+```
+
+### 6. lame delegation になっていないか確認する
+
+親ゾーンが示す NS それぞれに直接問い合わせ、全台が `{{ child_zone }}` を権威的に答えられることを確認します。
+
+```bash
+{% for ns in child_ns_records %}dig @{{ ns }} {{ child_zone }} SOA +short
+{% endfor %}```
+
+## 動作確認
+
+- `dig {{ parent_zone }} NS {{ child_zone }}` 相当の問い合わせで、委任先 NS（{% for ns in child_ns_records %}`{{ ns }}`{% if not loop.last %}, {% endif %}{% endfor %}）が返ること
+- `dig +trace {{ child_zone }} NS` が親から子まで途切れずにたどれること
+- 委任先 NS 全台が `{{ child_zone }}` の問い合わせに権威的に応答し、lame delegation になっていないこと
+- グルーレコードが必要な場合（`glue_needed = true`）、親ゾーンに A/AAAA レコードが登録されていること
+
+## 注意事項
+
+- 委任先の準備（手順1）が整う前に親ゾーンへ NS を追加すると、その間 lame delegation の状態になり名前解決に失敗する利用者が出る。順序を守ること。
+- グルーレコードが必要なのに登録しないと、委任先 NS のアドレス解決自体ができず子ゾーン全体が引けなくなる。
+- 委任変更後は既存の TTL の間、古い委任情報がキャッシュされ得るため、影響範囲と反映タイミングを `{{ child_admin_contact }}` とも共有しておくこと。

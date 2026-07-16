@@ -1,0 +1,6 @@
+registry_host = "registry.internal.example.com"
+registry_port = 5000
+data_dir = "/srv/docker-registry/data"
+auth_user = "ci-deploy"
+tls_cert_path = "/etc/docker-registry/tls/registry.crt"
+gc_policy = "weekly manual review before delete"

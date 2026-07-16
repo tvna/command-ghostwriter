@@ -1,0 +1,8 @@
+bastion_host: "bastion.example.com"
+bastion_user: "opsuser"
+target_hosts:
+  - "app01.internal"
+  - "app02.internal"
+  - "db01.internal"
+ssh_config_alias: "prod-bastion"
+key_path: "~/.ssh/id_ed25519_bastion"

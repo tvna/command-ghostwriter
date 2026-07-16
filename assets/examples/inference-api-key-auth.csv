@@ -1,0 +1,4 @@
+client_name,api_key_placeholder,rate_limit_rpm,allowed_models,expiry
+dev-team,PLACEHOLDER_DEV_TEAM_KEY_REPLACE_ME,120,"qwen3-coder:30b,gpt-oss:120b",2026-12-31
+mobile-app,PLACEHOLDER_MOBILE_APP_KEY_REPLACE_ME,60,gpt-oss:120b,2026-09-30
+partner-api,PLACEHOLDER_PARTNER_KEY_REPLACE_ME,30,qwen3-coder:30b,2026-06-30

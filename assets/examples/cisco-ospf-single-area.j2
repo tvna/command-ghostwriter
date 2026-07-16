@@ -1,0 +1,89 @@
+# CiscoルータのOSPF単一エリア設定
+
+複数のCiscoルータ間でOSPFエリア0(バックボーンエリア)を構成し、隣接関係(ネイバー)の確立と動的な経路交換を確認します。設定はコンソール接続で実施してください。
+
+## 目的
+
+OSPFの単一エリア構成をrouter-idと`network`文で定義し、`passive-interface`で不要な隣接形成を抑制した上で、ネイバー確立と経路交換を検証できるようになることを目指します。
+
+## 用語解説
+
+- **LSA(Link State Advertisement)**: OSPFルータ同士が交換する、自身のリンク状態(接続インターフェースや経路情報)の広告
+- **ネイバー(Neighbor)**: OSPFのHelloパケットをやり取りし、隣接関係が成立した対向ルータ
+- **DR/BDR(Designated Router/Backup Designated Router)**: マルチアクセスセグメント(イーサネット等)でLSA交換を集約する代表ルータとその予備
+- **エリア(Area)**: OSPFのLSA伝播範囲を区切る論理単位。エリア0はバックボーンエリアと呼ばれ、他エリアは必ずエリア0を経由する
+- **passive-interface**: OSPFのHelloパケットを送出させず、経路広告のみ行うインターフェース設定。末端セグメントでの不要な隣接形成を防ぐ
+
+## シナリオ設定
+
+router-id `{{ router_id }}` のルータで、エリア {{ area_id }} に以下の{{ networks | length }}個のネットワークを参加させます。
+
+{% for n in networks %}- `{{ n }}`
+{% endfor %}
+
+このうち以下のインターフェースは末端セグメントのため`passive-interface`とします。
+
+{% for intf in passive_interfaces %}- `{{ intf }}`
+{% endfor %}
+
+参照帯域幅(reference-bandwidth)は `{{ reference_bandwidth }}` Mbpsに設定し、高速リンクのコスト差を正しく反映させます。
+
+## 手順
+
+### 1. 事前にインターフェースの状態を確認する
+
+```bash
+enable
+show ip interface brief
+show running-config | section interface
+```
+
+対象インターフェースがOSPF参加予定のIPアドレス・帯域と一致しているか確認します。
+
+### 2. router-idと参照帯域幅を設定する
+
+```bash
+configure terminal
+router ospf 1
+ router-id {{ router_id }}
+ auto-cost reference-bandwidth {{ reference_bandwidth }}
+```
+
+### 3. network文でエリアへ参加させる
+
+```bash
+{% for n in networks %} network {{ n }} area {{ area_id }}
+{% endfor %}```
+
+### 4. passive-interfaceを設計する
+
+末端セグメントでは不要な隣接形成・Hello送出を止め、意図しないOSPFネイバーの成立を防ぎます。
+
+```bash
+{% for intf in passive_interfaces %} passive-interface {{ intf }}
+{% endfor %}end
+write memory
+```
+
+### 5. ネイバー確立と経路をshow ip ospf neighborで確認する
+
+```bash
+show ip ospf neighbor
+show ip route ospf
+show ip ospf interface brief
+```
+
+`show ip ospf interface brief`の`Passive`列で、意図したインターフェースがPassive扱いになっていることも確認します。
+
+## 動作確認
+
+- `show ip ospf neighbor`に対向ルータが`FULL`状態で表示されること(マルチアクセスセグメントではDR/BDR選出後に`FULL`または`2WAY`)
+- `show ip route ospf`に他ルータ経由のネットワークが`O`(OSPF由来)として学習されていること
+- `show ip ospf interface brief`で`{{ passive_interfaces[0] }}`等のpassive対象インターフェースにネイバーが存在しないこと
+- `show ip protocols`のrouter-idが `{{ router_id }}` と一致していること
+
+## 注意事項
+
+- router-idはルータ内で一意である必要があり、他ルータと重複するとLSAの発信元が正しく識別できず経路計算が不安定になる。ループバックIP等、変化しないアドレスを使うのが望ましい。
+- `network`文のワイルドカードマスクを広く取りすぎると、意図しないインターフェースまでOSPFに参加し、不要な隣接形成やLSA増加を招く。対象範囲は必要最小限にする。
+- reference-bandwidthを変更する場合は、OSPFが有効な全ルータで同じ値に揃えないと、コスト計算が機器間で食い違い最適経路選択がずれる原因になる。

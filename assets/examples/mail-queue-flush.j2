@@ -1,0 +1,92 @@
+# メールキュー滞留の解消 — {{ dest_domain }}
+
+Postfixのdeferredキューに滞留したメールを検知し、滞留原因を分類したうえで、原因解消後の再送・不要メールの安全な削除までを行います。
+
+## 目的
+
+キュー滞留件数が **{{ queue_threshold }}** 件を超えるような事態に対し、`mailq` / `qshape` で状況を把握し、**{{ top_deferred_reason }}** のような滞留理由を分類して、原因解消後に `postqueue -f` で再送できるようになることを目指します。
+
+## 用語解説
+
+- **mailq**: Postfixのメールキューの一覧（送信待ち・保留中メール)を表示するコマンド
+- **qshape**: キューを宛先ドメイン別・経過時間別に集計し、滞留の偏りを把握できるツール
+- **deferred(保留)キュー**: 一時的な配送失敗により再送待ちとなっているメールが置かれるキュー
+- **postqueue -f**: キュー内の全メールについて即座に再送を試みるコマンド
+- **postsuper -d**: 指定したキューIDのメールをキューから削除するコマンド
+
+## シナリオ設定
+
+宛先ドメイン `{{ dest_domain }}` 向けのメールを中心に、deferredキューの滞留件数が **{{ queue_threshold }}** 件を超えています。主な滞留理由は「{{ top_deferred_reason }}」です。再送方針は「{{ flush_policy }}」、削除基準は「{{ delete_criteria }}」とします。
+
+## 手順
+
+### 1. mailq・qshapeで滞留状況を把握する
+
+```bash
+mailq | tail -n 20
+mailq | grep -c '^[A-F0-9]'
+qshape deferred | head -n 20
+```
+
+→ 全体の滞留件数が {{ queue_threshold }} 件を超えているか、また `{{ dest_domain }}` 宛てに集中していないかを確認します。
+
+### 2. deferred理由を分類する
+
+```bash
+postqueue -p | grep -A1 "{{ dest_domain }}" | grep -i "reason\|deferred" | sort | uniq -c | sort -rn
+mailq | grep -B1 "{{ dest_domain }}"
+```
+
+→ 「{{ top_deferred_reason }}」のように、宛先障害・DNS解決不能・宛先側からの拒否のいずれに分類されるか確認します。
+
+### 3. 原因が解消しているか確認する
+
+```bash
+dig +short mx {{ dest_domain }}
+nc -zv $(dig +short mx {{ dest_domain }} | head -n1 | sed 's/\.$//') 25
+```
+
+→ MXレコードの解決とSMTPポートへの到達性を確認し、宛先側の障害が続いていないかを判断します。
+
+### 4. postqueue -fで再送する
+
+原因解消を確認したうえで、方針「{{ flush_policy }}」に沿って再送します。
+
+```bash
+sudo postqueue -f
+sleep 30
+mailq | grep -c '^[A-F0-9]'
+```
+
+→ 再送直後にキュー件数が減少していれば配送が再開されています。
+
+### 5. 不達メールを安全に削除する
+
+削除基準「{{ delete_criteria }}」に合致するメールのみを対象にします。
+
+```bash
+mailq | awk '/^[A-F0-9]+/{id=$1} /'"{{ dest_domain }}"'/{print id}' | sort -u
+sudo postsuper -d <キューID>
+```
+
+→ 一括削除(`postsuper -d ALL`)は誤って正常なメールまで失うため使用せず、対象を絞り込んでから個別に削除します。
+
+### 6. 再発を防ぐための監視を確認する
+
+```bash
+mailq | grep -c '^[A-F0-9]'
+systemctl status postfix --no-pager
+```
+
+## 動作確認
+
+- `mailq | grep -c '^[A-F0-9]'` の件数が {{ queue_threshold }} 件を大きく下回っていること
+- `{{ dest_domain }}` 宛てのメールが再送後に正常配送またはバウンス通知のいずれかで処理済みになっていること
+- 削除したメールが基準「{{ delete_criteria }}」に合致するもの限定であったこと
+- Postfixサービスが `active` のまま稼働し続けていること
+
+## 注意事項
+
+- `postsuper -d ALL` のようなキュー全削除は正当な送信待ちメールも失う破壊的操作であるため、削除対象は必ずキューIDを絞り込んでから実行する。
+- 宛先側の障害が解消していない状態で `postqueue -f` を乱発すると、再送の連続失敗がさらにキューを圧迫するため、原因解消確認を先に行う。
+- 大量削除・大量再送を行った際は件数と対象を記録し、後日の問い合わせ（未達メールの有無)に備える。

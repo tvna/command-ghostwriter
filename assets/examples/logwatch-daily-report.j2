@@ -1,0 +1,88 @@
+# Logwatchによる日次ログサマリレポート
+
+`Logwatch`を導入し、認証失敗・ディスク・サービスの日次サマリを`{{ mail_to }}`宛にメール送付する運用を構築します。sudo権限で実施してください。
+
+## 目的
+
+Logwatchの走査対象と詳細度(`detail_level`)の考え方を理解し、日次サマリレポートをメール送付する運用を構築・検証できるようになることを目指します。
+
+## 用語解説
+
+- **Logwatch**: `/var/log`配下の各種ログを解析し、サービス単位でサマリを生成するツール
+- **detail_level**: レポートの詳細度。`Low`/`Med`/`High`の3段階、または0〜10の数値で指定する
+- **service**: `sshd`や`sudo`のように、Logwatchが個別に解析対象とするサービス単位のフィルタ
+- **range**: 集計対象期間。`Yesterday`(前日分)や`Today`(当日分)などを指定する
+- **output_format**: レポートの出力形式。`text`または`html`
+
+## シナリオ設定
+
+対象サービス {{ services | length }} 件({% for s in services %}`{{ s }}`{% if not loop.last %}, {% endif %}{% endfor %})について、集計範囲`{{ range }}`・詳細度`{{ detail_level }}`・出力形式`{{ output_format }}`で日次サマリを生成し、`{{ mail_to }}`へメール送付します。
+
+## 手順
+
+### 1. Logwatchを導入する
+
+```bash
+sudo apt-get install -y logwatch
+which logwatch
+```
+
+### 2. 設定ファイルを作成する
+
+```bash
+sudo tee /etc/logwatch/conf/logwatch.conf <<'EOF'
+MailTo = {{ mail_to }}
+Detail = {{ detail_level }}
+Range = {{ range }}
+Format = {{ output_format }}
+{% for s in services %}Service = {{ s }}
+{% endfor %}EOF
+```
+
+`Service`行を指定した場合、記載したサービスのみが解析対象になります(未指定時は全サービス)。
+
+### 3. 手動実行で内容を確認する
+
+```bash
+sudo logwatch --output stdout --format {{ output_format }} --range {{ range }} --detail {{ detail_level }}
+```
+
+標準出力に各サービスのセクションが表示されることを確認します。
+
+### 4. メール送付を検証する
+
+```bash
+sudo logwatch --output mail --mailto {{ mail_to }} --format {{ output_format }} --range {{ range }}
+mail -f /var/mail/root
+```
+
+メールサーバが未設定の環境では、送信キュー(`mailq`)にジョブが積まれていることを確認します。
+
+### 5. 読むべき項目を確認する
+
+```bash
+sudo logwatch --service sshd --output stdout --range {{ range }}
+sudo logwatch --service sudo --output stdout --range {{ range }}
+```
+
+`sshd`セクションの認証失敗回数と送信元IP、`sudo`セクションの実行コマンド一覧を重点的に確認します。
+
+### 6. レポート疲れを防ぐ調整を行う
+
+```bash
+sudo crontab -l | grep logwatch
+```
+
+不要なサービスは`Service`行から除外し、`Detail`を`Low`寄りに下げることで、日々目を通す分量を抑えます。
+
+## 動作確認
+
+- 手動実行(`--output stdout`)で {{ services | length }} 件のサービスセクションが表示されること
+- `{{ mail_to }}`宛のメール(または送信キュー)にレポートが生成されること
+- `Range = {{ range }}`の期間に対応したログのみが集計されていること
+
+## 注意事項
+
+- `Detail`を`High`にすると情報量が増えすぎて重要な異常が埋もれやすくなる。まず`{{ detail_level }}`程度から始め、必要に応じて対象サービスを絞り込む。
+- ログローテーション済みの圧縮ログ(`.gz`)も解析対象になるため、`range`の指定を誤ると想定より広い期間を集計してしまう。事前に`--range`の挙動を`stdout`出力で確認してから`mail`出力に切り替える。
+- メール送信経路(`postfix`等のMTA)が未構成の環境では`--output mail`が失敗するため、事前にローカルMTAの疎通を確認する。

@@ -1,0 +1,5 @@
+target_host: app01.internal.example
+console_access_method: IPMI SOL (idrac01.internal.example 経由)
+last_change: 2026-07-15
+suspect_layers: ネットワーク経路 / ファイアウォール / sshd設定 / 認証方式
+rollback_config_path: /etc/ssh/sshd_config.bak-20260715

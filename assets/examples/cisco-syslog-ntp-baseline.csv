@@ -1,0 +1,4 @@
+device_name,mgmt_ip,syslog_server,logging_level,ntp_server,timezone
+CORE-SW01,10.0.0.1,10.0.0.100,informational,10.0.0.101,JST
+ACCESS-SW01,10.0.0.2,10.0.0.100,informational,10.0.0.101,JST
+EDGE-RTR01,10.0.0.3,10.0.0.100,notifications,10.0.0.101,JST
