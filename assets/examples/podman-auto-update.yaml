@@ -1,0 +1,5 @@
+container_name: web-app
+image: docker.io/library/nginx:1.27
+autoupdate_policy: registry
+unit_name: container-web-app
+rollback_note: "新イメージでの再起動に失敗した場合、podmanは自動的に直前のコンテナ状態(旧イメージ)へロールバックする"

@@ -1,0 +1,6 @@
+db_name = "salesdb"
+db_user = "backup_operator"
+backup_dir = "/var/backups/postgresql"
+format = "custom"
+retention_days = 14
+restore_test_db = "salesdb_restore_test"

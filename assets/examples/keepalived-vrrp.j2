@@ -1,0 +1,134 @@
+# keepalivedによるVRRP仮想IPの冗長化
+
+2台のLinuxサーバで`keepalived`によるVRRPを構成し、仮想IPをMASTER側に持たせつつ、障害時にBACKUP側へフェイルオーバーする動作を検証します。
+
+## 目的
+
+VRRPの優先度・プリエンプトの仕組みを理解し、MASTER/BACKUPの2台構成で仮想IPの冗長化とフェイルオーバー・切り戻しの挙動を検証できるようになることを目指します。
+
+## 用語解説
+
+- **VRRP**: Virtual Router Redundancy Protocol。複数のルータ/サーバで1つの仮想IPを共有し、優先度に基づいて代表(MASTER)を決める冗長化プロトコル
+- **VRID(Virtual Router ID)**: 同一セグメント内でVRRPグループを識別するID。同じVRIDを使う機器同士が1つの仮想IPを共有する
+- **優先度(priority)**: MASTERを決める基準値。値が大きい方がMASTERになる
+- **プリエンプト(preempt)**: 優先度の高いノードが復旧した際、自動的にMASTERの座を奪い返す挙動。無効化すると復旧後もBACKUPのままにできる
+- **advertisement interval**: MASTERがVRRP広告パケットを送信する間隔。BACKUPはこれが届かなくなるとMASTER不在と判断する
+
+## シナリオ設定
+
+仮想IPは `{{ vip }}`、VRIDは `{{ vrid }}` です。MASTER役は `{{ master_host }}`(優先度 `{{ priority_master }}`)、BACKUP役は `{{ backup_host }}` です。広告間隔は `{{ advert_interval }}` 秒とします。ヘルスチェックスクリプトの方針は次の通りです: {{ track_script_note }}
+
+## 手順
+
+### 1. 両ホストにkeepalivedを導入する
+
+```bash
+ssh {{ master_host }} 'sudo apt-get install -y keepalived'
+ssh {{ backup_host }} 'sudo apt-get install -y keepalived'
+```
+
+### 2. MASTER側の設定ファイルを作成する
+
+```bash
+ssh {{ master_host }} "sudo tee /etc/keepalived/keepalived.conf" <<'EOF'
+vrrp_script chk_healthz {
+    script "curl -sf http://127.0.0.1/healthz"
+    interval 2
+    weight -20
+}
+vrrp_instance VI_1 {
+    state MASTER
+    interface eth0
+    virtual_router_id {{ vrid }}
+    priority {{ priority_master }}
+    advert_int {{ advert_interval }}
+    authentication {
+        auth_type PASS
+        auth_pass changeme
+    }
+    virtual_ipaddress {
+        {{ vip }}
+    }
+    track_script {
+        chk_healthz
+    }
+}
+EOF
+```
+
+`track_script`は `{{ track_script_note }}` の方針に基づくヘルスチェックです。
+
+### 3. BACKUP側の設定ファイルを作成する
+
+```bash
+ssh {{ backup_host }} "sudo tee /etc/keepalived/keepalived.conf" <<'EOF'
+vrrp_script chk_healthz {
+    script "curl -sf http://127.0.0.1/healthz"
+    interval 2
+    weight -20
+}
+vrrp_instance VI_1 {
+    state BACKUP
+    interface eth0
+    virtual_router_id {{ vrid }}
+    priority 100
+    advert_int {{ advert_interval }}
+    authentication {
+        auth_type PASS
+        auth_pass changeme
+    }
+    virtual_ipaddress {
+        {{ vip }}
+    }
+    track_script {
+        chk_healthz
+    }
+}
+EOF
+```
+
+BACKUP側は優先度を `{{ priority_master }}` より低い値にし、MASTERとVRIDが一致していることを確認します。
+
+### 4. keepalivedを起動し、仮想IPの付与を確認する
+
+```bash
+ssh {{ master_host }} 'sudo systemctl enable --now keepalived'
+ssh {{ backup_host }} 'sudo systemctl enable --now keepalived'
+ssh {{ master_host }} "ip addr show eth0 | grep '{{ vip }}'"
+```
+
+`{{ vip }}` が `{{ master_host }}` 側にのみ付与されていることを確認します。
+
+### 5. MASTER停止によるフェイルオーバーを試験する
+
+```bash
+ssh {{ master_host }} 'sudo systemctl stop keepalived'
+sleep 5
+ssh {{ backup_host }} "ip addr show eth0 | grep '{{ vip }}'"
+```
+
+`{{ advert_interval }}` 秒×数回分の広告が途絶えたのち、`{{ backup_host }}` 側に `{{ vip }}` が付与されることを確認します。
+
+### 6. MASTER復旧時の切り戻り挙動を確認する
+
+```bash
+ssh {{ master_host }} 'sudo systemctl start keepalived'
+sleep 5
+ssh {{ master_host }} "ip addr show eth0 | grep '{{ vip }}'"
+ssh {{ backup_host }} "ip addr show eth0 | grep '{{ vip }}' || echo 'vip not present (expected)'"
+```
+
+プリエンプト有効時は `{{ master_host }}` 復旧後に仮想IPが自動的に戻ります。復旧のタイミングを制御したい場合は`nopreempt`の追加を検討します。
+
+## 動作確認
+
+- 平常時に `{{ vip }}` が `{{ master_host }}` にのみ付与されていること
+- `{{ master_host }}` の`keepalived`停止後、`{{ backup_host }}` に `{{ vip }}` が引き継がれること
+- `{{ master_host }}` 復旧後、仮想IPが `{{ master_host }}` へ戻る(またはプリエンプト無効時は戻らない)ことが設計通りであること
+- `track_script`によるヘルスチェック失敗時に優先度が下がり、フェイルオーバーが発生すること
+
+## 注意事項
+
+- 両ホストの`virtual_router_id`が一致していないとVRRPグループが形成されず、フェイルオーバーが機能しない。設定投入前に必ず両者で `{{ vrid }}` が一致していることを確認する。
+- `auth_pass`はVRRP広告の簡易認証であり強固なものではない。同一セグメントに第三者が存在する環境では別途L2的な隔離を検討する。
+- 同一セグメント内に同じVRIDを使う別のVRRPグループが存在すると、仮想IPの奪い合い(スプリットブレイン)が発生する。導入前にVRID重複がないか確認する。

@@ -1,0 +1,103 @@
+# sudoが使えなくなった時の復旧
+
+sudoersファイルの構文エラーや権限設定ミスによって `sudo` コマンドが使えなくなった際、代替の昇格経路を使って安全に設定を修復する手順を示します。
+
+## 目的
+
+`sudo` が使用できなくなったというエラーを構文エラー・権限不足・グループ設定ミスに分類して原因を特定し、代替の昇格経路から `visudo` の構文検証機能を使って安全に修復できるようになることを目指します。
+
+## 用語解説
+
+- **sudoers**: `sudo` の許可設定を記述するファイル群（`/etc/sudoers` と `/etc/sudoers.d/` 配下）
+- **visudo**: sudoers系ファイルを構文検証しながら編集する専用コマンド。直接エディタで編集すると構文エラー時に `sudo` 自体が全損する危険がある
+- **pkexec**: PolicyKitを介してGUI/CLIから昇格実行する、sudo以外の代替昇格手段
+- **シングルユーザモード**: OS起動時にrootシェルへ直接入るリカバリモード。ネットワークサービスなしでファイル修復ができる
+- **wheel/sudoグループ**: sudo実行を許可されたユーザーが属するべきグループ。所属漏れも「sudoが使えない」原因になる
+
+## シナリオ設定
+
+`sudo` を実行すると次のエラーが出て使用できません。
+
+```
+{{ error_message }}
+```
+
+root直接ログインの可否: {{ root_login_available }}。今回使用する代替昇格経路: {{ recovery_route }}。疑われる破損ファイルは `{{ broken_file }}` です。
+
+## 手順
+
+### 1. エラーメッセージを分類する
+
+```bash
+sudo -l 2>&1 | head -n 5
+```
+
+`syntax error` を含む場合は構文エラー、`is not in the sudoers file` はグループ外、`a password is required` かつパスワードが正しいのに拒否される場合は権限設定ミスを疑います。今回は次のメッセージから分類します。
+
+```
+{{ error_message }}
+```
+
+### 2. 代替の昇格経路を確認する
+
+{% if root_login_available %}root への直接ログインが可能なため、まずrootとして接続します。
+```bash
+su -
+```
+{% else %}root への直接ログインは利用できないため、`{{ recovery_route }}` を使用します。
+```bash
+{% if recovery_route == "pkexec" %}pkexec bash
+{% elif recovery_route == "コンソール" %}# IPMI/シリアル等のコンソールから直接ログインする
+{% elif recovery_route == "シングルユーザ" %}# 起動時にGRUBメニューでカーネル行末に systemd.unit=rescue.target を追加して起動する
+{% else %}echo "recovery_route: {{ recovery_route }}"
+{% endif %}```
+{% endif %}
+
+### 3. visudo -c で構文エラーを検証する
+
+```bash
+visudo -c
+```
+
+エラーを含むファイルパスと行番号が出力されます。今回の対象は `{{ broken_file }}` です。
+
+### 4. 破損ファイルを修復する
+
+**必ず `visudo -f` 経由で編集します。**直接エディタでファイルを開いて保存すると、構文検証なしに保存されてしまいます。
+
+```bash
+visudo -f {{ broken_file }}
+```
+
+修正後、保存時に構文エラーがあれば `visudo` が警告し保存を拒否します。
+
+### 5. 修復後の動作を確認する
+
+昇格した別セッションを維持したまま、通常ユーザーのセッションで確認します。
+
+```bash
+visudo -c
+sudo -l
+sudo whoami
+```
+
+### 6. 再発防止策を徹底する
+
+{{ prevention_note }}
+
+```bash
+echo "sudoers系ファイルは visudo / visudo -f 以外での編集を禁止する" | sudo tee -a /etc/motd
+```
+
+## 動作確認
+
+- `visudo -c` がエラーを出力せず終了すること
+- `sudo -l` が権限一覧を正常に表示すること
+- `sudo whoami` が `root` を返すこと
+- 修復に使用した代替昇格経路（{{ recovery_route }}）のセッションを、動作確認が終わるまで切断していないこと
+
+## 注意事項
+
+- sudoersファイルは `visudo` / `visudo -f` 以外で編集しない。直接編集は本手順が対応した障害の再発を招く。
+- 代替昇格経路（{{ recovery_route }}）のセッションは、`sudo` の動作確認が完了するまで切断しない。切断後に修復が不完全だと判明すると再度昇格経路を探す必要が生じる。
+- 既存の `sudo-least-privilege`（sudo権限の事前設計）とは異なり、本手順は `sudo` が使えなくなった後の復旧対応に焦点を当てる。

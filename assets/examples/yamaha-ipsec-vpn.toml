@@ -1,0 +1,6 @@
+local_wan_ip = "203.0.113.1"
+remote_wan_ip = "198.51.100.1"
+local_lan = "192.168.10.0/24"
+remote_lan = "192.168.20.0/24"
+pre_shared_key_note = "パスフレーズは鍵管理台帳(社内Vault)で別途管理し、設定投入時のみ入力する。設定ファイルへの平文保存は禁止"
+ike_version = 1

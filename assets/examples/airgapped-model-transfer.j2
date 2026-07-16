@@ -1,0 +1,95 @@
+# オフライン環境へのモデル搬入手順
+
+インターネットに接続していないGPUサーバへ、モデルと依存パッケージをチェックサム検証付きで安全に搬入します。
+
+## 目的
+
+接続環境で取得したモデル資産の完全性をチェックサムで担保しながら媒体経由で搬入し、閉域(エアギャップ)GPU環境でも動作確認まで完了できるようになることを目指します。
+
+## 用語解説
+
+- **エアギャップ環境**: インターネットに一切接続していない、物理的に隔離されたネットワーク環境
+- **チェックサム台帳**: 搬入対象ファイルごとのハッシュ値を記録した一覧。搬入後の完全性検証の基準になる
+- **ステージングホスト**: インターネットに接続でき、搬入物の取得・検証を行う中継用ホスト
+- **搬入媒体**: 物理的にデータを運ぶための記憶媒体。ネットワーク経由を使わないため紛失・盗難対策が必要
+
+## シナリオ設定
+
+搬入対象は以下の{{ model_artifacts | length }}件のモデルです。
+
+{% for m in model_artifacts %}- {{ m.name }} ({{ m.path }})
+{% endfor %}
+チェックサム台帳は `{{ checksum_manifest }}` に作成し、搬入媒体は{{ transfer_media }}、取得・検証はステージングホスト `{{ staging_host }}` で行います。搬入後の検証手順は以下の{{ verification_steps | length }}件です。
+
+{% for v in verification_steps %}- {{ v }}
+{% endfor %}
+
+## 手順
+
+### 1. 搬入物を棚卸しする
+
+モデル本体・依存パッケージ・推論用コンテナイメージなど、搬入が必要な資産を洗い出します。
+
+```bash
+{% for m in model_artifacts %}echo "{{ m.name }}: {{ m.path }}"
+{% endfor %}```
+
+### 2. 接続環境(ステージングホスト)で取得しチェックサム台帳を作成する
+
+```bash
+ssh {{ staging_host }} '
+{% for m in model_artifacts %}mkdir -p {{ m.path }} && echo "download {{ m.name }} into {{ m.path }}"
+{% endfor %}
+sha256sum {% for m in model_artifacts %}{{ m.path }}/* {% endfor %}> {{ checksum_manifest }}
+'
+```
+
+### 3. 搬入媒体へ書き出す
+
+```bash
+ssh {{ staging_host }} "
+{% for m in model_artifacts %}rsync -avh {{ m.path }} /mnt/transfer-media/
+{% endfor %}cp {{ checksum_manifest }} /mnt/transfer-media/
+sync
+"
+```
+
+搬入媒体({{ transfer_media }})は、輸送中の盗難・紛失に備えて暗号化した状態で運搬してください。
+
+### 4. 搬入先で完全性を検証する
+
+```bash
+cd /mnt/transfer-media
+sha256sum -c $(basename {{ checksum_manifest }})
+```
+
+### 5. 搬入先へ配置し動作確認する
+
+```bash
+{% for m in model_artifacts %}sudo mkdir -p {{ m.path }}
+sudo rsync -avh /mnt/transfer-media/$(basename {{ m.path }})/ {{ m.path }}/
+{% endfor %}```
+
+「{{ verification_steps[1] }}」の手順に従い、推論サーバへモデルをロードしてサンプルリクエストを送り、正常に応答することを確認します。
+
+### 6. 媒体を安全に取り扱う
+
+```bash
+sudo shred -uvz /mnt/transfer-media/*.tmp 2>/dev/null || true
+umount /mnt/transfer-media
+```
+
+搬入完了後、媒体上の作業用一時ファイルを消去し、媒体自体は施錠保管または返却台帳に記録して管理します。
+
+## 動作確認
+
+- 手順4の`sha256sum -c`が{{ model_artifacts | length }}件すべて`OK`と表示されること(台帳: `{{ checksum_manifest }}`)
+- 搬入先の各モデルディレクトリ({% for m in model_artifacts %}{{ m.path }}{% if not loop.last %}, {% endif %}{% endfor %})のファイルサイズがステージングホスト側と一致すること
+- 手順5の推論リクエストが正常なレスポンスを返すこと
+
+## 注意事項
+
+- チェックサム台帳(`{{ checksum_manifest }}`)なしでの搬入は改ざん・破損の検知ができないため、手順2を省略しない。
+- 搬入媒体({{ transfer_media }})は輸送中に単独で情報漏洩の原因になりうるため、暗号化と搬送記録(誰がいつ何を運んだか)を必ず残す。
+- ステージングホスト(`{{ staging_host }}`)は接続環境と閉域環境の境界にあたるため、閉域側へ持ち込む前に必ずマルウェアスキャンを実施する。
+- 本手順は接続環境での取得・検証・搬入までを対象とし、モデルの永続的な資産管理・世代管理(model-storage-backup)とは焦点が異なる。

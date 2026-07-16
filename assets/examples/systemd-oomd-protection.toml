@@ -1,0 +1,5 @@
+protected_service = "app.service"
+expendable_slice = "batch.slice"
+memory_pressure_limit = "60%"
+swap_used_limit = "90%"
+verify_scenario = "stress-ng --vm 2 --vm-bytes 90% --timeout 60s"

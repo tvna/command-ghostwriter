@@ -1,0 +1,93 @@
+# ルーティング設定ミスによる到達不能の切り分け
+
+`{{ src_host }}` から `{{ unreachable_dst }}` への通信のみが失敗する事象について、ルーティングテーブルとポリシールールを読み解き、誤った経路設定を特定して修正します。
+
+## 目的
+
+「一部の宛先だけ届かない」事象に対して `ip route get` で実際に選択される経路を確認し、ルーティングテーブル・メトリック・非対称経路(rp_filter)のどこに問題があるかを切り分けて、恒久的な経路修正まで行えるようになることを目指します。
+
+## 用語解説
+
+- **ip route get**: 指定した宛先に対してカーネルが実際に選択する経路(出力インタフェース・ゲートウェイ)をシミュレーションするコマンド
+- **メトリック(metric)**: 同一宛先に複数経路がある場合の優先度。値が小さいほど優先される
+- **非対称経路(asymmetric routing)**: 往路と復路で異なる経路を通る状態。マルチホーム環境で発生しやすい
+- **rp_filter**: reverse path filter。パケットの送信元IPが到達経路と矛盾する場合に破棄するカーネル機能。非対称経路では正当な応答も破棄され得る
+- **デフォルトゲートウェイ**: 経路表に一致するエントリがない場合に使われる既定の転送先
+
+## シナリオ設定
+
+`{{ src_host }}` から `{{ unreachable_dst }}` への通信が失敗しています。期待されるゲートウェイは `{{ expected_gateway }}` です。直近の経路変更として `{{ route_changes }}` があり、`{{ rp_filter_note }}` という懸念があります。
+
+## 手順
+
+### 1. 症状を整理する
+
+```bash
+ping -c1 -W2 {{ expected_gateway }}
+ping -c1 -W2 {{ unreachable_dst }}
+```
+
+→ ゲートウェイ疎通は正常なのに `{{ unreachable_dst }}` だけ失敗する場合、経路より先(相手側・中間機器)の問題ではなく `{{ src_host }}` の経路選択を疑います。
+
+### 2. 実際に選択される経路を確認する
+
+```bash
+ip route get {{ unreachable_dst }}
+```
+
+→ 出力の `via` と `dev` が期待するゲートウェイ `{{ expected_gateway }}` と一致するかを確認します。異なる経路が選択されていれば、より優先度の高い(メトリックの小さい)誤った経路が存在します。
+
+### 3. ルーティングテーブルとメトリックを確認する
+
+```bash
+ip route show table main
+ip route show table all | grep {{ unreachable_dst }}
+```
+
+→ 直近の変更 `{{ route_changes }}` が、`{{ unreachable_dst }}` を含むより広いサブネットを意図せず横取りしていないか確認します。
+
+### 4. 非対称経路とrp_filterを確認する
+
+```bash
+sysctl net.ipv4.conf.all.rp_filter
+sysctl net.ipv4.conf.eth1.rp_filter
+```
+
+→ `{{ rp_filter_note }}` の懸念どおり `strict(1)` になっている場合、応答パケットの到着インタフェースが送出インタフェースと異なると破棄されます。往路と復路で経路が対称になっているか `tcpdump` で確認します。
+
+### 5. 誤設定を修正し永続化する
+
+```bash
+sudo ip route del <誤った経路> 2>/dev/null
+sudo ip route add {{ unreachable_dst }}/32 via {{ expected_gateway }} dev eth1
+sudo tee /etc/netplan/99-static-route.yaml >/dev/null <<EOF
+network:
+  version: 2
+  ethernets:
+    eth1:
+      routes:
+        - to: {{ unreachable_dst }}/32
+          via: {{ expected_gateway }}
+EOF
+sudo netplan apply
+```
+
+### 6. 検証と記録を行う
+
+```bash
+ip route get {{ unreachable_dst }}
+ping -c3 {{ unreachable_dst }}
+```
+
+## 動作確認
+
+- `ip route get {{ unreachable_dst }}` の `via` が `{{ expected_gateway }}` を指していること
+- `ping {{ unreachable_dst }}` が継続して応答すること(再起動後も含む)
+- `rp_filter` の設定が経路構成と矛盾していないこと
+- 修正内容と原因(`{{ route_changes }}` との関連)が記録に残っていること
+
+## 注意事項
+
+- `ip route del`/`ip route add` はランタイムの経路表を即時変更するため、リモート接続中は誤って自分自身への経路を壊さないよう対象を `{{ unreachable_dst }}` に限定する。
+- 経路変更はコンソールなど別経路のアクセス手段を確保したうえで実施し、`netplan try` 相当のロールバック手段がない場合は変更前の経路表を保存しておく。
+- `rp_filter` を安易に `0`(無効)へ緩めるとスプーフィング対策が失われるため、経路の対称化で解決できないかを先に検討する。

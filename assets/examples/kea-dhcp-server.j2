@@ -1,0 +1,105 @@
+# Kea DHCPサーバの構築
+
+ISC Keaで社内セグメント向けのDHCPサーバを構築します。サブネット定義・アドレスプール・リースデータベースの確認までを一巡します。root権限(sudo)で実施してください。
+
+## 目的
+
+Keaの設定構造(JSON)とリース・予約の概念を理解し、サブネットとアドレスプールを定義してクライアントへの払い出しを検証できるようになることを目指します。
+
+## 用語解説
+
+- **リース(lease)**: DHCPサーバがクライアントへ一時的に割り当てるIPアドレスの貸与記録。有効期限(lease_time)が切れると回収対象になる
+- **予約(reservation)**: 特定のMACアドレスに対して常に同じIPアドレスを割り当てる固定割当設定
+- **Keaの設定構造**: `Dhcp4`ブロック配下に`subnet4`(サブネット定義)・`interfaces-config`(待受interface)などを階層的なJSONで記述する
+- **pool**: サブネット内でクライアントに払い出す対象とするアドレス範囲
+- **lease-database**: 発行済みリースの状態を保持するデータベース。既定ではメモリファイル形式(memfile)が使われる
+
+## シナリオ設定
+
+サブネット`{{ subnet }}`、払い出しプール`{{ pool_range }}`、ゲートウェイ`{{ gateway }}`、DNSサーバ`{{ dns_servers }}`、リース期間`{{ lease_time }}`秒でKea DHCPv4サーバを構築します。{{ reservations_note }}
+
+## 手順
+
+### 1. Keaをインストールする
+
+```bash
+sudo apt-get update
+sudo apt-get install -y kea-dhcp4-server
+sudo systemctl stop kea-dhcp4-server
+```
+
+設定投入前に一旦停止し、設定ファイル編集後にまとめて起動します。
+
+### 2. kea-dhcp4.confを作成する
+
+```bash
+sudo tee /etc/kea/kea-dhcp4.conf <<'EOF'
+{
+  "Dhcp4": {
+    "interfaces-config": {
+      "interfaces": [ "eth0" ]
+    },
+    "lease-database": {
+      "type": "memfile",
+      "persist": true,
+      "name": "/var/lib/kea/kea-leases4.csv"
+    },
+    "valid-lifetime": {{ lease_time }},
+    "subnet4": [
+      {
+        "subnet": "{{ subnet }}",
+        "pools": [ { "pool": "{{ pool_range }}" } ],
+        "option-data": [
+          { "name": "routers", "data": "{{ gateway }}" },
+          { "name": "domain-name-servers", "data": "{{ dns_servers }}" }
+        ]
+      }
+    ]
+  }
+}
+EOF
+```
+
+### 3. 設定ファイルを検証する
+
+```bash
+sudo kea-dhcp4 -t /etc/kea/kea-dhcp4.conf
+```
+
+構文・値の妥当性を実際にリスンする前に検証します。エラーが出た場合はサービスを起動しないでください。
+
+### 4. サービスを起動する
+
+```bash
+sudo systemctl enable --now kea-dhcp4-server
+sudo systemctl status kea-dhcp4-server --no-pager
+```
+
+### 5. クライアント側で取得テストを行う
+
+```bash
+sudo dhclient -v -1 eth0
+ip addr show eth0
+```
+
+払い出されたアドレスが`{{ pool_range }}`の範囲内であること、ゲートウェイが`{{ gateway }}`になっていることを確認します。
+
+### 6. リースデータベースを確認する
+
+```bash
+cat /var/lib/kea/kea-leases4.csv
+```
+
+払い出したアドレス・MACアドレス・有効期限(`{{ lease_time }}`秒)が記録されていることを確認します。
+
+## 動作確認
+
+- `kea-dhcp4 -t`が設定エラーなく完了すること
+- クライアントが`{{ pool_range }}`の範囲内のアドレスを取得し、ゲートウェイが`{{ gateway }}`、DNSが`{{ dns_servers }}`になっていること
+- `/var/lib/kea/kea-leases4.csv`に払い出し記録が残ること
+
+## 注意事項
+
+- 同一セグメントに既存のDHCPサーバ(ISC DHCP、ルータ内蔵DHCP等)が稼働している場合、二重応答による払い出し競合が発生する。Keaを本稼働させる前に既存DHCPサーバを必ず停止・無効化する。
+- `interfaces-config`で待受インターフェースを絞らないと、意図しないセグメントにも応答してしまう可能性がある。
+- MACアドレスベースの固定IP予約が必要な場合は`reservations`配列に追記する({{ reservations_note }})。誤って重複予約すると起動時に設定エラーになる。

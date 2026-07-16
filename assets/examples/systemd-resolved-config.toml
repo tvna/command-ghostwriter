@@ -1,0 +1,5 @@
+dns_servers = ["10.0.0.53", "10.0.0.54"]
+fallback_dns = ["1.1.1.1", "9.9.9.9"]
+search_domains = ["corp.example.internal"]
+stub_listener = "yes"
+resolv_conf_mode = "stub"

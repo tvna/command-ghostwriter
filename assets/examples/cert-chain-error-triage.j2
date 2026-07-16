@@ -1,0 +1,85 @@
+# TLS証明書チェーンエラーの切り分け — {{ target_url }}
+
+ブラウザやcurlで発生する証明書エラーを、期限・チェーン欠落・ホスト名不一致に分類し、原因を特定して解消します。
+
+## 目的
+
+**{{ error_message }}** のような証明書エラーに対し、`openssl s_client` でチェーンを可視化し、期限切れ・中間CA欠落・SAN不一致のどれに該当するかを判断して修正できるようになることを目指します。
+
+## 用語解説
+
+- **証明書チェーン**: サーバ証明書からルートCAまでを結ぶ、中間CA証明書を含む署名の連なり
+- **中間CA(intermediate CA)**: ルートCAとサーバ証明書の間に立つ証明書。多くのサーバはこれの同梱を忘れて信頼エラーを起こす
+- **SAN(Subject Alternative Name)**: 証明書が有効なホスト名を列挙する拡張フィールド。一致しないとホスト名不一致エラーになる
+- **unable to get local issuer certificate**: 検証側がチェーンを最後まで辿れない(中間CA欠落)ことを示す代表的なエラー文言
+- **openssl s_client**: TLSハンドシェイクを行い、サーバが実際に送出している証明書チェーンを確認できるコマンド
+
+## シナリオ設定
+
+`{{ target_url }}` へのアクセスで `{{ error_message }}` というエラーが発生しています。サーバ証明書は `{{ cert_path }}` に配置されており、期待されるSANは `{{ expected_san }}` です。中間CA証明書は `{{ intermediate_ca }}` を使用する想定です。
+
+## 手順
+
+### 1. エラーメッセージを分類する
+
+エラー文言から「期限切れ」「チェーン欠落」「ホスト名不一致」のどれに近いかを一次判定します。
+
+```bash
+echo "{{ error_message }}"
+```
+
+→ `unable to get local issuer certificate` / `certificate has expired` / `hostname mismatch` のいずれに該当するかで以降の重点手順が変わります。
+
+### 2. openssl s_clientでチェーンを確認する
+
+```bash
+openssl s_client -connect $(echo "{{ target_url }}" | sed -E 's#https?://##;s#/.*##'):443 -servername $(echo "{{ target_url }}" | sed -E 's#https?://##;s#/.*##') -showcerts </dev/null
+```
+
+→ `Certificate chain` に表示される証明書の数を確認します。サーバ証明書のみで中間CAが表示されない場合はチェーン欠落を疑います。
+
+### 3. 中間CA欠落を特定し結合する
+
+```bash
+openssl x509 -in {{ cert_path }} -noout -issuer
+openssl verify -CAfile {{ intermediate_ca }} {{ cert_path }}
+cat {{ cert_path }} {{ intermediate_ca }} | sudo tee /etc/nginx/ssl/fullchain.pem
+```
+
+→ `verify` が `OK` を返さない場合は中間CAが誤りか欠落しています。`fullchain.pem` はサーバ証明書を先頭に、中間CAを後続で連結します。
+
+### 4. SAN・ホスト名不一致を確認する
+
+```bash
+openssl x509 -in {{ cert_path }} -noout -ext subjectAltName
+```
+
+→ 出力に `{{ expected_san }}` が含まれない場合、証明書自体がこのホスト名向けに発行されていません。証明書再発行が必要です。
+
+### 5. 修正した証明書を再配置する
+
+```bash
+sudo cp /etc/nginx/ssl/fullchain.pem {{ cert_path }}
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+### 6. 各クライアントから検証する
+
+```bash
+curl -vI {{ target_url }}
+openssl s_client -connect $(echo "{{ target_url }}" | sed -E 's#https?://##;s#/.*##'):443 -showcerts </dev/null 2>/dev/null | openssl x509 -noout -dates
+```
+
+## 動作確認
+
+- `curl -vI {{ target_url }}` がSSL検証エラーなしで200系応答を返すこと
+- `openssl s_client` の `Verify return code` が `0 (ok)` になっていること
+- 証明書の `subjectAltName` に `{{ expected_san }}` が含まれていること
+- ブラウザなど別クライアントからも警告なしにアクセスできること
+
+## 注意事項
+
+- 中間CA証明書は発行元CAが公開する正規のものを使用する。出所不明な証明書を結合すると別の信頼エラーや偽装リスクを招く。
+- `fullchain.pem` の結合順序(サーバ証明書→中間CA)を誤るとチェーン検証が失敗するため、`openssl verify` で必ず順序を確認してから配置する。
+- 再配置後は `nginx -t` で構文検証してからreloadし、証明書破損によるサービス停止を避ける。

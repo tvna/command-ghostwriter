@@ -1,0 +1,4 @@
+ip_address,ptr_hostname,forward_check,note
+203.0.113.10,web01.example.com.,web01.example.com,本番Webサーバ
+203.0.113.11,mail01.example.com.,mail01.example.com,メールサーバ(逆引き不備は受信拒否につながる)
+203.0.113.12,app01.example.com.,app01.example.com,アプリケーションサーバ

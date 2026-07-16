@@ -1,0 +1,84 @@
+# opensslによる社内プライベートCAの構築
+
+opensslで社内用のプライベートCAを構築し、サーバ証明書の発行からクライアント側の信頼設定までを一巡します。外部の公開CAを使えない閉域ネットワーク向けの手順です。
+
+## 目的
+
+CA・CSR・SANの役割を理解し、opensslで自己署名CAを作成してサーバ証明書に署名し、クライアント側の信頼ストアに配布して検証できるようになることを目指します。
+
+## 用語解説
+
+- **CA(認証局)**: 証明書に署名し、その正当性を保証する主体
+- **CSR(証明書署名要求)**: サーバが自身の公開鍵と識別情報をまとめ、CAに署名を依頼するファイル
+- **SAN(Subject Alternative Name)**: 証明書が有効なホスト名・IPアドレスを列挙する拡張フィールド
+- **信頼ストア**: OSやクライアントが信頼するCA証明書の一覧を保持する場所(`update-ca-certificates`で反映)
+- **CRL(証明書失効リスト)**: 失効した証明書のシリアル番号を列挙するリスト
+
+## シナリオ設定
+
+CAの識別名は `{{ ca_subject }}`、CA証明書の有効期間は `{{ ca_days }}` 日とします。サーバ証明書のCommon Nameは `{{ server_cn }}`、SANは {{ san_list | length }} 件({% for s in san_list %}`{{ s }}`{% if not loop.last %}, {% endif %}{% endfor %})、サーバ証明書の有効期間は `{{ cert_days }}` 日です。失効運用は「{{ crl_note }}」とします。
+
+## 手順
+
+### 1. CA用の秘密鍵と自己署名CA証明書を作成する
+
+```bash
+mkdir -p ~/private-ca/{private,certs,csr}
+openssl genrsa -out ~/private-ca/private/ca.key 4096
+openssl req -x509 -new -key ~/private-ca/private/ca.key \
+  -sha256 -days {{ ca_days }} \
+  -subj "{{ ca_subject }}" \
+  -out ~/private-ca/certs/ca.crt
+```
+
+### 2. サーバの秘密鍵とCSRを作成する
+
+```bash
+openssl genrsa -out ~/private-ca/private/{{ server_cn }}.key 2048
+openssl req -new -key ~/private-ca/private/{{ server_cn }}.key \
+  -subj "/CN={{ server_cn }}" \
+  -out ~/private-ca/csr/{{ server_cn }}.csr
+```
+
+### 3. SANを含む拡張ファイルを用意しCSRに署名する
+
+```bash
+cat > ~/private-ca/{{ server_cn }}.ext <<'EOF'
+subjectAltName = {{ san_list | join(",") }}
+EOF
+
+openssl x509 -req -in ~/private-ca/csr/{{ server_cn }}.csr \
+  -CA ~/private-ca/certs/ca.crt -CAkey ~/private-ca/private/ca.key -CAcreateserial \
+  -days {{ cert_days }} -sha256 \
+  -extfile ~/private-ca/{{ server_cn }}.ext \
+  -out ~/private-ca/certs/{{ server_cn }}.crt
+```
+
+### 4. クライアント側の信頼ストアにCA証明書を配布する
+
+```bash
+sudo cp ~/private-ca/certs/ca.crt /usr/local/share/ca-certificates/example-internal-root-ca.crt
+sudo update-ca-certificates
+```
+
+### 5. opensslとcurlで検証する
+
+```bash
+openssl verify -CAfile ~/private-ca/certs/ca.crt ~/private-ca/certs/{{ server_cn }}.crt
+openssl x509 -in ~/private-ca/certs/{{ server_cn }}.crt -noout -text | grep -A1 "Subject Alternative Name"
+curl -v https://{{ server_cn }}/ 2>&1 | grep -i "SSL certificate verify"
+```
+
+## 動作確認
+
+- `openssl verify` が `{{ server_cn }}.crt: OK` を出力すること
+- 証明書のSANに設定した {{ san_list | length }} 件のエントリがすべて含まれていること
+- 信頼ストア配布後、クライアントから `curl` で証明書エラーなくHTTPS接続できること
+- CA証明書の有効期間が `{{ ca_days }}` 日、サーバ証明書が `{{ cert_days }}` 日で設定されていること
+
+## 注意事項
+
+- CAの秘密鍵(`ca.key`)は漏えいするとすべての発行済み証明書の信頼が崩れるため、アクセス制限された場所に保管しオフライン化を検討する。
+- サーバ証明書の有効期間は業界の推奨(1年程度)を踏まえ、CAの有効期間より十分短く設定する。
+- 失効運用として「{{ crl_note }}」を徹底し、CRLまたはOCSPの仕組みを併せて検討する。
+- certbot-auto-renewal(本カタログ)は公開CA(Let's Encrypt)を前提とした自動更新であり、本手順は外部に公開できない社内閉域ネットワーク向けの用途に限定する。

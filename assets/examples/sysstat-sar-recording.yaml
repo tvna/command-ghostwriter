@@ -1,0 +1,7 @@
+collect_interval: 10
+history_days: 28
+target_metrics:
+  - cpu
+  - memory
+  - io
+report_time_range: "09:00:00-18:00:00"

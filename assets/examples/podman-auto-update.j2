@@ -1,0 +1,85 @@
+# Podmanコンテナの自動更新運用 — {{ container_name }}
+
+ラベルを付与したコンテナ **{{ container_name }}**（イメージ: `{{ image }}`）を対象に、`podman auto-update` と systemd タイマーによるイメージ追従更新を構成し、失敗時の挙動を確認します。
+
+## 目的
+
+`io.containers.autoupdate` ラベルと systemd ユニットを組み合わせた自動更新の仕組みを理解し、`--dry-run` による事前確認と失敗時のロールバック挙動を検証できるようになることを目指します。
+
+## 用語解説
+
+- **io.containers.autoupdateラベル**: コンテナに付与する更新方針の指定。`registry` はレジストリ上のダイジェスト変化を検出して更新、`local` はローカルの `podman build`/`podman commit` によるイメージ更新を検出する
+- **podman generate systemd**: 既存コンテナからsystemdユニットファイルを生成するコマンド。`--new` を付けると再作成型のユニットになり、auto-updateとの相性がよい
+- **sdnotify**: systemdへコンテナの起動完了を通知する仕組み。auto-updateが再起動の成否を正しく判定するために使われる
+- **podman auto-update**: ラベル付きコンテナを対象に新イメージの有無を確認し、変化があれば再作成・再起動するコマンド
+- **ロールバック**: 更新後のコンテナが正常に起動しなかった場合、podmanが直前の状態(旧イメージ)へ自動的に戻す挙動
+
+## シナリオ設定
+
+コンテナ `{{ container_name }}` に更新方針 `{{ autoupdate_policy }}` のラベルを付与し、systemdユニット `{{ unit_name }}.service` として管理します。ロールバック挙動: {{ rollback_note }}。
+
+## 手順
+
+### 1. auto-updateラベル付きでコンテナを作成する
+
+```bash
+podman create --name {{ container_name }} \
+  --label io.containers.autoupdate={{ autoupdate_policy }} \
+  {{ image }}
+```
+
+### 2. systemdユニットを生成する
+
+```bash
+cd /etc/containers/systemd/
+podman generate systemd --new --name {{ container_name }} --files
+systemctl daemon-reload
+systemctl enable --now {{ unit_name }}.service
+```
+
+### 3. auto-updateの対象をdry-runで確認する
+
+実際には更新せず、対象コンテナと現在のイメージダイジェストの一覧のみを表示します。
+
+```bash
+podman auto-update --dry-run
+```
+
+### 4. タイマーの有効化状態を確認する
+
+```bash
+systemctl status podman-auto-update.timer
+systemctl list-timers podman-auto-update.timer
+```
+
+### 5. 更新を手動実行して検証する
+
+タイマーの待機時間を待たずに、その場で更新処理を実行します。
+
+```bash
+podman auto-update
+systemctl status {{ unit_name }}.service
+podman inspect {{ container_name }} | grep -i '"Image"'
+```
+
+### 6. 更新履歴とロールバックを確認する
+
+```bash
+podman auto-update --dry-run
+journalctl -u {{ unit_name }}.service --since "10 minutes ago"
+```
+
+`{{ rollback_note }}` の挙動は、更新後にコンテナが起動失敗した場合のログで確認できます。
+
+## 動作確認
+
+- `podman auto-update --dry-run` に `{{ container_name }}` が対象として表示されること
+- `systemctl list-timers podman-auto-update.timer` にタイマーの次回実行時刻が表示されること
+- `podman auto-update` 実行後、`{{ unit_name }}.service` が active(running) を維持していること
+- イメージダイジェストが更新前後で変化していること
+
+## 注意事項
+
+- `podman generate systemd --new` で生成したユニットは実行のたびにコンテナを再作成するため、コンテナ内に保存した永続データはボリューム等で外出ししておく。
+- `autoupdate_policy` が `local` の場合はレジストリを参照しないため、ローカルでのイメージ再ビルド・再タグ付けを検証手順に含める必要がある。
+- 自動更新は無停止ではなく、更新のたびにコンテナが再作成される点を利用者へ周知する。

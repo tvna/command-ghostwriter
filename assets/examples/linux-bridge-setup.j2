@@ -1,0 +1,77 @@
+# Linuxブリッジによる仮想ネットワーク構成 — {{ bridge_name }}
+
+物理NICと仮想マシン・コンテナを同一L2セグメントに接続するLinuxブリッジ `{{ bridge_name }}` を作成します。用途: {{ vm_or_container_use }}。
+
+## 目的
+
+Linuxブリッジの役割とSTPの意味を理解し、物理NICをブリッジに組み込んでIP付与位置を移し替え、仮想マシンやコンテナをホストと同一LAN上の独立したホストとして扱えるようになることを目指します。
+
+## 用語解説
+
+- **Linuxブリッジ**: 複数のネットワークインターフェースをL2レベルで束ねる仮想スイッチ機能。`brctl`や`ip link`で操作する
+- **L2転送**: MACアドレスをもとにフレームを転送する動作。ブリッジは学習したMACアドレステーブルに基づいて転送先を決定する
+- **STP(Spanning Tree Protocol)**: ループ検出・防止のためのプロトコル。単純な構成では不要な場合が多いが、複数経路がある環境では有効化を検討する
+- **IP付与位置の移行**: ブリッジ化すると物理NIC自体は直接IPを持たなくなり、代わりにブリッジデバイスにIPを設定する必要がある
+
+## シナリオ設定
+
+物理インターフェース {% for i in member_interfaces %}`{{ i }}`{% if not loop.last %}、{% endif %}{% endfor %} を組み込んだブリッジ `{{ bridge_name }}`（IP `{{ bridge_ip }}`、STP {{ "有効" if stp_enabled else "無効" }}）を作成します。
+
+## 手順
+
+### 1. 既存構成を確認する
+
+```bash
+{% for i in member_interfaces %}ip addr show {{ i }}
+{% endfor %}ip link show type bridge
+```
+
+### 2. ブリッジを作成する
+
+```bash
+sudo nmcli connection add type bridge ifname {{ bridge_name }} con-name {{ bridge_name }} \
+  ipv4.addresses {{ bridge_ip }} ipv4.method manual bridge.stp {{ "yes" if stp_enabled else "no" }}
+```
+
+### 3. 物理NICをブリッジのメンバーとして参加させる
+
+```bash
+{% for i in member_interfaces %}sudo nmcli connection add type bridge-slave ifname {{ i }} master {{ bridge_name }}
+{% endfor %}sudo nmcli connection up {{ bridge_name }}
+```
+
+### 4. IP付与位置が移ったことを確認する
+
+物理NIC自体は直接IPを持たなくなり、`{{ bridge_name }}` 側にIPが移ります。
+
+```bash
+ip addr show {{ bridge_name }}
+{% for i in member_interfaces %}ip addr show {{ i }}
+{% endfor %}
+```
+
+### 5. MAC学習とL2疎通を確認する
+
+```bash
+bridge link show
+bridge fdb show br {{ bridge_name }}
+```
+
+### 6. LAN疎通を検証する
+
+```bash
+ping -c 3 $(ip route show dev {{ bridge_name }} | awk '/default/ {print $3}')
+```
+
+## 動作確認
+
+- `ip link show type bridge` に `{{ bridge_name }}` が表示され、状態が `UP` であること
+- `bridge link show` に {% for i in member_interfaces %}`{{ i }}`{% if not loop.last %}、{% endif %}{% endfor %} がブリッジメンバーとして表示されること
+- `ip addr show {{ bridge_name }}` に `{{ bridge_ip }}` が設定されていること
+- 同一セグメント上の他ホストとの疎通(ping)が成功すること
+
+## 注意事項
+
+- リモート作業でブリッジ化を行う場合、`nmcli connection up {{ bridge_name }}` の適用直後に既存SSHセッションが切断される可能性があるため、コンソールまたはOOB経路を確保してから実施する。
+- ブリッジ化により物理NICへの直接IP付与は失われるため、他の設定(ファイアウォールのゾーン割当等)がNIC名を直接参照していないか事前に確認する。
+- kvm-bridge-network(既存,KVM文脈)はlibvirtネットワーク定義まで含むが、本手順はブリッジ本体の構築に焦点を絞り、汎用のL2接続として扱う。

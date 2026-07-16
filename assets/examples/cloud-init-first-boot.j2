@@ -1,0 +1,111 @@
+# cloud-initによる初回起動時の自動セットアップ
+
+`user-data`でユーザー作成・SSH公開鍵配置・パッケージ導入を初回起動時に自動化するcloud-init設定を構築します。
+
+## 目的
+
+`user-data`/`meta-data`とNoCloudデータソースの仕組みを理解し、VMの初回起動時にユーザー作成・鍵配置・パッケージ導入・任意コマンド実行を自動化できるようになることを目指します。
+
+## 用語解説
+
+- **user-data**: cloud-initが読み込む主設定ファイル。ユーザー作成・パッケージ導入・実行コマンドなどを宣言的に記述する
+- **meta-data**: インスタンスID・ホスト名などインスタンス固有のメタ情報を記述するファイル
+- **NoCloud**: ISOイメージやローカルディレクトリを疑似メタデータサーバとして扱い、クラウドAPIなしにcloud-initへデータを渡すデータソース
+- **runcmd**: cloud-initの処理の最後に、通常のシェルコマンドとして順に実行されるステップ
+- **cloud-init status**: cloud-initの現在の実行状態（`running`/`done`/`error`）を確認するコマンド
+
+## シナリオ設定
+
+デフォルトユーザー `{{ default_user }}` を作成し、SSH公開鍵を配置します。タイムゾーンは `{{ timezone }}`、導入パッケージは{% for p in packages %}`{{ p }}`{% if not loop.last %}, {% endif %}{% endfor %}、初回起動時に{{ runcmd | length }}件の`runcmd`を実行します。
+
+## 手順
+
+### 1. user-dataファイルを作成する
+
+```bash
+mkdir -p ~/cloud-init/nocloud
+cat <<'EOF' > ~/cloud-init/nocloud/user-data
+#cloud-config
+timezone: {{ timezone }}
+users:
+  - name: {{ default_user }}
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - {{ ssh_authorized_key }}
+packages:
+{% for p in packages %}  - {{ p }}
+{% endfor %}
+runcmd:
+{% for c in runcmd %}  - {{ c }}
+{% endfor %}
+EOF
+cat <<'EOF' > ~/cloud-init/nocloud/meta-data
+instance-id: iid-local01
+local-hostname: {{ default_user }}-vm
+EOF
+```
+
+### 2. cloud-init schemaで構文を検証する
+
+```bash
+cloud-init schema --config-file ~/cloud-init/nocloud/user-data
+```
+
+エラーが出力されないことを確認します。構文エラーがあると初回起動時に該当ステップだけ静かにスキップされる場合があります。
+
+### 3. NoCloud ISOを作成しVMへ適用する
+
+```bash
+cloud-localds ~/cloud-init/seed.img ~/cloud-init/nocloud/user-data ~/cloud-init/nocloud/meta-data
+virt-install --name {{ default_user }}-vm --disk ~/cloud-init/seed.img,device=cdrom \
+  --import --disk path=/var/lib/libvirt/images/{{ default_user }}-vm.qcow2 \
+  --memory 2048 --vcpus 2 --os-variant ubuntu22.04 --noautoconsole
+```
+
+### 4. 初回起動を待ちcloud-init statusで完了を確認する
+
+```bash
+virsh console {{ default_user }}-vm
+```
+
+コンソール内で以下を実行します。
+
+```bash
+cloud-init status --wait
+```
+
+`status: done`が表示されれば初回起動処理が完了しています。
+
+### 5. 作成結果を確認する
+
+```bash
+id {{ default_user }}
+cat /home/{{ default_user }}/.ssh/authorized_keys
+timedatectl | grep "Time zone"
+{% for p in packages %}dpkg -l {{ p }} | tail -n1
+{% endfor %}cat /var/log/cloud-init-first-boot.log
+```
+
+### 6. cloud-initのログを確認する
+
+```bash
+cat /var/log/cloud-init-output.log
+cloud-init analyze show
+```
+
+`cloud-init analyze show`で各ステージの所要時間を確認し、`runcmd`の失敗がないかログを追跡します。
+
+## 動作確認
+
+- `id {{ default_user }}`でユーザーが作成されていること
+- `~/.ssh/authorized_keys`に指定したSSH公開鍵が登録されていること
+- `timedatectl`のTime zoneが`{{ timezone }}`になっていること
+- 指定した{{ packages | length }}個のパッケージがすべて導入されていること
+- `/var/log/cloud-init-first-boot.log`が`runcmd`の実行により作成されていること
+
+## 注意事項
+
+- cloud-initは既定でインスタンスごとに一度しか`user-data`を適用しない。設定を変更して再実行したい場合は`cloud-init clean --logs`でステートをリセットしてから再起動する必要がある。
+- `ssh_authorized_keys`に配置する鍵は公開鍵のみとする。秘密鍵を`user-data`に含めてはならない。
+- `runcmd`はエラーが発生しても後続ステップの実行を止めない場合がある。重要な処理は`cloud-init-output.log`で個別に成否を確認すること。

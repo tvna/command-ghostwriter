@@ -1,0 +1,7 @@
+zone_name: example.jp
+zone_file_path: /var/named/db.example.jp
+check_commands:
+  - "named-checkzone example.jp /var/named/db.example.jp"
+  - "named-checkconf"
+serial_policy: "YYYYMMDDnn形式（例: 2026071601）で、変更のたびに末尾2桁をインクリメントする"
+reload_procedure: "rndc reload example.jp"

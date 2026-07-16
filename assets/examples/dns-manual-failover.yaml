@@ -1,0 +1,6 @@
+service_fqdn: app.example.com
+primary_ip: 203.0.113.10
+standby_ip: 203.0.113.20
+current_ttl: 300
+failover_criteria: "主系への3回連続ヘルスチェック失敗、または合計5分以上の応答なし"
+switchback_criteria: "主系の復旧確認後、30分以上の安定稼働を確認できたこと"

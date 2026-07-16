@@ -1,0 +1,92 @@
+# Dockerによるディスク肥大化の調査と整理
+
+イメージ・コンテナ・ボリューム・ログの内訳を可視化し、業務データを保護しながら安全に `prune` してディスク容量を回復します。
+
+## 目的
+
+ディスク使用率が閾値 {{ threshold_percent }}% を超えた際に、何が容量を圧迫しているかを `docker system df` で内訳把握し、保護対象を明確にしたうえで不要なリソースだけを整理できるようになることを目指します。
+
+## 用語解説
+
+- **docker system df**: イメージ・コンテナ・ローカルボリューム・ビルドキャッシュそれぞれの使用容量とRECLAIMABLE(回収可能量)を表示するコマンド
+- **dangling image**: どのタグからも参照されなくなった中間・旧イメージ。`prune_scope` に `dangling` を指定するとこれのみが対象になる
+- **prune**: 未使用リソースを一括削除する操作。`docker volume prune` は誤って稼働データを消す危険があるため対象範囲の理解が必須
+- **log-opts**: コンテナのログドライバに渡すオプション。`max-size` を設定しないとログが無制限に肥大化する
+- **保護対象(protect_volumes / protect_images)**: prune実行時に誤削除してはならない稼働中データやリリース済みイメージのリスト
+
+## シナリオ設定
+
+ディスク使用率が {{ threshold_percent }}% を超えたため整理対象を洗い出します。保護対象ボリュームは {{ protect_volumes | join(", ") }}、保護対象イメージは {{ protect_images | join(", ") }} です。コンテナログの上限は `{{ log_max_size }}` とし、prune範囲は `{{ prune_scope }}` に限定します。
+
+## 手順
+
+### 1. 使用量の内訳を確認する
+
+```bash
+df -h /var/lib/docker
+docker system df -v
+```
+
+→ TYPE別のRECLAIMABLE列を確認し、イメージ・ボリューム・ビルドキャッシュのどれが支配的かを特定します。
+
+### 2. コンテナログの肥大化を確認する
+
+```bash
+sudo du -sh /var/lib/docker/containers/*/*-json.log 2>/dev/null | sort -rh | head -10
+docker ps --format '{% raw %}{{.Names}}{% endraw %}' | xargs -I{} docker inspect {} --format '{% raw %}{{.Name}} {{.HostConfig.LogConfig.Config.max-size}}{% endraw %}'
+```
+
+→ `max-size` が未設定のコンテナは `daemon.json` に `"log-opts": {"max-size": "{{ log_max_size }}"}` を追加し、対象コンテナを再作成してログ上限を効かせます。
+
+### 3. 未使用イメージ・停止コンテナを整理する
+
+保護対象イメージを退避してから、指定した範囲でのみ整理します。
+
+```bash
+{% for img in protect_images %}docker image inspect {{ img }} >/dev/null && echo "保護対象のため対象外: {{ img }}"
+{% endfor %}docker container prune --force --filter "until=24h"
+docker image prune --force
+```
+
+→ `prune_scope` が `{{ prune_scope }}` の場合、`docker image prune` は既定でdanglingイメージのみを削除し、タグ付きイメージには影響しません。
+
+### 4. ボリュームは保護対象を除外して確認する
+
+```bash
+docker volume ls -f dangling=true
+{% for vol in protect_volumes %}docker volume inspect {{ vol }} >/dev/null 2>&1 && echo "削除禁止: {{ vol }}"
+{% endfor %}```
+
+→ `docker volume prune` は無条件実行せず、上記で保護対象が一覧に含まれていないことを確認したうえで個別に判断します。
+
+### 5. 回復状況を確認する
+
+```bash
+docker system df
+df -h /var/lib/docker
+```
+
+### 6. 再発防止を設定する
+
+```bash
+sudo tee /etc/docker/daemon.json >/dev/null <<EOF
+{
+  "log-driver": "json-file",
+  "log-opts": {"max-size": "{{ log_max_size }}", "max-file": "3"}
+}
+EOF
+sudo systemctl restart docker
+```
+
+## 動作確認
+
+- `docker system df` の使用率が {{ threshold_percent }}% を下回っていること
+- {{ protect_volumes | join(", ") }} と {{ protect_images | join(", ") }} が引き続き存在し、削除されていないこと
+- 新規コンテナのログが `{{ log_max_size }}` を超えて肥大化しないこと(`log-opts` 反映後に確認)
+- 稼働中サービスに影響(再起動・データ消失)が発生していないこと
+
+## 注意事項
+
+- `docker volume prune` や `docker system prune --volumes` は稼働中データを含む未マウントボリュームも対象にできてしまうため、保護対象リスト({{ protect_volumes | join(", ") }})との突合を怠らない。
+- `prune_scope` を `all`(未使用の全イメージ)まで広げる場合は、参照されなくなったが再利用予定のイメージがないか事前に関係者へ確認する。
+- `daemon.json` 変更後の `systemctl restart docker` は全コンテナに影響し得るため、メンテナンス時間帯に実施する。

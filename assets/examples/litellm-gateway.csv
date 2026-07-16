@@ -1,0 +1,5 @@
+model_alias,backend_type,endpoint,actual_model,priority,budget_note
+gpt-router,外部API,https://api.openai.com/v1,gpt-4o-mini,1,月次予算上限あり
+社内chat,ollama,http://gpu01.internal:11434,llama3.1:8b,2,無料枠(社内リソース)
+コード生成,vllm,http://gpu02.internal:8000/v1,qwen2.5-coder-14b,2,無料枠(社内リソース)
+高精度分析,外部API,https://api.anthropic.com/v1,claude-opus,3,高コストのため利用申請制

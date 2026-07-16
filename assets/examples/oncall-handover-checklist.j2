@@ -1,0 +1,87 @@
+# オンコール当番の引き継ぎ
+
+オンコール当番が交代する際、継続中の障害・注意が必要なホスト・予定作業・連絡先を漏れなく次の担当者へ伝え、対応の空白（誰も状況を把握していない時間帯）を作らないための引き継ぎ手順を示します。
+
+## 目的
+
+継続中のインシデントや注意事項を{{ csv_rows | length }}件の引き継ぎ項目として整理し、次の当番が即座に状況を把握して対応を継続できる状態を作れるようになることを目指します。
+
+## 用語解説
+
+- **オンコール当番**: 営業時間外を含め、障害発生時に一次対応を担う担当者・体制
+- **対応の空白**: 引き継ぎの不備により、誰も状況を把握・対応していない時間帯が発生すること
+- **item_category**: 引き継ぎ項目の分類（継続障害・注意ホスト・予定作業・連絡先など）
+- **エスカレーション経路**: 一次対応で解決できない場合に、次に連絡すべきチーム・担当者への経路
+- **相互確認**: 引き継ぐ側と引き継がれる側の双方が内容を理解したことを確認し合うこと
+
+## シナリオ設定
+
+オンコール当番が交代します。引き継ぎ項目は{{ csv_rows | length }}件あります。
+
+| item_category | description | status |
+|---|---|---|
+{% for r in csv_rows %}| {{ r["item_category"] }} | {{ r["description"] }} | {{ r["status"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 引き継ぎの目的とタイミングを確認する
+
+当番交代の直前（例: 定例交代時刻の15分前）に、前任者と後任者の双方が揃った状態で開始します。片方だけの一方的な連絡は行いません。
+
+```bash
+date
+echo "oncall handover start: $(whoami) -> next"
+```
+
+### 2. 継続中インシデントの状態を共有する
+
+item_category が「継続障害」の項目について、現状のstatusと次に取るべきaction_needed、詳細への参照リンクを口頭とテキストの両方で伝えます。
+
+```bash
+{% for r in csv_rows %}{% if r["item_category"] == "継続障害" %}echo "[{{ r["status"] }}] {{ r["description"] }} -> {{ r["action_needed"] }} ({{ r["reference_url"] }})"
+{% endif %}{% endfor %}```
+
+### 3. 注意が必要なホスト・予定作業を共有する
+
+item_category が「注意ホスト」「予定作業」の項目を確認し、後任者が単独で判断に迷わないよう背景を伝えます。
+
+```bash
+{% for r in csv_rows %}{% if r["item_category"] in ["注意ホスト", "予定作業"] %}echo "[{{ r["item_category"] }}] {{ r["description"] }} -> {{ r["action_needed"] }}"
+{% endif %}{% endfor %}```
+
+### 4. 連絡先とエスカレーション経路を確認する
+
+item_category が「連絡先」の項目を確認し、緊急時にどのチームへ連絡すべきかを後任者と一致させます。
+
+```bash
+{% for r in csv_rows %}{% if r["item_category"] == "連絡先" %}echo "{{ r["description"] }} ({{ r["reference_url"] }})"
+{% endif %}{% endfor %}```
+
+### 5. 引き継ぎ完了を相互確認する
+
+後任者が全項目を復唱し、前任者が内容の一致を確認します。
+
+```bash
+echo "handover confirmed by both parties: $(date -Iseconds)"
+```
+
+### 6. 引き継ぎ内容を記録として保存する
+
+```bash
+{% for r in csv_rows %}echo "{{ r["item_category"] }},{{ r["description"] }},{{ r["status"] }},{{ r["action_needed"] }},{{ r["reference_url"] }}"
+{% endfor %} >> /var/log/oncall-handover-$(date +%Y%m%d).log
+```
+
+## 動作確認
+
+- 全{{ csv_rows | length }}件の項目について、status と action_needed が後任者に伝わっていること
+- reference_url に記載された詳細ページへ後任者がアクセスできること
+- 「連絡先」項目のエスカレーション経路を後任者が復唱できること
+- 引き継ぎ記録ファイルが保存されていること
+
+## 注意事項
+
+- 引き継ぎは前任者・後任者の双方が同席する時間を確保して行う。テキストの一方的な送付のみで完了とはしない。
+- 「継続障害」の項目は特に優先して伝える。伝達漏れが対応の空白に直結する。
+- 既存の `alert-first-response`(アラート受信時の一次対応の型)とは異なり、本手順は当番交代というタイミングでの状態引き継ぎに焦点を当てる。

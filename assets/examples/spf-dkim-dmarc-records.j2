@@ -1,0 +1,73 @@
+# SPF・DKIM・DMARCレコードの設定
+
+CSV で設計した {{ csv_rows | length }} 件のメール認証用TXTレコード(SPF・DKIM・DMARC)を登録し、なりすまし対策とメール到達率の向上を図ります。
+
+## 目的
+
+SPF・DKIM・DMARCそれぞれの役割を理解し、TXTレコードとして正しく登録・検証したうえで、DMARCのポリシーを段階的に強化していく運用の考え方を身につけることを目指します。
+
+## 用語解説
+
+- **SPF (Sender Policy Framework)**: 送信元IPがそのドメインの正当な送信元かをDNSで宣言する仕組み
+- **DKIM (DomainKeys Identified Mail)**: メールに電子署名を付与し、改ざんとなりすましを検知する仕組み
+- **DKIMセレクタ**: 複数のDKIM鍵を使い分けるための識別子。`selector._domainkey.<ドメイン>` に公開鍵を置く
+- **DMARC (Domain-based Message Authentication, Reporting and Conformance)**: SPF/DKIMの結果をもとに受信側の扱い(none/quarantine/reject)を指示する仕組み
+- **-all / ~all**: SPFの終端指定。`-all`は許可外送信元をハード失敗として拒否、`~all`はソフト失敗として扱う
+
+## シナリオ設定
+
+登録するレコードは {% for r in csv_rows %}{{ r["record_type"] | upper }}({{ r["host"] }}){% if not loop.last %}, {% endif %}{% endfor %} の {{ csv_rows | length }} 件です。DMARCは `{{ csv_rows[2]["policy_note"] }}` という方針で運用します。
+
+## 手順
+
+### 1. 現状のレコードを確認する
+
+```bash
+{% for r in csv_rows %}{{ r["verify_method"] }}
+{% endfor %}```
+
+### 2. SPFレコードを登録する
+
+```bash
+echo '{{ csv_rows[0]["host"] }} IN TXT "{{ csv_rows[0]["value"] }}"' >> /var/named/db.example.com
+```
+
+### 3. DKIM公開鍵レコードを登録する
+
+```bash
+echo '{{ csv_rows[1]["host"] }} IN TXT "{{ csv_rows[1]["value"] }}"' >> /var/named/db.example.com
+```
+
+### 4. DMARCポリシーレコードを登録する
+
+```bash
+echo '{{ csv_rows[2]["host"] }} IN TXT "{{ csv_rows[2]["value"] }}"' >> /var/named/db.example.com
+
+named-checkzone example.com /var/named/db.example.com
+rndc reload
+```
+
+### 5. 各レコードの反映を検証する
+
+```bash
+{% for r in csv_rows %}{{ r["verify_method"] }}
+{% endfor %}```
+
+### 6. 検証ツールでメール認証結果を確認する
+
+```bash
+echo "test" | mail -s "SPF/DKIM/DMARC test" check-auth@verifier.port25.com
+```
+
+## 動作確認
+
+- 各TXTレコードが `dig TXT` で設計どおりの値を返すこと
+- `named-checkzone` がエラーなく通ること
+- port25.comなどの検証ツールでSPF・DKIM・DMARCすべてがpassと判定されること
+- DMARCレポート(`rua`宛先)が想定どおり届き始めること
+
+## 注意事項
+
+- `{{ csv_rows[2]["policy_note"] }}` のとおり、DMARCは `p=none` で監視のみから始め、`quarantine`、最終的に `reject` へ段階的に強化すること。いきなり `reject` にすると正当なメールまで拒否される危険がある。
+- SPFのinclude先が増えるとDNSルックアップ回数の上限(10回)を超えてSPF自体が無効化されるため、include構成を定期的に見直すこと。
+- 既存の別テンプレート(mail-delivery-triage)はメール不達の障害切り分けが主眼であり、本手順はDNS側のレコード設計・登録という平時構築に焦点を絞る。

@@ -1,0 +1,5 @@
+test_tool: gpu-burn
+duration_hours: 4
+temp_ceiling: 85
+ecc_check: true
+pass_criteria: 全GPUがスロットリングなく完走し、ECCエラー数が試験前後で増加しないこと

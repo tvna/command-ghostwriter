@@ -1,0 +1,5 @@
+upgrade_type = "security"
+apply_updates = true
+emit_via = "stdio"
+timer_schedule = "06:00"
+exclude_packages = "kernel*,glibc*"

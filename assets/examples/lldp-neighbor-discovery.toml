@@ -1,0 +1,5 @@
+host_role = "サーバ"
+lldp_daemon = "lldpd"
+expected_neighbor = "sw-core01 Gi1/0/24"
+port_description_policy = "hostname-role形式(例: sw-core01-rack3-app)"
+inventory_ref = "docs/network/mac-address-inventory.csv"

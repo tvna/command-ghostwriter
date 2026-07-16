@@ -1,0 +1,77 @@
+# Linux bondingによるNIC冗長化(LACP)設定 — {{ bond_name }}
+
+2枚のNICを `{{ bond_name }}` としてbondingで束ね、LACPモード(`{{ bond_mode }}`)による冗長化を構成します。片系のケーブルを抜いてもフェイルオーバーで通信が継続することを検証します。
+
+## 目的
+
+bondingモードの違いとLACPの前提条件を理解し、NIC1本が故障・切断してもサービスを継続できる冗長構成を安全に構築・検証できるようになることを目指します。
+
+## 用語解説
+
+- **bonding**: 複数の物理NICを1つの論理インターフェースとして束ね、冗長化や帯域集約を行うLinuxカーネル機能
+- **LACP(802.3ad)**: スイッチとホストが制御パケットをやり取りして自動的にリンクを束ねるIEEE標準プロトコル。スイッチ側の対応設定が前提となる
+- **miimon**: リンク状態を監視する間隔(ミリ秒)。この間隔でリンクダウンを検出しフェイルオーバーを行う
+- **active-backupモード**: LACP非対応スイッチでも使える、常時1本のみ使用し障害時に切り替える単純なモード
+- **ポートチャネル**: スイッチ側で複数物理ポートを束ねて1つの論理ポートとして扱う設定。LACPモードではホスト側と対になっている必要がある
+
+## シナリオ設定
+
+インターフェース {% for i in slave_interfaces %}`{{ i }}`{% if not loop.last %}、{% endif %}{% endfor %} を `{{ bond_name }}`（モード `{{ bond_mode }}`、miimon {{ miimon }}ms、IP `{{ ip_address }}`）として束ねます。事前条件: {{ switch_requirement }}。
+
+## 手順
+
+### 1. 対象NICの現状を確認する
+
+```bash
+{% for i in slave_interfaces %}ip link show {{ i }}
+{% endfor %}nmcli device status
+```
+
+### 2. スイッチ側LAG設定を確認する
+
+作業前に、対象ポートがスイッチ側でポートチャネルとして構成済みであることをネットワーク担当に確認します。未設定のままLACPモードで開始すると通信断となります。
+
+### 3. bondインターフェースを作成する
+
+```bash
+sudo nmcli connection add type bond ifname {{ bond_name }} con-name {{ bond_name }} \
+  bond.options "mode={{ bond_mode }},miimon={{ miimon }}" \
+  ipv4.addresses {{ ip_address }} ipv4.method manual
+{% for i in slave_interfaces %}sudo nmcli connection add type ethernet ifname {{ i }} master {{ bond_name }} con-name {{ bond_name }}-slave-{{ i }}
+{% endfor %}sudo nmcli connection up {{ bond_name }}
+```
+
+### 4. 状態を確認する
+
+```bash
+cat /proc/net/bonding/{{ bond_name }}
+ip addr show {{ bond_name }}
+```
+
+### 5. フェイルオーバーを試験する
+
+対象NICのうち1本のケーブルを抜き、通信が継続することを確認します(ラボ環境ではリンクダウンをシミュレートしても構いません)。
+
+```bash
+{% for i in slave_interfaces %}sudo ip link set {{ i }} down   # 1本ずつ試験し、都度upに戻す
+{% endfor %}watch -n 1 'cat /proc/net/bonding/{{ bond_name }} | grep "Slave Interface\|MII Status"'
+```
+
+### 6. 通信断がなかったことを確認する
+
+```bash
+ping -c 20 {{ ip_address }}
+```
+
+## 動作確認
+
+- `cat /proc/net/bonding/{{ bond_name }}` に全スレーブが `MII Status: up` で表示されること
+- 片方のスレーブをdownにしても `{{ ip_address }}` へのpingが継続して成功すること
+- ダウンさせたスレーブをupに戻すと自動的に `Bonding Mode` の構成へ復帰すること
+- `nmcli connection show {{ bond_name }}` が有効な接続として表示されること
+
+## 注意事項
+
+- LACPモード(`802.3ad`)はスイッチ側のポートチャネル設定と対になっていないと通信不安定やループの原因になる。事前確認なしに投入しない。
+- フェイルオーバー試験でリンクダウンさせる際は、リモートセッションが `{{ bond_name }}` 経由の場合、両NICを同時に落とさないよう1本ずつ実施する。
+- 本手順はNIC冗長化に焦点を絞り、上位のVRRPやHAProxy等のサービス冗長化は対象外とする。

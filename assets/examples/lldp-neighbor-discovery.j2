@@ -1,0 +1,86 @@
+# LLDPによる隣接機器の確認と配線調査
+
+`lldpd` を導入してスイッチ・サーバ間の接続関係を可視化し、現地に行かずに配線調査や台帳更新を行う手順です。
+
+## 目的
+
+LLDPによる隣接機器の自動検出の仕組みを理解し、配線の実態確認とスイッチ側情報との突合を通じて台帳を正確に保てるようになることを目指します。
+
+## 用語解説
+
+- **LLDP(Link Layer Discovery Protocol)**: 隣接するネットワーク機器同士が自身の情報(機器名・ポート名等)を定期的に送り合い、互いを認識するL2プロトコル
+- **TLV(Type-Length-Value)**: LLDPパケット内で情報を格納する単位。機器名・ポート説明・システム説明などがTLVとして格納される
+- **lldpd**: Linux上でLLDPの送受信を行うデーモン。`lldpcli`コマンドで状態を確認・操作する
+- **CDPとの違い**: CDP(Cisco Discovery Protocol)はCisco独自プロトコルであるのに対し、LLDPはIEEE 802.1AB標準でベンダーを問わず利用できる
+- **ポート説明(port description)**: スイッチ側で各ポートに設定する説明文字列。接続先を明示することで配線調査が容易になる
+
+## シナリオ設定
+
+対象ホストの役割は `{{ host_role }}` で、LLDPデーモンには `{{ lldp_daemon }}` を使用します。想定される隣接先は `{{ expected_neighbor }}` で、ポート説明は `{{ port_description_policy }}` の方針に従って命名します。調査結果は `{{ inventory_ref }}` の台帳に反映します。
+
+## 手順
+
+### 1. lldpdを導入し有効化する
+
+```bash
+sudo apt-get install -y lldpd
+sudo systemctl enable --now lldpd
+sudo systemctl status lldpd --no-pager
+```
+
+### 2. lldpcliで隣接情報を確認する
+
+```bash
+sudo lldpcli show neighbors
+```
+
+出力の `SysName` と `PortID` が、想定している隣接先 `{{ expected_neighbor }}` と一致するかを確認します。
+
+### 3. 詳細情報を機器単位で確認する
+
+```bash
+sudo lldpcli show neighbors details -f json | jq '.[] | {chassis: .["lldp"].interface[]["chassis"], port: .["lldp"].interface[]["port"]}'
+```
+
+`{{ host_role }}` としてのホスト名がLLDPネイバー情報として正しく相手側に送出されているかも合わせて確認します。
+
+### 4. スイッチ側のLLDP近隣情報と突合する
+
+スイッチ側(Cisco系)で対応するコマンドを実行し、双方の見え方が一致するか確認します。
+
+```bash
+show lldp neighbors detail
+```
+
+`{{ expected_neighbor }}` の記載と、サーバ側`lldpcli show neighbors`の結果が一致していることを確認します。
+
+### 5. ポート説明を命名規則に沿って設定する
+
+スイッチ側のポート説明を `{{ port_description_policy }}` の方針で設定し、以後の配線調査を容易にします。
+
+```bash
+interface GigabitEthernet1/0/24
+ description sw-core01-rack3-app
+```
+
+### 6. 台帳へ反映する
+
+確認した接続関係を台帳ファイルに追記します。
+
+```bash
+echo "$(hostname),{{ expected_neighbor }},$(date -I)" >> {{ inventory_ref }}
+git add {{ inventory_ref }}
+git commit -m "docs: update {{ inventory_ref }} from lldp survey"
+```
+
+## 動作確認
+
+- `lldpcli show neighbors` に隣接先として `{{ expected_neighbor }}` が表示されること
+- スイッチ側 `show lldp neighbors detail` の内容とサーバ側の見え方に矛盾がないこと
+- `{{ inventory_ref }}` に今回確認した接続関係が反映され、コミットされていること
+
+## 注意事項
+
+- LLDPは双方の機器でLLDPが有効化されていて初めて情報が得られる。片側のみ有効な場合は隣接情報が空になるため、まず双方の有効化状況を確認する。
+- 古いスイッチファームウェアやセキュリティ制限でLLDP送出がデフォルト無効の場合がある。その場合はCDPなど代替手段との併用を検討する。
+- 台帳更新はコミット履歴を残す形で行い、誰がいつ何を調査した結果かを追跡できるようにする。

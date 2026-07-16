@@ -1,0 +1,82 @@
+# コンテナイメージpull失敗の切り分け
+
+`{{ image_ref }}` の取得時に発生する `{{ error_message }}` を、認証・レート制限・ネットワーク・タグ不存在のどれが原因かを分類して解消します。
+
+## 目的
+
+pull失敗のエラーメッセージから原因カテゴリを絞り込み、レジストリへの到達性・プロキシ設定・認証情報・タグ存在の各層を順に確認して、最小限の是正でpullを成功させられるようになることを目指します。
+
+## 用語解説
+
+- **unauthorized / authentication required**: レジストリ側で認証が必要、または権限が不足していることを示すエラー
+- **rate limit exceeded**: 匿名または無料枠のpull回数上限に達したことを示すエラー(Docker Hub等で発生しやすい)
+- **manifest unknown / not found**: 指定したタグまたはダイジェストがレジストリ上に存在しないことを示すエラー
+- **プロキシ環境変数(http_proxy/https_proxy)**: レジストリ通信を中継するプロキシの指定。誤設定や未設定が接続失敗の原因になる
+- **docker login**: レジストリに対して認証情報を保存し、以降のpull/pushで自動的に使用させるコマンド
+
+## シナリオ設定
+
+`{{ registry_host }}` 上のイメージ `{{ image_ref }}` をpullしようとすると `{{ error_message }}` が発生します。現在のプロキシ設定は `{{ proxy_env }}`、認証状態は `{{ auth_status }}` です。
+
+## 手順
+
+### 1. エラーメッセージを分類する
+
+```bash
+docker pull {{ image_ref }}
+```
+
+→ 出力された `{{ error_message }}` を「認証(unauthorized/authentication)」「レート制限(rate limit)」「到達不能(timeout/connection refused)」「タグ不存在(manifest unknown/not found)」のいずれかに分類します。
+
+### 2. レジストリへの到達性を確認する
+
+```bash
+curl -sS -o /dev/null -w "%{http_code}\n" https://{{ registry_host }}/v2/
+getent hosts {{ registry_host }}
+```
+
+→ 応答がない、または名前解決できない場合はネットワーク層(DNS/FW)を疑います。
+
+### 3. プロキシ設定を確認する
+
+```bash
+echo "{{ proxy_env }}"
+sudo systemctl show docker --property=Environment | grep -i proxy || echo "dockerdにプロキシ未設定"
+```
+
+→ ホストのシェルにはプロキシが設定されていても、`dockerd` 自体には反映されていないケースが多いため、systemdドロップインの設定有無を確認します。
+
+### 4. 認証情報を確認する
+
+```bash
+cat ~/.docker/config.json 2>/dev/null | grep -A1 "{{ registry_host }}" || echo "認証情報が保存されていません: {{ auth_status }}"
+docker login {{ registry_host }}
+```
+
+### 5. タグ・ダイジェストの存在を確認する
+
+```bash
+curl -sS -u "$DOCKER_USER:$DOCKER_TOKEN" https://{{ registry_host }}/v2/$(echo {{ image_ref }} | sed -E 's#^[^/]+/##;s#:.*##')/tags/list
+```
+
+→ 一覧に対象タグが含まれない場合、ビルド・push側の問題であり、pull側では解消できません。
+
+### 6. 是正後に再度pullし記録する
+
+```bash
+docker pull {{ image_ref }}
+docker image inspect {{ image_ref }} --format '{% raw %}{{.RepoDigests}}{% endraw %}'
+```
+
+## 動作確認
+
+- `docker pull {{ image_ref }}` がエラーなく完了し、`docker image inspect` でイメージが存在すること
+- `curl` によるレジストリ疎通確認が200系または401(未認証だが到達している)を返すこと
+- `docker login {{ registry_host }}` が成功していること
+- 原因カテゴリ(認証/レート制限/到達不能/タグ不存在)と是正内容が記録されていること
+
+## 注意事項
+
+- 認証トークンやパスワードは手順書・ログ・チャットに平文で残さず、`docker login` は対話入力または環境変数経由で行う。
+- レート制限が原因の場合は認証済みpullへの切替やミラーレジストリの利用を検討し、短時間でのpull再試行を繰り返さない。
+- プロキシ設定変更後は `sudo systemctl daemon-reload && sudo systemctl restart docker` が必要になり、稼働中コンテナに影響し得るため実施時間帯に注意する。

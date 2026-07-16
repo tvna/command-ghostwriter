@@ -1,0 +1,4 @@
+mac_address,hostname,fixed_ip,lease_time,note
+aa:bb:cc:dd:ee:01,printer01,192.168.10.21,infinite,共有プリンタの固定IP
+aa:bb:cc:dd:ee:02,nas01,192.168.10.22,infinite,ファイルサーバの固定IP
+aa:bb:cc:dd:ee:03,camera01,192.168.10.23,24h,監視カメラ。定期的にリース更新

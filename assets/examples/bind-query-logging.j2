@@ -1,0 +1,102 @@
+# BINDクエリログの有効化とローテーション設計手順
+
+BIND のクエリログ・エラーログを `channel` 設計で整理し、調査に使える情報量を保ちながら容量を制御します。
+
+## 目的
+
+`logging` ステートメントの category/channel の関係を理解し、必要なログだけを分離して記録し、容量を制御しながら障害調査に使える状態を維持できるようになることを目指します。
+
+## 用語解説
+
+- **category**: `queries`（問い合わせ）や `default`（一般ログ）など、ログの種類を表す分類
+- **channel**: ログの出力先ファイル・severity・ローテーション条件をまとめて定義する単位
+- **severity**: 記録するログの重大度レベル（`info` / `notice` / `warning` など）。低いレベルほど詳細に記録される
+- **rndc querylog**: 設定を変更・再起動せずにクエリログの記録を動的にオン/オフする運用コマンド
+- **versions / size**: channel のローテーション設定で、保持する世代数と1ファイルあたりの上限サイズを指定するもの
+
+## シナリオ設定
+
+ログ出力先は `{{ log_dir }}`、クエリログの有効化状態は `{{ query_log_enabled }}` を目標とします。channel 構成は「{{ channel_definitions }}」とし、記録する severity は `{{ severity }}`、ローテーション方針は「{{ versions_and_size }}」とします。
+
+## 手順
+
+### 1. ログ出力ディレクトリを準備する
+
+BIND の実行ユーザーが書き込めるディレクトリを用意します。
+
+```bash
+mkdir -p {{ log_dir }}
+chown named:named {{ log_dir }}
+chmod 750 {{ log_dir }}
+```
+
+### 2. loggingステートメントでchannelを定義する
+
+「{{ channel_definitions }}」の方針に沿って、クエリ専用の channel と一般ログ用の channel を分離します。severity は `{{ severity }}`、ローテーションは「{{ versions_and_size }}」を設定します。
+
+```bash
+cat >> /etc/named.conf <<'EOF'
+logging {
+    channel query_log {
+        file "{{ log_dir }}/queries.log" versions 5 size 100m;
+        severity {{ severity }};
+        print-time yes;
+    };
+    channel default_log {
+        file "{{ log_dir }}/named.log" versions 5 size 100m;
+        severity {{ severity }};
+        print-time yes;
+    };
+    category queries { query_log; };
+    category default { default_log; };
+};
+EOF
+```
+
+### 3. 構文チェックして反映する
+
+```bash
+named-checkconf
+rndc reload
+```
+
+### 4. rndc querylogでクエリログの記録有無を切り替える
+
+初期状態のクエリログ有効化状態は `{{ query_log_enabled }}` とし、必要に応じて再起動せずに切り替えます。
+
+```bash
+# 現在の状態を確認しつつ切り替える(実行のたびにon/offがトグルされる)
+rndc querylog
+tail -n 5 {{ log_dir }}/queries.log
+```
+
+### 5. テストクエリを投げてログの読み方を確認する
+
+```bash
+dig @127.0.0.1 example.com A +short
+tail -n 3 {{ log_dir }}/queries.log
+```
+
+出力にはクエリ元アドレス・クエリ名・種別（A, AAAA 等）・view 名が記録されるため、この形式を調査時の読み方として把握します。
+
+### 6. 容量とローテーション状況を確認する
+
+「{{ versions_and_size }}」の設定どおりに世代が保持されているかを確認します。
+
+```bash
+ls -la {{ log_dir }}
+du -sh {{ log_dir }}
+```
+
+## 動作確認
+
+- `named-checkconf` がエラーなく通ること
+- `dig` によるテストクエリが `queries.log` に記録されること
+- `rndc querylog` の実行でクエリ記録のオン/オフが切り替わること
+- ログファイルが `{{ versions_and_size }}` の設定どおりにローテーションされ、上限を超えて肥大化しないこと
+
+## 注意事項
+
+- クエリログにはクライアントの送信元 IP と問い合わせ内容が全件記録されるため、個人情報・機微情報として扱い、アクセス権限とログ保存期間を適切に管理すること。
+- 常時クエリログを有効化すると I/O 負荷とディスク消費が増えるため、平時は無効化し障害調査時のみ `rndc querylog` で一時的に有効化する運用も検討する。
+- ログディレクトリの所有権・権限は BIND の実行ユーザーに合わせること。誤った権限だとログ出力自体が失敗する。

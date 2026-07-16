@@ -1,0 +1,86 @@
+# KVM用ブリッジネットワークの構成 — {{ bridge_name }}
+
+ホストの物理インターフェース **{{ physical_interface }}** 上にLinuxブリッジ **{{ bridge_name }}** を作成し、KVMゲスト **{{ vm_name }}** をNATを介さずLANへ直接参加させます。
+
+## 目的
+
+デフォルトのNATモードとブリッジモードの違いを理解し、KVMゲストをホストと同一LAN上の独立したホストとして扱えるブリッジ接続を構成できるようになることを目指します。
+
+## 用語解説
+
+- **NATモード**: libvirtのdefaultネットワークが提供する方式。ゲストはホスト内部の仮想サブネットに属し、ホストがアドレス変換して外部と通信する
+- **ブリッジモード**: ホストの物理NICと仮想NICを同一のL2セグメントに接続し、ゲストがLAN上で独立したIPを持てるようにする方式
+- **Linuxブリッジ**: 複数のネットワークインターフェースをL2レベルで束ねる仮想スイッチ機能
+- **libvirtネットワーク定義**: virshが管理するネットワークの設定単位。`forward mode="bridge"` でホストのブリッジをそのまま利用できる
+
+## シナリオ設定
+
+物理インターフェース `{{ physical_interface }}` を組み込んだブリッジ `{{ bridge_name }}`（ホストIP `{{ host_ip }}`、ゲートウェイ `{{ gateway }}`）を作成し、`{{ vm_name }}` を接続します。
+
+## 手順
+
+### 1. 現在のNAT構成を確認する
+
+```bash
+virsh net-list --all
+ip addr show {{ physical_interface }}
+```
+
+### 2. ブリッジを作成する(nmcli)
+
+作業をリモートで行う場合、インターフェース切替の瞬間に接続が切れる可能性があるため、コンソールアクセスを確保した上で実施します。
+
+```bash
+nmcli connection add type bridge ifname {{ bridge_name }} con-name {{ bridge_name }} \
+  ipv4.addresses {{ host_ip }} ipv4.gateway {{ gateway }} ipv4.method manual
+nmcli connection add type bridge-slave ifname {{ physical_interface }} master {{ bridge_name }}
+nmcli connection up {{ bridge_name }}
+```
+
+### 3. ブリッジの状態を確認する
+
+```bash
+ip addr show {{ bridge_name }}
+bridge link show
+```
+
+### 4. libvirtネットワークを定義する
+
+```bash
+cat > /tmp/{{ bridge_name }}-net.xml <<EOF
+<network>
+  <name>{{ bridge_name }}</name>
+  <forward mode="bridge"/>
+  <bridge name="{{ bridge_name }}"/>
+</network>
+EOF
+virsh net-define /tmp/{{ bridge_name }}-net.xml
+virsh net-start {{ bridge_name }}
+virsh net-autostart {{ bridge_name }}
+```
+
+### 5. ゲストをブリッジへ接続する
+
+```bash
+virsh attach-interface {{ vm_name }} bridge {{ bridge_name }} --model virtio --config --live
+```
+
+### 6. LAN疎通を検証する
+
+```bash
+virsh domifaddr {{ vm_name }}
+ping -c 3 {{ gateway }}
+```
+
+## 動作確認
+
+- `ip addr show {{ bridge_name }}` に `{{ physical_interface }}` がスレーブとして組み込まれていること
+- `virsh net-list` に `{{ bridge_name }}` が active かつ autostart yes で表示されること
+- `virsh domifaddr {{ vm_name }}` でゲストがLANサブネット内のIPを取得していること
+- ゲストから `{{ gateway }}` へのpingが成功すること
+
+## 注意事項
+
+- リモート作業でブリッジ切替を行う場合、`nmcli connection up` の瞬間に既存SSHセッションが切断される可能性があるため、コンソールまたはOOB経路を確保してから実施する。
+- ブリッジ化するとホストの `{{ physical_interface }}` は直接IPを持たなくなり、`{{ bridge_name }}` 側にIPが移る点を関係者へ周知する。
+- virsh-vm-lifecycle(既存,VM作成)とはネットワーク層の構成に焦点を絞り、VM本体の作成手順は対象外とする。

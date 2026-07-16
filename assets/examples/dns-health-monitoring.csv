@@ -1,0 +1,4 @@
+dns_server,query_fqdn,query_type,expected_answer,check_interval,alert_dest
+ns1.example.com,www.example.com,A,203.0.113.10,60,ops-dns@example.com
+ns2.example.com,www.example.com,A,203.0.113.10,60,ops-dns@example.com
+resolver1.example.com,api.example.com,A,203.0.113.20,120,ops-dns@example.com

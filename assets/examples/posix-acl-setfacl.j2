@@ -1,0 +1,85 @@
+# POSIX ACLによる例外的なアクセス許可の管理
+
+`chmod` の所有者・グループ・その他という3区分では表現できない「特定の1ユーザーだけに許可したい」といった例外を、POSIX ACL(`setfacl`/`getfacl`)で管理します。root権限(sudo)で実施してください。
+
+## 目的
+
+基本パーミッションでは表現しきれない例外的なアクセス要件を、POSIX ACLで安全に追加し、デフォルトACLによって新規作成ファイルにも継承させられるようになることを目指します。
+
+## 用語解説
+
+- **ACL(Access Control List)**: 所有者・グループ・その他の3区分に加えて、特定のユーザー・グループ単位でアクセス権を追加設定できる仕組み
+- **mask**: ACLで許可されるグループ・個別ユーザーエントリの権限上限を定める特殊エントリ。`getfacl`で`mask::`として表示される
+- **デフォルトACL**: ディレクトリに設定すると、その配下に新規作成されるファイル・ディレクトリへ自動的に継承されるACL
+- **`+`印**: `ls -l`の権限表示末尾に付く`+`は、そのファイルに追加のACLエントリが存在することを示す
+- **setfacl/getfacl**: それぞれACLの設定・確認を行うコマンド
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 件のACLエントリを投入します。
+
+| target_path | entry_type | entry_name | perms | default_acl | reason |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["target_path"] }} | {{ r["entry_type"] }} | {{ r["entry_name"] }} | {{ r["perms"] }} | {{ r["default_acl"] }} | {{ r["reason"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. ファイルシステムのACL対応を確認する
+
+```bash
+mount | grep -E "$(df --output=target {{ csv_rows[0]["target_path"] }} | tail -n1)"
+tune2fs -l $(df --output=source {{ csv_rows[0]["target_path"] }} | tail -n1) 2>/dev/null | grep -i "default mount options" || echo "acl オプションはカーネル既定で有効な場合が多い"
+```
+
+ext4/xfsは通常デフォルトでACLが有効です。無効な場合は`/etc/fstab`にマウントオプション`acl`を追加して再マウントします。
+
+### 2. 現状のACLを確認する
+
+```bash
+{% for r in csv_rows %}getfacl {{ r["target_path"] }}
+{% endfor %}```
+
+### 3. ACLエントリを投入する
+
+```bash
+{% for r in csv_rows %}setfacl -m {{ r["entry_type"] }}:{{ r["entry_name"] }}:{{ r["perms"] }} {{ r["target_path"] }}
+{% endfor %}```
+
+### 4. デフォルトACLで継承設定を行う
+
+`default_acl` が `true` のディレクトリには、配下への継承用にデフォルトACLも設定します。
+
+```bash
+{% for r in csv_rows %}{% if r["default_acl"] == "true" %}setfacl -d -m {{ r["entry_type"] }}:{{ r["entry_name"] }}:{{ r["perms"] }} {{ r["target_path"] }}
+{% endif %}{% endfor %}```
+
+### 5. `+`印とgetfaclで反映を確認する
+
+```bash
+{% for r in csv_rows %}ls -ld {{ r["target_path"] }}
+getfacl {{ r["target_path"] }}
+{% endfor %}```
+
+`ls -ld` の権限欄末尾に`+`が付いていれば、ACLエントリが存在することを示します。
+
+### 6. デフォルトACLの継承を検証する
+
+```bash
+{% for r in csv_rows %}{% if r["default_acl"] == "true" %}touch {{ r["target_path"] }}/inherited-test.txt
+getfacl {{ r["target_path"] }}/inherited-test.txt
+{% endif %}{% endfor %}```
+
+新規作成したファイルに、親ディレクトリで設定したエントリが自動的に付与されていることを確認します。
+
+## 動作確認
+
+- 各対象パスの `ls -ld` 出力末尾に `+` が付いていること
+- `getfacl` の出力に `{{ csv_rows[0]["entry_type"] }}:{{ csv_rows[0]["entry_name"] }}:{{ csv_rows[0]["perms"] }}` のエントリが含まれること
+- デフォルトACLを設定したディレクトリ配下の新規ファイルに、ACLエントリが継承されていること
+
+## 注意事項
+
+- ACLはバックアップ・コピー方法によって失われる場合がある。`cp -a`や`tar --acls`、`rsync -A`など、ACLを保持するオプションを使用すること。
+- `mask`エントリはグループ・個別ユーザーエントリの実効権限上限を決めるため、`setfacl -m`実行後は`getfacl`で意図した`mask`になっているか必ず確認する。
+- 例外許可は棚卸ししないと蓄積して見通しが悪くなる。定期的に`getfacl -R`で一覧化し、不要になったエントリは`setfacl -x`で削除する。

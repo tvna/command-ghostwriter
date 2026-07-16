@@ -1,0 +1,87 @@
+# MACアドレス台帳とスイッチポート特定手順の整備
+
+スイッチのMACアドレステーブルから端末の物理接続ポートを特定する手順と、MACアドレス台帳の整備・実態突合の運用を整理します。「この端末はどこに繋がっているか」を素早く答えられるようにする台帳です。
+
+## 目的
+
+MACアドレステーブルとARPテーブルの読み方を理解し、不明端末や障害端末の物理的な接続位置を素早く特定できるようになることを目指します。あわせて、台帳を継続的に実態と突き合わせる運用を定着させます。
+
+## 用語解説
+
+- **MACアドレステーブル**: スイッチが「どのMACアドレスがどのポートから見えているか」を学習して保持するテーブル。`show mac address-table`で参照する
+- **ARPテーブル**: IPアドレスとMACアドレスの対応表。ルータやサーバの`arp -a`、`ip neigh`で参照する
+- **VLAN**: MACアドレステーブルはVLANごとに分かれて学習されるため、検索時はVLAN番号の指定が必要になることが多い
+- **不明端末**: 台帳に登録がないMACアドレスがスイッチ上で検出された端末。不正接続や未登録機器の可能性がある
+- **台帳突合**: 事前に整備した台帳と、スイッチ・ARPから収集した実態情報を照らし合わせて差異を洗い出す作業
+
+## シナリオ設定
+
+台帳には以下の {{ csv_rows | length }} 台を登録しています。
+
+| mac_address | device_name | expected_switch | expected_port | vlan | owner |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["mac_address"] }} | {{ r["device_name"] }} | {{ r["expected_switch"] }} | {{ r["expected_port"] }} | {{ r["vlan"] }} | {{ r["owner"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 台帳を最新化しやすい形で保持する
+
+```bash
+cat <<'EOF' > mac-inventory.csv
+mac_address,device_name,expected_switch,expected_port,vlan,owner
+{% for r in csv_rows %}{{ r["mac_address"] }},{{ r["device_name"] }},{{ r["expected_switch"] }},{{ r["expected_port"] }},{{ r["vlan"] }},{{ r["owner"] }}
+{% endfor %}EOF
+```
+
+### 2. スイッチのMACアドレステーブルを検索する
+
+```bash
+{% for r in csv_rows %}ssh {{ r["expected_switch"] }} "show mac address-table address {{ r["mac_address"] }}"
+{% endfor %}```
+
+対象MACアドレスがVLAN `{{ csv_rows[0]["vlan"] }}` などのどのVLAN・どのポートに学習されているかを確認します。
+
+### 3. ARPテーブルからIPアドレスを紐付ける
+
+```bash
+{% for r in csv_rows %}arp -a | grep -i {{ r["mac_address"] }}
+{% endfor %}```
+
+ルータや監視サーバ上の`arp -a`(または`ip neigh`)で、MACアドレスに対応する現在のIPアドレスを確認します。
+
+### 4. 台帳と実態を突合する
+
+```bash
+{% for r in csv_rows %}echo "expect: {{ r["device_name"] }} on {{ r["expected_switch"] }} {{ r["expected_port"] }} (vlan {{ r["vlan"] }})"
+{% endfor %}```
+
+手順2で得られたスイッチ/ポート/VLANが、台帳記載の`expected_switch`/`expected_port`/`vlan`と一致するかを1台ずつ確認します。
+
+### 5. 不明端末を発見した場合の追跡手順
+
+```bash
+ssh {{ csv_rows[0]["expected_switch"] }} "show mac address-table dynamic vlan {{ csv_rows[0]["vlan"] }}"
+```
+
+台帳に無いMACアドレスが出力に含まれていないかを確認します。含まれる場合は、そのポートの接続先を現地調査またはLLDP隣接情報から特定します。
+
+### 6. 差異を分類し台帳を更新する
+
+```bash
+echo "差異分類: (a) ポート変更のみ (b) 未登録端末 (c) 台帳側の誤記"
+```
+
+差異が見つかった場合、原因を上記のいずれかに分類したうえで、台帳(`mac-inventory.csv`)または現地配線のどちらを正とするかを決めて更新します。
+
+## 動作確認
+
+- 登録された {{ csv_rows | length }} 台すべてについて、`show mac address-table`の結果が台帳の`expected_switch`/`expected_port`/`vlan`と一致すること
+- 不明端末調査で検出した未登録MACアドレスが、追跡の結果いずれかの分類(ポート変更/未登録端末/台帳誤記)に振り分けられていること
+- 台帳更新後、再度の突合で差異がゼロになること
+
+## 注意事項
+
+- MACアドレステーブルはスイッチの再起動やエージングタイムアウトでエントリが消えることがある。検索時にヒットしない場合は、対象端末が実際に通信中かを確認してから「不在」と判断する。
+- 台帳の`owner`欄が古いままだと、不明端末発覚時の連絡先特定が遅れる。定期棚卸し(四半期に一度など)で所有者情報も合わせて更新する。
+- スイッチへのSSHログインや設定変更を伴わない、閲覧コマンドのみで完結する調査であることを確認し、調査目的以外の設定変更は行わない。

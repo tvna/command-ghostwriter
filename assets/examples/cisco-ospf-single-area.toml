@@ -1,0 +1,5 @@
+router_id = "10.10.10.1"
+area_id = 0
+networks = ["10.10.10.0 0.0.0.255", "10.10.20.0 0.0.0.255", "192.0.2.0 0.0.0.3"]
+passive_interfaces = ["GigabitEthernet0/1", "GigabitEthernet0/2"]
+reference_bandwidth = 10000

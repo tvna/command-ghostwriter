@@ -1,0 +1,9 @@
+ca_key_path: "/etc/ssh/ca/ssh_ca_key"
+host_principals:
+  - "app01.internal"
+  - "app02.internal"
+user_principals:
+  - "ops-team"
+  - "developers"
+validity: "+52w"
+revoked_keys_file: "/etc/ssh/ca/revoked_keys"

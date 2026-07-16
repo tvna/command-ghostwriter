@@ -1,0 +1,5 @@
+container_port: 3000
+ollama_base_url: "http://gpu01.internal:11434"
+data_volume: "open-webui-data"
+auth_mode: "signup_disabled"
+admin_user: "admin@example.com"

@@ -1,0 +1,4 @@
+alarm_name,metric_name,instance_id,threshold,period,sns_topic
+app-cpu-high,CPUUtilization,i-0123456789abcdef0,80,300,arn:aws:sns:ap-northeast-1:123456789012:ops-alerts
+app-status-check-failed,StatusCheckFailed,i-0123456789abcdef0,1,60,arn:aws:sns:ap-northeast-1:123456789012:ops-alerts
+db-cpu-high,CPUUtilization,i-0fedcba9876543210,75,300,arn:aws:sns:ap-northeast-1:123456789012:ops-alerts

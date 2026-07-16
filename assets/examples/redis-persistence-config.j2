@@ -1,0 +1,95 @@
+# Redisの永続化(RDB/AOF)設定
+
+RDBスナップショットとAOFの特性を踏まえ、要件に応じた永続化設定を行い、再起動後のデータ残存を検証します。sudo権限で実施してください。
+
+## 目的
+
+RDBとAOFそれぞれの永続化方式の特性・トレードオフを理解し、`redis.conf`で要件に合った設定を反映して再起動後のデータ復旧を確認できるようになることを目指します。
+
+## 用語解説
+
+- **RDB（Redis Database）**: 指定した条件を満たした時点でメモリ全体のスナップショットをディスクに書き出す永続化方式。復旧は速いが、直前の書き込みを失う可能性がある
+- **AOF（Append Only File）**: 書き込みコマンドを追記ログとして記録する永続化方式。復旧時はログを再生する。RDBよりデータ損失が少ない
+- **appendfsyncの違い**: `always`(コマンド毎にfsync、最も安全だが低速)、`everysec`(1秒毎にfsync、既定の折衷案)、`no`(OS任せ、最速だが損失リスクが高い)
+- **save_rules**: RDBスナップショットを取得する条件(`<秒> <変更数>`の組を複数指定)。`900 1`は「900秒間に1回以上の変更があればスナップショット」を意味する
+- **maxmemory-policy**: `maxmemory`到達時にどのキーを追い出すかの戦略。`noeviction`はエラーで拒否し、追い出しを行わない
+
+## シナリオ設定
+
+保存条件 `{{ save_rules }}`、AOF有効化 `{{ aof_enabled }}`、fsyncポリシー `{{ appendfsync }}`、データディレクトリ `{{ dir }}`、上限メモリ `{{ maxmemory }}`、追い出し方針 `{{ maxmemory_policy }}` で永続化を設定します。
+
+## 手順
+
+### 1. 現状の永続化設定を確認する
+
+```bash
+redis-cli CONFIG GET save
+redis-cli CONFIG GET appendonly
+redis-cli CONFIG GET dir
+redis-cli INFO persistence | grep -E 'rdb_|aof_'
+```
+
+### 2. redis.confを編集する
+
+```bash
+sudo tee -a /etc/redis/redis.conf <<'EOF'
+save {{ save_rules }}
+dir {{ dir }}
+{% if aof_enabled %}appendonly yes
+appendfsync {{ appendfsync }}
+{% else %}appendonly no
+{% endif %}maxmemory {{ maxmemory }}
+maxmemory-policy {{ maxmemory_policy }}
+EOF
+```
+
+### 3. サービスを再起動し反映を確認する
+
+```bash
+sudo systemctl restart redis-server
+redis-cli CONFIG GET save
+redis-cli CONFIG GET appendonly
+```
+
+### 4. BGSAVE・BGREWRITEAOFの動作を確認する
+
+```bash
+redis-cli SET persistence_probe "$(date -Iseconds)"
+redis-cli BGSAVE
+{% if aof_enabled %}redis-cli BGREWRITEAOF
+{% endif %}sleep 2
+redis-cli INFO persistence | grep -E 'rdb_last_bgsave_status|aof_last_bgrewrite_status'
+ls -lh {{ dir }}
+```
+
+`rdb_last_bgsave_status`が`ok`であることを確認します。
+
+### 5. 再起動後のデータ残存を検証する
+
+```bash
+sudo systemctl restart redis-server
+redis-cli GET persistence_probe
+```
+
+`persistence_probe`キーの値が再起動前と一致していれば、永続化が正しく機能しています。
+
+### 6. maxmemory設定を検証する
+
+```bash
+redis-cli CONFIG GET maxmemory
+redis-cli CONFIG GET maxmemory-policy
+redis-cli INFO memory | grep used_memory_human
+```
+
+## 動作確認
+
+- `redis-cli CONFIG GET save`が`{{ save_rules }}`を返すこと
+- `redis-cli CONFIG GET appendonly`が設定(`{{ aof_enabled }}`)と一致すること
+- 再起動後も`persistence_probe`キーの値が保持されていること
+- `redis-cli INFO persistence`の`rdb_last_bgsave_status`が`ok`であること
+
+## 注意事項
+
+- `appendfsync {{ appendfsync }}`が`always`でない場合、Redisプロセスクラッシュ時に直近数秒分の書き込みが失われる可能性がある。損失許容度に応じて選定する。
+- `maxmemory_policy = {{ maxmemory_policy }}`が`noeviction`の場合、`{{ maxmemory }}`到達時に新規書き込みがエラーになる。監視でメモリ使用率を追跡すること。
+- `dir {{ dir }}`の書き込み権限がRedis実行ユーザーにない場合、RDB/AOFの書き出しが静かに失敗することがある。`INFO persistence`のステータスを必ず確認する。

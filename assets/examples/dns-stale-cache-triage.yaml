@@ -1,0 +1,9 @@
+fqdn: api.example.internal
+old_ip: 203.0.113.10
+new_ip: 203.0.113.55
+ttl_value: 300
+cache_layers:
+  - ブラウザ(OSキャッシュとは別に自前で保持)
+  - OSスタブリゾルバ(systemd-resolved)
+  - 社内ローカルキャッシュDNS(dnsmasq)
+  - 権威側に近いキャッシュDNS(BIND)

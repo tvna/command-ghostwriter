@@ -1,0 +1,5 @@
+item_category,description,status,action_needed,reference_url
+継続障害,app01でAPIレスポンス遅延が断続的に発生,調査中(暫定復旧済み),次回悪化時はDBスロークエリログを確認,https://status.internal.example/incidents/4821
+注意ホスト,db01のディスク使用率が80%を超過,監視中,週明けにログローテーション設定を見直す,https://wiki.internal.example/runbooks/disk-usage-triage
+予定作業,web01でカーネルアップデート後の再起動が必要,未実施,深夜メンテナンス枠で再起動を実施,https://wiki.internal.example/maintenance/2026-07-20
+連絡先,エスカレーション先はネットワークチーム当番,常時,障害がL3以下に及ぶ場合は即連絡,https://wiki.internal.example/oncall/network-team

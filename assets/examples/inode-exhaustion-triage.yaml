@@ -1,0 +1,7 @@
+filesystem: ext4
+mount_point: /var/lib/app-data
+suspect_dirs:
+  - /var/lib/app-data/tmp/sessions
+  - /var/lib/app-data/cache/thumbnails
+cleanup_policy: 7日以上前のセッションファイルを削除し、サムネイルキャッシュは再生成可能なため全削除する
+recreate_note: inode数はmkfs時にフォーマットオプションで決定されるため、恒久対策には -N オプション指定での再フォーマットが必要になる場合がある

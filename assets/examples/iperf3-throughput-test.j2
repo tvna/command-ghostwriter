@@ -1,0 +1,102 @@
+# iperf3によるネットワークスループット測定
+
+`iperf3`のサーバ/クライアント測定でTCP/UDPの実効帯域を定量化し、期待値との乖離を評価します。「なんとなく遅い」を数値化して報告できるようにする手順です。
+
+## 目的
+
+`iperf3`を使ってサーバ・クライアント間のスループットを再現性のある形で測定し、期待帯域との差分・再送率・ジッタから経路上の問題を評価できるようになることを目指します。
+
+## 用語解説
+
+- **スループット**: 実際に転送できたデータ量を時間で割った実効帯域。理論上のリンク速度とは一致しないのが普通
+- **再送(retransmits)**: TCPでパケットロスが発生し再送された回数。回線品質や輻輳の指標になる
+- **ジッタ**: パケット到着間隔のばらつき。UDP測定で計測され、音声・映像系トラフィックの品質に影響する
+- **パラレルストリーム**: 複数のTCPコネクションを同時に張って測定すること。単一ストリームの上限を超えた帯域を確認する際に使う
+- **UDPモード**: 帯域を指定して一方的に送りつけ、パケットロス率とジッタを測定するモード(TCPの輻輳制御が働かない)
+
+## シナリオ設定
+
+サーバ役は `{{ server_host }}`、クライアント役は `{{ client_host }}` です。期待帯域は `{{ expected_bandwidth }}`、測定時間は `{{ duration }}` 秒、並列ストリーム数は `{{ parallel_streams }}` です。UDPモードでの測定は{% if udp_test %}実施します{% else %}実施しません{% endif %}。
+
+## 手順
+
+### 1. 測定環境を確認する
+
+```bash
+ssh {{ server_host }} 'uptime && ss -tan | grep ESTAB | wc -l'
+ssh {{ client_host }} 'uptime && ss -tan | grep ESTAB | wc -l'
+```
+
+業務時間帯や他のバッチ処理と重ならないかを確認します。既存のコネクション数が多い場合は測定結果が汚染されるため、可能なら閑散時間帯に実施します。
+
+### 2. サーバ側でiperf3をリスン状態にする
+
+```bash
+ssh {{ server_host }} 'iperf3 -s -D --logfile /var/log/iperf3-server.log'
+```
+
+`-D`でデーモン化し、SSHセッションを切断しても測定を継続できるようにします。
+
+### 3. クライアントからTCPスループットを測定する
+
+```bash
+iperf3 -c {{ server_host }} -t {{ duration }} -P {{ parallel_streams }}
+```
+
+`-P {{ parallel_streams }}`で並列ストリームを張り、単一ストリームのボトルネックに引きずられていないかを確認します。
+
+### 4. 結果を期待帯域と比較する
+
+```bash
+iperf3 -c {{ server_host }} -t {{ duration }} -P {{ parallel_streams }} --json | tee /tmp/iperf3-result.json
+python3 -c "import json;d=json.load(open('/tmp/iperf3-result.json'));print(d['end']['sum_received']['bits_per_second']/1e6,'Mbps')"
+```
+
+計測値が `{{ expected_bandwidth }}` を大きく下回る場合、経路上の輻輳・NICのオフロード設定・MTUなどを疑います。
+
+{% if udp_test %}
+### 5. UDPモードでパケットロスとジッタを測定する
+
+```bash
+iperf3 -c {{ server_host }} -u -b {{ expected_bandwidth }} -t {{ duration }}
+```
+
+出力の `Jitter` 列と `Lost/Total Datagrams` 列を確認します。ロス率が数%を超える場合は経路品質の問題を疑います。
+
+### 6. 逆方向(サーバ→クライアント)も測定する
+
+```bash
+iperf3 -c {{ server_host }} -R -t {{ duration }} -P {{ parallel_streams }}
+```
+
+`-R`でリバースモードにし、非対称な帯域制限(上り/下りの差)がないかを確認します。
+{% else %}
+### 5. 逆方向(サーバ→クライアント)も測定する
+
+```bash
+iperf3 -c {{ server_host }} -R -t {{ duration }} -P {{ parallel_streams }}
+```
+
+`-R`でリバースモードにし、非対称な帯域制限(上り/下りの差)がないかを確認します。
+{% endif %}
+
+### {% if udp_test %}7{% else %}6{% endif %}. サーバを停止し測定結果を記録する
+
+```bash
+ssh {{ server_host }} 'pkill -f "iperf3 -s"'
+```
+
+測定結果(TCP/UDP双方の値、日時、経路)を記録し、期待帯域 `{{ expected_bandwidth }}` との乖離を報告します。
+
+## 動作確認
+
+- クライアント→サーバ(`{{ client_host }}` → `{{ server_host }}`)のTCP測定値が `{{ expected_bandwidth }}` に対して妥当な範囲であること
+- リバースモード測定で上り/下りの帯域に極端な非対称がないこと
+{% if udp_test %}- UDP測定でパケットロス率とジッタが許容範囲内であること
+{% endif %}- サーバ側の`iperf3 -s`プロセスが測定後に停止していること
+
+## 注意事項
+
+- `iperf3`は回線の帯域を実際に使い切る負荷テストである。本番トラフィックがある経路・時間帯での実施は業務影響を伴うため、事前に関係者へ周知する。
+- UDPモードの`-b`指定を誤って高く設定すると、意図せず回線を飽和させる。まずは控えめな値から始めて段階的に上げる。
+- 測定後は必ずサーバ側の`iperf3 -s`プロセスを停止する。放置するとポートが開いたままになりリソースを消費し続ける。

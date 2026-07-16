@@ -1,0 +1,6 @@
+vg_name: vg_data
+lv_name: lv_app
+new_device: /dev/sdb
+extend_size: 20G
+filesystem: xfs
+mount_point: /var/lib/app

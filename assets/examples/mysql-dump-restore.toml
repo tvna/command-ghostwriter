@@ -1,0 +1,6 @@
+db_name = "inventorydb"
+db_user = "backup_operator"
+backup_dir = "/var/backups/mysql"
+single_transaction = true
+retention_days = 14
+restore_test_db = "inventorydb_restore_test"

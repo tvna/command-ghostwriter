@@ -1,0 +1,92 @@
+# SNMPによるネットワーク機器監視の設定
+
+機器側のSNMP有効化と`snmpwalk`での取得確認から、監視対象OIDの選定・定期取得までを行う手順です。
+
+## 目的
+
+SNMPによる機器監視の基本構造(OID・MIB・バージョン差異)を理解し、監視対象OIDを選定して安全に定期取得できる状態を構築できるようになることを目指します。
+
+## 用語解説
+
+- **OID(Object Identifier)**: 機器が公開する個々の情報項目(インターフェース通信量、CPU使用率等)を一意に指し示す階層的な数値識別子
+- **MIB(Management Information Base)**: OIDとその意味・データ型を定義した仕様書。ベンダーMIBを読み込むことでOIDを人が読める名前に変換できる
+- **SNMP v2c**: コミュニティ名(平文の共有文字列)で認証する旧バージョン。設定は簡単だが盗聴耐性がない
+- **SNMP v3**: ユーザー単位の認証・暗号化に対応したバージョン。認証情報が盗聴されるリスクを下げられる
+- **community_or_user**: v2cではコミュニティ名、v3ではSNMPユーザー名を表す、本手順書内での呼称
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 項目をSNMP監視の対象とします。
+
+| device | mgmt_ip | snmp_version | community_or_user | target_oid | metric_name |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["device"] }} | {{ r["mgmt_ip"] }} | {{ r["snmp_version"] }} | {{ r["community_or_user"] }} | {{ r["target_oid"] }} | {{ r["metric_name"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 機器側でSNMPを有効化する(読み取り専用・ACL付き)
+
+対象機器の管理画面またはCLIで、読み取り専用(RO)アクセスと、監視サーバのIPに限定したACLを設定します。Cisco系の例です。
+
+```bash
+snmp-server community {{ csv_rows[0]["community_or_user"] }} RO 10
+access-list 10 permit host <監視サーバIP>
+```
+
+v3対象機器({{ csv_rows[2]["device"] }})はユーザー単位で設定します。
+
+```bash
+snmp-server group MONITOR-GRP v3 auth
+snmp-server user {{ csv_rows[2]["community_or_user"] }} MONITOR-GRP v3 auth sha <認証パスワード> priv aes 128 <暗号化パスワード>
+```
+
+### 2. snmpwalkで取得確認を行う(v2c)
+
+```bash
+{% for r in csv_rows %}{% if r["snmp_version"] == "v2c" %}snmpwalk -v2c -c {{ r["community_or_user"] }} {{ r["mgmt_ip"] }} {{ r["target_oid"] }}
+{% endif %}{% endfor %}```
+
+### 3. snmpgetで取得確認を行う(v3)
+
+```bash
+{% for r in csv_rows %}{% if r["snmp_version"] == "v3" %}snmpget -v3 -u {{ r["community_or_user"] }} -l authPriv -a SHA -x AES {{ r["mgmt_ip"] }} {{ r["target_oid"] }}
+{% endif %}{% endfor %}```
+
+### 4. インターフェース統計の読み方を確認する
+
+```bash
+snmpwalk -v2c -c {{ csv_rows[0]["community_or_user"] }} {{ csv_rows[0]["mgmt_ip"] }} {{ csv_rows[0]["target_oid"] }}
+```
+
+`ifInOctets`はカウンタ値であり、単調増加する累積バイト数です。2時点の差分を取得間隔で割ることでスループットに換算します。
+
+### 5. 全対象への定期取得を組み込む
+
+```bash
+cat <<'EOF' >> /etc/snmp-poll/targets.txt
+{% for r in csv_rows %}{{ r["device"] }},{{ r["mgmt_ip"] }},{{ r["snmp_version"] }},{{ r["target_oid"] }},{{ r["metric_name"] }}
+{% endfor %}EOF
+```
+
+このファイルを監視基盤(node_exporterのSNMPエクスポータ等)の取得対象リストとして読み込ませ、可視化ダッシュボードへ接続します。
+
+### 6. コミュニティ名・認証情報の管理を確認する
+
+```bash
+grep -c "public-ro\|snmp-mon-user" /etc/snmp-poll/targets.txt
+```
+
+デフォルトのコミュニティ名(`public`等)が残っていないか、対象全機器で確認します。
+
+## 動作確認
+
+- {{ csv_rows | length }} 項目すべてで `snmpwalk`/`snmpget` がタイムアウトなく応答を返すこと
+- v2c対象と v3対象で、それぞれ対応する認証方式で取得できていること
+- 取得したOIDの値が定期取得基盤に登録され、時系列で値が更新されていくこと
+
+## 注意事項
+
+- v2cのコミュニティ名は平文で流れるため、監視サーバと機器の間のネットワークが信頼できる経路であることを前提とする。可能な機器は`{{ csv_rows[2]["snmp_version"] }}`への移行を検討する。
+- ACLを設定せずにSNMPを有効化すると、外部から機器情報を読み取られるリスクがある。読み取り専用であっても情報漏えいにつながるため、必ず監視サーバのIPに限定する。
+- デフォルトコミュニティ名(`public`)を本番機器に残さない。監査対象として定期的に棚卸しする。

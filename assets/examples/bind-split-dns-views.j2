@@ -1,0 +1,99 @@
+# BINDのviewによるスプリットDNS構成手順 — {{ zone_name }}
+
+社内クライアントと社外クライアントで **{{ zone_name }}** の名前解決結果を出し分けるスプリット DNS を、BIND の `view` 機能で構成します。
+
+## 目的
+
+内部専用のアドレス（プライベート IP や社内限定サービス）を外部に漏らさず、社内からは内部向けの応答、社外からは公開用の応答を返す構成を安全に作れるようになることを目指します。
+
+## 用語解説
+
+- **view**: クライアントの送信元アドレスなどの条件ごとに、異なるゾーンデータや設定を適用する BIND の機能
+- **match-clients**: view に一致させるクライアント条件（IP レンジなど）を指定する項目
+- **評価順序**: `named.conf` に定義した view は上から順に評価され、最初に一致した view が採用される
+- **スプリットDNS（split-horizon DNS）**: 同一ドメイン名に対して問い合わせ元によって異なる応答を返す構成全般を指す用語
+- **内部ゾーンファイル/外部ゾーンファイル**: view ごとに別々に管理する、同じドメイン用の異なるレコード定義ファイル
+
+## シナリオ設定
+
+対象ゾーンは `{{ zone_name }}`。社内クライアントの条件は `{{ internal_match_clients }}` とし、内部向けゾーンファイルは `{{ internal_zone_file }}`、外部向けゾーンファイルは `{{ external_zone_file }}` に分離します。再帰問い合わせの方針は「{{ recursion_policy }}」とします。
+
+## 手順
+
+### 1. 内部向け・外部向けのゾーンファイルをそれぞれ用意する
+
+同じドメインでも中身が異なるため、view ごとに別ファイルとして管理します。
+
+```bash
+mkdir -p "$(dirname {{ internal_zone_file }})" "$(dirname {{ external_zone_file }})"
+# {{ internal_zone_file }} には社内限定レコード（内部IP等）を記述
+# {{ external_zone_file }} には公開用レコードのみを記述
+named-checkzone {{ zone_name }} {{ internal_zone_file }}
+named-checkzone {{ zone_name }} {{ external_zone_file }}
+```
+
+### 2. named.conf に internal view を定義する
+
+`match-clients` に社内ネットワークを指定し、内部ゾーンファイルを紐付けます。評価順序上、より限定的な条件を先に書きます。
+
+```bash
+cat >> /etc/named.conf <<'EOF'
+view "internal" {
+    match-clients { {{ internal_match_clients }}; };
+    recursion yes;
+    zone "{{ zone_name }}" IN {
+        type master;
+        file "{{ internal_zone_file }}";
+    };
+};
+EOF
+```
+
+### 3. named.conf に external view を定義する
+
+社内条件に一致しなかったクライアント向けに、公開用ゾーンファイルを紐付けます。方針は「{{ recursion_policy }}」に沿って `recursion no;` を設定します。
+
+```bash
+cat >> /etc/named.conf <<'EOF'
+view "external" {
+    match-clients { any; };
+    recursion no;
+    zone "{{ zone_name }}" IN {
+        type master;
+        file "{{ external_zone_file }}";
+    };
+};
+EOF
+```
+
+### 4. 構文チェックして反映する
+
+```bash
+named-checkconf
+rndc reload
+```
+
+### 5. 内外それぞれからdigで応答を検証する
+
+社内セグメント（`{{ internal_match_clients }}` に含まれるホスト）と、それ以外のホストの双方から問い合わせ、返る内容が異なることを確認します。
+
+```bash
+# 社内クライアントから実行
+dig {{ zone_name }} A +short
+
+# 社外相当のクライアント（またはmatch-clients外のIP）から実行
+dig {{ zone_name }} A +short
+```
+
+## 動作確認
+
+- 社内クライアントからの問い合わせで internal view のレコード（内部向け内容）が返ること
+- 社外クライアントからの問い合わせで external view のレコード（公開用内容）が返り、内部限定情報が含まれないこと
+- external view で再帰問い合わせが拒否され、オープンリゾルバ化していないこと
+- `named-checkconf` がエラーなく通ること
+
+## 注意事項
+
+- view は `named.conf` 内での記述順が評価順序そのものになる。`match-clients { any; }` の view は必ず最後に置くこと。
+- 内部・外部のゾーンファイルは独立して管理されるため、レコードを追加する際は更新対象を間違えないよう二重更新の運用ルールを定めること。
+- view をまたいでのゾーン転送設定は個別に必要であり、本手順には含まない。

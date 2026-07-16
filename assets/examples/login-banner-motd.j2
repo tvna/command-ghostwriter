@@ -1,0 +1,86 @@
+# ログインバナーとMOTDによる警告・周知設定
+
+接続前に表示する警告バナー(issue.net)と、接続後に表示するMOTDを整備し、不正利用への警告と運用上の周知を確実に届けます。
+
+## 目的
+
+Banner設定とmotdの仕組みの違いを理解し、認証前に表示すべき法的警告文と、認証後に表示すべき運用周知を適切に分離して設定できるようになることを目指します。
+
+## 用語解説
+
+- **Banner**: sshd_configで指定する、認証開始前に表示されるファイルの内容
+- **issue.net**: SSH接続時のバナー表示によく使われる慣例的なファイル名(/etc用)
+- **motd**: Message of the day。ログイン成功後にシェルへ渡る直前に表示されるメッセージ
+- **update-motd.d**: Ubuntu/Debianで動的にmotdを組み立てる仕組み(/etc/update-motd.d/配下のスクリプト群)
+- **動的MOTD**: システム情報(稼働時間・更新件数など)を起動時に生成して表示する仕組み
+
+## シナリオ設定
+
+接続前バナーの本文は次の通りです。
+
+```
+{{ banner_text }}
+```
+
+接続後MOTDは {{ motd_lines | length }} 行構成で、動的MOTD生成の無効化は `{{ disable_dynamic_motd }}` です。法的注記として `{{ legal_note }}` を末尾に付記します。
+
+## 手順
+
+### 1. 現在のバナー・MOTD設定を確認する
+
+```bash
+sudo grep -i '^Banner' /etc/ssh/sshd_config
+ls -la /etc/update-motd.d/ 2>/dev/null
+cat /etc/motd 2>/dev/null
+```
+
+### 2. issue.netに接続前バナーを作成する
+
+```bash
+sudo tee /etc/issue.net <<'EOF'
+{{ banner_text }}
+EOF
+```
+
+歓迎の意を表す文言(“Welcome”など)は、無許可アクセス者にも歓迎の印象を与え法的な不正アクセス立証を弱める恐れがあるため避けます。
+
+### 3. sshd_configでBannerを有効化する
+
+```bash
+sudo sed -i 's|^#\?Banner.*|Banner /etc/issue.net|' /etc/ssh/sshd_config
+sudo sshd -t
+sudo systemctl reload sshd
+```
+
+### 4. 動的MOTDを整理し、静的MOTDを設定する
+
+```bash
+{% if disable_dynamic_motd %}sudo chmod -x /etc/update-motd.d/* 2>/dev/null
+{% endif %}sudo tee /etc/motd <<'EOF'
+{% for line in motd_lines %}{{ line }}
+{% endfor %}
+{{ legal_note }}
+EOF
+```
+
+### 5. SSH接続で表示を検証する
+
+```bash
+ssh -o PreferredAuthentications=none testuser@localhost 2>&1 | head -n 5
+ssh testuser@localhost 'exit' 2>&1 | head -n $(( {{ motd_lines | length }} + 3 ))
+```
+
+`PreferredAuthentications=none` を指定すると認証成功前に切断されるため、バナーのみを表示させて確認できます。
+
+## 動作確認
+
+- 認証前の接続時に `{{ banner_text }}` を含むバナーが表示されること
+- 認証成功後のログイン直後に、設定した {{ motd_lines | length }} 行のMOTDと `{{ legal_note }}` が表示されること
+- `{{ disable_dynamic_motd }}` が真の場合、稼働時間や更新件数などの動的な情報が表示に含まれないこと
+
+## 注意事項
+
+- バナー文言には歓迎表現を使わず、無許可アクセスの禁止と監視・記録の事実を明記する。
+- `sshd -t` による構文検証を経ずに `reload` すると、設定誤りでSSHサービス全体が起動不能になる恐れがある。
+- 動的MOTDスクリプトの実行権限を外す変更は、システム情報表示に依存する既存の運用フローに影響しないか事前に確認する。
+- 法的な注記文言(`{{ legal_note }}` 相当)は、実際の運用では法務部門の確認を経た文言に置き換える。

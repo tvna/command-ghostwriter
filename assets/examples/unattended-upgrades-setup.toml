@@ -1,0 +1,5 @@
+allowed_origins = "${distro_id}:${distro_codename}-security"
+blacklist_packages = "linux-image*, mysql-server*"
+auto_reboot = false
+reboot_time = "03:30"
+mail_to = "ops@example.com"

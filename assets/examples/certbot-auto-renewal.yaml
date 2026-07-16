@@ -1,0 +1,5 @@
+domain: "www.example.com"
+webroot_path: "/var/www/html"
+email: "admin@example.com"
+reload_command: "systemctl reload nginx"
+renew_hook_path: "/etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh"

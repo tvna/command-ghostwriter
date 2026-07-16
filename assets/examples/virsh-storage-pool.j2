@@ -1,0 +1,77 @@
+# libvirtストレージプールとボリュームの管理 — {{ pool_name }}
+
+virshで専用ディレクトリ **{{ pool_path }}** をストレージプール **{{ pool_name }}** として定義し、`{{ volume_format }}` 形式のボリューム **{{ volume_name }}** の作成・拡張・削除を管理します。
+
+## 目的
+
+libvirtのプール/ボリューム管理モデルを理解し、virshコマンドだけでディスクイメージの作成から拡張、削除までを完結できるようになることを目指します。
+
+## 用語解説
+
+- **プール(pool)**: libvirtがディスクイメージの保存場所として管理する単位。ディレクトリ・LVM・NFS等さまざまな種別がある
+- **ボリューム(volume)**: プール内に作成される個々のディスクイメージ。VMのディスクとして割り当てられる
+- **qcow2とraw**: qcow2はスナップショットや差分に対応したQEMU標準形式、rawは単純なブロックイメージでオーバーヘッドが小さい
+- **autostart**: ホスト起動時にプールを自動的にアクティブ化する設定
+
+## シナリオ設定
+
+パス `{{ pool_path }}` を実体とするプール `{{ pool_name }}` を定義し、サイズ `{{ volume_size }}`・形式 `{{ volume_format }}` のボリューム `{{ volume_name }}` を作成します。
+
+## 手順
+
+### 1. プール用ディレクトリを準備してプールを定義する
+
+```bash
+mkdir -p {{ pool_path }}
+virsh pool-define-as {{ pool_name }} dir --target {{ pool_path }}
+```
+
+### 2. プールをビルド・起動し自動起動を有効化する
+
+```bash
+virsh pool-build {{ pool_name }}
+virsh pool-start {{ pool_name }}
+virsh pool-autostart {{ pool_name }}
+virsh pool-list --all
+```
+
+### 3. ボリュームを作成する
+
+```bash
+virsh vol-create-as {{ pool_name }} {{ volume_name }} {{ volume_size }} --format {{ volume_format }}
+virsh vol-list {{ pool_name }}
+```
+
+### 4. ボリュームを拡張する
+
+```bash
+virsh vol-resize {{ volume_name }} 30G --pool {{ pool_name }}
+qemu-img info {{ pool_path }}/{{ volume_name }}
+```
+
+### 5. 使用状況を確認する
+
+```bash
+virsh pool-info {{ pool_name }}
+virsh vol-info {{ volume_name }} --pool {{ pool_name }}
+```
+
+### 6. 不要になったボリュームを削除する
+
+```bash
+virsh vol-delete {{ volume_name }} --pool {{ pool_name }}
+virsh vol-list {{ pool_name }}
+```
+
+## 動作確認
+
+- `virsh pool-list --all` に `{{ pool_name }}` が active・autostart yes で表示されること
+- `virsh vol-list {{ pool_name }}` に `{{ volume_name }}` が表示されること
+- `qemu-img info` で拡張後のボリュームサイズが30Gへ増加していること
+- `virsh vol-delete` 後、`vol-list` から `{{ volume_name }}` が消えること
+
+## 注意事項
+
+- `virsh vol-resize` はボリューム自体の容量拡張のみであり、VM内のファイルシステム拡張（`resize2fs` 等）は別途VM側で実施する必要がある。
+- `virsh vol-delete` は該当ボリュームのデータを完全に削除する破壊的操作であり、稼働中VMが使用しているボリュームには実行しない。
+- プールを削除(`pool-destroy`/`pool-undefine`)しても `{{ pool_path }}` 配下のファイル自体は残る場合があるため、完全撤去にはディレクトリの手動削除も検討する。

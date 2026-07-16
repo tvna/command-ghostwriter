@@ -1,0 +1,85 @@
+# tcpdumpによるパケットキャプチャの基本
+
+対象トラフィックをBPFフィルタで絞って`tcpdump`で取得・保存し、TCPハンドシェイクの読み方とWiresharkへの引き渡し方までを一巡します。root権限(sudo)で実施してください。
+
+## 目的
+
+BPFフィルタとsnaplenの意味を理解し、対象を絞った安全なキャプチャの取得・保存・一次解析ができるようになることを目指します。
+
+## 用語解説
+
+- **BPFフィルタ**: `tcpdump`や`Wireshark`が使う、キャプチャ対象パケットを絞り込むための共通フィルタ言語(Berkeley Packet Filter)
+- **snaplen**: パケットごとに保存するバイト数の上限。ヘッダのみで十分な場合は小さく絞ることでファイルサイズを抑えられる
+- **pcap**: パケットキャプチャの標準保存形式。`tcpdump`の`-w`出力や`Wireshark`の読み込みで共通に使われる
+- **プロミスキャスモード**: 自ホスト宛でないパケットも含めて受信するNICの動作モード。共有セグメントでの調査に使う
+- **SYN/SYN-ACK/ACK**: TCPの3ウェイハンドシェイクを構成するフラグの組。接続確立の成否や遅延の切り分けに使う
+
+## シナリオ設定
+
+インターフェース`{{ interface }}`で、フィルタ`{{ capture_filter }}`・snaplen `{{ snaplen }}`バイトの条件でキャプチャを取得し、`{{ output_file }}`へ保存します。取得条件は`{{ duration_or_count }}`、解析観点は「{{ analysis_focus }}」です。
+
+## 手順
+
+### 1. 事前確認(ディスク空きと負荷)を行う
+
+```bash
+df -h $(dirname {{ output_file }})
+ip -s link show {{ interface }}
+```
+
+キャプチャ対象の回線が高負荷な場合、`snaplen`や`-c`/時間指定を絞らないとファイルが急速に肥大化します。
+
+### 2. フィルタ付きキャプチャを実行する
+
+```bash
+sudo tcpdump -i {{ interface }} -s {{ snaplen }} {{ duration_or_count }} -w {{ output_file }} '{{ capture_filter }}'
+```
+
+`-w`でバイナリのまま保存するため、キャプチャ中はパケットの中身を画面には表示しません。
+
+### 3. 保存中に簡易表示で状況を確認する
+
+別セッションで進行状況だけを目視確認します(保存には影響しません)。
+
+```bash
+sudo tcpdump -i {{ interface }} -n '{{ capture_filter }}' -c 5
+```
+
+### 4. TCPハンドシェイクの読み方を確認する
+
+保存したファイルを読み込み、SYN・SYN-ACK・ACKの並びを確認します。
+
+```bash
+tcpdump -r {{ output_file }} -n 'tcp[tcpflags] & (tcp-syn|tcp-ack) != 0' | head -n 20
+```
+
+`[S]`(SYN)の直後に`[S.]`(SYN-ACK)が短時間で続かない場合、到達性かバックログ溢れを疑います。
+
+### 5. pcapを保存しWiresharkへ引き渡す
+
+```bash
+ls -lh {{ output_file }}
+sha256sum {{ output_file }} > {{ output_file }}.sha256
+```
+
+ハッシュ値を添えて引き渡すことで、転送中の破損や改変がないことを引き渡し先で確認できます。
+
+### 6. 解析観点に沿って一次確認する
+
+```bash
+tcpdump -r {{ output_file }} -n | grep -i 'retransmission\|out-of-order' | head -n 20
+```
+
+「{{ analysis_focus }}」の観点で、再送(retransmission)や順序逆転(out-of-order)が出ていないかをまず確認します。
+
+## 動作確認
+
+- `{{ output_file }}`が生成され、`tcpdump -r`で内容が読み込めること
+- キャプチャ内に`{{ capture_filter }}`の条件に合致しないパケットが含まれていないこと
+- `.sha256`ファイルと`sha256sum -c`の照合が一致すること
+
+## 注意事項
+
+- キャプチャには通信内容(場合によっては認証情報や個人情報)が含まれ得る。`{{ output_file }}`の保存先とアクセス権限を限定し、不要になったら確実に削除する。
+- フィルタを絞らずに長時間キャプチャすると、ディスク枯渇やキャプチャホストの負荷上昇を招く。必ず`{{ capture_filter }}`のような対象限定フィルタと`{{ duration_or_count }}`のような打ち切り条件をセットで使う。
+- 共有セグメント上でのプロミスキャスモード利用は、自組織の許可範囲内でのみ実施する。

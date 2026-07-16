@@ -1,0 +1,5 @@
+storage_mode = "persistent"
+system_max_use = "500M"
+max_retention_sec = "1month"
+rate_limit_interval = "30s"
+rate_limit_burst = 10000

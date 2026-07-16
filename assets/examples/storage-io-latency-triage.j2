@@ -1,0 +1,83 @@
+# ストレージI/O遅延の切り分け
+
+`{{ affected_device }}` で発生しているI/O遅延を `iostat` の `await`・`%util` と `iotop` で定量化し、発生源プロセスとデバイス側要因を特定します。
+
+## 目的
+
+体感的な「遅い」を `await`(平均応答時間)と `%util`(デバイス使用率)で数値化し、通常時の基準値 `{{ await_baseline }}ms` と比較したうえで、発生源プロセスを特定して応急対応と恒久対策を判断できるようになることを目指します。
+
+## 用語解説
+
+- **await**: I/Oリクエストがキューイングされてから完了するまでの平均時間(ミリ秒)。値が大きいほど体感遅延に直結する
+- **%util**: デバイスがI/O処理に費やしていた時間の割合。100%に近いほどデバイスが飽和している
+- **iotop**: プロセスごとのディスク読み書き量をリアルタイムに表示するツール
+- **pidstat -d**: プロセスごとのI/O統計(kB_rd/s, kB_wr/s)を周期的に記録できるコマンド
+- **RAID再同期**: ディスク交換後などにRAIDアレイを再構築する処理。実行中は通常I/Oと競合し `%util` を押し上げる
+
+## シナリオ設定
+
+対象デバイスは `{{ affected_device }}`(構成: {{ storage_type }})で、通常時の `await` 基準値は `{{ await_baseline }}ms` です。現在の `%util` は `{{ util_percent }}%` まで上昇しており、最もI/Oを消費しているプロセスは `{{ top_io_process }}` と見られます。
+
+## 手順
+
+### 1. I/O遅延を定量化する
+
+```bash
+iostat -x {{ affected_device }} 2 5
+```
+
+→ `await` 列が基準値 `{{ await_baseline }}ms` を大きく超え、`%util` が `{{ util_percent }}%` 前後で高止まりしていないかを確認します。
+
+### 2. 発生源プロセスを特定する
+
+```bash
+sudo iotop -oPa -d 2 -n 5
+sudo pidstat -d 1 5 | grep -i {{ top_io_process }}
+```
+
+→ `{{ top_io_process }}` のI/O量が突出している場合、そのプロセスのクエリ・バッチ処理内容を確認します。
+
+### 3. 読み書きパターンを分析する
+
+```bash
+sudo iostat -x -d {{ affected_device }} 2 5
+```
+
+→ `r/s`・`w/s`・`rkB/s`・`wkB/s` から、シーケンシャルな大量書き込みかランダムI/Oかを見分け、`{{ top_io_process }}` の処理特性(バックアップ、フルスキャン等)と整合するか確認します。
+
+### 4. デバイス側要因を確認する
+
+```bash
+cat /proc/mdstat 2>/dev/null
+sudo smartctl -a {{ affected_device }} | grep -Ei "reallocated|wear"
+```
+
+→ RAID再同期中でないか、{{ storage_type }} の摩耗・劣化指標に異常がないかを確認します。デバイス自体の劣化であれば `smartctl-disk-health` の点検手順に引き継ぎます。
+
+### 5. 応急対応を行う
+
+```bash
+kill -STOP $(pgrep -f {{ top_io_process }}_batch) 2>/dev/null || echo "対象のバッチプロセスなし"
+ionice -c2 -n7 -p $(pgrep -o {{ top_io_process }})
+```
+
+→ 緊急停止ではなく `ionice` でI/O優先度を下げることを優先し、業務影響を最小化します。
+
+### 6. 回復を確認し記録する
+
+```bash
+iostat -x {{ affected_device }} 2 3
+```
+
+## 動作確認
+
+- `iostat -x {{ affected_device }}` の `await` が基準値 `{{ await_baseline }}ms` 近辺まで回復していること
+- `%util` が `{{ util_percent }}%` から明確に低下していること
+- `{{ top_io_process }}` 以外のプロセスのI/O待ちが解消していること
+- 発生源・対応内容・恒久対策の提案が記録に残っていること
+
+## 注意事項
+
+- `kill -STOP`/`kill`でのプロセス強制停止は業務データの不整合を招きうるため、まず `ionice` によるI/O優先度調整を試み、停止は最終手段とする。
+- RAID再同期中の高 `%util` は正常な保護動作であり、途中で中断するとデータ保護レベルが低下するため安易に止めない。
+- 恒久対策(ディスク増設、インデックス改善、バッチ時間帯の変更等)は本手順の応急対応だけで終わらせず、別途計画に落とし込む。

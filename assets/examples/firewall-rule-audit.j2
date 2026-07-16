@@ -1,0 +1,74 @@
+# ファイアウォールルールの棚卸し
+
+現行FWルールを一覧化し、用途不明・過剰許可・重複ルールを検出して整理する棚卸し手順です。
+
+## 目的
+
+ファイアウォールルール棚卸しの目的を理解し、ヒットカウンタで利用実態を確認した上で、不要・過剰なルールを段階的に無効化できるようになることを目指します。
+
+## 用語解説
+
+- **ヒットカウンタ**: 各ルールが何回マッチ（適用）したかを示すカウンタ。利用実態の確認に使う
+- **any-any許可**: 送信元・宛先・ポートを限定しない、最も広い許可ルール
+- **verdict(判定)**: 棚卸しの結果として下す keep（維持）/ tighten（絞り込み）/ remove（削除）の判定
+- **段階的無効化**: 削除前に一時的にログのみ・拒否を試すなど、影響を確認しながら進めること
+- **last_reviewed**: そのルールが最後にレビューされた日付
+
+## シナリオ設定
+
+今回棚卸し対象は {{ csv_rows | length }} 件のルールです。台帳には `rule_id` / `source` / `destination` / `port` / `protocol` / `owner` / `last_reviewed` / `verdict` を記録します。
+
+## 手順
+
+### 1. 棚卸しの目的を確認する
+
+```bash
+echo "棚卸し対象ルール数: {{ csv_rows | length }}"
+{% for r in csv_rows %}echo "- {{ r["rule_id"] }}: {{ r["source"] }} -> {{ r["destination"] }}:{{ r["port"] }}/{{ r["protocol"] }}"
+{% endfor %}```
+
+### 2. 現行ルールをエクスポートする
+
+```bash
+firewall-cmd --list-all-zones > /tmp/current-rules.txt
+nft list ruleset >> /tmp/current-rules.txt
+```
+
+### 3. ヒットカウンタで利用実態を確認する
+
+```bash
+{% for r in csv_rows %}nft list chain inet filter forward | grep {{ r["rule_id"] }} || echo "{{ r["rule_id"] }}: ヒットカウンタ未取得"
+{% endfor %}```
+
+### 4. any-any・広すぎる許可を検出する
+
+```bash
+{% for r in csv_rows %}{% if r["source"] == "0.0.0.0/0" and r["destination"] == "0.0.0.0/0" %}echo "要検出: {{ r["rule_id"] }} は any-any 許可 (owner={{ r["owner"] }}, last_reviewed={{ r["last_reviewed"] }})"
+{% endif %}{% endfor %}```
+
+### 5. verdictに沿って段階的に無効化する
+
+`remove` 判定のルールは、いきなり削除せずログのみのモードで一定期間観察してから削除します。
+
+```bash
+{% for r in csv_rows %}{% if r["verdict"] == "remove" %}echo "段階的無効化対象: {{ r["rule_id"] }} ({{ r["owner"] }})"
+{% elif r["verdict"] == "tighten" %}echo "絞り込み対象: {{ r["rule_id"] }} ({{ r["source"] }} -> {{ r["destination"] }})"
+{% endif %}{% endfor %}```
+
+### 6. 台帳を更新し、定期棚卸しとして記録する
+
+```bash
+{% for r in csv_rows %}echo "{{ r["rule_id"] }},{{ r["source"] }},{{ r["destination"] }},{{ r["port"] }},{{ r["protocol"] }},{{ r["owner"] }},{{ r["last_reviewed"] }},{{ r["verdict"] }}" >> /tmp/firewall-audit-updated.csv
+{% endfor %}```
+
+## 動作確認
+
+- 全 {{ csv_rows | length }} 件のルールについて `verdict`（keep/tighten/remove）が確認できていること
+- any-any 等の広すぎる許可ルールがすべて検出リストに含まれていること
+- `remove` 判定のルールが即時削除ではなく、段階的無効化の対象として記録されていること
+
+## 注意事項
+
+- `remove` 判定のルールでも、SSHや監視通信など重要な通信を誤って遮断しないよう、削除前に影響確認と関係者への周知を行う。
+- firewall-rules（既存、ルールの新規投入）とは異なり、本手順は既存ルールの棚卸し・整理を目的とする。
+- ヒットカウンタが0のルールでも、季節性の通信（月次バッチ等）である可能性があるため、`last_reviewed` の期間だけで即断しない。

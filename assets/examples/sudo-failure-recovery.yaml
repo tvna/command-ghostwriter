@@ -1,0 +1,5 @@
+error_message: ">>> /etc/sudoers.d/10-ops: syntax error near line 3 <<<"
+root_login_available: false
+recovery_route: pkexec
+broken_file: /etc/sudoers.d/10-ops
+prevention_note: sudoers系ファイルの編集は必ずvisudoまたはvisudo -fを経由し、直接エディタで保存しない

@@ -1,0 +1,105 @@
+# DHCPでアドレスが取得できない時の切り分け — {{ affected_segment }}
+
+クライアント・ネットワーク経路・DHCPサーバの3層に分解し、アドレス取得失敗の原因を切り分けます。
+
+## 目的
+
+**{{ affected_segment }}** でDHCPによるIPアドレス取得が失敗するという事象を、クライアント側・ネットワーク経路（リレー）・DHCPサーバ側の3層に分解して原因を特定できるようになることを目指します。
+
+## 用語解説
+
+- **DHCP DISCOVER/OFFER/REQUEST/ACK**: DHCPのアドレス払い出しで交わされる4つのメッセージ。DISCOVERはクライアントからの探索、OFFERはサーバからの提案、REQUESTは選択、ACKは確定を意味する
+- **APIPA (169.254.0.0/16)**: DHCP応答を得られなかった場合にクライアントが自動的に割り当てる私設アドレス帯。169.254で始まるIPはDHCP失敗の兆候
+- **DHCPリレーエージェント**: クライアントとDHCPサーバが異なるセグメントにある場合に、DHCPブロードキャストを中継する機能（`ip helper-address`等）
+- **DHCPスコープ(プール)**: サーバが払い出せるIPアドレスの範囲
+- **リース**: クライアントに一定時間だけ割り当てられるIPアドレスの使用権
+
+## シナリオ設定
+
+{{ affected_segment }} でDHCPによるアドレス取得ができないとの報告があります。DHCPサーバは {{ dhcp_server }}、リレー設定は {{ relay_agent }}、払い出しプールは {{ pool_range }}、リース時間は {{ lease_time }} です。
+
+## 手順
+
+### 1. 症状を確認する（APIPAアドレスの有無）
+
+```bash
+ip addr show
+```
+
+→ 169.254.x.xが割り当てられている場合、DHCP応答を一切受け取れていないことを示します。
+
+### 2. クライアント側でアドレス再取得を試みる
+
+```bash
+sudo dhclient -r
+sudo dhclient -v
+```
+
+または NetworkManager 環境では次を使います。
+
+```bash
+nmcli device disconnect eth0
+nmcli device connect eth0
+```
+
+### 3. DHCP要求がネットワーク上に出ているかをtcpdumpで観測する
+
+```bash
+sudo tcpdump -i eth0 -n port 67 or port 68
+```
+
+→ DISCOVERは出ているがOFFERが返らない場合、リレーまたはサーバ側を疑います。
+
+### 4. リレーエージェントとVLAN境界を確認する
+
+{{ relay_agent }} の設定が正しくDHCPサーバ {{ dhcp_server }} を指しているか確認します。
+
+```bash
+# {{ relay_agent }} にログイン後
+show running-config interface vlan30 | include helper-address
+```
+
+### 5. DHCPサーバ側のプール枯渇とサービス状態を確認する
+
+```bash
+# {{ dhcp_server }} にログイン後
+systemctl status isc-dhcp-server
+dhcp-lease-list
+```
+
+→ プール（{{ pool_range }}）に空きがない場合、リース期限切れの古いエントリが残っていないか確認します。
+
+### 6. サーバのログでDISCOVER受信有無を確認する
+
+```bash
+# {{ dhcp_server }} にログイン後
+journalctl -u isc-dhcp-server -e --no-pager
+```
+
+### 7. 原因層に応じて是正する
+
+- クライアント側の設定不備 → NIC設定・仮想スイッチ設定を修正
+- リレー未設定・誤設定 → {{ relay_agent }} の helper-address を是正
+- プール枯渇 → リース時間（{{ lease_time }}）の見直しまたはプール拡張
+
+### 8. 復旧確認と報告
+
+```bash
+sudo dhclient -v
+ip addr show
+```
+
+原因層、実施した是正内容、影響範囲を記録し報告します。
+
+## 動作確認
+
+- クライアントに {{ pool_range }} の範囲内でIPアドレスが正常に割り当てられていること
+- `ip addr show` に169.254系のAPIPAアドレスが残っていないこと
+- {{ dhcp_server }} のログにDISCOVER〜ACKの一連のやり取りが記録されていること
+- 対象セグメント（{{ affected_segment }}）の他端末でも取得できることを抜き取り確認したこと
+
+## 注意事項
+
+- `dhclient -r` でリース解放を行うと一時的に接続が切れるため、対象端末での作業影響を事前に周知する。
+- DHCPサーバやリレー設定の変更は他のVLAN・セグメントにも影響しうるため、変更前に現状設定を記録してから実施する。
+- リース時間（{{ lease_time }}）を安易に延長するとプール枯渇の根本解決にならない場合があるため、実際の端末台数と払い出しプール（{{ pool_range }}）の余裕を確認した上で判断する。

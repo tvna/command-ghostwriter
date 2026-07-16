@@ -1,0 +1,107 @@
+# OpenSSH認証局によるホスト・ユーザー証明書運用
+
+OpenSSHのCA鍵でホスト鍵・ユーザー鍵に署名し、`known_hosts`の個別管理と鍵配布の手間を簡素化するまでを一巡します。
+
+## 目的
+
+CA署名・principal・有効期限付き証明書の仕組みを理解し、ホスト鍵とユーザー鍵の両方をOpenSSH標準機能だけで証明書化・検証できるようになることを目指します。
+
+## 用語解説
+
+- **CA署名**: 個々のホスト鍵・ユーザー鍵を信頼するのではなく、それらに署名したCA(認証局)鍵1つを信頼する仕組み
+- **principal**: 証明書に埋め込む「誰が/どのホストが対象か」を表す識別子。ホスト証明書ではホスト名、ユーザー証明書ではユーザー名やロール名を指定する
+- **有効期限付き鍵**: `-V`オプションで発行から失効までの期間を証明書に埋め込み、期限切れ後は自動的に無効化される鍵
+- **TrustedUserCAKeys**: sshd側でユーザー証明書を検証する際に信頼するCA公開鍵を指定する設定
+- **@cert-authority(known_hosts)**: クライアント側でホスト証明書を検証する際に信頼するCA公開鍵を`known_hosts`に登録する記法
+
+## シナリオ設定
+
+CA鍵は `{{ ca_key_path }}` に保管します。ホスト証明書のprincipalは {{ host_principals | length }} 件、ユーザー証明書のprincipalは {{ user_principals | length }} 件、証明書の有効期間は `{{ validity }}` とし、失効リストは `{{ revoked_keys_file }}` で管理します。
+
+ホストprincipal:
+{% for p in host_principals %}- `{{ p }}`
+{% endfor %}
+ユーザーprincipal:
+{% for p in user_principals %}- `{{ p }}`
+{% endfor %}
+
+## 手順
+
+### 1. CA鍵を生成し保管する
+
+```bash
+sudo mkdir -p $(dirname {{ ca_key_path }})
+sudo ssh-keygen -t ed25519 -f {{ ca_key_path }} -C "internal-ssh-ca" -N ""
+sudo chmod 600 {{ ca_key_path }}
+sudo chmod 644 {{ ca_key_path }}.pub
+```
+
+CA秘密鍵(`{{ ca_key_path }}`)は署名専用の管理端末にのみ置き、各サーバへは配布しません。
+
+### 2. ホスト証明書を署名し配布する
+
+```bash
+ssh-keygen -s {{ ca_key_path }} -I host-cert-$(date +%Y%m%d) \
+  -h -n {{ host_principals | join(',') }} \
+  -V {{ validity }} /etc/ssh/ssh_host_ed25519_key.pub
+
+sudo cp /etc/ssh/ssh_host_ed25519_key-cert.pub /etc/ssh/
+echo "HostCertificate /etc/ssh/ssh_host_ed25519_key-cert.pub" | sudo tee -a /etc/ssh/sshd_config.d/host-cert.conf
+sudo sshd -t
+```
+
+`-h`はホスト証明書であることを示し、`-n`にはこの証明書がどのホスト名を名乗ってよいかを`{{ host_principals | join(',') }}`として埋め込みます。
+
+### 3. ユーザー証明書を署名する
+
+```bash
+{% for p in user_principals %}ssh-keygen -s {{ ca_key_path }} -I user-cert-{{ p }}-$(date +%Y%m%d) \
+  -n {{ p }} -V {{ validity }} ~/.ssh/id_ed25519_{{ p }}.pub
+{% endfor %}
+```
+
+ユーザー証明書には`-h`を付けません。`-n`にはそのユーザーが名乗れるロール(`{{ user_principals | join(',') }}`のいずれか)を指定します。
+
+### 4. サーバ側でユーザー証明書を信頼し、クライアント側でホスト証明書を信頼する
+
+```bash
+sudo tee /etc/ssh/ca/user_ca.pub <<'EOF'
+$(cat {{ ca_key_path }}.pub)
+EOF
+echo "TrustedUserCAKeys /etc/ssh/ca/user_ca.pub" | sudo tee -a /etc/ssh/sshd_config.d/host-cert.conf
+sudo systemctl reload sshd
+
+echo "@cert-authority {{ host_principals | join(',') }} $(cat {{ ca_key_path }}.pub)" >> ~/.ssh/known_hosts
+```
+
+### 5. 証明書による接続を検証する
+
+```bash
+{% for p in host_principals %}ssh -o StrictHostKeyChecking=yes {{ p }} hostname
+{% endfor %}
+```
+
+`known_hosts`に個々のホスト鍵を登録していなくても、CA鍵1つの信頼で全ホストへの接続時に警告なく検証が通ることを確認します。
+
+### 6. 失効運用を整備する
+
+```bash
+sudo touch {{ revoked_keys_file }}
+echo "RevokedKeys {{ revoked_keys_file }}" | sudo tee -a /etc/ssh/sshd_config.d/host-cert.conf
+sudo sshd -t && sudo systemctl reload sshd
+
+# 漏洩した証明書を失効させる例
+ssh-keygen -k -f {{ revoked_keys_file }} -z 1 ~/.ssh/id_ed25519_{{ user_principals[0] }}-cert.pub
+```
+
+## 動作確認
+
+- `ssh-keygen -L -f`で各証明書を確認し、principal・有効期限(`{{ validity }}`)が意図通りであること
+- ホスト側は`known_hosts`に個別のホスト鍵を登録しなくても、`@cert-authority`の1行だけで全{{ host_principals | length }}ホストへの接続を検証できること
+- `{{ revoked_keys_file }}`に登録した証明書での接続が拒否されること
+
+## 注意事項
+
+- CA秘密鍵(`{{ ca_key_path }}`)が漏洩すると、すべてのホスト・ユーザー証明書を偽造できてしまう。署名専用端末での厳格な保管とアクセス制御が前提となる。
+- 証明書の有効期限(`{{ validity }}`)を長く取りすぎると、鍵漏洩時の被害期間が延びる。定期的な再署名運用とセットで設計する。
+- 本手順はmTLSやstep-caベースのゼロトラストアクセス(`zero-trust-access`)とは異なり、OpenSSH標準機能のみで完結する枯れた方式である点が差分となる。

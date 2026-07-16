@@ -1,0 +1,12 @@
+title: 管理コンソールアカウントの乗っ取り疑い対応
+target_account: y.tanaka
+suspicious_evidence: 深夜3時台に海外IPからのログイン成功と、直後の管理者権限付与操作を検知
+active_session_check: 全ログインセッションと発行済みAPIトークンの一覧を確認する
+credential_reset_scope:
+  - ログインパスワード
+  - SSH公開鍵の登録内容
+  - 発行済みAPIトークン・OAuthクライアント
+related_systems:
+  - 社内SSO連携先の全業務システム
+  - 当該アカウントが管理者権限を持つクラウドコンソール
+escalation: セキュリティインシデント対応チーム (内線 1199)

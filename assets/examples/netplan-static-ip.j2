@@ -1,0 +1,92 @@
+# Netplanによる静的IPアドレス設定
+
+UbuntuのNetplanで対象インターフェースに静的IP・ゲートウェイ・DNSを設定し、`netplan try` によるロールバック付き適用で安全に切り替えます。root権限（sudo）で実施してください。
+
+## 目的
+
+Netplanの設定ファイルの構造とYAMLインデントの注意点を理解し、`netplan try` を使うことでリモート作業中のロックアウトを避けながら静的IPへ切り替えられるようになることを目指します。
+
+## 用語解説
+
+- **netplan**: YAML形式の設定ファイルからネットワーク接続を定義し、`networkd` や `NetworkManager` に適用するUbuntu標準のネットワーク設定ツール
+- **renderer**: netplanの設定を実際に適用するバックエンド（本手順では `{{ renderer }}`）
+- **YAMLインデントの罠**: netplanはインデント幅（スペース数）で階層を判定するため、タブ混入や1文字のズレでも構文エラーや意図しない設定になり得る
+- **netplan try**: 設定を一時適用し、一定時間内にEnterで確定しなければ自動的に元の設定へロールバックする安全確認モード
+- **netplan generate / apply**: `generate` はレンダラー向け設定を生成するだけ、`apply` は実際にネットワークへ反映するコマンド
+
+## シナリオ設定
+
+対象インターフェース `{{ interface }}` に、アドレス {% for a in addresses %}`{{ a }}`{% if not loop.last %}, {% endif %}{% endfor %} を割り当て、ゲートウェイは `{{ gateway4 }}`、DNSサーバは {% for n in nameservers %}`{{ n }}`{% if not loop.last %}, {% endif %}{% endfor %} とします。レンダラーは `{{ renderer }}` です。
+
+## 手順
+
+### 1. 既存のnetplan設定を確認する
+
+```bash
+ls -l /etc/netplan/
+cat /etc/netplan/*.yaml
+ip addr show {{ interface }}
+```
+
+既存ファイルの内容と現在のIPアドレス割り当てを把握し、上書き対象を取り違えないようにします。
+
+### 2. 既存設定ファイルをバックアップする
+
+```bash
+cp -a /etc/netplan/ /etc/netplan.bak.$(date +%Y%m%d)/
+```
+
+### 3. 静的IP設定ファイルを作成する
+
+インデントはスペース2つ単位で統一します。タブを混入させないよう注意してください。
+
+```bash
+tee /etc/netplan/99-static-{{ interface }}.yaml <<'EOF'
+network:
+  version: 2
+  renderer: {{ renderer }}
+  ethernets:
+    {{ interface }}:
+      dhcp4: no
+      addresses:
+{% for a in addresses %}        - {{ a }}
+{% endfor %}      routes:
+        - to: default
+          via: {{ gateway4 }}
+      nameservers:
+        addresses:
+{% for n in nameservers %}          - {{ n }}
+{% endfor %}EOF
+chmod 600 /etc/netplan/99-static-{{ interface }}.yaml
+```
+
+### 4. 構文を検証してからtryで安全に適用する
+
+```bash
+netplan generate
+netplan try
+```
+
+`netplan try` はEnterキーで確定するまで120秒の猶予があります。リモートSSH接続が切れた場合は自動的に元の設定へ戻るため、確定前に別セッションで疎通を確認してください。
+
+### 5. 疎通と反映内容を検証する
+
+```bash
+ip addr show {{ interface }}
+ip route show default
+resolvectl status {{ interface }} 2>/dev/null || cat /etc/resolv.conf
+ping -c 3 {{ gateway4 }}
+```
+
+## 動作確認
+
+- `ip addr show {{ interface }}` に {% for a in addresses %}`{{ a }}`{% if not loop.last %}, {% endif %}{% endfor %} が表示されること
+- `ip route show default` の経由が `{{ gateway4 }}` になっていること
+- `{{ gateway4 }}` への `ping` が疎通すること
+- SSH接続が切断されないこと（`netplan try` のロールバックが発動していないこと）
+
+## 注意事項
+
+- リモート作業では必ず `netplan try`（または `netplan apply` ではなく確認付きの手段）を使う。`netplan apply` を直接使うと、設定ミスで即座に接続が切れロックアウトする危険がある。
+- インデントの誤りはYAML構文エラーとして`netplan generate`が検出することもあるが、階層のズレは構文エラーにならずに誤設定として適用される場合があるため、目視でも構造を確認する。
+- 旧設定ファイルが複数残っていると適用順序で意図しない上書きが起きるため、バックアップ後は不要な旧ファイルを整理する。

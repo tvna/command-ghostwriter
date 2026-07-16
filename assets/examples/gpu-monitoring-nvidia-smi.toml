@@ -1,0 +1,9 @@
+sampling_interval = 60
+log_output_path = "/var/log/gpu-metrics/nvidia-smi.csv"
+watch_metrics = ["utilization.gpu", "utilization.memory", "temperature.gpu", "power.draw"]
+process_watch = true
+
+[alert_thresholds]
+gpu_util_percent = 95
+memory_percent = 90
+temp_celsius = 85

@@ -1,0 +1,85 @@
+# Btrfsサブボリュームとスナップショット運用
+
+`{{ mount_point }}` 上のサブボリューム `{{ subvolume_name }}` について、読み取り専用スナップショットを `{{ snapshot_dir }}` に定期取得し、ファイル復元とロールバックまでを一巡します。
+
+## 目的
+
+Btrfsのサブボリュームと、CoW(Copy-on-Write)によるスナップショットの仕組みを理解し、定期取得・一覧確認・復元・世代整理を安全に運用できるようになることを目指します。
+
+## 用語解説
+
+- **サブボリューム**: Btrfs内部で独立した名前空間として扱える論理単位。マウントやスナップショットの単位になる
+- **CoWスナップショット**: 書き込み時に元データを複製せず差分だけを新規確保する仕組みにより、瞬時かつ低コストで取得できるスナップショット
+- **readonly**: スナップショットを読み取り専用で作成するかどうか。`true` の場合は変更不可のため誤操作から保護できる
+- **retention_count**: 保持するスナップショット世代数
+- **ロールバック**: スナップショット時点の状態にサブボリュームやファイルを戻す操作
+
+## シナリオ設定
+
+対象マウントポイントは `{{ mount_point }}`、サブボリュームは `{{ subvolume_name }}` です。スナップショットは `{{ snapshot_dir }}` に、読み取り専用({{ readonly }})で取得し、保持世代数は {{ retention_count }} 世代とします。
+
+## 手順
+
+### 1. サブボリュームを作成する
+
+```bash
+sudo btrfs subvolume create {{ mount_point }}/{{ subvolume_name }}
+sudo btrfs subvolume list {{ mount_point }}
+```
+
+### 2. スナップショット保存先を用意する
+
+```bash
+sudo mkdir -p {{ snapshot_dir }}
+sudo btrfs subvolume show {{ mount_point }}/{{ subvolume_name }}
+```
+
+### 3. スナップショットを取得する
+
+```bash
+DATE=$(date +%Y-%m-%d_%H%M)
+{% if readonly %}sudo btrfs subvolume snapshot -r {{ mount_point }}/{{ subvolume_name }} {{ snapshot_dir }}/${DATE}
+{% else %}sudo btrfs subvolume snapshot {{ mount_point }}/{{ subvolume_name }} {{ snapshot_dir }}/${DATE}
+{% endif %}sudo btrfs subvolume list -s {{ mount_point }}
+```
+
+### 4. スナップショットからファイルを復元する
+
+```bash
+LATEST=$(sudo btrfs subvolume list -s {{ mount_point }} | tail -n1 | awk '{print $NF}')
+sudo cp -a {{ mount_point }}/${LATEST}/path/to/file {{ mount_point }}/{{ subvolume_name }}/path/to/file
+```
+
+### 5. サブボリューム単位でロールバックする
+
+`{{ subvolume_name }}` 全体を過去のスナップショット時点に戻す場合は、現行サブボリュームを退避してからスナップショットを書き込み可能な複製として配置します。
+
+```bash
+LATEST=$(sudo btrfs subvolume list -s {{ mount_point }} | tail -n1 | awk '{print $NF}')
+sudo mv {{ mount_point }}/{{ subvolume_name }} {{ mount_point }}/{{ subvolume_name }}.bak
+sudo btrfs subvolume snapshot {{ mount_point }}/${LATEST} {{ mount_point }}/{{ subvolume_name }}
+```
+
+### 6. 世代を整理する
+
+保持世代数({{ retention_count }})を超えた古いスナップショットを削除します。
+
+```bash
+sudo btrfs subvolume list -s {{ mount_point }} | sort -k2 | head -n -{{ retention_count }} | awk '{print $NF}' | while read -r snap; do
+  sudo btrfs subvolume delete {{ mount_point }}/${snap}
+done
+```
+
+## 動作確認
+
+- Step 3実行直後、`btrfs subvolume list -s {{ mount_point }}` に新規スナップショットが表示されること
+- `{{ readonly }}` が真の場合、スナップショット配下への書き込みが `Read-only file system` で拒否されること
+- Step 5のロールバック後、`{{ subvolume_name }}` の内容がスナップショット取得時点と一致すること
+- Step 6実行後、`btrfs subvolume list -s {{ mount_point }}` の件数が {{ retention_count }} 件以下であること
+
+## 注意事項
+
+- `btrfs subvolume delete` は元に戻せない破壊的操作である。Step 6の削除対象一覧は必ず実行前に目視確認する。
+- `df -h` に表示される空き容量は、CoWにより複数スナップショット間でデータブロックが共有されるため直感と異なる場合がある。実際の解放容量は `btrfs filesystem usage {{ mount_point }}` で確認する。
+- Step 5のロールバックは `{{ subvolume_name }}.bak` を退避として残すため、確認が済むまで削除しないこと。
+- `lvm-snapshot-backup`(本カタログ, LVM層のスナップショット)とはファイルシステム機構が異なり、Btrfsではブロックデバイス全体ではなくサブボリューム単位で扱う点が焦点の違いとなる。

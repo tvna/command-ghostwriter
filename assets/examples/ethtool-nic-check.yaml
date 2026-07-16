@@ -1,0 +1,5 @@
+interface: eth0
+expected_speed: 1000Mb/s
+expected_duplex: Full
+offload_settings: "tso off gso off gro off"
+ring_buffer_note: RXリングバッファを256から4096へ増やしてパケットドロップを抑制する

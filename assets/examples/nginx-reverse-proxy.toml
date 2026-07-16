@@ -1,0 +1,6 @@
+server_name = "api.example.com"
+listen_port = 443
+upstream_host = "127.0.0.1"
+upstream_port = 8080
+proxy_read_timeout = "60s"
+client_max_body_size = "10m"

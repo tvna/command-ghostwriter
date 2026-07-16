@@ -1,0 +1,75 @@
+# YAMAHAルータのDHCPスコープと固定割当設定
+
+RTX系ルータでDHCPスコープ(払い出し範囲)と、MACアドレスによる固定割当(bind)を設計・設定します。台帳(CSV)の定義に沿って一括投入し、二重払い出しがないことを確認してください。
+
+## 目的
+
+DHCPスコープとリースの基本動作を理解した上で、複数セグメントのスコープを作成し、複合機やサーバなど固定IPが必要な機器をbindで払い出し対象から除外・固定できるようになることを目指します。
+
+## 用語解説
+
+- **スコープ**: DHCPサーバが動的にアドレスを払い出す範囲。RTXでは`dhcp scope <番号> <開始>-<終了>/<プレフィックス長>`で定義する
+- **リース**: クライアントに払い出したIPアドレスの有効期限付き貸与。期限が切れると再要求(更新)が必要になる
+- **固定割当(bind)**: 特定のMACアドレスに対して常に同じIPアドレスを払い出す設定。`dhcp scope bind`で、対象スコープの範囲内のアドレスを指定する
+- **二重払い出し**: 同一アドレスが複数の端末に払い出される事故。bind対象のアドレスをスコープの動的払い出し範囲内に置きつつbind登録を忘れると発生し得る
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 件の定義を投入します。`entry_type`が`scope`の行はスコープ(動的払い出し範囲)、`bind`の行は固定割当です。
+
+| entry_type | network_or_host | range_start | range_end | mac_address | description |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["entry_type"] }} | {{ r["network_or_host"] }} | {{ r["range_start"] }} | {{ r["range_end"] }} | {{ r["mac_address"] }} | {{ r["description"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 既存のスコープとリース状況を確認する
+
+```bash
+show status dhcp
+show status dhcp scope
+```
+
+新規に投入するスコープ番号(1, 2, ...)が既存の設定と衝突しないことを確認します。
+
+### 2. dhcp scopeでスコープを設定する
+
+`entry_type`が`scope`の行を、投入順にスコープ番号1、2…として設定します。対象セグメントはいずれも`/24`とします。
+
+```bash
+{% set ns = namespace(scope_id=0) %}
+{% for r in csv_rows %}{% if r["entry_type"] == "scope" %}{% set ns.scope_id = ns.scope_id + 1 %}dhcp scope {{ ns.scope_id }} {{ r["range_start"] }}-{{ r["range_end"] }}/24
+{% endif %}{% endfor %}save
+```
+
+### 3. dhcp scope bindで固定割当を設定する
+
+`entry_type`が`bind`の行を、対応するスコープ(ここではスコープ1)へ固定登録します。
+
+```bash
+{% for r in csv_rows %}{% if r["entry_type"] == "bind" %}dhcp scope bind 1 {{ r["network_or_host"] }} ethernet {{ r["mac_address"] }} # {{ r["description"] }}
+{% endif %}{% endfor %}save
+```
+
+### 4. show status dhcpでリースと固定割当を確認する
+
+```bash
+show status dhcp scope
+show status dhcp
+```
+
+固定割当対象の端末を再起動(またはDHCP再要求)させ、意図したアドレスが払い出されることを確認します。
+
+## 動作確認
+
+- `show status dhcp scope`に、投入した {{ csv_rows | selectattr("entry_type", "equalto", "scope") | list | length }} 件のスコープが表示されること
+- bind対象の端末(MACアドレス`{{ csv_rows[2]["mac_address"] }}`等)が、常に登録した固定アドレスを取得すること
+- 動的払い出し対象の端末が、bind済みのアドレス({{ csv_rows[2]["network_or_host"] }}等)を取得しないこと
+- 同一アドレスが2台以上の端末に同時払い出しされていないこと(`show status dhcp`のリース一覧で重複がないか確認)
+
+## 注意事項
+
+- bind対象のアドレスは、対応するスコープの動的払い出し範囲(`range_start`〜`range_end`)内に含めること。範囲外に置くとbind自体は登録できてもリース管理上の想定と食い違うことがある。
+- 既存端末が稼働中のスコープ番号を変更・再定義すると、既存のリースが失われ一時的に通信できなくなる端末が出る可能性がある。変更は影響の少ない時間帯に行う。
+- `save`を忘れると再起動時に設定が失われる。投入後は必ず`show config`等で反映内容を確認してから作業を終了する。

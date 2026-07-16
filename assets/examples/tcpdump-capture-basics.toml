@@ -1,0 +1,6 @@
+interface = "eth0"
+capture_filter = "tcp and port 443"
+snaplen = 96
+output_file = "/var/tmp/capture-20260716.pcap"
+duration_or_count = "-c 2000"
+analysis_focus = "TLSハンドシェイクの再送・タイムアウト有無"

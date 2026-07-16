@@ -1,0 +1,5 @@
+host,cpu_avg,cpu_peak,mem_used_percent,disk_used_percent,growth_trend,action
+web01,42,78,65,55,+3%/月,監視継続
+db01,68,92,81,72,+8%/月,メモリ増設検討
+batch01,25,40,30,90,+15%/月,ディスク増設が必要
+app02,35,60,50,45,+1%/月,対応不要

@@ -1,0 +1,5 @@
+scan_targets = "/home /var/www/uploads"
+exclude_paths = "/home/*/cache"
+quarantine_dir = "/var/quarantine/clamav"
+schedule = "0 3 * * *"
+notify_mail = "security-ops@example.com"

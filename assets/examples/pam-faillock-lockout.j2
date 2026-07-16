@@ -1,0 +1,81 @@
+# pam_faillockによるログイン失敗回数制限
+
+連続したログイン失敗をpam_faillockで検知し、一時的にアカウントをロックする設定を導入します。誤ってrootを締め出さないよう、除外ユーザーと解除手順を含めて検証します。
+
+## 目的
+
+pam_faillockの仕組みを理解し、認証失敗回数の閾値・ロック時間を設計・適用したうえで、意図的な失敗によるロックとfaillock --resetによる解除までを一巡できるようになることを目指します。
+
+## 用語解説
+
+- **faillock**: 連続した認証失敗を記録し、閾値超過でアカウントを一時ロックするPAMモジュール
+- **deny**: ロックが発動するまでに許容する連続失敗回数
+- **unlock_time**: ロックが自動的に解除されるまでの秒数
+- **fail_interval**: 失敗回数をカウントする観測期間(秒)。この期間を過ぎた失敗はカウントされない
+- **rootロックの危険**: 除外設定なしでrootまでロック対象にすると、コンソール以外からの復旧手段を失う恐れがある
+- **/var/run/faillock**: ユーザーごとの失敗記録が保存されるディレクトリ
+
+## シナリオ設定
+
+失敗許容回数は `{{ deny_count }}` 回、ロック時間は `{{ unlock_time }}` 秒、失敗カウントの観測期間は `{{ fail_interval }}` 秒とします。除外ユーザーは {{ exempt_users | length }} 件({% for u in exempt_users %}`{{ u }}`{% if not loop.last %}, {% endif %}{% endfor %})で、監査ログ記録は `{{ audit }}` です。
+
+## 手順
+
+### 1. 現在のfaillock設定と記録を確認する
+
+```bash
+sudo cat /etc/security/faillock.conf 2>/dev/null | grep -vE '^\s*#|^\s*$'
+sudo faillock --user root
+```
+
+### 2. faillock.confに閾値を設定する
+
+```bash
+sudo tee -a /etc/security/faillock.conf <<'EOF'
+deny = {{ deny_count }}
+unlock_time = {{ unlock_time }}
+fail_interval = {{ fail_interval }}
+{% if audit %}audit
+{% endif %}EOF
+```
+
+RHEL9系ではauthselectがpam_faillockの有効・無効を管理しています。authselect current でカスタムプロファイルの状態を確認し、必要なら authselect enable-feature with-faillock を実行してください。
+
+### 3. 除外ユーザーの扱いを確認する
+
+```bash
+{% for u in exempt_users %}sudo faillock --user {{ u }}
+{% endfor %}```
+
+除外ユーザーは業務影響が大きいサービスアカウントを想定しています。pam_faillockには恒久的な除外設定がないため、運用ではロック発生時に速やかに手動解除できる体制を用意します。
+
+### 4. 意図的な失敗でロックを発生させる
+
+```bash
+for i in $(seq 1 {{ deny_count }}); do
+  ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no testuser@localhost true
+done
+sudo faillock --user testuser
+```
+
+### 5. ロックされたアカウントを解除する
+
+```bash
+sudo faillock --user testuser --reset
+sudo faillock --user testuser
+```
+
+## 動作確認
+
+- `{{ deny_count }}` 回連続失敗後、`faillock --user testuser` の表示にロック状態が記録されること
+- `unlock_time` の `{{ unlock_time }}` 秒経過後、ロックが自動解除されること
+- `faillock --user testuser --reset` 実行直後にロックが解除され、正しい認証情報で再ログインできること
+- 除外ユーザー({% for u in exempt_users %}`{{ u }}`{% if not loop.last %}, {% endif %}{% endfor %})が想定通り監視・即時解除の対象として扱えること
+
+## 注意事項
+
+- rootを含む全ユーザーがロック対象になり得る設定なので、コンソールアクセスや代替の管理者アカウントを確保してから適用する。
+- 検証はtestuserなど専用アカウントで行い、本番サービスアカウントを誤ってロックしない。
+- `audit = true` はロックイベントを監査ログにも残すための設定であり、有効化した場合はログ肥大化にも注意する。
+- password-policy-basics(既存)はパスワード強度を扱う領域であり、本手順は失敗回数によるロック制御に焦点を絞っている。
+- faillock.confへの追記は再実行のたびに重複しうるため、内容を反映済みか確認してから適用する。

@@ -1,0 +1,95 @@
+# WireGuardによる拠点間・リモートアクセスVPN構築
+
+WireGuardサーバを構築し、複数のピア(拠点間接続・リモートアクセス)の鍵管理と`AllowedIPs`設計、疎通検証までを一巡します。root権限(sudo)で実施してください。
+
+## 目的
+
+サーバ・ピア双方の鍵ペアを生成し、`AllowedIPs`によるルーティング範囲を正しく設計したうえで、`wg show`とpingによる疎通検証まで行えるようになることを目指します。
+
+## 用語解説
+
+- **公開鍵ペア**: WireGuardは秘密鍵と公開鍵のペアで各ノードを識別する。秘密鍵は各ノードから外に出さない
+- **AllowedIPs**: そのピア宛て/経由で許可する通信先IPレンジ。ルーティングテーブルとファイアウォールの両方の役割を兼ねる
+- **トンネルIP設計**: WireGuardインターフェース(`wg0`等)に割り当てる仮想IPアドレス帯の設計。物理LANとは別のアドレス空間を使う
+- **Endpoint**: ピアの実際の到達先(パブリックIP:ポート)。固定IPを持たないロードウォリア型ピアでは省略できる
+- **PersistentKeepalive**: NAT配下のピアとの接続を維持するため、一定間隔でキープアライブパケットを送る設定(秒)
+
+## シナリオ設定
+
+以下の{{ csv_rows | length }}件のピアを登録します。
+
+| peer_name | allowed_ips | endpoint | keepalive | purpose |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["peer_name"] }} | {{ r["allowed_ips"] }} | {{ r["endpoint"] }} | {{ r["keepalive"] }} | {{ r["purpose"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. WireGuardを導入し鍵ペアを生成する
+
+サーバとすべてのピアで鍵ペアを生成します(以下はサーバ側の例)。
+
+```bash
+sudo apt install -y wireguard
+wg genkey | tee server_private.key | wg pubkey > server_public.key
+chmod 600 server_private.key
+```
+
+各ピアでも同様に鍵ペアを生成し、公開鍵をサーバ管理者へ共有します。CSVの`public_key_placeholder`列は実際の公開鍵に置き換えてください。
+
+### 2. サーバのwg0.confを作成する
+
+```bash
+sudo tee /etc/wireguard/wg0.conf <<'EOF'
+[Interface]
+Address = 10.10.0.1/24
+PrivateKey = $(cat server_private.key)
+ListenPort = 51820
+
+{% for r in csv_rows %}[Peer]
+# {{ r["purpose"] }}
+PublicKey = {{ r["public_key_placeholder"] }}
+AllowedIPs = {{ r["allowed_ips"] }}
+{% if r["endpoint"] %}Endpoint = {{ r["endpoint"] }}
+{% endif %}PersistentKeepalive = {{ r["keepalive"] }}
+
+{% endfor %}EOF
+sudo chmod 600 /etc/wireguard/wg0.conf
+```
+
+### 3. インターフェースを起動する
+
+```bash
+sudo systemctl enable --now wg-quick@wg0
+sudo wg show wg0
+```
+
+### 4. ピア設定を配布する
+
+各ピア(`{% for r in csv_rows %}{{ r["peer_name"] }}{% if not loop.last %}, {% endif %}{% endfor %}`)に、対応する`[Interface]`(自身のトンネルIPと秘密鍵)と`[Peer]`(サーバの公開鍵とEndpoint)を記載した設定ファイルを安全な経路で配布します。
+
+### 5. 疎通を検証する
+
+```bash
+sudo wg show wg0 latest-handshakes
+{% for r in csv_rows %}ping -c 3 {{ r["allowed_ips"].split('/')[0] }}
+{% endfor %}```
+
+### 6. 鍵ローテーションの準備をする
+
+```bash
+wg genkey | tee server_private_new.key | wg pubkey > server_public_new.key
+```
+
+## 動作確認
+
+- `wg show wg0`で登録した{{ csv_rows | length }}件のピアがすべて表示されること
+- 各ピアとの`latest-handshakes`が直近の時刻で更新されていること
+- 各ピアのトンネルIPへのpingが成功すること
+- `AllowedIPs`の範囲が意図しない全トラフィック(`0.0.0.0/0`)を含んでいないこと(意図的なフルトンネル構成を除く)
+
+## 注意事項
+
+- 秘密鍵は`wg0.conf`に平文で記載されるため、ファイルの権限(600)と保管場所を厳格に管理する。Gitリポジトリ等に絶対にコミットしない。
+- `AllowedIPs`の設計ミスは拠点間ルーティングの意図しない経路漏洩につながる。追加時は既存ピアの範囲と重複していないか確認する。
+- 鍵ローテーションを行う場合は、サーバとピア双方の設定を同時に切り替える必要があり、旧鍵での接続は即座に失効する。事前に切替時間を関係者へ周知する。

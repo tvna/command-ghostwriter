@@ -1,0 +1,5 @@
+global_forwarders = ["8.8.8.8", "1.1.1.1"]
+conditional_zone = "internal.example.com"
+conditional_forwarders = ["10.0.0.53", "10.0.0.54"]
+forward_policy = "only"
+cache_note = "内部ゾーンのキャッシュは条件付き転送先の変更後に手動でパージすることを推奨する"

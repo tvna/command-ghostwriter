@@ -1,0 +1,91 @@
+# dnsmasqのDHCP連携と固定リース設定
+
+dnsmasqのDHCP機能を有効化し、MACアドレスごとの固定リースを設定して、DHCPで払い出したIPアドレスがそのまま名前解決にも反映される台帳一元化を構築します。
+
+## 目的
+
+DHCPのリース情報とDNSのホスト名解決を別々の台帳で管理するのではなく、dnsmasqの `dhcp-host` による固定リースを使って1つの設定に統合し、リース状況と名前解決結果が常に一致する状態を作れるようになることを目指します。
+
+## 用語解説
+
+- **dhcp-range**: dnsmasqがDHCPサーバとして払い出すIPアドレスの範囲とリース時間を指定する設定
+- **dhcp-host**: 特定のMACアドレスに対して固定のIPアドレス・ホスト名・リース時間を割り当てる設定
+- **リースファイル**: 現在払い出し中のDHCPリース（MACアドレス・IP・ホスト名・有効期限）を記録するファイル
+- **台帳の一元化**: DHCPの払い出し情報とDNSの名前解決情報を同じ設定ファイルで管理し、不整合をなくす考え方
+- **DHCPサーバの競合**: 同一セグメントに複数のDHCPサーバが存在すると、クライアントがどちらから応答を受けるか不定になる問題
+
+## シナリオ設定
+
+CSV で定義した {{ csv_rows | length }} 件の固定リースをdnsmasqへ登録します。
+
+| mac_address | hostname | fixed_ip | lease_time | note |
+|-------------|----------|----------|------------|------|
+{% for r in csv_rows %}| {{ r["mac_address"] }} | {{ r["hostname"] }} | {{ r["fixed_ip"] }} | {{ r["lease_time"] }} | {{ r["note"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 既存DHCPサーバの有無を確認する
+
+同一セグメントに他のDHCPサーバが稼働していないか確認します。競合するとクライアントの挙動が不安定になります。
+
+```bash
+sudo nmap --script broadcast-dhcp-discover
+```
+
+### 2. dhcp-rangeを設定する
+
+DHCPとして払い出すアドレス範囲とデフォルトのリース時間を設定します。
+
+```bash
+cat >> /etc/dnsmasq.conf <<'EOF'
+dhcp-range=192.168.10.100,192.168.10.200,12h
+EOF
+```
+
+### 3. dhcp-hostで固定リースを登録する
+
+CSVで定義した {{ csv_rows | length }} 件について、MACアドレスとホスト名・固定IP・リース時間を紐付けます。
+
+```bash
+cat >> /etc/dnsmasq.conf <<'EOF'
+{% for r in csv_rows %}dhcp-host={{ r["mac_address"] }},{{ r["hostname"] }},{{ r["fixed_ip"] }},{{ r["lease_time"] }}
+{% endfor %}EOF
+```
+
+### 4. 構文チェックと反映
+
+```bash
+dnsmasq --test
+sudo systemctl restart dnsmasq
+```
+
+### 5. リースファイルと名前解決の連動を確認する
+
+固定リースが払い出された後、リースファイルの内容とDNS問い合わせの結果が一致することを確認します。
+
+```bash
+cat /var/lib/misc/dnsmasq.leases
+{% for r in csv_rows %}dig @127.0.0.1 {{ r["hostname"] }} +short
+{% endfor %}```
+
+### 6. 既存DHCPサーバとの競合を最終確認する
+
+サービス起動後、再度スキャンして応答するDHCPサーバがdnsmasqのみであることを確認します。
+
+```bash
+sudo nmap --script broadcast-dhcp-discover
+```
+
+## 動作確認
+
+- `/var/lib/misc/dnsmasq.leases` に登録した {{ csv_rows | length }} 件のMACアドレスと固定IPが記録されること
+- 各ホスト名に対する `dig` の結果が、CSVで指定した `fixed_ip` と一致すること
+- `dnsmasq --test` がエラーなく成功すること
+- ネットワーク上で応答するDHCPサーバがdnsmasq以外に存在しないこと
+
+## 注意事項
+
+- 同一セグメントに他のDHCPサーバが残っている状態で有効化すると、クライアントが意図しないIPを受け取ることがあるため、事前に必ず停止または競合しない範囲に調整する。
+- 固定リースのIPアドレスは `dhcp-range` の範囲外に設定することもできるが、範囲内にする場合は他のクライアントに払い出されないよう `dhcp-range` の設計と重複しないか確認する。
+- `dhcp-host` の設定変更後は既存のリースファイルに古い情報が残ることがあるため、反映後にリースファイルの内容を必ず確認する。

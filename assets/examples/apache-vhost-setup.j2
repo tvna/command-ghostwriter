@@ -1,0 +1,101 @@
+# Apache仮想ホストの複数サイト設定
+
+1台のApacheに複数の名前ベース仮想ホスト（Name-based VirtualHost）を設定し、サイトごとに有効化・検証します。root権限（sudo）で実施してください。
+
+## 目的
+
+`ServerName` によって同一IP・同一ポートで複数サイトを振り分ける名前ベース仮想ホストの仕組みを理解し、`a2ensite`/`apachectl configtest` を使ってサイト単位で安全に有効化できるようになることを目指します。
+
+## 用語解説
+
+- **名前ベース仮想ホスト**: 同一のIPアドレス・ポートで待ち受けつつ、リクエストの `Host` ヘッダ（`ServerName`）によって応答するサイトを振り分ける仕組み
+- **ServerName**: 仮想ホストが応答するホスト名。この値が一致しないリクエストは他の仮想ホストや既定サイトへ振り分けられる
+- **sites-available / sites-enabled**: 設定ファイルの実体を置く `sites-available` と、シンボリックリンクで有効化する `sites-enabled` を分離するDebian系の運用構造
+- **a2ensite / a2dissite**: `sites-available` の設定を `sites-enabled` へリンクして有効化・無効化するコマンド
+- **apachectl configtest**: 設定ファイルの構文エラーを事前検証するコマンド（`apachectl -t` と同義）
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 件のサイトを名前ベース仮想ホストとして設定します。
+
+| server_name | document_root | admin_email | log_prefix | notes |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["server_name"] }} | {{ r["document_root"] }} | {{ r["admin_email"] }} | {{ r["log_prefix"] }} | {{ r["notes"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. Apacheを導入し既存サイト構成を確認する
+
+```bash
+apt-get install -y apache2
+apache2ctl -S
+ls -l /etc/apache2/sites-available/ /etc/apache2/sites-enabled/
+```
+
+### 2. サイトごとにドキュメントルートと仮想ホスト設定を作成する
+
+```bash
+{% for r in csv_rows %}mkdir -p {{ r["document_root"] }}
+tee /etc/apache2/sites-available/{{ r["server_name"] }}.conf <<'EOF'
+<VirtualHost *:80>
+    ServerName {{ r["server_name"] }}
+    ServerAdmin {{ r["admin_email"] }}
+    DocumentRoot {{ r["document_root"] }}
+
+    ErrorLog ${APACHE_LOG_DIR}/{{ r["log_prefix"] }}_error.log
+    CustomLog ${APACHE_LOG_DIR}/{{ r["log_prefix"] }}_access.log combined
+
+    <Directory {{ r["document_root"] }}>
+        AllowOverride All
+        Require all granted
+    </Directory>
+</VirtualHost>
+EOF
+{% endfor %}```
+
+`notes` 欄（{% for r in csv_rows %}{{ r["server_name"] }}: {{ r["notes"] }}{% if not loop.last %} / {% endif %}{% endfor %}）は用途確認のメモであり、設定ファイルには反映しません。
+
+### 3. サイトを有効化し構文チェックする
+
+```bash
+{% for r in csv_rows %}a2ensite {{ r["server_name"] }}.conf
+{% endfor %}apachectl configtest
+```
+
+`Syntax OK` が表示されることを確認してから次に進みます。エラーがある場合は該当ファイルを見直し、有効化を取り消します。
+
+### 4. Apacheへ反映する
+
+```bash
+systemctl reload apache2
+apache2ctl -S
+```
+
+`apache2ctl -S` の出力に、投入した全サイトの `ServerName` が名前ベース仮想ホストとして一覧表示されることを確認します。
+
+### 5. hostsファイルを使って動作を検証する
+
+```bash
+{% for r in csv_rows %}echo "127.0.0.1 {{ r["server_name"] }}" >> /etc/hosts
+{% endfor %}{% for r in csv_rows %}curl -s -o /dev/null -w "{{ r["server_name"] }}: %{http_code}\n" http://{{ r["server_name"] }}/
+{% endfor %}```
+
+### 6. サイトごとのログ分離を確認する
+
+```bash
+{% for r in csv_rows %}ls -l /var/log/apache2/{{ r["log_prefix"] }}_access.log
+{% endfor %}```
+
+## 動作確認
+
+- `apachectl configtest` が `Syntax OK` を返すこと
+- `apache2ctl -S` に {{ csv_rows | length }} 件全ての `ServerName` が表示されること
+- 各サイトへの `curl` アクセスで、意図したサイトが200系で応答すること（誤って既定サイトに振り分けられていないこと）
+- サイトごとにアクセスログ・エラーログが分離して記録されていること
+
+## 注意事項
+
+- 検証用に `/etc/hosts` へ追記したエントリは、検証後に必ず削除する。放置すると名前解決が本来のDNSと乖離し、後日別の混乱を招く。
+- `AllowOverride All` は `.htaccess` を許容するため、必要最小限のサイトのみに使う。不要な場合は `AllowOverride None` を検討する。
+- 複数サイトを同一IP・ポートで運用する場合、`ServerName` の設定漏れや重複があると意図しないサイトへ振り分けられる。`apache2ctl -S` で必ず一覧を確認する。

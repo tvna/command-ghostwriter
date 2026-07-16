@@ -1,0 +1,4 @@
+device,type,role,check_focus,schedule
+/dev/sda,sata,OS起動ディスク,Reallocated_Sector_Ct,daily
+/dev/sdb,sata,データ保管用HDD,Current_Pending_Sector,daily
+/dev/nvme0n1,nvme,DBキャッシュ用NVMe,Percentage_Used,weekly

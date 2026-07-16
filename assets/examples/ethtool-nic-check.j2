@@ -1,0 +1,93 @@
+# ethtoolによるNICの状態確認と設定調整
+
+`ethtool` でリンク速度・デュプレックス・オフロード設定を点検し、期待値とのズレやエラーカウンタの増加を確認したうえで、必要な調整を安全に反映します。
+
+## 目的
+
+オートネゴシエーションの結果やオフロード設定が期待通りかを`ethtool`で確認し、疑わしい設定を変更前後の比較を取りながら調整できるようになることを目指します。
+
+## 用語解説
+
+- **オートネゴシエーション**: リンク相手と速度・デュプレックスを自動的にすり合わせる仕組み。ミスマッチが起きると速度低下やエラー増加の原因になる
+- **デュプレックス**: 送受信を同時に行えるか(Full)、片方向ずつか(Half)を示す。現代のスイッチ環境ではFullが正常
+- **オフロード**: TSO/GSO/GROなど、パケット処理の一部をNICやカーネルの上位層で肩代わりする機能。仮想化環境やトラブル切り分け時は無効化することがある
+- **リングバッファ**: NICとカーネル間でパケットを受け渡すためのバッファ。小さすぎると高負荷時にパケットドロップが起きる
+- **エラーカウンタ**: `rx_errors`や`rx_dropped`など、物理層・受信処理での異常を示す統計値
+
+## シナリオ設定
+
+対象インターフェースは `{{ interface }}` です。期待するリンク速度は `{{ expected_speed }}`、期待するデュプレックスは `{{ expected_duplex }}` です。オフロード設定は `{{ offload_settings }}` に調整し、リングバッファについては次の方針で対応します: {{ ring_buffer_note }}
+
+## 手順
+
+### 1. 現在のリンク状態を確認する
+
+```bash
+sudo ethtool {{ interface }}
+```
+
+`Speed:` と `Duplex:` の行が、期待値である `{{ expected_speed }}` / `{{ expected_duplex }}` と一致しているかを確認します。`Link detected: yes` になっていることも合わせて確認します。
+
+### 2. エラーカウンタを含む詳細統計を確認する
+
+```bash
+sudo ethtool -S {{ interface }} | grep -E 'rx_errors|rx_dropped|rx_crc_errors|tx_errors'
+```
+
+いずれかのカウンタが継続的に増加している場合、ケーブル・ポート・デュプレックスミスマッチを疑います。
+
+### 3. 現在のオフロード設定を確認する
+
+```bash
+sudo ethtool -k {{ interface }} | grep -E 'tcp-segmentation-offload|generic-segmentation-offload|generic-receive-offload'
+```
+
+### 4. オフロード設定を変更する
+
+```bash
+sudo ethtool -K {{ interface }} {{ offload_settings }}
+sudo ethtool -k {{ interface }} | grep -E 'tcp-segmentation-offload|generic-segmentation-offload|generic-receive-offload'
+```
+
+### 5. リングバッファを調整する
+
+```bash
+sudo ethtool -g {{ interface }}
+# {{ ring_buffer_note }}
+sudo ethtool -G {{ interface }} rx 4096
+sudo ethtool -g {{ interface }}
+```
+
+### 6. 変更を永続化する
+
+```bash
+sudo tee /etc/networkd-dispatcher/routable.d/50-{{ interface }}-tuning <<'EOF'
+#!/bin/sh
+ethtool -K {{ interface }} {{ offload_settings }}
+ethtool -G {{ interface }} rx 4096
+EOF
+sudo chmod +x /etc/networkd-dispatcher/routable.d/50-{{ interface }}-tuning
+```
+
+オフロードやリングバッファの設定は再起動やNIC再初期化で失われるため、起動時に再適用するフックを用意します。
+
+### 7. 変更前後の性能を比較する
+
+```bash
+sudo ethtool -S {{ interface }} | grep -E 'rx_errors|rx_dropped'
+```
+
+変更適用から一定時間経過後に再度カウンタを確認し、増加が止まっているかを比較します。
+
+## 動作確認
+
+- `ethtool {{ interface }}` の `Speed:` / `Duplex:` が `{{ expected_speed }}` / `{{ expected_duplex }}` と一致していること
+- `ethtool -k {{ interface }}` の出力が `{{ offload_settings }}` の意図通りに反映されていること
+- `ethtool -S {{ interface }}` のエラーカウンタ増加が変更後に収まっていること
+- 起動時フックが再起動後も設定を再適用すること
+
+## 注意事項
+
+- オフロード設定の変更は、変更直後に一時的な通信断や再ネゴシエーションを引き起こすことがある。本番トラフィックがある時間帯を避けて実施する。
+- リングバッファの拡大はメモリ消費と引き換えにドロップを減らす調整であり、無条件に大きくすればよいものではない。NICの上限値(`ethtool -g`の`Pre-set maximums`)を超えないこと。
+- スイッチ側のポート設定(速度・デュプレックス固定/オート)とサーバ側の設定が食い違うと性能劣化やエラー増加の原因になるため、変更前にスイッチ側の設定も確認する。

@@ -1,0 +1,5 @@
+src_host: "app01"
+unreachable_dst: "10.20.30.5"
+expected_gateway: "10.20.30.1"
+route_changes: "10.20.0.0/16 via 10.20.30.254 dev eth1 (追加日: 2026-07-15)"
+rp_filter_note: "eth1でstrict rp_filterが有効なため非対称経路の応答パケットが破棄される可能性がある"

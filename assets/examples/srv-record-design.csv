@@ -1,0 +1,4 @@
+service_proto,priority,weight,port,target,purpose
+_ldap._tcp,10,60,389,ldap1.example.com,プライマリLDAPサーバ
+_ldap._tcp,20,40,389,ldap2.example.com,セカンダリLDAPサーバ
+_sip._tcp,10,100,5060,sip1.example.com,SIPプロキシ

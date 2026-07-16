@@ -1,0 +1,78 @@
+# Hugging Faceモデルのダウンロードとキャッシュ管理
+
+`huggingface-cli` を使い、モデルの取得・キャッシュ配置・容量整理と、アクセストークンの安全な管理を行います。
+
+## 目的
+
+`HF_HOME` によるキャッシュ構造を理解し、共有サーバ上で複数モデルを安全かつ容量を意識して運用できるようになることを目指します。
+
+## 用語解説
+
+- **リポジトリ(repo)**: Hugging Face Hub上のモデル・データセットの格納単位。`{{ model_repo }}` のように `組織名/モデル名` の形式を取る
+- **revision**: 取得するブランチ・タグ・コミットハッシュの指定。省略時は既定ブランチが使われる
+- **HF_HOME**: キャッシュのルートディレクトリを指定する環境変数。既定値ではホームディレクトリ配下になるため、共有サーバでは明示指定が望ましい
+- **キャッシュ構造**: `HF_HOME/hub` 以下にリポジトリ単位でスナップショットとblobが分離保存される仕組み
+- **アクセストークン**: 認証が必要なモデル(gated model)を取得するための個人アクセストークン。スコープを最小限にする
+
+## シナリオ設定
+
+モデル `{{ model_repo }}`(revision: `{{ revision }}`)を、キャッシュ先 `{{ hf_home_path }}` に取得します。キャッシュ上限は `{{ cache_limit_gb }}` GBとし、トークンの権限方針は「{{ token_scope_note }}」です。
+
+## 手順
+
+### 1. アクセストークンを安全に設定する
+
+```bash
+export HF_HOME={{ hf_home_path }}
+huggingface-cli login --token "$HF_TOKEN"
+```
+
+トークン方針: {{ token_scope_note }}。トークン値はシェル履歴やコミットに残さず、環境変数またはシークレットストア経由で渡します。
+
+### 2. huggingface-cli downloadを実行する
+
+```bash
+export HF_HOME={{ hf_home_path }}
+huggingface-cli download {{ model_repo }} --revision {{ revision }} --local-dir-use-symlinks True
+```
+
+### 3. キャッシュを確認する
+
+```bash
+export HF_HOME={{ hf_home_path }}
+huggingface-cli scan-cache
+du -sh {{ hf_home_path }}/hub
+```
+
+### 4. scan-cacheで不要リビジョンを整理する
+
+```bash
+export HF_HOME={{ hf_home_path }}
+huggingface-cli scan-cache -v
+huggingface-cli delete-cache
+```
+
+対話プロンプトで不要な古いリビジョンのみを選択し、`{{ model_repo }}` の `{{ revision }}` は残すよう注意します。
+
+### 5. 共有サーバでの配置を設計する
+
+```bash
+sudo mkdir -p {{ hf_home_path }}
+sudo chgrp -R ai-users {{ hf_home_path }}
+sudo chmod -R 2775 {{ hf_home_path }}
+df -h {{ hf_home_path }}
+```
+
+容量が `{{ cache_limit_gb }}` GBの上限に近づいていないかを `df` で確認し、超過が見込まれる場合は手順4の整理を先に行います。
+
+## 動作確認
+
+- `huggingface-cli scan-cache` に `{{ model_repo }}`(revision `{{ revision }}`)が表示されること
+- `{{ hf_home_path }}` 配下の使用容量が `{{ cache_limit_gb }}` GBを超えていないこと
+- 別ユーザーで同じ `HF_HOME={{ hf_home_path }}` を参照した際に再ダウンロードなしでモデルを利用できること
+
+## 注意事項
+
+- アクセストークンは「{{ token_scope_note }}」の方針を守り、write権限を持つトークンをサーバに常駐させない。
+- `huggingface-cli delete-cache` は削除対象を誤ると再ダウンロードが必要になるため、`-v` で内容を確認してから実行する。
+- ライセンス条項(gated modelの利用規約)を確認したうえで取得する。ライセンス確認自体は本手順の対象外とする。

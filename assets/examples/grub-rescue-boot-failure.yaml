@@ -1,0 +1,5 @@
+boot_mode: UEFI
+root_partition: /dev/sda2
+boot_partition: /dev/sda1
+live_media: Ubuntu Live USB (22.04)
+disk_layout_note: 直近のディスク増設でsdaの認識順が変わり、GRUBのUUID指定が古いディスクを指したまま起動不能になった

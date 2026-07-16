@@ -1,0 +1,88 @@
+# Cisco標準・拡張ACLの設計と投入
+
+台帳(CSV)に基づき、標準ACLと拡張ACLを使い分けてCisco機器へ投入し、インターフェースへ適用します。設定はコンソール接続で実施してください。
+
+## 目的
+
+標準ACL・拡張ACLそれぞれの特性と評価順序を理解した上で、一覧からACLエントリを一括投入し、インターフェースへ適用してヒット数で動作を検証できるようになることを目指します。
+
+## 用語解説
+
+- **暗黙のdeny**: ACLの末尾には明示していなくても`deny any`(拡張)/`deny any`相当(標準)が存在し、どのエントリにも一致しなかったトラフィックは破棄される
+- **評価順序**: ACLエントリは上から順に評価され、最初に一致したエントリのaction(permit/deny)が適用される。以降のエントリは評価されない
+- **標準ACL**: 送信元アドレスのみで判定するACL。宛先に近い(できるだけ目的地に近い)インターフェースへ適用するのが原則
+- **拡張ACL**: 送信元・宛先・プロトコル・ポートで判定するACL。送信元に近いインターフェースへ適用するのが原則
+- **ワイルドカードマスク**: `0.0.0.255`のようにCiscoのACLで使われるマスク表記。サブネットマスクとはビットが反転している点に注意
+- **show access-lists**: 定義済みACLの内容と、各エントリの累積マッチ件数(ヒット数)を表示するコマンド
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 件のACLエントリを投入します。
+
+| acl_id | type | action | source | destination | port | remark |
+|---|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["acl_id"] }} | {{ r["type"] }} | {{ r["action"] }} | {{ r["source"] }} | {{ r["destination"] }} | {{ r["port"] }} | {{ r["remark"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 現行のACLとインターフェース適用状況を確認する
+
+```bash
+enable
+show access-lists
+show ip interface | include access list
+```
+
+### 2. 設定モードへ入る
+
+```bash
+configure terminal
+```
+
+### 3. ACLエントリを投入する
+
+`type` が `standard` の行は送信元のみ、`extended` の行は送信元・宛先・ポートで判定します。`port` が `any` の行はプロトコル`ip`(全ポート)として扱います。
+
+```bash
+{% for r in csv_rows %}{% if r["type"] == "standard" %}access-list {{ r["acl_id"] }} {{ r["action"] }} {{ r["source"] }} # {{ r["remark"] }}
+{% else %}{% if r["port"] == "any" %}access-list {{ r["acl_id"] }} {{ r["action"] }} ip {{ r["source"] }} {{ r["destination"] }} # {{ r["remark"] }}
+{% else %}access-list {{ r["acl_id"] }} {{ r["action"] }} tcp {{ r["source"] }} {{ r["destination"] }} eq {{ r["port"] }} # {{ r["remark"] }}
+{% endif %}{% endif %}{% endfor %}```
+
+### 4. インターフェースへ適用する
+
+拡張ACL(ACL番号 {{ csv_rows[0]["acl_id"] }})は送信元に近いアクセス側インターフェースの`in`方向へ、標準ACL(ACL番号 {{ csv_rows[3]["acl_id"] }})はVTY回線へ適用します。
+
+```bash
+interface GigabitEthernet0/1
+ ip access-group {{ csv_rows[0]["acl_id"] }} in
+exit
+line vty 0 4
+ access-class {{ csv_rows[3]["acl_id"] }} in
+exit
+end
+write memory
+```
+
+### 5. show access-listsとヒット数で検証する
+
+```bash
+show access-lists {{ csv_rows[0]["acl_id"] }}
+show access-lists {{ csv_rows[3]["acl_id"] }}
+```
+
+疎通試験(許可対象・拒否対象それぞれから通信を試みる)を行った上で再度実行し、意図したエントリの`matches`件数が増加していることを確認します。
+
+## 動作確認
+
+- `show access-lists {{ csv_rows[0]["acl_id"] }}` に投入した拡張ACLの全エントリが、投入順のまま表示されること
+- 許可対象からのアクセス試行後、該当`permit`エントリの`matches`件数が増加していること
+- 拒否対象からのアクセス試行後、`deny`エントリの`matches`件数が増加し、実際に通信が遮断されていること
+- `show ip interface GigabitEthernet0/1`にACL適用(`Outgoing/Inbound access list`)が反映されていること
+
+## 注意事項
+
+- VTY回線・自分がリモート接続しているインターフェースへACLを適用する際は、自分自身の接続元アドレスを許可するエントリを先頭付近に含めること。誤って自分を締め出すとコンソール接続でしか復旧できなくなる。
+- ACLエントリの追加はCLI上では末尾追加が基本であり、途中への挿入や順序変更にはシーケンス番号の指定が必要になる。意図した評価順序になっているか`show access-lists`で必ず確認する。
+- 暗黙のdenyがあるため、明示的な`permit`エントリを含まないACLをインターフェースに適用すると、全トラフィックが遮断される。適用前に必ず最終行の意図(全拒否か一部許可か)を確認する。

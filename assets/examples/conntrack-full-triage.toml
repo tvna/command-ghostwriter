@@ -1,0 +1,5 @@
+current_max = 65536
+current_count_command = "conntrack -C"
+timeout_established = 432000
+suspect_traffic = "10.0.4.0/24 からの大量の短命TCP接続(ヘルスチェック多重化の疑い)"
+new_max = 262144

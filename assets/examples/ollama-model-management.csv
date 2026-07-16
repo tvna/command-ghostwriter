@@ -1,0 +1,5 @@
+model_name,tag,quantization,size_gb,use_case,keep_policy
+llama3.1,8b,Q4_K_M,4.9,汎用チャット,常時保持
+qwen2.5-coder,14b,Q5_K_M,10.2,コード生成,常時保持
+mistral,7b,Q4_0,4.1,検証用,月次見直し
+llava,13b,Q4_K_M,8.0,画像理解,不要なら削除

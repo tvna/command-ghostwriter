@@ -1,0 +1,16 @@
+title: 依存サービス連鎖障害の切り分け演習
+hostname: app-prod-03
+visible_failed_service: web-app.service
+dependency_chain:
+  - web-app.service
+  - redis.service
+  - network-online.target
+root_candidate: redis.service
+start_order:
+  - redis.service
+  - web-app.service
+verify_commands:
+  - "systemctl is-active redis.service"
+  - "systemctl is-active web-app.service"
+  - "curl -fsS http://localhost:8080/healthz"
+escalation: インフラ基盤チーム (内線 1201)

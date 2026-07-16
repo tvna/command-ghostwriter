@@ -1,0 +1,5 @@
+site_url: "https://shop.example.com"
+detection_method: "外部の改ざん監視サービスからのアラート通知"
+doc_root: "/var/www/shop.example.com/public"
+last_known_good_backup: "/backup/shop.example.com/2026-07-15_0300.tar.gz"
+takedown_authority: "インフラ責任者(佐藤)の承認"

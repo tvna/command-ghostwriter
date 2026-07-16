@@ -1,0 +1,6 @@
+service_name: app-backup
+description: アプリケーションデータの日次バックアップ
+oncalendar: "*-*-* 02:30:00"
+exec_start: /usr/local/bin/app-backup.sh
+user: backup
+persistent: true

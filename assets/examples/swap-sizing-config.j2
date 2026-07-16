@@ -1,0 +1,81 @@
+# swap領域の設計とswappiness調整
+
+swapファイルの作成・恒久化と `vm.swappiness` の調整により、メモリ逼迫時の挙動を平時のうちに設計します。root権限（sudo）で実施してください。
+
+## 目的
+
+swapとswappinessの役割を理解し、メモリ搭載量に応じたswapサイズの設計・作成・恒久化と、swappiness調整による挙動制御ができるようになることを目指します。
+
+## 用語解説
+
+- **swap**: 物理メモリが不足した際に、使用頻度の低いメモリページを退避させるディスク上の領域
+- **swappiness**: カーネルがどれだけ積極的にswapを利用するかを0〜100で示す設定値（値が大きいほど積極的にswapする）
+- **OOM回避との関係**: swapがあることで即座のメモリ枯渇（OOM Killer発動）を先送りできるが、根本的なメモリ不足の解決にはならない
+
+## シナリオ設定
+
+搭載メモリ **{{ memory_total }}** のホストに、swapファイル **{{ swap_file_path }}**（サイズ **{{ swap_size }}**）を作成し、swappinessを **{{ swappiness }}** に設定します。
+
+## 手順
+
+### 1. 現状を確認する
+
+```bash
+free -h
+swapon --show
+```
+
+### 2. swapファイルを作成する
+
+```bash
+fallocate -l {{ swap_size }} {{ swap_file_path }}
+chmod 600 {{ swap_file_path }}
+mkswap {{ swap_file_path }}
+```
+
+### 3. swapを有効化する
+
+```bash
+swapon {{ swap_file_path }}
+swapon --show
+```
+
+### 4. `/etc/fstab` に恒久化する
+
+```bash
+cp /etc/fstab /etc/fstab.bak
+echo '{{ fstab_entry }}' >> /etc/fstab
+```
+
+### 5. swappinessを調整する
+
+```bash
+cat > /etc/sysctl.d/90-swappiness.conf <<'EOF'
+vm.swappiness = {{ swappiness }}
+EOF
+sysctl --system
+```
+
+### 6. 動作検証
+
+```bash
+free -h
+swapon --show
+sysctl vm.swappiness
+mount -a
+```
+
+`mount -a` を実行しても `/etc/fstab` の記述にエラーが出ないことを確認し、fstab恒久化の妥当性を検証します。
+
+## 動作確認
+
+- `swapon --show` に `{{ swap_file_path }}` が `{{ swap_size }}` で表示されること
+- `sysctl vm.swappiness` の値が `{{ swappiness }}` になっていること
+- 再起動後も `swapon --show` にswapファイルが表示されること（fstab恒久化の効果）
+- `free -h` の合計メモリ表示が `{{ memory_total }}` と概ね一致していること
+
+## 注意事項
+
+- `swappiness` を極端に低くしすぎると、メモリ逼迫時にswapへ逃げる前にOOM Killerが早期に発動する場合があるため、アプリケーションの特性に応じて段階的に調整する。
+- swapファイル作成前に、配置先ファイルシステムに十分な空き容量（`{{ swap_size }}` 以上）があることを確認する。
+- 本手順は平時のswap設計・恒久化を扱うものであり、oom-memory-triage(既存)のようなメモリ逼迫発生時の障害対応とは焦点が異なる。

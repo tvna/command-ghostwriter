@@ -1,0 +1,5 @@
+listen_port = 3128
+allowed_src_networks = "192.168.10.0/24"
+blocked_domains = "ads.example.com,tracker.example.net"
+cache_size = "1000 MB"
+log_note = "access.logはip/URL/コード列で構成され、ローテーションはlogrotate-setup(既存)側で管理する"

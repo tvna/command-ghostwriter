@@ -1,0 +1,4 @@
+name,type,value,ttl,action,requester
+www.example.com,A,203.0.113.10,300,add,tanaka
+old.example.com,A,203.0.113.9,300,delete,tanaka
+api.example.com,CNAME,www.example.com.,300,add,sato

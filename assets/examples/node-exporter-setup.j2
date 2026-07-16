@@ -1,0 +1,95 @@
+# Prometheus node_exporterによるメトリクス公開
+
+node_exporter `{{ exporter_version }}` をsystemdサービスとして導入し、`{{ listen_address }}` でCPU・メモリ・ディスクのメトリクスを公開・確認します。
+
+## 目的
+
+exporterの役割とスクレイプの仕組みを理解し、専用ユーザーでnode_exporterを常駐化し、公開範囲を制限した状態で `/metrics` の内容を確認できるようになることを目指します。
+
+## 用語解説
+
+- **exporter**: 対象システムの状態をPrometheusが読み取れるテキスト形式(メトリクス)に変換して公開するプロセス
+- **メトリクス**: `node_cpu_seconds_total` のような、名前・ラベル・数値からなる計測データ
+- **スクレイプ**: Prometheusサーバがexporterの `/metrics` エンドポイントを定期的にHTTP GETで取得する動作
+- **textfile_collector**: シェルスクリプト等で生成した任意の値を、ファイル経由でnode_exporterに取り込ませる拡張機構
+- **listen_address**: node_exporterがHTTPで待ち受けるアドレスとポート
+
+## シナリオ設定
+
+導入バージョンは `{{ exporter_version }}`、待ち受けは `{{ listen_address }}` です。textfile_collectorのディレクトリは `{{ textfile_dir }}`、実行ユーザーは `{{ service_user }}` とします。アクセス許可元は {{ firewall_allow_from | length }} 件({% for ip in firewall_allow_from %}`{{ ip }}`{% if not loop.last %}, {% endif %}{% endfor %})に限定します。
+
+## 手順
+
+### 1. 専用ユーザーとバイナリを配置する
+
+```bash
+sudo useradd --no-create-home --shell /usr/sbin/nologin {{ service_user }}
+curl -LO https://github.com/prometheus/node_exporter/releases/download/v{{ exporter_version }}/node_exporter-{{ exporter_version }}.linux-amd64.tar.gz
+tar xzf node_exporter-{{ exporter_version }}.linux-amd64.tar.gz
+sudo install -m 0755 node_exporter-{{ exporter_version }}.linux-amd64/node_exporter /usr/local/bin/node_exporter
+sudo mkdir -p {{ textfile_dir }}
+sudo chown -R {{ service_user }}:{{ service_user }} {{ textfile_dir }}
+```
+
+### 2. systemdユニットを作成する
+
+```bash
+sudo tee /etc/systemd/system/node_exporter.service <<'EOF'
+[Unit]
+Description=Prometheus Node Exporter
+After=network.target
+
+[Service]
+User={{ service_user }}
+ExecStart=/usr/local/bin/node_exporter \
+  --web.listen-address={{ listen_address }} \
+  --collector.textfile.directory={{ textfile_dir }}
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now node_exporter
+```
+
+### 3. サービス状態を確認する
+
+```bash
+sudo systemctl status node_exporter --no-pager
+```
+
+### 4. /metricsをローカルから確認する
+
+```bash
+curl -s http://{{ listen_address }}/metrics | head -n 20
+curl -s http://{{ listen_address }}/metrics | grep -c '^node_'
+```
+
+### 5. 公開範囲をファイアウォールで制限する
+
+```bash
+{% for ip in firewall_allow_from %}sudo ufw allow from {{ ip }} to any port 9100 proto tcp
+{% endfor %}sudo ufw deny 9100/tcp
+sudo ufw status numbered
+```
+
+### 6. 主要メトリクスを読む
+
+```bash
+curl -s http://{{ listen_address }}/metrics | grep -E '^node_(cpu_seconds_total|memory_MemAvailable_bytes|filesystem_avail_bytes)'
+```
+
+## 動作確認
+
+- `systemctl status node_exporter` が `active (running)` であり、実行ユーザーが `{{ service_user }}` であること
+- `curl http://{{ listen_address }}/metrics` がHTTP 200でPrometheus形式のテキストを返すこと
+- {{ firewall_allow_from | length }} 件の許可元以外からのアクセスがファイアウォールで拒否されること
+- `{{ textfile_dir }}` の所有者が `{{ service_user }}` であり、textfile_collectorが読み取り可能であること
+
+## 注意事項
+
+- node_exporterはメトリクスを認証なしで公開する。`{{ listen_address }}` を `0.0.0.0` のまま外部ネットワークに晒さないよう、Step 5のファイアウォール制限を必ず適用する。
+- `{{ textfile_dir }}` への書き込みは信頼できるスクリプトのみに限定する。任意のプロセスが書き込めるとメトリクス偽装につながる。
+- ダウンロードしたリリースアーカイブ(`node_exporter-{{ exporter_version }}.linux-amd64.tar.gz`)は展開後に削除し、作業ディレクトリを汚さないよう後片付けする。
+- `cron-healthcheck`(既存, 死活監視)とは異なり、本手順は継続的なメトリクス収集基盤の構築が焦点であり、単発の生死判定ではない。

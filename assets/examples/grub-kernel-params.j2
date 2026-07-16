@@ -1,0 +1,89 @@
+# GRUBによるカーネル起動パラメータの管理
+
+GRUBのカーネルコマンドラインを編集し、パラメータを追加してから設定を再生成・再起動して反映を確認します。root権限(sudo)で実施し、リモート作業では特に切り戻し手順を事前に用意してください。
+
+## 目的
+
+`GRUB_CMDLINE_LINUX`の編集からGRUB設定の再生成、再起動後の反映確認、そして起動不能時の切り戻しまでを安全に行えるようになることを目指します。
+
+## 用語解説
+
+- **GRUB**: Linuxで広く使われるブートローダー。起動時にカーネルへ渡すパラメータを制御する
+- **カーネルコマンドライン**: カーネル起動時に渡される引数の並び。`/proc/cmdline`で現在有効な値を確認できる
+- **GRUB_CMDLINE_LINUX**: `/etc/default/grub`内の変数。ここに追記したパラメータが全エントリの起動時に適用される
+- **update-grub / grub2-mkconfig**: `/etc/default/grub`の内容から実際のGRUB設定ファイル(`grub.cfg`)を再生成するコマンド。ディストリビューションにより名称が異なる
+- **フォールバックエントリ**: 直前のカーネルや旧設定で起動できる保険用のGRUBメニュー項目
+
+## シナリオ設定
+
+`{{ grub_file }}`を編集し、`{{ param_to_add }}`を追加します。追加理由は「{{ param_reason }}」です。切り戻しの備え: {{ fallback_note }}。物理コンソールまたはシリアルコンソールへのアクセス可否: {{ console_access }}。
+
+## 手順
+
+### 1. 現在のカーネルコマンドラインを確認する
+
+```bash
+cat /proc/cmdline
+grep '^GRUB_CMDLINE_LINUX' {{ grub_file }}
+```
+
+### 2. 設定ファイルをバックアップする
+
+```bash
+sudo cp {{ grub_file }} {{ grub_file }}.bak.$(date +%Y%m%d%H%M%S)
+ls -l {{ grub_file }}.bak.*
+```
+
+### 3. GRUB_CMDLINE_LINUXにパラメータを追記する
+
+```bash
+sudo sed -i \
+  's/^GRUB_CMDLINE_LINUX="\(.*\)"$/GRUB_CMDLINE_LINUX="\1 {{ param_to_add }}"/' \
+  {{ grub_file }}
+grep '^GRUB_CMDLINE_LINUX' {{ grub_file }}
+```
+
+### 4. GRUB設定を再生成する
+
+ディストリビューションに応じたコマンドを使用します。
+
+```bash
+# Debian/Ubuntu系
+sudo update-grub
+
+# RHEL系
+sudo grub2-mkconfig -o /boot/grub2/grub.cfg
+```
+
+### 5. 再起動して反映を確認する
+
+```bash
+sudo reboot
+```
+
+再起動後、以下で反映を確認します。
+
+```bash
+cat /proc/cmdline | grep -o '{{ param_to_add }}'
+```
+
+### 6. 起動不能時に切り戻す
+
+GRUBメニューで`e`キーを押し、追加したパラメータを一時的に削除して起動した後、恒久的に切り戻します。
+
+```bash
+sudo cp {{ grub_file }}.bak.* {{ grub_file }}
+sudo update-grub || sudo grub2-mkconfig -o /boot/grub2/grub.cfg
+```
+
+## 動作確認
+
+- `/proc/cmdline`に`{{ param_to_add }}`が含まれていること
+- `{{ grub_file }}`のバックアップファイルが再起動前に作成されていること
+- 再起動後もシステムが正常に起動し、対象サービスが問題なく稼働していること
+
+## 注意事項
+
+- パラメータ誤設定によりカーネルが起動不能になる可能性があるため、変更前に必ずバックアップを取得し、可能であれば{{ fallback_note }}。
+- リモート環境で作業する場合、コンソールアクセス({{ console_access }})が確保できない状態での再起動は避ける。作業前にクラウド/仮想化基盤のシリアルコンソールを確認しておく。
+- 複数のパラメータを一度に追加せず、1つずつ追加・再起動・検証を繰り返すことで、問題発生時の切り分けを容易にする。

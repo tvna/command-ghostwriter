@@ -1,0 +1,71 @@
+# ワイルドカードとCNAMEの設計・登録の注意点
+
+ゾーン `{{ zone_name }}` にワイルドカードレコードとCNAMEレコード群を設計・登録します。ワイルドカードの適用範囲やCNAMEの制約による事故を避けながら進めます。
+
+## 目的
+
+ワイルドカードレコードの適用範囲とCNAMEの制約(頂点への設定不可・他レコードとの共存不可)を理解し、既存レコードと衝突しない設計で登録・検証できるようになることを目指します。
+
+## 用語解説
+
+- **ワイルドカードレコード**: `*.example.com` のように、明示的に登録されていない名前への問い合わせに一括で応答するレコード
+- **CNAME (Canonical Name)**: ある名前を別の正規名の別名として扱うレコード
+- **頂点(apex)**: ゾーンのルートとなる名前(例: `example.com` 自体)。CNAMEを設定できない
+- **ALIAS/ANAME**: 頂点にCNAME相当の挙動を持たせるためのDNSプロバイダ独自拡張機能
+- **共存不可の制約**: ある名前にCNAMEを設定すると、同じ名前に他のレコードタイプ(A, MX, TXTなど)を置けなくなる
+
+## シナリオ設定
+
+対象ゾーンは `{{ zone_name }}` です。ワイルドカードの転送先は `{{ wildcard_target }}` とし、個別のCNAMEエントリを {{ cname_entries | length }} 件登録します。頂点(apex)の扱いは「{{ apex_strategy }}」とします。
+
+## 手順
+
+### 1. 既存レコードとの衝突を確認する
+
+```bash
+dig ANY *.{{ zone_name }} +short
+{% for c in cname_entries %}dig ANY {{ c.name }}.{{ zone_name }} +short
+{% endfor %}```
+
+### 2. ワイルドカードレコードを登録する
+
+```bash
+echo '*.{{ zone_name }}. IN CNAME {{ wildcard_target }}' >> /var/named/db.{{ zone_name }}
+```
+
+### 3. 個別のCNAMEエントリを登録する
+
+```bash
+{% for c in cname_entries %}echo '{{ c.name }}.{{ zone_name }}. IN CNAME {{ c.target }}' >> /var/named/db.{{ zone_name }}
+{% endfor %}
+named-checkzone {{ zone_name }} /var/named/db.{{ zone_name }}
+rndc reload
+```
+
+### 4. 頂点(apex)への対応方針を適用する
+
+```bash
+# {{ apex_strategy }}
+dig {{ zone_name }} A +short
+```
+
+### 5. 意図した名前・意図しない名前の両方をdigで検証する
+
+```bash
+dig random-unregistered-name.{{ zone_name }} +short
+{% for c in cname_entries %}dig {{ c.name }}.{{ zone_name }} +short
+{% endfor %}dig {{ zone_name }} A +short
+```
+
+## 動作確認
+
+- ワイルドカード対象の未登録名(例: `random-unregistered-name.{{ zone_name }}`)が `{{ wildcard_target }}` を経由して解決できること
+- 各CNAMEエントリが期待どおりの転送先に解決されること
+- 頂点(`{{ zone_name }}` 自体)がCNAMEではなくAレコードとして解決できること
+- `named-checkzone` がエラーなく通ること
+
+## 注意事項
+
+{% for p in pitfall_checklist %}- **{{ p.issue }}**: {{ p.detail }}
+{% endfor %}- ワイルドカードは存在しない全ての名前に応答してしまうため、タイプミスしたホスト名へのアクセスに気づけなくなる副作用がある。用途を限定して使うこと。
+- 既存のCNAMEレコードを持つ名前に別のレコードを追加しようとするとゾーン投入自体が失敗するため、登録前に必ず衝突確認を行うこと。

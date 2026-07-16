@@ -1,0 +1,5 @@
+power_limit_watts = 250
+default_power_limit = 300
+target_temp = 80
+persistence_mode = true
+benchmark_command = "python3 -m torch.utils.benchmark.examples.compare"

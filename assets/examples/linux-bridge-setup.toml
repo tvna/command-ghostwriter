@@ -1,0 +1,5 @@
+bridge_name = "br0"
+member_interfaces = ["eth0"]
+bridge_ip = "192.168.20.10/24"
+stp_enabled = false
+vm_or_container_use = "KVMゲストとPodmanコンテナを同一LANセグメントへ直接接続する"

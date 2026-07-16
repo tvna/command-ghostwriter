@@ -1,0 +1,4 @@
+interface,max_mac,violation_action,sticky,description
+GigabitEthernet0/1,1,shutdown,true,受付PC
+GigabitEthernet0/2,2,restrict,true,会議室共用ポート
+GigabitEthernet0/3,1,protect,false,来客用キオスク端末

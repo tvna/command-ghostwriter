@@ -1,0 +1,5 @@
+symptom: 社内から基幹APIへのレスポンスが断続的に遅い
+affected_path: client-lan01 -> core-sw01 -> fw01 -> api01.internal.example
+baseline_rtt: 2ms
+measurement_duration: 10分間
+escalation_contact: network-noc@internal.example

@@ -1,0 +1,5 @@
+run_user = "named"
+version_string = "not disclosed"
+hide_hostname = true
+disable_recursion_on_auth = true
+minimal_responses = true

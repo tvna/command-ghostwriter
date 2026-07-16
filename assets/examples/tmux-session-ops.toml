@@ -1,0 +1,5 @@
+session_name = "batch-job"
+long_job_command = "rsync -av /data/src/ /data/dst/"
+log_pipe_path = "/var/log/tmux/batch-job-pipe.log"
+shared_user = "opsteam"
+tmux_conf_snippet = "set -g mouse on\nset -g history-limit 10000"

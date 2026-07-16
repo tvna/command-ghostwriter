@@ -1,0 +1,5 @@
+rule_type,target_path,permissions,key_name,purpose
+watch,/etc/passwd,wa,passwd_changes,パスワードファイルの変更監視
+watch,/etc/sudoers,wa,sudoers_changes,sudo権限設定の変更監視
+watch,/etc/shadow,wa,shadow_changes,シャドウパスワードファイルの変更監視
+syscall,/usr/bin/sudo,x,priv_cmd_exec,特権コマンド実行の監視

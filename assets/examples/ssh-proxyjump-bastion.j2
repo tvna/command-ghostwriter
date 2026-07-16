@@ -1,0 +1,96 @@
+# 踏み台経由SSH接続(ProxyJump)の設定
+
+踏み台サーバ経由の多段SSHを`ProxyJump`と`ssh_config`で整備し、鍵転送(agent forwarding)を使わずに安全に接続できるようにするまでを一巡します。
+
+## 目的
+
+`ProxyJump`の仕組みと、鍵をリモート側に転送する`agent forwarding`との違い・リスク差を理解し、踏み台経由の多段SSHを1コマンドかつ安全に実行できるようになることを目指します。
+
+## 用語解説
+
+- **ProxyJump(-J)**: 指定した踏み台サーバを経由し、内部ネットワークのホストへ直接ログインしたかのように接続する機能
+- **agent forwardingとの違い**: `agent forwarding`は踏み台上に秘密鍵の操作権限そのものを転送するため、踏み台が侵害されると鍵の悪用経路になる。`ProxyJump`は接続をトンネルするだけで鍵は手元に留まる
+- **ssh_config Hostブロック**: `~/.ssh/config`内でホストごとの接続設定(踏み台・鍵・ユーザー)をエイリアスとしてまとめる仕組み
+- **多段SSH**: 直接到達できない内部ホストに、踏み台を経由して接続する構成
+- **ControlMaster**: 一度確立した接続を再利用し、2回目以降の接続を高速化するssh_configのオプション
+
+## シナリオ設定
+
+踏み台サーバ `{{ bastion_host }}`(ユーザー `{{ bastion_user }}`)を経由し、内部ネットワークの {{ target_hosts | length }} 台へ接続します。踏み台自体のエイリアスは `{{ ssh_config_alias }}`、使用する鍵は `{{ key_path }}` です。
+
+対象ホスト:
+{% for h in target_hosts %}- `{{ h }}`
+{% endfor %}
+
+## 手順
+
+### 1. 内部ホストに直接到達できないことを確認する
+
+```bash
+{% for h in target_hosts %}ssh -o ConnectTimeout=5 {{ h }} true || echo "{{ h }}: 直接到達不可を確認"
+{% endfor %}
+```
+
+内部ホストはグローバルには公開されておらず、`{{ bastion_host }}`を経由しない限り到達できないことを前提にします。
+
+### 2. ssh_configにHostブロックを記述する
+
+```bash
+cat <<'EOF' >> ~/.ssh/config
+
+Host {{ ssh_config_alias }}
+    HostName {{ bastion_host }}
+    User {{ bastion_user }}
+    IdentityFile {{ key_path }}
+    ControlMaster auto
+    ControlPath ~/.ssh/cm-%r@%h:%p
+    ControlPersist 10m
+
+{% for h in target_hosts %}Host {{ h }}
+    ProxyJump {{ ssh_config_alias }}
+    IdentityFile {{ key_path }}
+
+{% endfor %}EOF
+```
+
+`agent forwarding`(`ForwardAgent yes`)は設定しません。`ProxyJump`はトンネルを張るだけで、鍵の操作権限自体は手元の端末に留まります。
+
+### 3. 1コマンドでの接続を検証する
+
+```bash
+{% for h in target_hosts %}ssh {{ h }} 'hostname && whoami'
+{% endfor %}
+```
+
+`ssh {{ target_hosts[0] }}`のように、踏み台の指定を意識せず1コマンドで内部ホストへ到達できることを確認します。
+
+### 4. scpとポートフォワードを併用する
+
+```bash
+scp /etc/hostname {{ target_hosts[0] }}:/tmp/from-local.txt
+ssh -L 8443:{{ target_hosts[-1] }}:443 {{ ssh_config_alias }} -N &
+curl -sk https://localhost:8443/ -o /dev/null -w "%{http_code}\n"
+kill %1
+```
+
+`-L`はローカルポートを`{{ ssh_config_alias }}`経由で内部ホストの443番へトンネルし、ブラウザやcurlから直接アクセスできるようにします。
+
+### 5. 接続ログを確認する
+
+```bash
+ssh {{ ssh_config_alias }} "sudo journalctl -u ssh --since '10 min ago' | grep Accepted"
+```
+
+踏み台側のログに、想定外の経由元からの接続がないかを確認します。
+
+## 動作確認
+
+- {{ target_hosts | length }} 台すべてに`ssh <ホスト名>`のみでログインでき、踏み台のホスト名を明示する必要がないこと
+- `~/.ssh/config`に`ForwardAgent`が設定されていないこと(`grep -i forwardagent ~/.ssh/config`が該当なしを返す)
+- `ControlMaster`により2回目以降の接続確立が高速化されていること
+
+## 注意事項
+
+- `agent forwarding`は踏み台が侵害された際に鍵の悪用経路となるため、本手順では使用しない。既存で有効になっている場合は`ForwardAgent no`を明示して無効化する。
+- `{{ key_path }}`はパスフレーズ付きで生成し、`ssh-agent`にローカルでのみ登録して使う。秘密鍵を踏み台サーバへコピーしない。
+- `ControlPersist`で接続を保持したままにすると、端末を離れた際に踏み台経由のセッションが残り続ける。共有端末では利用後に`ssh -O exit {{ ssh_config_alias }}`で明示的に切断する。

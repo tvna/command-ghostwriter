@@ -1,0 +1,9 @@
+title: コンテナ再起動ループの調査
+container_name: order-api
+restart_policy: always
+exit_code: 137
+image_tag: order-api:2.4.1
+recent_changes:
+  - image_tag を order-api:2.3.0 から order-api:2.4.1 へ更新
+  - 環境変数 DB_POOL_SIZE を 10 から 50 へ変更
+escalation: アプリケーション基盤チーム (内線 1210)

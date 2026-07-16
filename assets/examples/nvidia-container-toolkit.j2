@@ -1,0 +1,88 @@
+# NVIDIA Container ToolkitによるGPUコンテナ実行
+
+Dockerコンテナから GPU を利用できるようにするため、NVIDIA Container Toolkit を導入し、動作検証とリソース指定までを行います。
+
+## 目的
+
+Container Toolkitがランタイムに追加する仕組みを理解し、コンテナから安全にGPUを利用・割当できるようになることを目指します。
+
+## 用語解説
+
+- **NVIDIA Container Toolkit**: コンテナランタイムにGPUデバイスを渡すためのフック・ライブラリ一式
+- **ランタイム連携**: `{{ runtime }}` などのコンテナランタイムに、GPU対応ランタイム(`nvidia`)を登録して有効化する仕組み
+- **--gpusオプション**: `docker run` でコンテナに割り当てるGPUの範囲(全部・個数・特定ID)を指定するオプション
+- **deploy.resources.reservations.devices**: Docker ComposeでGPUなどのデバイスリソースを予約する記法
+
+## シナリオ設定
+
+対象ランタイムは `{{ runtime }}`、導入するToolkitのバージョンは `{{ toolkit_version }}` です。検証用イメージは `{{ test_image }}`、割当は `--gpus {{ gpus_option }}` を使います。
+
+## 手順
+
+### 1. 前提を確認する(ドライバ導入済み)
+
+ホスト側にNVIDIAドライバが導入済みであることが前提です（「NVIDIAドライバとCUDA Toolkitのセットアップ」を参照）。未導入の場合は先にそちらを実施してください。
+
+```bash
+nvidia-smi
+```
+
+### 2. Container Toolkitを導入する
+
+```bash
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | \
+  sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+  sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+  sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+sudo apt-get update
+sudo apt-get install -y nvidia-container-toolkit={{ toolkit_version }}-1
+```
+
+### 3. ランタイムを設定する
+
+```bash
+sudo nvidia-ctk runtime configure --runtime={{ runtime }}
+sudo systemctl restart {{ runtime }}
+```
+
+### 4. --gpusオプションでnvidia-smi実行を検証する
+
+```bash
+sudo docker run --rm --gpus {{ gpus_option }} {{ test_image }} nvidia-smi
+```
+
+### 5. 特定GPUを割り当てる
+
+```bash
+sudo docker run --rm --gpus '"device=0"' {{ test_image }} nvidia-smi -L
+```
+
+### 6. Composeでの指定を確認する
+
+{{ compose_example_note }}。
+
+```yaml
+services:
+  app:
+    image: {{ test_image }}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+```
+
+## 動作確認
+
+- 手順4のコンテナ内 `nvidia-smi` がホストと同じGPUを表示すること
+- `sudo docker info | grep -i runtime` に `nvidia` ランタイムが含まれること
+- Composeで起動したコンテナ内からも `nvidia-smi` が成功すること
+
+## 注意事項
+
+- Container ToolkitはGPUをホストと共有するため、複数コンテナから同時に `--gpus all` を指定すると資源が競合する。
+- `{{ runtime }}` 以外のランタイム（containerd単体など）を使う場合は設定ファイルの記法が異なるため、公式ドキュメントで確認する。
+- 本手順は一般的なDockerコンテナ運用(docker-basic-ops)とはGPU連携の追加設定に焦点を絞って差別化している。

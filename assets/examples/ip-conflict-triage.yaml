@@ -1,0 +1,5 @@
+conflict_ip: 192.0.2.50
+expected_mac: 00:1a:2b:3c:4d:5e
+dhcp_scope: 192.0.2.0/24 (192.0.2.10-192.0.2.199)
+static_assignment_list_ref: docs/network/static-ip-registry.csv
+switch_access: core-sw01 (SSH管理IP 192.0.2.1)

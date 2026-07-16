@@ -1,0 +1,11 @@
+title: デプロイ失敗時のロールバック演習
+service_name: checkout-api
+release_id: v2.14.0
+rollback_trigger_criteria: エラー率が5%を超えて5分継続、またはレイテンシp99が3倍以上に悪化
+previous_version: v2.13.2
+db_migration_involved: true
+verification_checks:
+  - "curl -fsS https://checkout-api.internal/healthz"
+  - "systemctl status checkout-api"
+  - "curl -s https://checkout-api.internal/metrics | grep error_rate"
+escalation: インフラ基盤チーム (内線 1201)

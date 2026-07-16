@@ -1,0 +1,6 @@
+bond_name = "bond0"
+slave_interfaces = ["eth0", "eth1"]
+bond_mode = "802.3ad"
+miimon = 100
+ip_address = "192.168.10.50/24"
+switch_requirement = "スイッチ側で対象2ポートをLACP(IEEE802.3ad)のポートチャネルとして事前設定しておくこと"

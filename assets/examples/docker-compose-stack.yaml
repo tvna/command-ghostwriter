@@ -1,0 +1,8 @@
+project_name: shopapp
+app_image: myorg/shopapp-web:1.4.0
+app_port: 8080
+db_image: postgres:16
+db_volume: shopapp_db_data
+env_vars:
+  DATABASE_URL: postgres://shopapp:shopapp_pw@db:5432/shopapp
+  APP_ENV: production

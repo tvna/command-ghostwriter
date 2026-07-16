@@ -1,0 +1,77 @@
+# NVIDIAドライバとCUDA Toolkitのセットアップ — {{ gpu_model }}
+
+GPUサーバに NVIDIA ドライバと CUDA Toolkit を、標準ドライバである nouveau の無効化から動作検証まで一貫して導入します。
+
+## 目的
+
+ドライバと CUDA Toolkit の役割分担を理解し、nouveau との競合や Secure Boot による署名検証を踏まえて、GPU 基盤を安全に構築・検証できるようになることを目指します。
+
+## 用語解説
+
+- **ドライバとCUDAの関係**: ドライバはOSがGPUを認識・制御するための基盤であり、CUDA Toolkitはその上でGPU向けプログラムをビルド・実行するための開発環境
+- **nouveau**: Linuxカーネルに標準搭載されているオープンソースのNVIDIA向けドライバ。NVIDIA公式ドライバと同時にはロードできない
+- **Secure Boot**: 署名されていないカーネルモジュールの読み込みをファームウェアレベルで拒否する仕組み
+- **MOK(Machine Owner Key)**: Secure Boot環境で、ベンダー署名のないカーネルモジュールを個別に信頼させるための鍵登録の仕組み
+- **cuda-drivers**: NVIDIA公式リポジトリが提供する、ドライバ一式をまとめたメタパッケージ
+
+## シナリオ設定
+
+対象GPUは `{{ gpu_model }}`、導入するドライバは `{{ driver_version }}`、CUDA Toolkitは `{{ cuda_version }}` です。導入方式は {{ install_method }} を用います。{{ secure_boot_note }}。
+
+## 手順
+
+### 1. 事前確認(GPU認識・Secure Boot状態)
+
+```bash
+lspci -nn | grep -i nvidia
+mokutil --sb-state
+lsmod | grep nouveau
+```
+
+### 2. nouveauドライバを無効化する
+
+```bash
+sudo tee /etc/modprobe.d/blacklist-nouveau.conf <<'EOF'
+blacklist nouveau
+options nouveau modeset=0
+EOF
+sudo update-initramfs -u
+sudo reboot
+```
+
+### 3. NVIDIAドライバを導入する
+
+```bash
+sudo apt-get update
+sudo apt-get install -y cuda-drivers-{{ driver_version.split('.')[0] }}
+```
+
+### 4. CUDA Toolkitを導入しPATHを設定する
+
+```bash
+sudo apt-get install -y cuda-toolkit-{{ cuda_version.replace('.', '-') }}
+echo 'export PATH=/usr/local/cuda-{{ cuda_version }}/bin:$PATH' | sudo tee -a /etc/profile.d/cuda.sh
+echo 'export LD_LIBRARY_PATH=/usr/local/cuda-{{ cuda_version }}/lib64:$LD_LIBRARY_PATH' | sudo tee -a /etc/profile.d/cuda.sh
+source /etc/profile.d/cuda.sh
+```
+
+### 5. 動作確認(nvidia-smi・サンプルビルド)
+
+```bash
+nvidia-smi
+nvcc --version
+cd /usr/local/cuda-{{ cuda_version }}/extras/demo_suite && ./deviceQuery
+```
+
+## 動作確認
+
+- `nvidia-smi` が `{{ gpu_model }}` と `{{ driver_version }}` を表示すること
+- `lsmod | grep nouveau` が何も出力しないこと
+- `nvcc --version` が `{{ cuda_version }}` 系を表示すること
+- `deviceQuery` が `Result = PASS` で終了すること
+
+## 注意事項
+
+- {{ secure_boot_note }}。MOK登録を怠るとドライバのカーネルモジュールがロードされず `nvidia-smi` が失敗する。
+- カーネル更新後はDKMSによる再ビルドが必要になる場合があるため、更新直後は `nvidia-smi` で疎通を再確認する。
+- nouveauブラックリスト設定は initramfs 再構築と再起動を伴うため、リモート作業ではコンソールアクセス経路を確保してから実施する。

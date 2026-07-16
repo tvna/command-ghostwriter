@@ -1,0 +1,87 @@
+# ファイルシステムのread-only化障害の対応 — {{ affected_mount }}
+
+I/Oエラーを検知したカーネルが安全のためファイルシステムを自動的にread-onlyへリマウントすることがあります。原因を確認し、安易な書き込み再開を避けて安全に復旧します。
+
+## 目的
+
+`{{ affected_mount }}`(`{{ device }}`)がread-only化した際に、原因をdmesgから確認し、バックアップ状況を踏まえてfsck実施の要否を判断し、安全に復旧できるようになることを目指します。
+
+## 用語解説
+
+- **read-onlyリマウント**: カーネルがファイルシステムの破損やI/Oエラーを検知した際、それ以上の書き込みによる被害拡大を防ぐために自動的に行う保護動作
+- **EXT4-fs error**: ext4がジャーナルやディスクの不整合を検知した際にdmesg/journalに出力するエラー文言
+- **ジャーナル**: ファイルシステムの更新操作を記録し、クラッシュ時に整合性を保つための仕組み。ジャーナル自体の異常もread-only化の原因になる
+- **fsck**: ファイルシステムの整合性検査・修復を行うツール。マウント中の実行は原則禁止で、追加破損のリスクがある
+- **ハードウェア故障切り分け**: I/Oエラーがディスク自体の物理故障によるものか、一時的な要因かを区別する調査
+
+## シナリオ設定
+
+`{{ device }}` 上の `{{ affected_mount }}` がread-only化しています。dmesgには `{{ dmesg_excerpt }}` という記録があります。バックアップ状況は「{{ backup_status }}」で、メンテナンス枠として「{{ maintenance_window }}」を確保しています。
+
+## 手順
+
+### 1. 症状を確認する
+
+```bash
+mount | grep {{ affected_mount }}
+touch {{ affected_mount }}/.write_test 2>&1
+```
+
+→ マウントオプションに `ro` が含まれ、書き込みが `Read-only file system` で失敗することを確認します。
+
+### 2. dmesgでI/Oエラー・ジャーナル異常を確認する
+
+```bash
+dmesg -T | grep -iE 'sdb1|ext4|I/O error' | tail -n 30
+journalctl -k --since "-1 hour" | grep -iE 'error|ext4'
+```
+
+→ 記録例「{{ dmesg_excerpt }}」のようなエラーが実際に出力されているかを確認し、単発のI/Oエラーか継続的な障害かを判断します。
+
+### 3. 安易なrw再マウントを避ける
+
+```bash
+echo "対象: {{ device }}、安易な mount -o remount,rw は追加破損のリスクがあるため実施しない"
+```
+
+→ 原因未特定のまま `mount -o remount,rw` を行うと、不整合な状態への書き込みでデータ破損が拡大する恐れがあります。
+
+### 4. バックアップ状態を確認する
+
+```bash
+echo "バックアップ状況: {{ backup_status }}"
+```
+
+→ 「{{ backup_status }}」を踏まえ、fsck実施やディスク交換で失われうるデータ範囲を事前に把握します。
+
+### 5. fsck実施を判断し実行する
+
+```bash
+sudo systemctl stop mysql
+sudo umount {{ affected_mount }}
+sudo fsck -n {{ device }}
+```
+
+→ メンテナンス枠「{{ maintenance_window }}」内でアンマウントし、まず `-n`(確認のみ)で修復規模を把握してから、必要に応じて修復実行に切り替えます。
+
+### 6. ハードウェア故障を切り分け報告する
+
+```bash
+sudo smartctl -H {{ device }}
+sudo smartctl -a {{ device }} | grep -iE 'reallocated|pending'
+```
+
+→ SMART属性に異常があれば物理故障が疑われるため、ディスク交換の手配と関係者への報告に進みます。
+
+## 動作確認
+
+- `mount | grep {{ affected_mount }}` で `rw` オプションに戻っていること
+- `touch {{ affected_mount }}/.write_test` が成功し、直後に削除できること
+- `dmesg -T` に新規のI/Oエラーが再発していないこと
+- サービス(mysqld等)が正常起動し、データ読み書きができること
+
+## 注意事項
+
+- fsckの実行は必ずアンマウント状態、かつ「{{ backup_status }}」を関係者と共有したうえで行う。マウント中の実行はさらなる破損を招く。
+- ハードウェア故障が疑われる場合、応急のfsckで復旧しても再発する可能性が高いため、ディスク交換を前提とした計画に切り替える。
+- `{{ maintenance_window }}` を超過しそうな場合は、いったんread-onlyのまま参照系のみ復旧させる代替案も検討する。

@@ -1,0 +1,5 @@
+parent_zone = "example.com"
+child_zone = "dev.example.com"
+child_ns_records = ["ns1.dev-dns.example.net", "ns2.dev-dns.example.net"]
+glue_needed = false
+child_admin_contact = "dns-team@dev.example.com"

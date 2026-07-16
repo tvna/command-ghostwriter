@@ -1,0 +1,88 @@
+# Zabbixエージェントの導入とサーバ登録
+
+監視対象ホスト `{{ hostname }}` にZabbixエージェント2を導入し、Zabbixサーバ `{{ zabbix_server_ip }}` への登録・疎通確認・テンプレート適用までを一巡します。
+
+## 目的
+
+パッシブチェックとアクティブチェックの違いを理解し、エージェント導入からサーバ側でのホスト登録・テンプレート適用・疎通検証までを一連の流れとして実施できるようになることを目指します。
+
+## 用語解説
+
+- **パッシブチェック**: Zabbixサーバがエージェントへ問い合わせ、エージェントが応答する方式
+- **アクティブチェック**: エージェントが自らサーバへ接続し、取得すべき項目を問い合わせて能動的に送信する方式
+- **zabbix_agentd.conf**: エージェントの接続先・待受ポート等を定義する設定ファイル
+- **template_name**: ホストに適用する監視項目・トリガーのひな形
+- **PSK(Pre-Shared Key)**: サーバ・エージェント間の通信を暗号化するための事前共有鍵
+
+## シナリオ設定
+
+対象ホスト名は `{{ hostname }}`、Zabbixサーバは `{{ zabbix_server_ip }}`、待受ポートは {{ listen_port }} です。適用するテンプレートは `{{ template_name }}` とします。通信保護について: {{ psk_note }}。
+
+## 手順
+
+### 1. エージェントパッケージを導入する
+
+```bash
+sudo apt-get install -y zabbix-agent2
+dpkg -l zabbix-agent2
+```
+
+### 2. zabbix_agentd.confを設定する
+
+```bash
+sudo sed -i "s/^Server=.*/Server={{ zabbix_server_ip }}/" /etc/zabbix/zabbix_agent2.conf
+sudo sed -i "s/^ServerActive=.*/ServerActive={{ zabbix_server_ip }}/" /etc/zabbix/zabbix_agent2.conf
+sudo sed -i "s/^Hostname=.*/Hostname={{ hostname }}/" /etc/zabbix/zabbix_agent2.conf
+sudo sed -i "s/^ListenPort=.*/ListenPort={{ listen_port }}/" /etc/zabbix/zabbix_agent2.conf
+sudo systemctl enable --now zabbix-agent2
+sudo systemctl status zabbix-agent2 --no-pager
+```
+
+### 3. zabbix_getでサーバ側から疎通確認する
+
+Zabbixサーバ上で実行します。
+
+```bash
+zabbix_get -s {{ hostname }} -p {{ listen_port }} -k agent.ping
+zabbix_get -s {{ hostname }} -p {{ listen_port }} -k agent.version
+```
+
+### 4. サーバにホストを登録しテンプレートを適用する
+
+Zabbixサーバ上でAPI経由、またはWeb UIで実施します。
+
+```bash
+curl -s -X POST -H 'Content-Type: application/json-rpc' \
+  -d '{"jsonrpc":"2.0","method":"host.create","params":{"host":"{{ hostname }}","interfaces":[{"type":1,"main":1,"useip":1,"ip":"","dns":"{{ hostname }}","port":"{{ listen_port }}"}],"groups":[{"groupid":"1"}],"templates":[{"host":"{{ template_name }}"}]},"auth":"<API_TOKEN>","id":1}' \
+  http://{{ zabbix_server_ip }}/api_jsonrpc.php
+```
+
+`<API_TOKEN>` はZabbixサーバの管理者が発行したAPIトークンに置き換えてください。
+
+### 5. 監視データの収集を確認する
+
+```bash
+zabbix_get -s {{ hostname }} -p {{ listen_port }} -k system.cpu.load
+zabbix_get -s {{ hostname }} -p {{ listen_port }} -k vfs.fs.size[/,pfree]
+```
+
+### 6. 通信保護を確認する
+
+```bash
+sudo ls -l /etc/zabbix/zabbix_agent2.psk
+grep -E '^TLS' /etc/zabbix/zabbix_agent2.conf
+```
+
+## 動作確認
+
+- Step 1完了後、`systemctl status zabbix-agent2` が `active (running)` であること
+- Step 3の `zabbix_get -k agent.ping` が `1` を返すこと(疎通成功)
+- Step 4完了後、Zabbixサーバの「監視データ」画面でホスト `{{ hostname }}` が「有効」と表示されること
+- Step 4で適用したテンプレート `{{ template_name }}` の監視項目が、登録後しばらくしてデータを取得し始めること
+
+## 注意事項
+
+- PSK鍵ファイル(`/etc/zabbix/zabbix_agent2.psk`)はエージェントとサーバ間で共有する秘匿情報であり、パーミッションを600に絞り、Gitやチケットに値を残さない。{{ psk_note }}
+- Step 2の `Server`/`ServerActive` を誤設定すると、意図しないZabbixサーバからの問い合わせを受け付けてしまう可能性がある。設定変更後は必ずStep 3の疎通確認を行う。
+- `<API_TOKEN>` は最小権限のAPIユーザーで発行し、コマンド履歴やログに平文で残さないよう扱いに注意する。
+- `node-exporter-setup`(本カタログ, Prometheusエコシステム)とは監視製品の系統が異なるため、両方を同一ホストへ導入する場合はポート({{ listen_port }} と 9100)の重複がないことを確認する。

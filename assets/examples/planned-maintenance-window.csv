@@ -1,0 +1,5 @@
+step_order,phase,task,owner,verify_command,rollback_note
+1,事前,利用者へのメンテナンス告知メール送信とバックアップ取得,広報担当,cat /var/log/maintenance-notice.log,告知未送信またはバックアップ失敗時は開始を延期する
+2,実施,アプリケーションサーバの停止とOSパッケージ更新,インフラ担当,systemctl is-active app.service,更新失敗時は直前のバックアップへ復元する
+3,確認,主要エンドポイントの疎通・応答確認,QA担当,curl -fsS https://app.example.internal/healthz,異常時は手順2のロールバックを実施する
+4,報告,完了報告と作業記録の共有,インフラ担当,cat /var/log/maintenance-report.md,該当なし

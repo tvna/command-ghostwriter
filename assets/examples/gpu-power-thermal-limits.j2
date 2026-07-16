@@ -1,0 +1,87 @@
+# GPUの電力・温度制限の設定
+
+`nvidia-smi` を使い、GPUの電力上限やクロック制御を設定し、発熱・電源容量に合わせた安全な運転点を作ります。
+
+## 目的
+
+熱暴走や電源逼迫を未然に防ぐため、GPUの電力上限を制限前後の性能・温度差を測定しながら設定し、再起動後も自動適用される状態を作ることを目指します。
+
+## 用語解説
+
+- **power limit (-pl)**: GPUが消費できる電力の上限値(W)。下げるほど発熱・消費電力は下がるが性能も低下する
+- **persistence mode**: GPUドライバをアンロードせず常駐させ、設定変更の反映速度とプロセス起動時のオーバーヘッドを改善するモード
+- **default_power_limit**: 出荷時・工場出荷設定の電力上限。変更前の基準値として記録しておく
+- **サーマルスロットリング**: 温度が上限に近づいた際にGPUが自動でクロックを下げ性能を落とす保護動作
+
+## シナリオ設定
+
+対象GPUの出荷時電力上限は `{{ default_power_limit }}` W、今回設定する電力上限は `{{ power_limit_watts }}` W、目標温度上限は `{{ target_temp }}` ℃です。persistence modeは `{{ persistence_mode }}` とし、検証には `{{ benchmark_command }}` を使用します。
+
+## 手順
+
+### 1. 現状を確認する(供給上限・温度推移)
+
+```bash
+nvidia-smi -q -d POWER,TEMPERATURE | grep -E "Power Limit|GPU Current Temp"
+nvidia-smi --query-gpu=power.limit,power.default_limit,temperature.gpu --format=csv
+```
+
+`power.default_limit` が `{{ default_power_limit }}` Wであることを確認します。
+
+### 2. persistence modeを設定する
+
+```bash
+{% if persistence_mode %}sudo nvidia-smi -pm 1
+{% else %}sudo nvidia-smi -pm 0
+{% endif %}nvidia-smi -q -d SUPPORTED_CLOCKS | grep -i persist || nvidia-smi --query-gpu=persistence_mode --format=csv
+```
+
+### 3. -plによる電力上限を設定する
+
+```bash
+sudo nvidia-smi -pl {{ power_limit_watts }}
+nvidia-smi --query-gpu=power.limit --format=csv
+```
+
+### 4. 制限前後の性能・温度を比較する
+
+```bash
+# 制限適用前の基準値を控えてから手順3を実施し、適用後に再計測する
+{{ benchmark_command }}
+nvidia-smi --query-gpu=power.draw,temperature.gpu,clocks.sm --format=csv
+```
+
+温度が目標上限 `{{ target_temp }}` ℃を超えていないか確認します。超えている場合は `{{ power_limit_watts }}` をさらに下げます。
+
+### 5. 再起動後も自動適用されるようsystemd化する
+
+```bash
+sudo tee /etc/systemd/system/nvidia-power-limit.service <<EOF
+[Unit]
+Description=Apply persistent GPU power limit ({{ power_limit_watts }}W)
+After=nvidia-persistenced.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/nvidia-smi -pm {% if persistence_mode %}1{% else %}0{% endif %}
+ExecStart=/usr/bin/nvidia-smi -pl {{ power_limit_watts }}
+RemainAfterExit=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now nvidia-power-limit.service
+```
+
+## 動作確認
+
+- `nvidia-smi --query-gpu=power.limit --format=csv` が `{{ power_limit_watts }}` Wを示すこと
+- 手順4のベンチマーク実行中、`temperature.gpu` が `{{ target_temp }}` ℃を超えないこと
+- ホスト再起動後に `nvidia-smi --query-gpu=power.limit,persistence_mode --format=csv` が設定値を維持していること
+
+## 注意事項
+
+- `-pl` の変更は再起動でリセットされるため、手順5のsystemd化を必ず行う。行わないと工場出荷値 `{{ default_power_limit }}` Wに戻る。
+- 電力上限を下げすぎると学習・推論のスループットが大きく低下するため、手順4で必ず性能差を確認してから本番適用する。
+- 本手順は電力・温度の制御に焦点を絞り、使用率・温度の継続監視(gpu-monitoring-nvidia-smi)は対象外とする。

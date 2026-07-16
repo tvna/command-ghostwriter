@@ -1,0 +1,95 @@
+# YAMAHA RTX ファームウェア更新手順
+
+{{ model }} のファームウェアを {{ current_revision }} から {{ target_revision }}
+へ更新します。コンフィグ退避・実行・切り戻し準備をこの順で行い、
+メンテナンス時間帯（{{ maintenance_window }}）内に完了させてください。
+
+## 目的
+
+{{ model }} のファームウェアを安全にリビジョンアップし、更新前のコンフィグ
+退避と切り戻し手順を確保したうえで、事前の動作確認まで一連の流れとして
+実施できるようになることを目指します。
+
+## 用語解説
+
+- **リビジョン**: YAMAHAルータのファームウェアバージョンを表す番号
+- **revision-up / revision-down**: ファームウェアを更新・切り戻しするコマンド
+- **TFTP/HTTP転送**: ファームウェアイメージをルータへ転送する方式
+- **コンフィグ退避**: 更新前の設定情報を別ファイルとして保存すること
+
+## シナリオ設定
+
+対象機種は `{{ model }}`、現行リビジョンは `{{ current_revision }}`、
+更新先リビジョンは `{{ target_revision }}` です。作業は
+`{{ maintenance_window }}` の時間帯に実施し、コンフィグは
+`{{ config_backup_path }}` に退避します。切り戻し方針は
+「{{ rollback_plan }}」です。
+
+## 手順
+
+### 1. リリースノートと現行リビジョンを確認する
+
+```bash
+show environment
+```
+
+`{{ current_revision }}` であることを確認したうえで、
+`{{ target_revision }}` のリリースノートで影響範囲を確認します。
+
+### 2. 更新前にコンフィグを退避する
+
+```bash
+show config > {{ config_backup_path }}
+```
+
+### 3. ファームウェアイメージを転送し更新を実行する
+
+TFTP サーバ経由でイメージを転送し、revision-up を実行します。
+
+```bash
+tftp {{ target_revision }}.bin get
+revision-up
+```
+
+### 4. 再起動して反映を確認する
+
+```bash
+reset
+show environment
+```
+
+再起動後、`show environment` の表示が `{{ target_revision }}` になっている
+ことを確認します。
+
+### 5. 動作確認チェックリストを実施する
+
+```bash
+show status pp 1
+show ip route
+show nat descriptor address
+```
+
+主要な PPPoE セッション・経路・NAT が更新前と同じ状態で稼働していること
+を確認します。
+
+### 6. 問題があれば切り戻す
+
+「{{ rollback_plan }}」の方針に沿って対応します。
+
+```bash
+revision-down
+restore config {{ config_backup_path }}
+```
+
+## 動作確認
+
+- `show environment` のリビジョン表示が `{{ target_revision }}` であること
+- PPPoE セッション・経路・NAT がすべて更新前と同じ状態で稼働していること
+- LAN 内端末からの疎通に問題がないこと
+- 問題発生時に `{{ config_backup_path }}` から復元できることを確認済みであること
+
+## 注意事項
+
+- 更新中はルータが一時的に再起動するため、必ず `{{ maintenance_window }}` の時間帯に実施し、事前に利用者へ周知する。
+- コンフィグ退避（{{ config_backup_path }}）を行わずに更新すると、切り戻し時に設定を再構築する必要が生じる。
+- リモートから作業する場合、更新失敗時に接続経路が失われる可能性があるため、可能な限りコンソール接続を確保する。

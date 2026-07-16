@@ -1,0 +1,89 @@
+# Ansible ad-hocコマンドによる複数台一括操作
+
+インベントリ定義と`ping`モジュールでの疎通確認から、複数サーバへの一括コマンド実行・パッケージ操作までを一巡します。
+
+## 目的
+
+インベントリとモジュールの基本概念、Ansibleの冪等性を理解し、複数サーバに対してad-hocコマンドで安全に一括操作できるようになることを目指します。
+
+## 用語解説
+
+- **インベントリ**: 管理対象ホストとそのグループ・接続情報を定義するファイル。ini形式やYAML形式で記述する
+- **モジュール**: Ansibleが実行する処理の単位。`ping`(疎通確認)、`command`(任意コマンド実行)、`apt`(パッケージ管理)などがある
+- **冪等性**: 同じ操作を何度実行しても結果が変わらない性質。`apt`モジュール等は「既にインストール済みなら何もしない」という形で冪等性を保証する
+- **become**: 対象ホスト上で権限昇格(sudo相当)を行うオプション。パッケージ操作など管理者権限が必要な処理で使用する
+- **--check（ドライラン）**: 実際には変更を加えず、変更が発生するかどうかだけを確認するモード
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 台を管理対象とします。
+
+| hostname | ansible_host | group | ansible_user | purpose |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["hostname"] }} | {{ r["ansible_host"] }} | {{ r["group"] }} | {{ r["ansible_user"] }} | {{ r["purpose"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. インベントリファイルを作成する
+
+```bash
+mkdir -p ~/ansible/inventory
+cat <<'EOF' > ~/ansible/inventory/hosts.ini
+{% for r in csv_rows %}[{{ r["group"] }}]
+{% endfor %}
+{% for r in csv_rows %}{{ r["hostname"] }} ansible_host={{ r["ansible_host"] }} ansible_user={{ r["ansible_user"] }}
+{% endfor %}EOF
+```
+
+グループ見出しが重複している場合、Ansibleは同名グループへの追記として扱うため問題ありません。
+
+### 2. pingモジュールで疎通を確認する
+
+```bash
+ansible all -i ~/ansible/inventory/hosts.ini -m ping
+```
+
+```bash
+{% for r in csv_rows %}ansible {{ r["hostname"] }} -i ~/ansible/inventory/hosts.ini -m ping
+{% endfor %}```
+
+### 3. commandモジュールで一括コマンドを実行する
+
+```bash
+ansible all -i ~/ansible/inventory/hosts.ini -m command -a "uptime"
+```
+
+### 4. aptモジュールでパッケージ操作を行う
+
+```bash
+{% for r in csv_rows %}ansible {{ r["hostname"] }} -i ~/ansible/inventory/hosts.ini -b -m apt -a "name=curl state=present" # {{ r["purpose"] }}
+{% endfor %}```
+
+`-b`（`--become`）で権限昇格し、パッケージのインストール権限を得ます。
+
+### 5. --checkでドライランを行う
+
+```bash
+ansible all -i ~/ansible/inventory/hosts.ini -b -m apt -a "name=curl state=latest" --check --diff
+```
+
+実際には変更せず、`curl`が最新化される見込みがあるかどうかだけを確認します。
+
+### 6. グループ単位での限定実行を確認する
+
+```bash
+{% for r in csv_rows %}ansible {{ r["group"] }} -i ~/ansible/inventory/hosts.ini -m command -a "hostname"
+{% endfor %}```
+
+## 動作確認
+
+- `ansible all -m ping`で {{ csv_rows | length }} 台すべてから`SUCCESS`が返ること
+- `-b`を付けたaptモジュール実行が、いずれのホストでも権限エラーなく完了すること
+- `--check`実行時に実際のパッケージ状態が変化していないこと（`apt list --installed`等で確認）
+
+## 注意事項
+
+- `become`(`-b`)は対象ホストで管理者権限相当の操作を行うため、影響範囲の広いコマンド（削除・停止系）を一括実行する前には必ず`--check --diff`で差分を確認する。
+- ad-hocコマンドは一度きりの操作に向く。恒久的な設定変更・再現性が必要な操作はPlaybook化し、変更履歴を残す。
+- インベントリ内の`ansible_host`はプレースホルダのIPアドレスである。実際の対象ホストに合わせて値を書き換えてから実行すること。

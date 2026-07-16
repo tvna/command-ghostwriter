@@ -1,0 +1,5 @@
+sending_ip: "203.0.113.45"
+rejection_log: "550 5.7.1 Service unavailable; Client host [203.0.113.45] blocked using zen.spamhaus.org"
+dnsbl_check_targets: "zen.spamhaus.org, bl.spamcop.net, b.barracudacentral.org"
+root_cause_candidates: "オープンリレー設定ミス / 侵害されたアカウントからの大量送信 / 共有IPレンジの巻き添え"
+delist_procedure_note: "Spamhaus は公式フォームから解除申請し、審査完了まで通常24〜48時間を要する"

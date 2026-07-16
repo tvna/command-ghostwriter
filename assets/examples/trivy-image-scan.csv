@@ -1,0 +1,4 @@
+image_name,tag,used_by,criticality,scan_policy
+nginx,1.27,web-frontend,high,daily
+postgres,16,shopapp-db,critical,daily
+redis,7.2,cache-layer,medium,weekly

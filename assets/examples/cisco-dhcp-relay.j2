@@ -1,0 +1,82 @@
+# CiscoでのDHCPリレー(ip helper-address)設定
+
+VLANごとのSVI(スイッチ仮想インターフェース)に`ip helper-address`を設定し、各セグメントのDHCP要求を中央DHCPサーバへ中継します。
+
+## 目的
+
+ブロードキャストであるDHCP要求がルータを越えられない理由と、リレーエージェントの動作を理解した上で、複数VLANの端末が同一の中央DHCPサーバからアドレスを取得できるよう設定・検証できるようになることを目指します。
+
+## 用語解説
+
+- **ブロードキャストとリレー**: DHCP要求(DHCPDISCOVER)はブロードキャストであり、そのままではルータ(レイヤ3境界)を越えて届かない。リレーエージェントがこれをユニキャストに変換してDHCPサーバへ中継する
+- **giaddr**: リレーエージェントがDHCPパケットに設定するフィールド。要求元のセグメントをDHCPサーバへ伝え、サーバがそのセグメント用のスコープからアドレスを払い出す根拠になる
+- **SVI(Switched Virtual Interface)**: VLANに対応する論理インターフェース(例: `Vlan10`)。ここに`ip helper-address`を設定する
+- **ip helper-address**: 指定したVLANで受信したブロードキャスト(DHCP等)を、指定した宛先へユニキャストで転送するCisco IOSのコマンド
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 件のVLANについて、SVIへ`ip helper-address`を設定します。
+
+| vlan_id | svi_interface | helper_address | segment_subnet | scope_note |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["vlan_id"] }} | {{ r["svi_interface"] }} | {{ r["helper_address"] }} | {{ r["segment_subnet"] }} | {{ r["scope_note"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 対象SVIの現状を確認する
+
+```bash
+enable
+{% for r in csv_rows %}show interfaces {{ r["svi_interface"] }}
+{% endfor %}```
+
+各SVIにセグメント {{ csv_rows[0]["segment_subnet"] }} 等のIPアドレスが正しく設定されていることを前提とします。
+
+### 2. ip helper-addressを投入する
+
+```bash
+configure terminal
+{% for r in csv_rows %}interface {{ r["svi_interface"] }}
+ ip helper-address {{ r["helper_address"] }}
+exit
+{% endfor %}end
+write memory
+```
+
+### 3. クライアントでアドレス取得を検証する
+
+各セグメントの端末でDHCP要求を再送信し、想定したサブネット({{ csv_rows[0]["segment_subnet"] }} 等)からアドレスが払い出されることを確認します。
+
+```bash
+show ip interface {{ csv_rows[0]["svi_interface"] }} | include helper
+```
+
+Windowsクライアントであれば `ipconfig /release` `ipconfig /renew`、Linuxクライアントであれば `dhclient -r` `dhclient` で取得し直します。
+
+### 4. debugで中継動作を確認する
+
+疎通しない場合は、SVI側でDHCPパケットが実際に転送されているかを確認します。
+
+```bash
+debug ip udp
+debug ip dhcp server events
+```
+
+確認後は必ずdebugを無効化します。
+
+```bash
+undebug all
+```
+
+## 動作確認
+
+- 対象 {{ csv_rows | length }} VLANそれぞれの端末で、対応する `segment_subnet` の範囲内のIPアドレスがDHCPで払い出されること
+- `show ip interface <SVI> | include helper` の出力に、設定した `helper_address` が反映されていること
+- 誤って他セグメントのアドレス帯を取得する端末が発生していないこと(SVI側のアドレス設定とスコープの対応を再確認する)
+
+## 注意事項
+
+- `ip helper-address`はDHCP以外にもTFTP・DNS等のUDPブロードキャストを既定で中継する。中継対象を限定したい場合は`ip forward-protocol udp`の設定で絞り込む必要がある。
+- 中央DHCPサーバ側で各セグメント用のスコープが未作成のままリレーだけ設定すると、端末はアドレスを取得できずタイムアウトする。リレー投入前にサーバ側のスコープ設計を確認する。
+- `debug`コマンドは負荷の高いスイッチ・トラフィック量の多い環境では機器の処理に影響するため、確認後は速やかに`undebug all`で停止する。

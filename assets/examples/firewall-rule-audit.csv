@@ -1,0 +1,5 @@
+rule_id,source,destination,port,protocol,owner,last_reviewed,verdict
+FW-001,0.0.0.0/0,10.0.1.11,443,tcp,インフラ課,2026-06-01,keep
+FW-014,10.0.0.0/8,10.0.1.21,3306,tcp,DB課,2024-03-10,tighten
+FW-027,0.0.0.0/0,0.0.0.0/0,any,any,不明,2022-01-05,remove
+FW-033,203.0.113.0/24,10.0.1.11,22,tcp,インフラ課,2026-05-15,keep

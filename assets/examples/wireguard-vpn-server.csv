@@ -1,0 +1,4 @@
+peer_name,public_key_placeholder,allowed_ips,endpoint,keepalive,purpose
+tokyo-office,PLACEHOLDER_TOKYO_PUBKEY_REPLACE_ME=,10.10.0.2/32,203.0.113.10:51820,25,東京拠点のLAN間接続
+osaka-office,PLACEHOLDER_OSAKA_PUBKEY_REPLACE_ME=,10.10.0.3/32,198.51.100.20:51820,25,大阪拠点のLAN間接続
+remote-admin,PLACEHOLDER_REMOTE_ADMIN_PUBKEY_REPLACE_ME=,10.10.0.10/32,,25,リモート管理者の単体アクセス

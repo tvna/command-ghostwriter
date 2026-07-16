@@ -1,0 +1,4 @@
+shutdown_order,hostname,role,graceful_command,boot_order,verify_after_power_restore
+1,web01.internal.example,Webフロントエンド,sudo systemctl stop nginx && sudo shutdown -h now,3,curl -sf http://web01.internal.example/healthz
+2,app01.internal.example,APIサーバ,sudo systemctl stop app.service && sudo shutdown -h now,2,curl -sf http://app01.internal.example:8080/healthz
+3,db01.internal.example,データベース,sudo -u postgres pg_ctl stop -m fast -D /var/lib/pgsql/data && sudo shutdown -h now,1,pg_isready -h db01.internal.example

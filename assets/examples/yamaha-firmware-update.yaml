@@ -1,0 +1,6 @@
+model: "RTX1300"
+current_revision: "Rev.23.00.11"
+target_revision: "Rev.23.01.03"
+config_backup_path: "/backup/yamaha/rtx1300-before-update.cfg"
+maintenance_window: "2026-07-20 02:00-03:00 JST"
+rollback_plan: "旧ファームウェアイメージを保管し、revision-down後にconfig_backup_pathから設定復元する"

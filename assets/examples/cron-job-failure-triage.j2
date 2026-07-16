@@ -1,0 +1,88 @@
+# cronジョブが実行されない時の調査 — {{ job_name }}
+
+{{ crontab_owner }} が登録した {{ job_name }} ジョブ(スケジュール `{{ schedule }}`)が実行されていません。cronデーモン・環境変数・権限・スクリプトのどこで失敗しているかを層別に調査します。
+
+## 目的
+
+cronの実行痕跡の確認方法と、cron環境と対話シェル環境の違い(PATH・環境変数の差異)を理解し、「手動では動くのにcronでは動かない」問題を層別に切り分けられるようになることを目指します。
+
+## 用語解説
+
+- **crontab**: ユーザーごとのジョブスケジュール定義。`crontab -l -u <user>` で確認する
+- **cronデーモン**: スケジュールに従ってジョブを起動する常駐プロセス。停止していれば一切実行されない
+- **cron環境のPATH**: cronはログインシェルを経由しないため、`.bashrc` 等で設定したPATHや環境変数が引き継がれない
+- **実行痕跡**: cronがジョブを起動したこと自体のログ(`CRON ... CMD`)。スクリプト内部の成否とは別の情報
+- **失敗通知**: cronは標準出力・標準エラーをメール送信する仕組みを持つが、MTA未設定だと通知が届かない
+
+## シナリオ設定
+
+{{ crontab_owner }} の crontab に登録された {{ job_name }}(`{{ schedule }}` に {{ script_path }} を実行)が、想定時刻に実行された形跡がありません。原因を層別に調査してください。
+
+## 手順
+
+### 1. 実行痕跡の有無を確認する
+
+```bash
+journalctl -u cron --since "-24h" | grep {{ crontab_owner }}
+grep CRON /var/log/syslog | grep {{ crontab_owner }}
+```
+
+{{ expected_evidence }}。この記録自体が無ければ、cronがジョブを起動すらできていないことになります。
+
+### 2. cronデーモンの稼働と登録内容を確認する
+
+```bash
+systemctl status cron
+crontab -l -u {{ crontab_owner }}
+```
+
+{{ job_name }} の行が `{{ schedule }} {{ script_path }}` として正しく登録されているか、コメントアウトされていないかを確認します。
+
+### 3. PATH・環境変数の差異を検証する
+
+```bash
+sudo -u {{ crontab_owner }} env -i /bin/sh -c 'echo $PATH'
+crontab -l -u {{ crontab_owner }} | grep -E "^(PATH|[A-Z_]+=)"
+```
+
+対話シェルと最小環境のcron実行環境とでPATHが異なっていないかを比較します。
+
+### 4. 権限とパーミッションを確認する
+
+```bash
+ls -l {{ script_path }}
+stat -c "%U %a" {{ script_path }}
+```
+
+{{ crontab_owner }} に実行権限(`x`)があるか、スクリプトの所有者・パーミッションが想定通りかを確認します。
+
+### 5. cron環境を再現して手動実行し比較する
+
+```bash
+sudo -u {{ crontab_owner }} env -i PATH=/usr/bin:/bin {{ script_path }}
+sudo -u {{ crontab_owner }} {{ script_path }}
+```
+
+対話シェルでの実行結果とcron相当の最小環境での実行結果を比較し、差分の原因(PATH・環境変数・カレントディレクトリ依存など)を特定します。
+
+### 6. 失敗通知の仕組みを追加する
+
+```bash
+crontab -l -u {{ crontab_owner }}
+echo "MAILTO=ops@example.com" | cat - <(crontab -l -u {{ crontab_owner }}) | crontab -u {{ crontab_owner }} -
+```
+
+原因を修正したうえで、以後失敗時に気づけるよう通知先(MAILTO)や外形監視への組み込みを追加します。
+
+## 動作確認
+
+- `journalctl -u cron` に {{ job_name }} の新しい実行記録が出力されること
+- {{ script_path }} を cron相当の最小環境で手動実行し、対話シェルと同じ結果になること
+- 想定時刻の翌日に {{ job_name }} が正常完了していること
+- MAILTO等の失敗通知設定が追加されていること
+
+## 注意事項
+
+- 「手動実行では成功するのでcron側は正常」と即断せず、必ず最小環境(`env -i`)での再現実行まで行う。
+- crontabの編集は `crontab -u {{ crontab_owner }} -` のようにユーザーを明示し、他ユーザーのジョブを上書きしないよう注意する。
+- cron-scheduling(既存, ジョブの登録方法)とは異なり、本手順は登録済みジョブが実行されない障害の調査に焦点を絞る。

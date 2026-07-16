@@ -1,0 +1,96 @@
+# AWS CLIによるEBSスナップショット取得と復元
+
+EBSボリュームのスナップショットをAWS CLIで取得し、タグ付け・世代整理を行ったうえで、新規ボリュームへの復元検証まで一巡する手順です。
+
+## 目的
+
+スナップショットが増分バックアップであり静止点として機能する仕組みを理解し、取得からタグ管理・世代整理・復元検証までを実施できるようになることを目指します。
+
+## 用語解説
+
+- **スナップショット**: 特定時点でのEBSボリュームの静止点。初回はフルコピー、以降は前回スナップショットからの増分のみが保存される
+- **増分**: 2回目以降のスナップショット取得時、前回との差分ブロックのみをS3内部に保存する仕組み。実際の課金は差分サイズに基づく
+- **静止点**: データの整合性が保証された、書き込みが一貫している瞬間の状態
+- **AZ(アベイラビリティゾーン)**: EBSボリュームが属する、リージョン内の独立した物理的な区画。復元先ボリュームは元と同じAZに作る必要がある
+- **世代管理**: 古いスナップショットを保持数の上限で削除し、ストレージコストと復元可能な過去時点のバランスを取る運用
+
+## シナリオ設定
+
+ボリューム `{{ volume_id }}`(アタッチ先: `{{ instance_id }}`)を対象に、タグ `{{ snapshot_tag }}` を付与したスナップショットを取得します。保持世代数は `{{ retention_count }}` 件、復元検証はAZ `{{ restore_az }}` で行います。
+
+## 手順
+
+### 1. 対象ボリュームの状態を確認する
+
+```bash
+aws ec2 describe-volumes --volume-ids {{ volume_id }} \
+  --query 'Volumes[].{State:State,AZ:AvailabilityZone,Size:Size}'
+aws ec2 describe-instances --instance-ids {{ instance_id }} \
+  --query 'Reservations[].Instances[].State.Name'
+```
+
+### 2. スナップショットを取得しタグを付与する
+
+```bash
+SNAP_ID=$(aws ec2 create-snapshot \
+  --volume-id {{ volume_id }} \
+  --description "{{ snapshot_tag }} $(date -u +%Y-%m-%dT%H:%M:%S)" \
+  --tag-specifications "ResourceType=snapshot,Tags=[{Key=Name,Value={{ snapshot_tag }}}]" \
+  --query 'SnapshotId' --output text)
+echo "created: ${SNAP_ID}"
+aws ec2 wait snapshot-completed --snapshot-ids "${SNAP_ID}"
+```
+
+### 3. 一覧を確認し世代を整理する
+
+保持数 `{{ retention_count }}` 件を超えた古いスナップショットを特定します。
+
+```bash
+aws ec2 describe-snapshots --owner-ids self \
+  --filters "Name=tag:Name,Values={{ snapshot_tag }}" \
+  --query 'Snapshots | sort_by(@, &StartTime) | [].{Id:SnapshotId,Time:StartTime}' \
+  --output table
+```
+
+`{{ retention_count }}`件を超える古い順のスナップショットIDを確認したうえで、`aws ec2 delete-snapshot --snapshot-id <old-id>`で個別に削除します。
+
+### 4. 新規ボリュームを作成し復元検証する
+
+```bash
+RESTORED_VOL=$(aws ec2 create-volume \
+  --snapshot-id "${SNAP_ID}" \
+  --availability-zone {{ restore_az }} \
+  --tag-specifications "ResourceType=volume,Tags=[{Key=Name,Value={{ snapshot_tag }}-restore-test}]" \
+  --query 'VolumeId' --output text)
+aws ec2 wait volume-available --volume-ids "${RESTORED_VOL}"
+echo "restored volume: ${RESTORED_VOL}"
+```
+
+### 5. 復元ボリュームをアタッチしてデータを確認する
+
+```bash
+aws ec2 attach-volume --volume-id "${RESTORED_VOL}" --instance-id {{ instance_id }} --device /dev/sdf
+aws ec2 describe-volumes --volume-ids "${RESTORED_VOL}" --query 'Volumes[].Attachments[].State'
+```
+
+インスタンス側で`lsblk`と`mount`を用いてマウントし、想定のデータが存在することを確認します。
+
+### 6. 検証後の後片付け
+
+```bash
+aws ec2 detach-volume --volume-id "${RESTORED_VOL}"
+aws ec2 wait volume-available --volume-ids "${RESTORED_VOL}"
+aws ec2 delete-volume --volume-id "${RESTORED_VOL}"
+```
+
+## 動作確認
+
+- `describe-snapshots`にタグ `{{ snapshot_tag }}` を持つスナップショットが表示され、`State`が`completed`であること
+- 復元検証で作成したボリュームをマウントした際、元のデータが読み出せること
+- 保持世代数が `{{ retention_count }}` 件以内に整理されていること
+
+## 注意事項
+
+- スナップショットは増分保存だが課金は保存されている全世代のデータブロック合計に対して発生する。復元検証で作成した一時ボリュームは検証後に必ず削除する。
+- 稼働中のボリュームからスナップショットを取得する場合、アプリケーション側でI/Oを一時停止するかファイルシステムの整合性確保(`fsfreeze`等)を検討しないと、静止点としての整合性が保証されない。
+- 復元先ボリュームは元ボリュームと同じAZ(`{{ restore_az }}`)でしか作成できない。異なるAZへ復元する場合はスナップショットのAZ間コピーが別途必要になる。

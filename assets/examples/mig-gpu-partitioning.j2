@@ -1,0 +1,82 @@
+# MIGによるGPUパーティション分割
+
+MIG(Multi-Instance GPU)対応GPUをインスタンス単位に分割し、複数のワークロードへ安全にGPU資源を割り当てます。
+
+## 目的
+
+MIGプロファイルの意味を理解し、台帳どおりのGPUインスタンスを作成・割当・検証・解除できるようになることを目指します。
+
+## 用語解説
+
+- **MIG(Multi-Instance GPU)**: 1枚の物理GPUをハードウェアレベルで複数の独立インスタンスに分割する機能。対応GPU(A100/H100等)でのみ利用可能
+- **GI(GPU Instance)**: MIGで分割されたコンピュート・メモリ資源のまとまり。プロセスからはほぼ独立したGPUとして見える
+- **CI(Compute Instance)**: GI内部をさらに分割する単位。今回はGI単位での運用を基本とする
+- **mig_profile**: 分割サイズの指定(例: `1g.10gb` はSM 1/7・メモリ10GB相当)
+- **CUDA_VISIBLE_DEVICES**: プロセスに見せるGPU(またはMIGインスタンス)を制御する環境変数
+
+## シナリオ設定
+
+分割台帳には {{ csv_rows | length }} 件のインスタンス定義があります。
+
+| gpu_index | mig_profile | instance_count | assigned_workload | owner |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["gpu_index"] }} | {{ r["mig_profile"] }} | {{ r["instance_count"] }} | {{ r["assigned_workload"] }} | {{ r["owner"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. MIGモードを有効化し再起動する
+
+```bash
+{% for r in csv_rows %}sudo nvidia-smi -i {{ r["gpu_index"] }} -mig 1
+{% endfor %}sudo reboot
+```
+
+再起動後、GPUプロセスがすべて終了していることを確認してから続行します。
+
+### 2. プロファイル一覧を確認しインスタンスを作成する
+
+```bash
+{% for r in csv_rows %}nvidia-smi mig -i {{ r["gpu_index"] }} -lgip
+sudo nvidia-smi mig -i {{ r["gpu_index"] }} -cgi {{ r["mig_profile"] }},count={{ r["instance_count"] }} -C
+{% endfor %}```
+
+### 3. CUDA_VISIBLE_DEVICESで割当を検証する
+
+```bash
+nvidia-smi -L
+{% for r in csv_rows %}# {{ r["assigned_workload"] }} 担当: {{ r["owner"] }}
+CUDA_VISIBLE_DEVICES=MIG-$(nvidia-smi -L | grep "GPU {{ r["gpu_index"] }}:" -A1 | grep -o "MIG-[0-9a-f-]*" | head -n1) \
+  python3 -c "import torch; print(torch.cuda.get_device_name(0))"
+{% endfor %}```
+
+### 4. 監視の見え方の変化を確認する
+
+```bash
+nvidia-smi --query-gpu=index,name --format=csv
+nvidia-smi mig -lgi
+nvidia-smi mig -lci
+```
+
+MIG有効化後は、物理GPU単位ではなくGIおよびCI単位でメトリクスが分かれて表示されることを確認します。
+
+### 5. 解除する(必要な場合)
+
+```bash
+{% for r in csv_rows %}sudo nvidia-smi mig -i {{ r["gpu_index"] }} -dci
+sudo nvidia-smi mig -i {{ r["gpu_index"] }} -dgi
+sudo nvidia-smi -i {{ r["gpu_index"] }} -mig 0
+{% endfor %}sudo reboot
+```
+
+## 動作確認
+
+- `nvidia-smi mig -lgi` に台帳どおり {{ csv_rows | length }} 件分のGIが表示されること
+- 各 `owner` の担当プロセスが、割り当てられた `mig_profile` のインスタンスのみを `CUDA_VISIBLE_DEVICES` で参照できること
+- インスタンス数の合計がGPUの分割上限を超えていないこと(超える組み合わせは作成時にエラーになる)
+
+## 注意事項
+
+- MIGモードの有効化・無効化(`-mig 0/1`)は反映にGPUリセットまたは再起動が必要で、稼働中プロセスを強制終了させる。事前にワークロードを止めてから実施する。
+- `assigned_workload` ごとに `owner` を明確にし、インスタンス削除(手順5)は担当チームへの事前確認後に行う。
+- 本手順はMIGによる静的な資源分割に焦点を絞り、電力・温度の制御(gpu-power-thermal-limits)は対象外とする。

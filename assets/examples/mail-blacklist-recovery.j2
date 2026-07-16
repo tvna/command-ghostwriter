@@ -1,0 +1,97 @@
+# 送信元IPのブラックリスト登録からの復旧 — {{ sending_ip }}
+
+送信元IP `{{ sending_ip }}` がDNSBL(DNS Blackhole List)に登録され、宛先サーバから受信拒否されている事態に対し、原因の是正から解除申請・再発防止までを行います。
+
+## 目的
+
+**{{ rejection_log }}** のような拒否ログをもとに、送信元IP `{{ sending_ip }}` がDNSBL登録されていることを確認し、原因を是正したうえで正しい手順で解除申請できるようになることを目指します。
+
+## 用語解説
+
+- **DNSBL(DNS Blackhole List)**: 迷惑メール送信元とみなされたIPアドレスを登録し、DNS問い合わせ形式で照会できるブロックリスト
+- **550 5.7.1**: 受信側SMTPサーバが送信元をポリシー違反（多くはブラックリスト起因）として恒久的に拒否したことを示す応答コード
+- **オープンリレー**: 認証なしで第三者宛てのメール中継を許可してしまう誤設定。スパム送信の踏み台にされる典型原因
+- **SPF/DKIM**: 送信ドメインの正当性を検証する仕組み。設定不備はなりすまし・迷惑メール判定の一因になる
+- **解除申請(delist)**: 原因是正後にDNSBL運営元へ登録解除を申請する手続き。審査には一定の時間を要する
+
+## シナリオ設定
+
+送信元IP `{{ sending_ip }}` から宛先へのメール送信が「{{ rejection_log }}」というログとともに拒否されています。確認対象のDNSBLは {{ dnsbl_check_targets }} です。想定される原因候補は {{ root_cause_candidates }} です。解除申請の流れは「{{ delist_procedure_note }}」です。
+
+## 手順
+
+### 1. 拒否ログからDNSBL登録を判定する
+
+```bash
+echo "{{ rejection_log }}"
+```
+
+→ ログ中にDNSBL名（Spamhaus等)や「blocked using」という文言が含まれていれば、DNSBL登録が拒否原因です。
+
+### 2. 登録状況を確認する
+
+送信元IPを逆順にしたクエリで各DNSBLへ照会します。
+
+```bash
+for dnsbl in $(echo "{{ dnsbl_check_targets }}" | tr ',' ' '); do
+  rev_ip=$(echo "{{ sending_ip }}" | awk -F. '{print $4"."$3"."$2"."$1}')
+  echo "=== ${dnsbl} ==="
+  dig +short "${rev_ip}.${dnsbl}"
+done
+```
+
+→ 応答（127.0.0.x等)が返るDNSBLが、実際に登録されているリストです。
+
+### 3. 原因を調査する
+
+登録原因の候補「{{ root_cause_candidates }}」に沿って調査します。
+
+```bash
+sudo postconf -n | grep -i relay
+grep -i "reject\|relay" /var/log/mail.log | tail -n 50
+last -n 20 | grep -v reboot
+```
+
+→ オープンリレーの誤設定、アカウント侵害、または大量送信元アプリケーションの異常動作を確認します。
+
+### 4. 原因を是正する
+
+```bash
+sudo postconf smtpd_relay_restrictions
+sudo postconf -e "smtpd_relay_restrictions = permit_mynetworks,permit_sasl_authenticated,reject_unauth_destination"
+sudo systemctl reload postfix
+```
+
+→ 中継制限の是正や、侵害アカウントのパスワードリセットなど、根本原因の解消を先に完了させます。
+
+### 5. 解除申請を行う
+
+原因是正が完了してから解除申請を行います。
+
+```bash
+echo "{{ delist_procedure_note }}"
+# 各DNSBL運営元の公式フォームから {{ sending_ip }} の解除を申請する
+```
+
+→ {{ delist_procedure_note }}
+
+### 6. SPF・DKIM・レート制御で再発を防止する
+
+```bash
+dig +short txt {{ sending_ip }}.example.com 2>/dev/null
+sudo postconf -e "smtpd_client_message_rate_limit = 30"
+sudo systemctl reload postfix
+```
+
+## 動作確認
+
+- {{ dnsbl_check_targets }} のすべてで `{{ sending_ip }}` の照会結果が空(未登録)になっていること
+- 是正後のテスト送信で「{{ rejection_log }}」と同種の拒否が再現しないこと
+- SPF/DKIMレコードが正しく設定され、送信ドメインの認証が通ること
+- レート制限設定が反映され、異常な大量送信が再発しない構成になっていること
+
+## 注意事項
+
+- 原因是正を確認する前に解除申請を行うと、審査中または解除直後に再登録され、以後の申請が通りにくくなるため順序を守る。
+- オープンリレーの是正では、正規の中継が必要な内部システムまで遮断しないよう `smtpd_relay_restrictions` の変更範囲を限定する。
+- 解除申請の審査状況・原因・是正内容は記録として残し、再発時の一次対応時間短縮に活用する。

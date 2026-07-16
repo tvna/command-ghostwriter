@@ -1,0 +1,5 @@
+queue_threshold: 500
+top_deferred_reason: "Connection timed out (宛先MXへの接続タイムアウト)"
+dest_domain: "partner-corp.example"
+flush_policy: "原因解消を確認してから postqueue -f で全体再送する"
+delete_criteria: "5日以上滞留し、宛先ドメインが存在しないメールのみ postsuper -d で削除する"

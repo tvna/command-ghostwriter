@@ -1,0 +1,96 @@
+# systemdタイマーによるバックアップの定期実行
+
+cronではなくsystemdのtimerユニットを使い、バックアップスクリプトを定期実行します。実行履歴が`journalctl`で追跡でき、実行し忘れた回のリカバリも設定できる点がcronとの違いです。root権限(sudo)で実施してください。
+
+## 目的
+
+`.service`と`.timer`のペアでジョブを定義し、`OnCalendar`によるスケジューリングと`Persistent`によるリカバリ実行を設計・検証できるようになることを目指します。
+
+## 用語解説
+
+- **timerユニット**: 指定した時刻・間隔で対応する`.service`ユニットを起動するsystemdの仕組み(`.timer`ファイル)
+- **serviceユニット**: 実際に実行するコマンドを定義するユニット(`.service`ファイル)。timerから起動される
+- **OnCalendar**: `*-*-* 02:30:00`のような書式でカレンダーベースのスケジュールを指定するディレクティブ
+- **Persistent**: システムがタイマー起動予定時刻に停止していた場合、次回起動時に未実行分を追いつき実行するかどうかの設定
+- **list-timers**: 有効なtimerユニットと次回・前回の実行時刻を一覧表示するコマンド
+
+## シナリオ設定
+
+`{{ service_name }}.service`(`{{ description }}`)を`{{ oncalendar }}`のスケジュールで実行するタイマーを、実行ユーザー`{{ user }}`で構成します。
+
+## 手順
+
+### 1. serviceユニットを作成する
+
+```bash
+tee /etc/systemd/system/{{ service_name }}.service <<'EOF'
+[Unit]
+Description={{ description }}
+
+[Service]
+Type=oneshot
+User={{ user }}
+ExecStart={{ exec_start }}
+EOF
+```
+
+### 2. timerユニットを作成する
+
+```bash
+tee /etc/systemd/system/{{ service_name }}.timer <<'EOF'
+[Unit]
+Description={{ description }} (timer)
+
+[Timer]
+OnCalendar={{ oncalendar }}
+{% if persistent %}Persistent=true
+{% else %}Persistent=false
+{% endif %}
+[Install]
+WantedBy=timers.target
+EOF
+```
+
+{% if persistent %}`Persistent=true`のため、実行予定時刻にシステムが停止していた場合は、次回起動時に未実行分を追いつき実行します。{% else %}`Persistent=false`のため、実行予定時刻にシステムが停止していた場合、その回の実行は追いつき実行されずスキップされます。{% endif %}
+
+### 3. デーモンをリロードしタイマーを有効化する
+
+```bash
+systemctl daemon-reload
+systemctl enable --now {{ service_name }}.timer
+```
+
+### 4. 有効化されたタイマーと次回実行時刻を確認する
+
+```bash
+systemctl list-timers {{ service_name }}.timer
+systemctl status {{ service_name }}.timer
+```
+
+### 5. 手動でserviceを起動し、動作を確認する
+
+```bash
+systemctl start {{ service_name }}.service
+systemctl status {{ service_name }}.service
+```
+
+### 6. 実行履歴をjournalctlで確認する
+
+```bash
+journalctl -u {{ service_name }}.service --since "1 hour ago"
+systemctl list-timers {{ service_name }}.timer
+```
+
+`list-timers`の`LAST`列に直近の実行時刻が記録されていることを確認します。
+
+## 動作確認
+
+- `systemctl list-timers {{ service_name }}.timer` に次回実行予定(`NEXT`)と前回実行(`LAST`)が表示されること
+- `journalctl -u {{ service_name }}.service` に手動起動・定期実行の両方のログが記録されること
+- `systemctl status {{ service_name }}.timer` が `active (waiting)` 状態であること
+
+## 注意事項
+
+- `.service`単体で`systemctl enable`すると意図せず常時起動型として扱われる場合があるため、定期実行の管理単位は`.timer`側で行う(`.service`は`enable`しない)。
+- `{{ exec_start }}`が実行ユーザー`{{ user }}`から実行可能な権限になっているか事前に確認する。権限不足はタイマーが起動してもジョブが失敗する原因になる。
+- ユニットファイルを変更した場合は必ず`systemctl daemon-reload`を行う。反映を忘れると古い定義のまま動作し続ける。

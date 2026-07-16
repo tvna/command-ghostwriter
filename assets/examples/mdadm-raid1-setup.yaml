@@ -1,0 +1,7 @@
+array_device: /dev/md0
+member_disks:
+  - /dev/sdb
+  - /dev/sdc
+filesystem: ext4
+mount_point: /data
+monitor_mail: storage-admin@example.com

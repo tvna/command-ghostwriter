@@ -1,0 +1,4 @@
+record_type,host,value,policy_note,verify_method
+spf,example.com,v=spf1 include:_spf.google.com -all,ハード失敗(-all)で終端し許可外送信元を拒否,dig TXT example.com +short
+dkim,selector1._domainkey.example.com,v=DKIM1; k=rsa; p=MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQC7example...,Google Workspace用セレクタselector1の公開鍵,dig TXT selector1._domainkey.example.com +short
+dmarc,_dmarc.example.com,v=DMARC1; p=quarantine; rua=mailto:dmarc-reports@example.com,noneからquarantineへ段階的に強化中,dig TXT _dmarc.example.com +short

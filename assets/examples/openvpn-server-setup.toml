@@ -1,0 +1,6 @@
+server_subnet = "10.20.0.0/24"
+port = 1194
+proto = "udp"
+dns_push = "10.20.0.1"
+client_name = "sales-laptop01"
+revoke_note = "退職・端末紛失時はeasy-rsaでクライアント証明書を失効させ、CRLをサーバへ再配布する"

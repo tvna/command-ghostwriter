@@ -1,0 +1,80 @@
+# 部門別ユーザー・グループ設計と一括作成
+
+部門・役割に基づくグループ設計を行い、台帳(CSV)に沿って `useradd`/`groupadd` でユーザーを一括作成・検証します。
+
+## 目的
+
+プライマリ/セカンダリグループによる権限設計の考え方を理解し、台帳に基づく一括ユーザー作成と、作成結果の検証ができるようになることを目指します。
+
+## 用語解説
+
+- **プライマリグループ**: ユーザー作成時に既定で割り当てられ、そのユーザーが新規作成するファイルの所有グループになるグループ
+- **セカンダリグループ(補助グループ)**: 追加の権限(例: `sudo`, `docker`)を与えるために所属させる、1つ以上のグループ
+- **UID/GID帯設計**: 人間のユーザーとシステムユーザーでUID/GIDの番号帯を分け、衝突や権限誤付与を防ぐ設計
+- **スケルトンディレクトリ(/etc/skel)**: 新規ユーザーのホームディレクトリ作成時にコピーされる初期ファイル群
+- **id・getent**: `id` はユーザーの所属グループ、`getent passwd`/`getent group` はNSS経由でユーザー・グループ台帳を検証するコマンド
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 件のユーザーを作成します。
+
+| username | primary_group | secondary_groups | shell | home_dir | purpose |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["username"] }} | {{ r["primary_group"] }} | {{ r["secondary_groups"] }} | {{ r["shell"] }} | {{ r["home_dir"] }} | {{ r["purpose"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 必要なプライマリグループを作成する
+
+```bash
+{% for r in csv_rows %}sudo groupadd -f {{ r["primary_group"] }}
+{% endfor %}```
+
+`-f` は既存グループがあっても失敗させないためのオプションです(部門をまたいで共有するグループがあるため)。
+
+### 2. セカンダリグループを作成する
+
+```bash
+{% for r in csv_rows %}{% for g in r["secondary_groups"].split(",") %}sudo groupadd -f {{ g }}
+{% endfor %}{% endfor %}```
+
+### 3. ユーザーを一括作成する
+
+```bash
+{% for r in csv_rows %}sudo useradd -m -d {{ r["home_dir"] }} -s {{ r["shell"] }} -g {{ r["primary_group"] }} -G {{ r["secondary_groups"] }} -c "{{ r["purpose"] }}" {{ r["username"] }}
+{% endfor %}```
+
+`-m` でホームディレクトリを作成し、`/etc/skel` の内容がコピーされます。
+
+### 4. idコマンドで所属グループを検証する
+
+```bash
+{% for r in csv_rows %}id {{ r["username"] }}
+{% endfor %}```
+
+### 5. getentで台帳との整合を確認する
+
+```bash
+{% for r in csv_rows %}getent passwd {{ r["username"] }}
+{% endfor %}getent group | grep -E '{% for r in csv_rows %}{{ r["primary_group"] }}{% if not loop.last %}|{% endif %}{% endfor %}'
+```
+
+### 6. 初期パスワードを設定し、初回ログイン時の変更を強制する
+
+```bash
+{% for r in csv_rows %}echo "{{ r["username"] }}:ChangeMe$(openssl rand -hex 4)" | sudo chpasswd
+sudo chage -d 0 {{ r["username"] }}
+{% endfor %}```
+
+## 動作確認
+
+- 全 {{ csv_rows | length }} 件について `id <username>` の出力が台帳の primary_group / secondary_groups と一致すること
+- `getent passwd <username>` にホームディレクトリとシェルが台帳どおり表示されること
+- 初回ログイン時にパスワード変更が要求されること(`chage -l <username>` で `must be changed` 相当の表示があること)
+
+## 注意事項
+
+- グループ名の重複作成を避けるため、実行前に `getent group` で既存グループとの衝突がないか確認する。
+- 初期パスワードは仮のものであり、本手順のようにチャットやログに平文で残さない運用(パスワード管理システム経由での配布等)に置き換えて使用する。
+- `useradd -G` は指定したセカンダリグループで完全に上書きするため、既存ユーザーへの追記には `usermod -aG` を使う(本手順は新規作成のみを対象とする)。

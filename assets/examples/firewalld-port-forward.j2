@@ -1,0 +1,83 @@
+# firewalldによるポートフォワードとマスカレード設定
+
+外部から着信したポート宛の通信を内部サーバへ転送するポートフォワードと、戻り経路を成立させるマスカレードをfirewalldで設定し、実際に転送経路が機能するかを検証します。root権限(sudo)で実施してください。
+
+## 目的
+
+DNAT(宛先アドレス変換)とマスカレードの役割の違いを理解し、`firewall-cmd`の`--add-forward-port`で外部ポートから内部サーバへの転送を安全に構成できるようになることを目指します。
+
+## 用語解説
+
+- **DNAT**: パケットの宛先アドレス・ポートを書き換え、別のホストへ転送する変換方式。ポートフォワードの中核機構
+- **マスカレード**: 転送先から見た送信元アドレスをゲートウェイ自身のアドレスに書き換える機能。戻りパケットが正しくゲートウェイへ戻ってくるために必要
+- **zone**: firewalldが通信を分類する信頼レベルの単位。ゾーンごとに許可ルールやフォワード設定を独立して持つ
+- **ip_forward**: カーネルがパケットを別インターフェースへ中継してよいかを制御する設定。0のままだとDNAT自体が機能しない
+- **--permanent**: 設定を永続化するオプション。即時反映されないため`--reload`が別途必要になる
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 件の転送ルールを投入します。
+
+| zone | external_port | protocol | dest_ip | dest_port | purpose |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["zone"] }} | {{ r["external_port"] }} | {{ r["protocol"] }} | {{ r["dest_ip"] }} | {{ r["dest_port"] }} | {{ r["purpose"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. カーネルのパケット転送を有効化する
+
+```bash
+sudo sysctl net.ipv4.ip_forward
+sudo sysctl -w net.ipv4.ip_forward=1
+echo "net.ipv4.ip_forward = 1" | sudo tee /etc/sysctl.d/99-forward.conf
+```
+
+`net.ipv4.ip_forward=0`のままだと、DNATルールを投入してもパケットが内部サーバへ届きません。
+
+### 2. 対象ゾーンの現状を確認する
+
+```bash
+{% for r in csv_rows %}sudo firewall-cmd --zone={{ r["zone"] }} --list-all
+{% endfor %}```
+
+### 3. ポートフォワードを投入する
+
+```bash
+{% for r in csv_rows %}sudo firewall-cmd --zone={{ r["zone"] }} --add-forward-port=port={{ r["external_port"] }}:proto={{ r["protocol"] }}:toport={{ r["dest_port"] }}:toaddr={{ r["dest_ip"] }} --permanent
+{% endfor %}```
+
+`--permanent`を付けているためこの時点ではまだ有効化されません。次の手順でまとめて反映します。
+
+### 4. マスカレードを設定する
+
+```bash
+{% for r in csv_rows %}sudo firewall-cmd --zone={{ r["zone"] }} --add-masquerade --permanent
+{% endfor %}sudo firewall-cmd --reload
+```
+
+`--add-masquerade`は同一ゾーンに重複投入しても害はないため、複数行でも一括で問題ありません。
+
+### 5. 外部からの到達を検証する
+
+```bash
+{% for r in csv_rows %}curl -m 5 -v telnet://<外部からアクセス可能なIP>:{{ r["external_port"] }} # {{ r["purpose"] }}
+{% endfor %}```
+
+内部サーバ側で`tcpdump`を併用し、送信元アドレスがゲートウェイのアドレスに書き換わっている(マスカレードが効いている)ことも確認してください。
+
+```bash
+{% for r in csv_rows %}sudo tcpdump -ni any dst {{ r["dest_ip"] }} and port {{ r["dest_port"] }} -c 5
+{% endfor %}```
+
+## 動作確認
+
+- `sudo firewall-cmd --zone=<zone> --list-forward-ports`に投入した {{ csv_rows | length }} 件がすべて表示されること
+- 各`external_port`への到達が対応する`dest_ip`:`dest_port`まで届いていること
+- `sudo firewall-cmd --zone=<zone> --query-masquerade`が`yes`を返すこと
+
+## 注意事項
+
+- 外部公開ポートは必要最小限に絞る。検証用に開けたポートは検証後に`--remove-forward-port`で必ず撤去する。
+- `--permanent`のみのルールは`--reload`または再起動まで反映されない。反映漏れのまま「効かない」と誤認しないよう、必ず`--reload`とセットで実施する。
+- `net.ipv4.ip_forward=1`はホスト全体のパケット転送を許可する設定であり、想定外の経路まで中継してしまわないか、フォワード先以外への通信がブロックされているかを別途確認する。

@@ -1,0 +1,93 @@
+# Webサイト応答遅延の切り分け — {{ target_url }}
+
+curlの時間内訳でDNS・接続・TLS・サーバ処理のどこが遅いかを分解し、原因層を特定します。
+
+## 目的
+
+**{{ target_url }}** の応答遅延について、`curl -w` の時間内訳を平常時の基準値(TTFB {{ baseline_ttfb }})と比較し、DNS・接続・TLS・アプリケーション・DB依存のどの層に原因があるかを特定できるようになることを目指します。
+
+## 用語解説
+
+- **TTFB(Time To First Byte)**: リクエスト送信からサーバの最初の応答バイトを受け取るまでの時間。サーバ側処理の遅さを表す代表指標
+- **curl -w**: レスポンスを表示せず、DNS解決・TCP接続・TLSハンドシェイク等の各フェーズの所要時間だけを出力させるcurlのオプション
+- **層別判定**: 遅延の原因をネットワーク層(DNS/TCP/TLS)とアプリケーション層(サーバ処理/DB)に切り分けて考えること
+- **バックエンド**: リバースプロキシの背後で実際にリクエストを処理するアプリケーションサーバ
+- **依存先(dependency)**: アプリケーションが応答生成のために呼び出すDBや外部APIなど
+
+## シナリオ設定
+
+`{{ target_url }}` の応答が遅いという報告があります。平常時のTTFBは `{{ baseline_ttfb }}` 程度です。バックエンドは `{{ backend_host }}`、DB依存先は `{{ db_dependency }}` です。時間内訳の出力フォーマットは `{{ curl_format_file }}` に用意します。
+
+## 手順
+
+### 1. curl -wで時間内訳を定量化する
+
+```bash
+cat <<'EOF' > {{ curl_format_file }}
+    dns: %{time_namelookup}\n
+  connect: %{time_connect}\n
+tls_done: %{time_appconnect}\n
+   ttfb: %{time_starttransfer}\n
+  total: %{time_total}\n
+EOF
+curl -o /dev/null -s -w "@{{ curl_format_file }}" {{ target_url }}
+```
+
+### 2. DNS・TCP・TLS・TTFBを層別判定する
+
+平常時のTTFB(`{{ baseline_ttfb }}`)と比較し、どのフェーズが突出して増加しているかを確認します。
+
+```bash
+for i in 1 2 3; do curl -o /dev/null -s -w "@{{ curl_format_file }}" {{ target_url }}; echo "---"; done
+```
+
+→ `dns`/`connect`/`tls_done` が正常でTTFBだけ大きい場合はサーバ側処理が疑わしく、次の手順に進みます。
+
+### 3. サーバ側リソースとアプリログを確認する
+
+```bash
+ssh {{ backend_host }} "uptime; free -h; tail -n 100 /var/log/app/access.log"
+```
+
+→ CPU負荷やメモリ逼迫、遅いリクエストの集中がないかを確認します。
+
+### 4. 依存先(DB,外部API)を確認する
+
+```bash
+ssh {{ backend_host }} "mysqladmin -h {{ db_dependency }} status; tail -n 50 /var/log/app/slow-queries.log"
+```
+
+→ `{{ db_dependency }}` への接続待ちやスロークエリがTTFB増加の原因になっていないかを確認します。
+
+### 5. 対処を実施し再測定する
+
+原因層(サーバ処理・DB依存)に応じた暫定対処(プロセス再起動、コネクションプール調整等)を行った上で、再測定します。
+
+```bash
+curl -o /dev/null -s -w "@{{ curl_format_file }}" {{ target_url }}
+```
+
+### 6. 結果を報告する
+
+```bash
+cat <<EOF
+対象URL: {{ target_url }}
+平常時TTFB: {{ baseline_ttfb }}
+バックエンド: {{ backend_host }}
+DB依存先: {{ db_dependency }}
+再測定結果: (手順5の出力を要約して記入)
+EOF
+```
+
+## 動作確認
+
+- 再測定したTTFBが平常時基準(`{{ baseline_ttfb }}`)に近い水準まで戻っていること
+- `{{ backend_host }}` のCPU・メモリ使用率が平常範囲内であること
+- `{{ db_dependency }}` 側にスロークエリや接続待ちが残っていないこと
+- 判定結果と再測定データが記録されていること
+
+## 注意事項
+
+- 本番URLへの連続curlは対象サーバへの負荷になり得るため、測定回数・間隔を必要最小限にとどめる。
+- `curl_format_file` は調査用の一時ファイルであり、調査終了後に削除する。
+- サーバ再起動などの暫定対処は影響範囲を関係者に周知してから実施する。

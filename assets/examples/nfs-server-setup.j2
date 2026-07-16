@@ -1,0 +1,85 @@
+# NFSサーバによるディレクトリ共有の構築
+
+NFSサーバのエクスポート設計から、クライアント側のマウント永続化・権限(squash)設定の検証までを一巡します。
+
+## 目的
+
+`exports` の書式と `root_squash`/`all_squash` によるUID変換の違いを理解し、意図した権限でディレクトリを共有し、クライアント側で正しくマウントできるようになることを目指します。
+
+## 用語解説
+
+- **exports**: NFSサーバが公開するディレクトリと、許可クライアント・オプションを記述する設定ファイル(`/etc/exports`)
+- **root_squash**: クライアントのroot権限でのアクセスを、サーバ側では権限のないユーザー(`nobody`相当)に変換する既定の安全設定
+- **all_squash**: root以外の全ユーザーも含めて、サーバ側では単一の無権限ユーザーに変換する設定。バックアップ専用領域などで使う
+- **sync/async**: `sync` は書き込み要求への応答前にディスクへの反映を待つ安全な方式、`async` は待たずに応答する高速だが非同期な方式
+- **exportfs**: `/etc/exports` の内容をNFSサーバの実行時設定へ反映するコマンド
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 件のディレクトリをエクスポートします。
+
+| export_path | allowed_clients | options | squash_policy | purpose |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["export_path"] }} | {{ r["allowed_clients"] }} | {{ r["options"] }} | {{ r["squash_policy"] }} | {{ r["purpose"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. NFSサーバを導入しexportsを記述する
+
+```bash
+sudo apt install -y nfs-kernel-server || sudo dnf install -y nfs-utils
+{% for r in csv_rows %}sudo mkdir -p {{ r["export_path"] }}
+echo "{{ r["export_path"] }} {{ r["allowed_clients"] }}({{ r["options"] }},{{ r["squash_policy"] }})" | sudo tee -a /etc/exports
+{% endfor %}
+```
+
+### 2. exportfsで反映し確認する
+
+```bash
+sudo exportfs -ra
+sudo exportfs -v
+sudo systemctl enable --now nfs-server
+```
+
+### 3. クライアント側でマウントし永続化する
+
+`SERVER_IP` は実際のNFSサーバのIPアドレスに置き換えてください。
+
+```bash
+{% for r in csv_rows %}sudo mkdir -p /mnt{{ r["export_path"] }}
+echo "SERVER_IP:{{ r["export_path"] }} /mnt{{ r["export_path"] }} nfs {{ r["options"] }} 0 0" | sudo tee -a /etc/fstab
+{% endfor %}sudo mount -a
+```
+
+### 4. 権限とUID整合を検証する
+
+```bash
+{% for r in csv_rows %}stat {{ r["export_path"] }}
+touch /mnt{{ r["export_path"] }}/permission-test.txt && ls -l /mnt{{ r["export_path"] }}/permission-test.txt
+{% endfor %}
+```
+
+`squash_policy` が `root_squash` の場合、クライアントでrootが作成したファイルもサーバ側では無権限ユーザー所有として記録されることを確認します。
+
+### 5. アクセス制御を検証する
+
+```bash
+{% for r in csv_rows %}showmount -e localhost | grep {{ r["export_path"] }}
+{% endfor %}
+```
+
+許可外のクライアントIPからは `showmount` やマウントが拒否されることも合わせて確認します。
+
+## 動作確認
+
+- `exportfs -v` に {{ csv_rows | length }} 件すべてのエクスポートが、指定した `allowed_clients` とオプション付きで表示されること
+- クライアントの `mount -a` がエラーなく完了し、`df -h` で対象パスがマウントされていること
+- `root_squash`/`all_squash` の設定どおりに、サーバ側で作成ファイルの所有者が無権限ユーザーに変換されること
+- 許可外クライアントからのアクセスが拒否されること
+
+## 注意事項
+
+- `allowed_clients` に `*` などの広いレンジを指定すると意図しないホストからマウントされる恐れがある。CIDRやホスト名で必要最小限に絞り込む。
+- `no_root_squash` 相当(squash_policyの指定漏れ)は、クライアントのrootにサーバ側の全権限を与えてしまうため、明示的な理由がない限り使用しない。
+- `/etc/exports` の変更は `exportfs -ra` を実行するまでクライアントに反映されない。反映確認を怠って周知すると、旧設定のまま利用されるおそれがある。

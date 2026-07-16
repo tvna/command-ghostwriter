@@ -1,0 +1,4 @@
+package,repo_source,pin_priority,hold,reason
+docker-ce,https://download.docker.com/linux/ubuntu,500,false,検証環境のため通常優先度に維持し自動更新を許可
+nodejs,https://deb.nodesource.com/node_20.x,900,true,LTSバージョンをholdで固定し誤アップグレードを防止
+postgresql-14,https://apt.postgresql.org/pub/repos/apt,700,false,メジャーバージョンを優先させつつ自動更新は許可

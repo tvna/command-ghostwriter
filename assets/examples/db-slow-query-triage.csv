@@ -1,0 +1,4 @@
+query_digest,avg_time_ms,rows_examined,frequency,suspected_table
+SELECT * FROM orders WHERE customer_id = ?,1850,420000,320,orders
+SELECT * FROM order_items JOIN products ON order_items.product_id = products.id,940,180000,150,order_items
+UPDATE inventory SET stock = stock - ? WHERE sku = ?,610,95000,500,inventory

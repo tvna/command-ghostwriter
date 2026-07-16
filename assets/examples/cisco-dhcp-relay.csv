@@ -1,0 +1,4 @@
+vlan_id,svi_interface,helper_address,segment_subnet,scope_note
+10,Vlan10,192.168.0.10,192.168.10.0/24,本社内部LAN
+20,Vlan20,192.168.0.10,192.168.20.0/24,ゲスト無線LAN
+30,Vlan30,192.168.0.11,192.168.30.0/24,IP電話セグメント(セカンダリDHCPサーバ)

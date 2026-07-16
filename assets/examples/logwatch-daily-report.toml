@@ -1,0 +1,5 @@
+mail_to = "ops-team@example.com"
+detail_level = "Med"
+services = ["sshd", "sudo", "cron"]
+range = "Yesterday"
+output_format = "html"

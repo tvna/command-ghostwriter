@@ -1,0 +1,5 @@
+mount_point = "/mnt/data"
+subvolume_name = "@app"
+snapshot_dir = "/mnt/data/.snapshots"
+readonly = true
+retention_count = 5

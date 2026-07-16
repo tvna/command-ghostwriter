@@ -1,0 +1,100 @@
+# Sambaによる部門ファイルサーバ構築
+
+Sambaで認証付き共有フォルダを構築し、Windowsクライアントからのアクセスと権限を検証するまでを一巡します。
+
+## 目的
+
+`smb.conf`の共有定義とSambaユーザーデータベースの仕組みを理解し、部門単位の認証付き共有フォルダを構築・検証できるようになることを目指します。
+
+## 用語解説
+
+- **smb.conf**: Sambaの共有定義・全体設定を記述するメイン設定ファイル(`/etc/samba/smb.conf`)
+- **pdbedit**: Sambaが独自に持つユーザーデータベース(passdb)を操作するコマンド。Linuxのユーザーとは別に管理される
+- **create mask**: Sambaがファイル作成時に適用するパーミッションの上限値。Linux側のumaskに相当する概念
+- **testparm**: `smb.conf`の構文エラーを反映前に検出する検証コマンド
+- **valid users / valid group**: その共有へのアクセスを許可するユーザー・グループを絞り込む設定
+
+## シナリオ設定
+
+共有名 `{{ share_name }}` を `{{ share_path }}` に作成し、グループ `{{ valid_group }}` に所属するユーザーのみアクセスを許可します。書き込み可否は `{{ "許可(writable = yes)" if writable else "禁止(writable = no)" }}`、作成ファイルのパーミッション上限は `{{ create_mask }}`、サーバの説明文は `{{ server_string }}` とします。
+
+## 手順
+
+### 1. Sambaを導入し共有ディレクトリを準備する
+
+```bash
+sudo apt-get install -y samba
+sudo mkdir -p {{ share_path }}
+sudo groupadd -f {{ valid_group }}
+sudo chgrp {{ valid_group }} {{ share_path }}
+sudo chmod 2770 {{ share_path }}
+```
+
+`2770`のsetgidビットにより、共有内に新規作成されるファイルも自動的に`{{ valid_group }}`所属になります。
+
+### 2. smb.confに共有定義を追記する
+
+```bash
+sudo tee -a /etc/samba/smb.conf <<'EOF'
+
+[{{ share_name }}]
+   path = {{ share_path }}
+   valid users = @{{ valid_group }}
+   writable = {{ "yes" if writable else "no" }}
+   create mask = {{ create_mask }}
+   browsable = yes
+EOF
+
+sudo sed -i "s/^server string = .*/server string = {{ server_string }}/" /etc/samba/smb.conf
+```
+
+`server string`の行が存在しない場合は、`[global]`セクション直下に手動で追記します。
+
+### 3. Sambaユーザーを登録する
+
+Linuxユーザーが既に存在することを前提に、Samba用のパスワードを別途設定します。
+
+```bash
+sudo smbpasswd -a $(whoami)
+sudo usermod -aG {{ valid_group }} $(whoami)
+sudo pdbedit -L
+```
+
+`pdbedit -L`で登録済みSambaユーザーの一覧を確認します。Linuxのパスワードとは独立したデータベースであることに注意してください。
+
+### 4. testparmで構文を検証する
+
+```bash
+testparm -s
+```
+
+エラーが出力されず、`[{{ share_name }}]`セクションが表示されることを確認します。
+
+### 5. Sambaサービスを再起動し反映する
+
+```bash
+sudo systemctl restart smbd nmbd
+sudo systemctl status smbd --no-pager
+```
+
+### 6. クライアントから接続を検証する
+
+```bash
+smbclient //localhost/{{ share_name }} -U $(whoami) -c "ls"
+smbclient -L localhost -U $(whoami)
+```
+
+Windowsクライアントからは`\\{{ server_string }}\{{ share_name }}`(実際はホスト名またはIPを使用)でアクセスし、認証プロンプトでSambaパスワードを入力して疎通を確認します。
+
+## 動作確認
+
+- `testparm -s`が構文エラーなく`[{{ share_name }}]`を表示すること
+- `pdbedit -L`にアクセスさせたいユーザーが登録されていること
+- `smbclient //localhost/{{ share_name }}`で認証成功し、ファイル一覧が取得できること
+- `{{ valid_group }}`に属さないユーザーでの接続が拒否されること
+
+## 注意事項
+
+- Sambaのパスワードは`smbpasswd`で個別に設定するデータベースであり、Linuxのログインパスワードとは同期しない。ユーザー追加のたびに設定を忘れないこと。
+- `create mask`はLinux側のumaskと重ねて適用されるため、意図した権限にならない場合は共有先のumask設定も併せて確認する。
+- `writable = no`にした共有を誤って`yes`に戻す際は、`valid users`の範囲が適切かを必ず再確認してから反映する。

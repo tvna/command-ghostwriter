@@ -1,0 +1,6 @@
+connection_name = "lan-static"
+interface = "eth0"
+ipv4_address = "192.168.1.50/24"
+gateway = "192.168.1.1"
+dns_servers = ["192.168.1.10", "192.168.1.11"]
+autoconnect = true

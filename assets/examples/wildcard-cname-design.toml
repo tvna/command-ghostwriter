@@ -1,0 +1,23 @@
+zone_name = "example.com"
+wildcard_target = "app-lb.example.com."
+apex_strategy = "頂点(apex)にはCNAMEを置けないため、ALIAS/ANAMEレコードまたはロードバランサのAレコードを直接割り当てる"
+
+[[cname_entries]]
+name = "www"
+target = "app-lb.example.com."
+
+[[cname_entries]]
+name = "blog"
+target = "ghost.example.com."
+
+[[pitfall_checklist]]
+issue = "ワイルドカードの適用範囲"
+detail = "*.example.com は直下の子孫(foo.example.com)にのみ適用され、孫(foo.bar.example.com)には適用されない"
+
+[[pitfall_checklist]]
+issue = "CNAMEの共存制約"
+detail = "CNAMEを設定した名前には他の種類のレコード(MXやTXTなど)を同時に置けない"
+
+[[pitfall_checklist]]
+issue = "頂点(apex)の制約"
+detail = "ゾーンの頂点(example.com自体)にはCNAMEを設定できない"

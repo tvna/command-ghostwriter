@@ -1,0 +1,70 @@
+# 逆引きゾーンとPTRレコードの整備
+
+CSV で棚卸しした {{ csv_rows | length }} 件のIPアドレスについて、in-addr.arpa の逆引きゾーンを作成し、正引きと整合するPTRレコードを一括登録・検証します。
+
+## 目的
+
+逆引きゾーンの構造を理解し、対象IPアドレス群のPTRレコードを一括登録したうえで、正引きの結果と食い違いがないことをdigで検証できるようになることを目指します。
+
+## 用語解説
+
+- **in-addr.arpa**: IPv4アドレスの逆引きを行うための特別なドメイン
+- **PTRレコード**: IPアドレスからホスト名を引くためのレコード
+- **正引き/逆引きの整合性**: メールサーバなどでは逆引きしたホスト名を正引きした結果が元のIPと一致することを要求される場合がある
+- **SOAシリアル**: ゾーンの更新を表す番号。更新のたびに増やす必要がある
+- **dig -x**: 逆引き専用の問い合わせを行うdigのオプション
+
+## シナリオ設定
+
+対象は {% for r in csv_rows %}{{ r["ip_address"] }}{% if not loop.last %}, {% endif %}{% endfor %} の {{ csv_rows | length }} 件です。いずれも `203.0.113.0/24` 内のホストであり、逆引きゾーン `113.0.203.in-addr.arpa` に登録します。
+
+## 手順
+
+### 1. 逆引きゾーンを定義する
+
+```bash
+cat >> /etc/named.conf <<'EOF'
+zone "113.0.203.in-addr.arpa" IN {
+    type master;
+    file "/var/named/db.113.0.203";
+};
+EOF
+```
+
+### 2. ゾーンファイルにPTRレコードを一括登録する
+
+```bash
+cat > /var/named/db.113.0.203 <<'EOF'
+$TTL 3600
+@ IN SOA ns1.example.com. admin.example.com. ( 2026071601 3600 900 604800 3600 )
+@ IN NS ns1.example.com.
+{% for r in csv_rows %}{{ r["ip_address"].split(".")[-1] }} IN PTR {{ r["ptr_hostname"] }}
+{% endfor %}EOF
+```
+
+### 3. 構文チェックと反映を行う
+
+```bash
+named-checkzone 113.0.203.in-addr.arpa /var/named/db.113.0.203
+named-checkconf
+rndc reload
+```
+
+### 4. 正引きとの整合を検証する
+
+```bash
+{% for r in csv_rows %}dig -x {{ r["ip_address"] }} +short
+dig {{ r["forward_check"] }} A +short
+{% endfor %}```
+
+## 動作確認
+
+- 各レコードで `dig -x <IPアドレス>` が対応するホスト名(例: `{{ csv_rows[0]["ptr_hostname"] }}`)を返すこと
+- 逆引きで得たホスト名を正引きした結果が元のIPアドレスと一致すること
+- `named-checkzone` がエラーなく通ること
+
+## 注意事項
+
+- `{{ csv_rows[1]["note"] }}`。逆引きを持たないメールサーバは他サーバから受信拒否されることがあるため、優先して整備すること。
+- PTRレコードのホスト名末尾のドット(FQDN終端)を書き忘れると、ゾーン名が誤って連結され意図しないホスト名になる。
+- dns-zone(既存,正引き中心)は正引きレコードの管理が主眼であり、本手順は逆引き専用ゾーンの整備に焦点を絞る。

@@ -1,0 +1,69 @@
+# SRVレコードによるサービスディスカバリ設計
+
+CSV で設計した {{ csv_rows | length }} 件のSRVレコードを登録し、LDAPやSIPなどのサービス所在をDNSで公開して、優先度・重みによる振り分けを実現します。
+
+## 目的
+
+SRVレコードの構造(priority・weight・port・target)を理解し、複数サーバへの振り分けを意図どおりに設計・登録したうえで、クライアント側の解決動作を検証できるようになることを目指します。
+
+## 用語解説
+
+- **SRVレコード**: `_service._proto.domain` の形式で、あるサービスを提供するホストとポートを公開するレコード
+- **priority**: 数値が小さいほど優先して使われる。フェイルオーバーの主従関係を表す
+- **weight**: 同じpriority内での振り分け比率。値が大きいほど選ばれやすい
+- **サービスディスカバリ**: クライアントが設定ファイルに固定IPを書かず、DNSに問い合わせてサービスの所在を動的に見つける仕組み
+- **target**: 実際に接続するホスト名。SRVレコード自体はIPアドレスを持たず、targetの名前解決が別途必要
+
+## シナリオ設定
+
+登録するSRVレコードは {% for r in csv_rows %}`{{ r["service_proto"] }}`(優先度{{ r["priority"] }}, {{ r["target"] }}){% if not loop.last %}, {% endif %}{% endfor %} の {{ csv_rows | length }} 件です。
+
+## 手順
+
+### 1. 対象サービスとホストを整理する
+
+```bash
+{% for r in csv_rows %}echo "{{ r["service_proto"] }}.example.com -> {{ r["target"] }}:{{ r["port"] }} (priority={{ r["priority"] }}, weight={{ r["weight"] }}) # {{ r["purpose"] }}"
+{% endfor %}```
+
+### 2. SRVレコードを登録する
+
+```bash
+{% for r in csv_rows %}echo '{{ r["service_proto"] }}.example.com IN SRV {{ r["priority"] }} {{ r["weight"] }} {{ r["port"] }} {{ r["target"] }}.' >> /var/named/db.example.com
+{% endfor %}
+named-checkzone example.com /var/named/db.example.com
+rndc reload
+```
+
+### 3. digでSRVレコードを確認する
+
+```bash
+dig SRV _ldap._tcp.example.com +short
+dig SRV _sip._tcp.example.com +short
+```
+
+### 4. クライアント側の解決動作を検証する
+
+```bash
+{% for r in csv_rows %}dig {{ r["target"] }} A +short
+{% endfor %}```
+
+### 5. プライマリ障害を想定したフェイルオーバーを確認する
+
+```bash
+# プライマリ(priority={{ csv_rows[0]["priority"] }})を意図的に停止し、
+# クライアントがセカンダリ(priority={{ csv_rows[1]["priority"] }})へ接続を切り替えることを確認する
+```
+
+## 動作確認
+
+- `dig SRV` の応答が priority の昇順(値が小さい順)で並ぶこと
+- 各 target のAレコードが正しく名前解決できること
+- クライアントアプリケーション(LDAPクライアント等)が実際にSRVレコードから接続先を選択できること
+- プライマリ停止時にセカンダリへフェイルオーバーすること
+
+## 注意事項
+
+- SRVレコードに対応していないクライアントソフトウェアもあるため、事前に対応状況を確認すること。
+- target には別途Aレコードが必要であり、SRVレコード自体はIPアドレスを持たないことに注意する。
+- 同一priority内でweightのみ変えても、対応クライアントが少ない場合は期待どおりの比率で分散されないことがある。

@@ -1,0 +1,97 @@
+# Webサイト改ざん検知時の初動対応 — {{ site_url }}
+
+Webサイトの改ざんを検知した際に、事実確認から公開停止判断・証跡保全・原因調査・クリーンな状態への復旧までの初動対応を行います。
+
+## 目的
+
+**{{ detection_method }}** をきっかけに、{{ site_url }} の改ざんが疑われる事態に対し、事実を確認・記録し、公開停止の要否を判断したうえで、証跡を保全しながら安全に復旧できるようになることを目指します。
+
+## 用語解説
+
+- **改ざん(defacement)**: 攻撃者が不正にWebコンテンツを書き換え、意図しない表示や不正コードを埋め込む行為
+- **証跡保全**: 調査や事後報告のために、改ざん状態のログ・ファイル・ハッシュ値をそのままの状態で保存すること
+- **メンテナンス画面**: 公開停止時に訪問者へ表示する、被害拡大を防ぎつつ利用者に状況を伝える暫定ページ
+- **既知の正常状態(last known good)**: 改ざん前に取得済みの、内容が正しいと確認できているバックアップ時点
+- **侵入経路(attack vector)**: 攻撃者がコンテンツを書き換えるために利用した脆弱性や認証情報の突破口
+
+## シナリオ設定
+
+{{ site_url }} において {{ detection_method }} により改ざんが検知されました。ドキュメントルートは {{ doc_root }} です。既知の正常なバックアップは {{ last_known_good_backup }} で、公開停止の判断には {{ takedown_authority }} が必要です。
+
+## 手順
+
+### 1. 改ざんの事実を確認し記録する
+
+```bash
+curl -s -o /tmp/defaced_snapshot.html {{ site_url }}
+sha256sum /tmp/defaced_snapshot.html
+date -u +%Y-%m-%dT%H:%M:%SZ
+```
+
+→ 改ざん後のページをスクリーンショット相当として保存し、取得時刻とハッシュ値を記録します。これが後の調査・報告の一次証跡になります。
+
+### 2. 公開停止の要否を判断する
+
+被害が利用者に及ぶ内容（フィッシング誘導、マルウェア配布等）かどうかで判断します。承認元は {{ takedown_authority }} です。
+
+```bash
+echo "承認: {{ takedown_authority }}"
+# 承認後にメンテナンス画面へ切替
+sudo cp /var/www/maintenance/index.html {{ doc_root }}/index.html.maint
+```
+
+→ {{ takedown_authority }} の承認を得たうえで、必要と判断した場合のみ公開を停止します。判断を待たずに独断で停止しない。
+
+### 3. 証跡を保全する
+
+改ざん状態のファイルとログを、調査のために変更前のまま保存します。
+
+```bash
+sudo tar czf /forensics/$(date +%Y%m%d_%H%M)_defaced_docroot.tar.gz -C {{ doc_root }} .
+sudo cp /var/log/nginx/access.log /forensics/$(date +%Y%m%d_%H%M)_access.log
+sudo cp /var/log/nginx/error.log /forensics/$(date +%Y%m%d_%H%M)_error.log
+```
+
+→ 復旧作業でファイルを上書きする前に、必ずこの保全を完了させます。
+
+### 4. 改ざん範囲と侵入経路を調査する
+
+```bash
+find {{ doc_root }} -newer {{ last_known_good_backup }} -type f -printf '%T@ %p\n' | sort -n
+grep -E "POST|PUT" /var/log/nginx/access.log | tail -n 100
+```
+
+→ 更新日時が最終正常時点より新しいファイルを洗い出し、改ざん範囲を特定します。あわせて不審なリクエストから侵入経路の手がかりを探します。
+
+### 5. クリーンなバックアップから復旧する
+
+```bash
+sudo mv {{ doc_root }} {{ doc_root }}.compromised
+sudo mkdir -p {{ doc_root }}
+sudo tar xzf {{ last_known_good_backup }} -C {{ doc_root }}
+sudo chown -R www-data:www-data {{ doc_root }}
+```
+
+→ {{ last_known_good_backup }} から展開し、改ざんされたディレクトリは削除せず `.compromised` として保持し、後続調査に備えます。
+
+### 6. 再発防止を実施し公開を再開する
+
+侵入経路として特定した脆弱性（認証情報漏洩、CMSプラグインの脆弱性等)を是正してから公開を再開します。
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" {{ site_url }}
+sudo systemctl reload nginx
+```
+
+## 動作確認
+
+- {{ site_url }} が復旧後、改ざん前と同じ正常なコンテンツを返すこと
+- `{{ doc_root }}.compromised` として改ざん状態のファイル一式が保全されていること
+- `/forensics/` 配下に改ざん時点のアーカイブとアクセスログ・エラーログが保存されていること
+- 特定した侵入経路に対する是正（脆弱性修正、認証情報リセット等)が完了していること
+
+## 注意事項
+
+- 事実確認前に慌てて `rm -rf` などで改ざんファイルを削除しない。証跡保全より前の削除は原因調査を不可能にする。
+- 公開停止は {{ takedown_authority }} の承認を得てから行う。独断での停止は事業影響の判断を飛ばすことになる。
+- 復旧後も侵入経路を塞がない限り再改ざんされるため、原因調査と是正を復旧作業と同等の優先度で扱う。

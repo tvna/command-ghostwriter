@@ -1,0 +1,5 @@
+syslog_host = "192.0.2.50"
+syslog_facility = "local0"
+log_level_policy = "notice以上をsyslogへ転送し、debugはコンソールのみに留める"
+filter_log_enabled = true
+rotation_note = "受信側syslogサーバでlogrotateにより30日分を保持する"

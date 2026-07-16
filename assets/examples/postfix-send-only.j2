@@ -1,0 +1,89 @@
+# Postfix送信専用サーバの構築
+
+通知メール送信専用のPostfixを構築します。外部からの受信は行わず、アプリケーションやcronからの通知メールをリレー経由で送信することだけを目的とします。sudo権限で実施してください。
+
+## 目的
+
+MTA(メール転送エージェント)の役割とオープンリレーの危険性を理解し、送信専用に絞ったPostfixをリレー制限付きで構築・検証できるようになることを目指します。
+
+## 用語解説
+
+- **MTA**: Mail Transfer Agent。メールの受信・キューイング・配送を担うソフトウェア。Postfixはその実装の一つ
+- **リレー**: 自ホストが直接インターネットへメールを送信せず、契約済みのSMTPリレーサーバへ中継を委ねる方式。到達率とブロックリスト対策に有効
+- **mynetworks**: Postfixに対してメール送信(リレー)を許可するクライアントのネットワーク範囲
+- **inet_interfaces**: Postfixがどのネットワークインタフェースで待ち受けるかの設定。`loopback-only`は外部からの接続を受け付けない
+- **オープンリレー**: 第三者が自由にメールを中継送信できてしまう誤設定状態。スパム踏み台化とブロックリスト登録の原因になる
+- **SPF**: 送信ドメインが許可するメール送信元IPを宣言するDNSレコード。リレー経由の送信ではリレー先のSPFレコードとの整合が必要
+
+## シナリオ設定
+
+ホスト名 `{{ myhostname }}` のサーバから、リレー `{{ relayhost }}` 経由で通知メールを送信します。待ち受けは `{{ inet_interfaces }}`、送信許可ネットワークは `{{ mynetworks }}` に限定し、通知元アドレスは `{{ notify_from }}` を使用します。
+
+## 手順
+
+### 1. Postfixを導入する
+
+```bash
+sudo apt-get install -y postfix mailutils
+```
+
+インストール中の設定タイプ選択画面では「No configuration」を選び、後続手順で `main.cf` を直接編集します。
+
+### 2. main.cfを最小構成で設定する
+
+```bash
+sudo postconf -e "myhostname = {{ myhostname }}"
+sudo postconf -e "relayhost = {{ relayhost }}"
+sudo postconf -e "mynetworks = {{ mynetworks }}"
+sudo postconf -e "inet_interfaces = {{ inet_interfaces }}"
+sudo postconf -e "inet_protocols = ipv4"
+sudo systemctl restart postfix
+```
+
+`inet_interfaces = {{ inet_interfaces }}` により、外部ネットワークからの接続を受け付けない送信専用構成になります。
+
+### 3. ローカルから送信テストを行う
+
+```bash
+echo "postfix send-only test" | mail -s "test from {{ myhostname }}" -a "From: {{ notify_from }}" root
+sudo tail -n 20 /var/log/mail.log
+```
+
+### 4. 外部宛てに送信しログを確認する
+
+```bash
+echo "notification body" | mail -s "notify test" -a "From: {{ notify_from }}" -a "Reply-To: {{ notify_from }}" your-address@example.com
+sudo journalctl -u postfix --since "10 minutes ago" --no-pager
+```
+
+`status=sent`が記録されていれば、リレー `{{ relayhost }}` への中継が成功しています。
+
+### 5. mailqでキューを確認する
+
+```bash
+mailq
+sudo postqueue -p
+```
+
+滞留メールがある場合はリレー認証やネットワーク到達性の問題を疑います。
+
+### 6. SPF整合を確認する
+
+```bash
+dig +short TXT {{ myhostname }}
+```
+
+`{{ notify_from }}` の送信ドメインのSPFレコードに、リレーサーバの送信元が含まれているかを確認します。
+
+## 動作確認
+
+- `sudo systemctl status postfix`が`active (running)`であること
+- `mail.log`に外部宛てテストメールの`status=sent`が記録されていること
+- `mailq`が空(キュー滞留なし)であること
+- 外部からポート25/587へ接続できない(`inet_interfaces = {{ inet_interfaces }}`が有効)こと
+
+## 注意事項
+
+- `mynetworks`の範囲を広げすぎるとオープンリレー化のリスクが生じる。送信元は必要最小限のネットワークに限定する。
+- 送信ドメインのSPF/DKIM/DMARCが未整備だと、正しく設定していても宛先側で迷惑メール判定される場合がある。リレー事業者側のガイドに従って整合させる。
+- `relayhost`への認証情報(SASLユーザー/パスワード)を`main.cf`に平文で書かず、`smtp_sasl_password_maps`で別ファイルに分離し権限を600に絞る。

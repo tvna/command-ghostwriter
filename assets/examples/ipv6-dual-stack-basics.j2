@@ -1,0 +1,80 @@
+# IPv6デュアルスタックの基本設定 — {{ interface }}
+
+インターフェース `{{ interface }}` にIPv6アドレスを設定し、既存のIPv4と共存するデュアルスタック環境を構築します。RA/DHCPv6の役割を理解したうえで疎通検証まで行います。
+
+## 目的
+
+リンクローカルアドレス・SLAAC・RAの関係を理解し、IPv4に加えてIPv6アドレスを正しく設定・検証できるようになること、またデュアルスタック時の優先順位とフィルタリングへの影響を把握することを目指します。
+
+## 用語解説
+
+- **リンクローカルアドレス**: `fe80::/10` から自動生成される、同一リンク内でのみ有効なアドレス。IPv6を有効化した全インターフェースが持つ
+- **SLAAC(Stateless Address Autoconfiguration)**: ルータが送出するRAのプレフィックス情報をもとに、ホストが自身でグローバルアドレスを生成する仕組み
+- **RA(Router Advertisement)**: ルータが定期的に送出する、プレフィックスやデフォルトゲートウェイ情報を含む制御パケット
+- **プレフィックス長**: IPv6アドレスのネットワーク部の長さ。`{{ prefix_length }}` はIPv4のサブネットマスクに相当する概念
+- **DHCPv6**: RAとは別に、アドレスやDNS等の情報をステートフルに配布する仕組み。SLAACと併用されることが多い
+
+## シナリオ設定
+
+`{{ interface }}` にIPv6アドレス `{{ ipv6_address }}/{{ prefix_length }}` を設定し、ゲートウェイ `{{ gateway6 }}`、DNS `{{ dns6 }}` を構成します。アドレス割当方式は `{{ ra_mode }}` を前提とします。
+
+## 手順
+
+### 1. 現状のIPv6設定を確認する
+
+```bash
+ip -6 addr show {{ interface }}
+ip -6 route show
+```
+
+### 2. IPv6が有効か確認する
+
+```bash
+sysctl net.ipv6.conf.{{ interface }}.disable_ipv6
+cat /proc/sys/net/ipv6/conf/{{ interface }}/disable_ipv6
+```
+
+### 3. 静的IPv6アドレスを設定する
+
+```bash
+sudo nmcli connection modify {{ interface }} \
+  ipv6.method manual \
+  ipv6.addresses {{ ipv6_address }}/{{ prefix_length }} \
+  ipv6.gateway {{ gateway6 }} \
+  ipv6.dns {{ dns6 }}
+sudo nmcli connection up {{ interface }}
+```
+
+### 4. アドレスが反映されたことを確認する
+
+```bash
+ip -6 addr show {{ interface }}
+ip -6 route show
+```
+
+### 5. IPv6疎通を検証する
+
+```bash
+ping6 -c 3 {{ gateway6 }}
+traceroute6 {{ dns6 }}
+```
+
+### 6. デュアルスタック時の優先順位を確認する
+
+```bash
+getent hosts $(hostname)
+cat /etc/gai.conf | grep -v '^#'
+```
+
+## 動作確認
+
+- `ip -6 addr show {{ interface }}` に `{{ ipv6_address }}/{{ prefix_length }}` が `scope global` で表示されること
+- `ip -6 route show` に `{{ gateway6 }}` 経由のデフォルト経路が存在すること
+- `{{ gateway6 }}` へのping6が成功すること
+- IPv4アドレスが変更されず、既存の疎通に影響がないこと
+
+## 注意事項
+
+- IPv6を有効化するとファイアウォールやセキュリティグループがIPv4のみを想定している場合、IPv6経路が意図せず素通りするリスクがある。ip6tables/firewalldのIPv6ルールも合わせて確認する。
+- `{{ ra_mode }}`(SLAAC)運用中に静的アドレスを追加すると、RAから受け取ったアドレスと共存し複数のグローバルアドレスを持つ状態になる。想定外のアドレスが増えていないか `ip -6 addr` で確認する。
+- subnetting-basics(既存,IPv4)とはアドレス体系そのものが異なるため、本手順はIPv6固有の設定と検証に焦点を絞る。

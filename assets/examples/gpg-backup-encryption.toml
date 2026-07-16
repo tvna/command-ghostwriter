@@ -1,0 +1,6 @@
+key_uid = "Backup Operator <backup-ops@example.com>"
+key_type = "RSA4096"
+backup_source = "/var/backups/nightly"
+encrypted_dest = "/mnt/offsite/nightly.tar.gz.gpg"
+passphrase_policy = "20文字以上のパスフレーズをパスワードマネージャーで管理し、四半期ごとにローテーションする"
+escrow_note = "秘密鍵はUSBメディア2本に複製し、金庫と別拠点のロッカーへ分散保管する"

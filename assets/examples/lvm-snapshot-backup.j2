@@ -1,0 +1,79 @@
+# LVMスナップショットを使った静止点バックアップ
+
+LVMスナップショットで整合性のある静止点を作り、バックアップ取得後に速やかに破棄する運用手順です。root権限（sudo）で実施してください。
+
+## 目的
+
+LVMスナップショットのCoW（Copy-on-Write）の仕組みを理解し、静止点を用いた安全なバックアップ取得と、取得後の適切な破棄までを一連の運用として実施できるようになることを目指します。
+
+## 用語解説
+
+- **CoW (Copy-on-Write)**: 元LV（origin）に書き込みが発生した際、変更前のブロックだけをスナップショット領域へコピーする方式
+- **スナップショット領域**: スナップショットが差分データを保持するために確保する専用の容量
+- **静止点**: バックアップ取得時点でのデータの整合性が保証された状態
+- **Invalid化**: スナップショット領域が満杯になり、差分を保持できなくなってスナップショットが破棄状態になる現象
+
+## シナリオ設定
+
+VG **{{ vg_name }}** の元LV **{{ origin_lv }}** に対し、スナップショット **{{ snapshot_name }}**（サイズ **{{ snapshot_size }}**）を作成し、バックアップ先 **{{ backup_dest }}** へ取得します。保持方針: {{ retention_note }}
+
+## 手順
+
+### 1. VGの空き容量を確認する
+
+```bash
+vgs {{ vg_name }}
+```
+
+スナップショット領域（{{ snapshot_size }}）を確保できる空き容量があることを確認します。
+
+### 2. スナップショットを作成する
+
+```bash
+lvcreate --snapshot --name {{ snapshot_name }} --size {{ snapshot_size }} /dev/{{ vg_name }}/{{ origin_lv }}
+lvs {{ vg_name }}
+```
+
+### 3. スナップショットをマウントしてバックアップを取得する
+
+```bash
+mkdir -p /mnt/{{ snapshot_name }}
+mount -o ro /dev/{{ vg_name }}/{{ snapshot_name }} /mnt/{{ snapshot_name }}
+tar -czf {{ backup_dest }} -C /mnt/{{ snapshot_name }} .
+```
+
+読み取り専用（`-o ro`）でマウントし、静止点のデータをそのままアーカイブします。
+
+### 4. バックアップ完了後にアンマウントする
+
+```bash
+umount /mnt/{{ snapshot_name }}
+ls -lh {{ backup_dest }}
+```
+
+### 5. スナップショットを破棄する
+
+```bash
+lvremove -f /dev/{{ vg_name }}/{{ snapshot_name }}
+lvs {{ vg_name }}
+```
+
+### 6. スナップショット領域の溢れ（Invalid化）を確認する
+
+```bash
+lvs -o lv_name,snap_percent {{ vg_name }}
+```
+
+破棄前に `snap_percent` が100%に近づいていた場合、スナップショット領域（{{ snapshot_size }}）が不足していた兆候であり、次回はサイズを見直します。
+
+## 動作確認
+
+- `lvs {{ vg_name }}` にスナップショット取得直後は `{{ snapshot_name }}` が表示されること
+- `{{ backup_dest }}` にバックアップアーカイブが作成されていること
+- `lvremove` 後、`lvs {{ vg_name }}` から `{{ snapshot_name }}` が消えていること
+
+## 注意事項
+
+- スナップショットは差分データを保持し続けるため、バックアップ取得後は速やかに破棄する（保持方針: {{ retention_note }}）。放置すると領域が溢れてInvalid化し、復元不能になる。
+- スナップショットは元LVと同じディスク・VGに依存するため、元ディスクの物理障害には無力であり、独立した複製であるバックアップの代替にはならない。
+- kvm-snapshot-restore(既存)はVM単位のスナップショットを扱うのに対し、本手順はホスト側のLVM層でのスナップショット取得に焦点を当てている。

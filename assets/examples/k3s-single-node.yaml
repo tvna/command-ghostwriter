@@ -1,0 +1,5 @@
+node_name: k3s-node01
+install_options: "--write-kubeconfig-mode 644"
+app_image: nginx:1.27
+app_replicas: 2
+nodeport: 30080

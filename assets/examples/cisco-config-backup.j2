@@ -1,0 +1,85 @@
+# Cisco機器コンフィグの定期バックアップ
+
+`running-config`を外部サーバへ退避し、変更前後の世代管理をできるようにします。手動退避と定期取得の両方を扱います。
+
+## 目的
+
+`running-config`と`startup-config`の違いを理解した上で、手動でのコンフィグ退避手順を確立し、それを定期実行に組み込んで変更前後の差分を追跡できるようになることを目指します。
+
+## 用語解説
+
+- **running-config**: 機器が現在稼働中の設定。再起動すると失われる揮発性の設定
+- **startup-config**: 機器起動時に読み込まれる、NVRAMに保存された恒久設定。`write memory`(`copy running-config startup-config`)で反映される
+- **copyコマンド**: `copy running-config <宛先>`で設定をファイルとして外部へ転送するCisco IOSのコマンド
+- **kron / EEM**: Cisco IOS上でスケジュール実行(kron)やイベント発生時の自動アクション(EEM: Embedded Event Manager)を実現する仕組み
+- **世代管理**: 退避したコンフィグをタイムスタンプ付きで複数世代保持し、変更履歴として差分比較できるようにする運用
+
+## シナリオ設定
+
+機器 `{{ device_name }}` の`running-config`を、`{{ protocol }}`で `{{ backup_server }}` の `{{ backup_dir }}` へ退避します。ファイル名は命名規則 `{{ naming_rule }}` に従い、スケジュール `{{ schedule }}` で定期取得します。
+
+## 手順
+
+### 1. 現在の設定と機器情報を確認する
+
+```bash
+enable
+show running-config | include hostname
+show version | include uptime
+```
+
+### 2. 手動でrunning-configを外部へ退避する
+
+```bash
+copy running-config {{ protocol }}://{{ backup_server }}{{ backup_dir }}/{{ device_name }}_manual.cfg
+```
+
+プロトコルの認証情報を求められた場合は、バックアップ専用アカウントの資格情報を入力します。
+
+### 3. サーバ側で定期取得を設定する(kron方式)
+
+機器側から能動的に送信させる方法として、kronスケジューラでcopyコマンドを定期実行します。
+
+```bash
+configure terminal
+kron occurrence CONFIG-BACKUP at 02:00 recurring
+ policy-list CONFIG-BACKUP-POLICY
+exit
+kron policy-list CONFIG-BACKUP-POLICY
+ cli copy running-config {{ protocol }}://{{ backup_server }}{{ backup_dir }}/{{ device_name }}_$(date +%Y%m%d).cfg
+exit
+end
+write memory
+```
+
+外部から取得する運用の場合は、代わりに管理サーバ側のcronでSSH経由の`show running-config`取得スクリプトを `{{ schedule }}` で登録します。
+
+### 4. 世代管理と差分を確認する
+
+```bash
+ls -lt {{ backup_dir }}/{{ device_name }}_*.cfg | head -n 10
+diff {{ backup_dir }}/{{ device_name }}_manual.cfg {{ backup_dir }}/{{ device_name }}_previous.cfg
+```
+
+差分がある場合は、意図した変更のみが反映されているか確認します。
+
+### 5. リストア手順を確認する(実施は変更管理の承認後のみ)
+
+```bash
+copy {{ protocol }}://{{ backup_server }}{{ backup_dir }}/{{ device_name }}_manual.cfg running-config
+```
+
+`running-config`への直接コピーはマージ動作(既存設定に追記)になるため、完全な復元には事前の`write erase`検討や差分確認が必要です。
+
+## 動作確認
+
+- `{{ backup_server }}` の `{{ backup_dir }}` 配下に、命名規則 `{{ naming_rule }}` に沿ったファイルが作成されていること
+- 手動退避したファイルと直近の定期取得ファイルの内容(`hostname`、インターフェース設定等)が一致していること
+- kronで設定した定期実行が `{{ schedule }}` の意図した時刻に実行され、新しいタイムスタンプのファイルが増えていくこと
+- 意図的な設定変更後、次回の定期取得ファイルに差分が反映されていること
+
+## 注意事項
+
+- `copy <ソース> running-config`は既存設定への追記(マージ)であり、`copy` 単体では完全なリストアにはならない。完全復元が必要な場合は`write erase`と再起動を伴う手順を別途整備し、事前に影響範囲を確認する。
+- バックアップ用の認証情報(SCP/TFTPサーバのアカウント)はコンフィグに平文で残る場合がある。専用の低権限アカウントを使い、機器のコンフィグ自体もアクセス制限されたリポジトリで管理する。
+- TFTPは認証・暗号化がないプロトコルであるため、可能な限りSCP等の認証付きプロトコルを優先し、TFTPを使う場合は隔離された管理セグメント内に限定する。

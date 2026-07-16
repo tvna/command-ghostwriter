@@ -1,0 +1,6 @@
+save_rules = "900 1 300 10 60 10000"
+aof_enabled = true
+appendfsync = "everysec"
+dir = "/var/lib/redis"
+maxmemory = "512mb"
+maxmemory_policy = "noeviction"

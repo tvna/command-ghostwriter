@@ -1,0 +1,102 @@
+# rsyslogによるログのリモート集約転送
+
+各サーバのログをrsyslogで集約サーバ `{{ central_server }}` へ転送し、受信側の保存設計と、キューによる欠損対策を行います。
+
+## 目的
+
+facility/severityによる選別と転送キューの役割を理解し、送信側・受信側それぞれのrsyslog設定を行い、`logger` コマンドで実際に到達することを検証できるようになることを目指します。
+
+## 用語解説
+
+- **facility**: `auth`, `cron`, `local0` のようにログの発生源種別を表す分類
+- **severity**: `emerg` から `debug` までのログ重要度
+- **forward_selector**: どのfacility/severityの組を転送するかを指定するセレクタ(`{{ forward_selector }}` は全件転送を意味する)
+- **転送キュー(action queue)**: 送信先へ届かない間、ログを一時的にディスク・メモリへ保持しておく仕組み
+- **receiver_template**: 受信側でホスト名・プログラム名別にログファイルを振り分ける出力テンプレート
+
+## シナリオ設定
+
+集約サーバは `{{ central_server }}`、プロトコルは `{{ protocol }}`、ポートは {{ port }} です。転送対象は `{{ forward_selector }}`、送信キューサイズは {{ queue_size }} 件とします。受信側の保存先テンプレートは `{{ receiver_template }}` です。
+
+## 手順
+
+### 1. 受信側(集約サーバ)を設定する
+
+```bash
+sudo tee /etc/rsyslog.d/00-receiver.conf <<'EOF'
+module(load="imtcp")
+input(type="imtcp" port="{{ port }}")
+
+template(name="RemoteLogs" type="string" string="{{ receiver_template }}")
+*.* action(type="omfile" dynaFile="RemoteLogs")
+EOF
+sudo systemctl restart rsyslog
+```
+
+### 2. 受信ポートの待受を確認する
+
+```bash
+sudo ss -tlnp | grep {{ port }}
+```
+
+### 3. 送信側(各サーバ)の転送設定を行う
+
+```bash
+{% if protocol == "tcp" %}sudo tee /etc/rsyslog.d/00-forward.conf <<'EOF'
+{{ forward_selector }} action(type="omfwd" target="{{ central_server }}" port="{{ port }}" protocol="tcp"
+  queue.type="LinkedList" queue.filename="fwd_queue" queue.maxdiskspace="1g" queue.size="{{ queue_size }}"
+  queue.saveonshutdown="on" action.resumeRetryCount="-1")
+EOF
+{% else %}sudo tee /etc/rsyslog.d/00-forward.conf <<'EOF'
+{{ forward_selector }} action(type="omfwd" target="{{ central_server }}" port="{{ port }}" protocol="udp"
+  queue.type="LinkedList" queue.filename="fwd_queue" queue.maxdiskspace="1g" queue.size="{{ queue_size }}"
+  queue.saveonshutdown="on")
+EOF
+{% endif %}sudo systemctl restart rsyslog
+```
+
+### 4. loggerコマンドで到達を検証する
+
+```bash
+logger -p local0.info "rsyslog-forward-test-$(hostname)-$(date +%s)"
+```
+
+受信側で該当ホストのログファイルにテストメッセージが記録されているか確認します。
+
+```bash
+sudo grep "rsyslog-forward-test" /var/log/remote/$(hostname)/*.log
+```
+
+### 5. キューによる欠損対策を確認する
+
+集約サーバを一時停止してもログが失われないことを確認します。
+
+```bash
+sudo systemctl stop rsyslog
+logger -p local0.info "rsyslog-forward-during-outage-$(date +%s)"
+sudo systemctl start rsyslog
+sleep 5
+sudo grep "rsyslog-forward-during-outage" /var/log/remote/$(hostname)/*.log
+```
+
+### 6. 時刻同期の前提を確認する
+
+転送ログの時系列比較にはホスト間の時刻同期が前提となります。
+
+```bash
+timedatectl status | grep -E "synchronized|NTP"
+```
+
+## 動作確認
+
+- Step 2で集約サーバの `{{ port }}` がプロトコル `{{ protocol }}` で待受状態(`LISTEN`)であること
+- Step 4のテストメッセージが集約サーバ側の `{{ receiver_template }}` に沿ったパスへ到達すること
+- Step 5で集約サーバ停止中に送信したログが、再起動後に欠損なく到達すること(キューの効果)
+- Step 6で送信側・受信側とも `synchronized: yes` であること
+
+## 注意事項
+
+- `imtcp`/`imudp` を有効化した集約サーバは、想定外のホストからの転送も受け付けてしまう可能性がある。ファイアウォールで送信元IPを許可リストに限定することを検討する。
+- キューサイズ({{ queue_size }} 件)を超える送信は古いメッセージから破棄される場合があるため、集約サーバの停止時間の想定に応じて調整する。
+- `{{ protocol }}` が `udp` の場合、パケット順序保証や到達保証がなく、ネットワーク輻輳時にログが欠損する可能性がある点に留意する。
+- `log-integrity-hash`(既存, 改ざん検知)とは異なり、本手順は転送・集約そのものが焦点であり、改ざん検知の仕組みは別途組み合わせる必要がある。

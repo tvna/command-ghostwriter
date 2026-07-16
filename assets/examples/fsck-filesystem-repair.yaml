@@ -1,0 +1,5 @@
+target_device: /dev/sdb1
+filesystem_type: ext4
+boot_method: SystemRescueライブUSBからの起動
+backup_confirmed: true
+lost_found_policy: 復旧されたファイルはowner不明のためoctet-streamとして扱い、アプリ担当チームに内容確認を依頼してから復元する

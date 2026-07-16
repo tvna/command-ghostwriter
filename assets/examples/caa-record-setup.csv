@@ -1,0 +1,5 @@
+domain,flag,tag,value,note
+example.com,0,issue,letsencrypt.org,通常証明書の発行を許可
+example.com,0,issuewild,letsencrypt.org,ワイルドカード証明書の発行を許可
+example.com,0,iodef,mailto:security@example.com,不正発行を検知した際の通知先
+shop.example.com,0,issue,digicert.com,ECサイトはDigiCert限定で発行

@@ -1,0 +1,5 @@
+zone_name = "example.com"
+internal_match_clients = "10.0.0.0/8"
+internal_zone_file = "/var/named/internal/db.example.com"
+external_zone_file = "/var/named/external/db.example.com"
+recursion_policy = "internalのみ許可し、externalは再帰禁止"

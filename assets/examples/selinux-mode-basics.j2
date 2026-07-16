@@ -1,0 +1,87 @@
+# SELinuxのモード管理とコンテキスト基礎
+
+Enforcing/Permissiveの切替とファイルコンテキストの確認・修復(restorecon)を、無効化に頼らず安全に行います。
+
+## 目的
+
+SELinuxの動作モードとファイルコンテキストの仕組みを理解し、権限問題が起きた際にコンテキストの確認・修復・boolean調整で解決できるようになることを目指します。`setenforce 0` による恒久無効化を選ばない判断ができることもゴールです。
+
+## 用語解説
+
+- **Enforcing**: ポリシー違反を実際にブロックし、監査ログに記録するモード
+- **Permissive**: ポリシー違反をブロックせず、監査ログにのみ記録する診断用モード
+- **コンテキスト(type)**: ファイル・プロセスに付与されるSELinuxラベル(例: `httpd_sys_content_t`)。プロセスのtypeとファイルのtypeの組み合わせでアクセス可否が決まる
+- **restorecon**: ファイルのコンテキストをポリシー既定値に修復するコマンド
+- **boolean**: 個別機能のオン・オフをポリシー変更なしで切り替えられるスイッチ(例: `httpd_can_network_connect`)
+- **AVC拒否(denial)**: ポリシー違反時に `audit.log` に記録されるアクセス拒否イベント
+
+## シナリオ設定
+
+対象サービスは `{{ target_service }}`、公開ディレクトリは `{{ web_root }}` です。期待コンテキストは `{{ expected_context }}`、確認するbooleanは `{{ boolean_name }}`、運用方針は `{{ mode_policy }}` モードの維持です。
+
+## 手順
+
+### 1. 現在の状態を確認する
+
+```bash
+getenforce
+sestatus
+```
+
+`sestatus` の `Current mode` が `{{ mode_policy }}` になっていることを確認します。
+
+### 2. コンテキストの実際値と期待値を比較する
+
+```bash
+ls -Z {{ web_root }}
+```
+
+表示された type が `{{ expected_context }}` と一致しない行があれば、コンテキストがずれています(手動コピーや別ディレクトリからの移動が典型的な原因です)。
+
+### 3. restoreconで修復する
+
+```bash
+sudo restorecon -Rv {{ web_root }}
+ls -Z {{ web_root }}
+```
+
+`-v` の出力に `restorecon reset` の行が出れば、修復対象があったということです。何も出力されなければ既に正しい状態です。
+
+### 4. booleanで機能単位の許可を確認・変更する
+
+```bash
+getsebool {{ boolean_name }}
+sudo setsebool -P {{ boolean_name }} on
+getsebool {{ boolean_name }}
+```
+
+`-P` を付けることで再起動後も設定が保持されます(付けない場合は次回起動で元に戻ります)。
+
+### 5. サービスを再起動し、AVC拒否がないか確認する
+
+```bash
+sudo systemctl restart {{ target_service }}
+sudo ausearch -m avc -ts recent
+```
+
+`ausearch` に該当時刻以降のAVC拒否が出なければ、コンテキストとbooleanの設定は妥当です。
+
+### 6. 外部から動作確認する
+
+```bash
+sudo systemctl status {{ target_service }} --no-pager
+curl -I http://localhost/
+```
+
+## 動作確認
+
+- `sestatus` の `Current mode` が `{{ mode_policy }}` であること
+- `ls -Z {{ web_root }}` の全ファイルが `{{ expected_context }}` であること
+- `getsebool {{ boolean_name }}` が `on` を示すこと
+- サービス再起動後、直近の `ausearch -m avc` に新規の拒否記録がないこと
+
+## 注意事項
+
+- `setenforce 0` や `SELINUX=disabled` による恒久無効化は行わない。問題の切り分けには一時的な `Permissive` 切替(`setenforce 0`)を使い、原因特定後は必ず `Enforcing` に戻す。
+- `restorecon` は既定ポリシーへの復元であり、意図的にカスタムコンテキストを設定している場合は上書きされる点に注意する。
+- booleanの変更は機能単位の許可拡大であるため、`{{ boolean_name }}` のように用途が明確なものに限定し、意味を確認せず有効化しない。

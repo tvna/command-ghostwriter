@@ -1,0 +1,84 @@
+# Linuxサーバへのスタティックルート追加と永続化
+
+複数セグメント環境で必要となるスタティックルートを一覧から追加し、再起動後も維持されるよう永続化します。
+
+## 目的
+
+ロンゲストマッチとメトリックの考え方を理解し、デフォルトルートを変更せずに特定セグメント向けの経路だけを安全に追加・永続化できるようになることを目指します。
+
+## 用語解説
+
+- **ロンゲストマッチ**: 複数の経路がマッチする場合、最もプレフィックス長が長い(より具体的な)経路が優先される仕組み
+- **メトリック**: 同一宛先に複数経路が存在する場合の優先度を示す数値。値が小さいほど優先される
+- **デフォルトルートとの関係**: スタティックルートはデフォルトルートより具体的なため、デフォルトルートを変更せずに特定宛先だけを迂回させられる
+- **永続化**: `ip route add` はOS再起動で消えるため、nmcliやnetplanなど恒久設定手段への反映が必要
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 件のスタティックルートを追加します。
+
+| destination_network | gateway | interface | metric | reason |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["destination_network"] }} | {{ r["gateway"] }} | {{ r["interface"] }} | {{ r["metric"] }} | {{ r["reason"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 現状のルーティングテーブルを確認する
+
+```bash
+ip route show
+ip route show table main
+```
+
+### 2. スタティックルートを一時追加する
+
+まず即時反映で動作確認し、問題なければ永続化します。
+
+```bash
+{% for r in csv_rows %}sudo ip route add {{ r["destination_network"] }} via {{ r["gateway"] }} dev {{ r["interface"] }} metric {{ r["metric"] }}
+{% endfor %}
+```
+
+### 3. 一時追加した経路を確認する
+
+```bash
+ip route show
+{% for r in csv_rows %}ip route get {{ r["gateway"] }}
+{% endfor %}
+```
+
+### 4. nmcliで永続化する
+
+```bash
+{% for r in csv_rows %}sudo nmcli connection modify {{ r["interface"] }} +ipv4.routes "{{ r["destination_network"] }} {{ r["gateway"] }} {{ r["metric"] }}"
+{% endfor %}sudo nmcli connection up {{ csv_rows[0]["interface"] }}
+```
+
+### 5. 疎通を検証する
+
+```bash
+{% for r in csv_rows %}ping -c 3 {{ r["gateway"] }}
+{% endfor %}
+```
+
+### 6. 再起動後の永続性を確認する
+
+```bash
+sudo reboot
+# 再ログイン後
+ip route show
+```
+
+## 動作確認
+
+- `ip route show` に表の {{ csv_rows | length }} 経路すべてが `interface` と `metric` 通りに表示されること
+- 各 `gateway` へのpingが成功すること
+- 再起動後も `ip route show` から経路が消えていないこと
+- 既存のデフォルトルート(`default via ...`)が変更されていないこと
+
+## 注意事項
+
+- `ip route add` のみで完結させると再起動時に経路が消え、障害時にしか気づかない事態を招くため、必ずnmcli等での永続化まで実施する。
+- 同一 `destination_network` に既存経路が存在する場合、`metric` の値によって意図しない優先順位になることがあるため、追加前に `ip route show` で重複を確認する。
+- 本手順は静的経路の追加に焦点を絞り、`ip rule` を用いた送信元別のポリシールーティングは対象外とする。

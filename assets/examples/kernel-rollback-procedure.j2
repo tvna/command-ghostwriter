@@ -1,0 +1,82 @@
+# カーネル更新後の不具合と旧カーネルへの切り戻し — {{ hostname }}
+
+{{ hostname }} でカーネルを `{{ bad_kernel_version }}` へ更新した後、「{{ symptom }}」という不具合が発生しました。旧カーネル `{{ good_kernel_version }}` で起動し、問題のあるバージョンを固定除外します。
+
+## 目的
+
+カーネル更新後の起動不良・ドライバ不具合発生時に、GRUBメニューから旧カーネルで起動し、デフォルト起動カーネルを固定した上で問題カーネルを保留(hold)できるようになることを目指します。
+
+## 用語解説
+
+- **GRUB**: Linuxの起動時にどのカーネルを読み込むか選択するブートローダ
+- **カーネルコマンドライン(/proc/cmdline)**: 起動中のカーネルに渡されたパラメータの一覧
+- **hold/versionlock**: パッケージマネージャに特定バージョンの自動更新を禁止させる設定
+- **ドライバ不具合**: 新カーネルでハードウェアドライバが正しく動作しない不具合
+- **デフォルト起動カーネル**: 何も選択しなければ起動するカーネルの設定(grub-set-default等)
+
+## シナリオ設定
+
+{{ hostname }} では現在 `{{ bad_kernel_version }}` がデフォルト起動カーネルになっており、「{{ symptom }}」が発生しています。GRUBメニューへのアクセス状況: {{ grub_menu_access }}。旧カーネル `{{ good_kernel_version }}` への切り戻しを行います。
+
+## 手順
+
+### 1. 症状と更新履歴を確認する
+
+```bash
+uname -r
+cat /proc/cmdline
+grep -i kernel /var/log/apt/history.log | tail -n 20
+```
+
+「{{ symptom }}」が `{{ bad_kernel_version }}` への更新後に発生し始めたことを確認します。
+
+### 2. GRUBメニューから旧カーネルで起動する
+
+{{ grub_menu_access }} を利用し、再起動時のGRUBメニューで `{{ good_kernel_version }}` を選択して起動します。
+
+```bash
+sudo reboot
+```
+
+### 3. デフォルト起動カーネルを固定する
+
+```bash
+awk -F\' '/menuentry / {print $2}' /boot/grub/grub.cfg | grep {{ good_kernel_version }}
+sudo grub-set-default "Advanced options for Ubuntu>Ubuntu, with Linux {{ good_kernel_version }}"
+sudo update-grub
+```
+
+### 4. 問題カーネルを保留する
+
+```bash
+{{ hold_method }}
+```
+
+自動更新で `{{ bad_kernel_version }}` が再度デフォルトに戻らないようにします。
+
+### 5. ハードウェア・ドライバ要因を記録する
+
+```bash
+uname -r
+lspci -k | grep -A 3 -i network
+dmesg | grep -i -E "error|fail" | tail -n 30
+```
+
+「{{ symptom }}」に関連するドライバ・デバイス情報を記録します。
+
+### 6. 解除条件を設定する
+
+問題カーネルの修正版が出た場合の再検証手順と、保留(hold)を解除する条件を記録します。
+
+## 動作確認
+
+- `uname -r` が `{{ good_kernel_version }}` であること
+- 再起動しても `{{ good_kernel_version }}` がデフォルトで起動すること
+- 「{{ symptom }}」が再現しないこと
+- 保留設定(`{{ hold_method }}`)が反映され、`{{ bad_kernel_version }}` へ自動更新されないこと
+
+## 注意事項
+
+- リモート作業でGRUB設定を誤ると起動不能になり得るため、可能な限りコンソールアクセス({{ grub_menu_access }})を確保してから実施する。
+- カーネル保留は恒久対応ではない。修正版リリース後は速やかに再検証し保留を解除する。
+- vuln-patch-triage(既存)は更新適用可否の事前判断を扱うのに対し、本手順は更新を適用した後の不具合切り戻しに焦点を当てる。

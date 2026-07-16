@@ -1,0 +1,5 @@
+target_url: "https://shop.example.com/checkout"
+baseline_ttfb: "120ms"
+curl_format_file: "/tmp/curl-format.txt"
+backend_host: "app01.internal.example"
+db_dependency: "orders-db.internal.example"

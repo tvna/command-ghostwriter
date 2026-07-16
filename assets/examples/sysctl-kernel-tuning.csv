@@ -1,0 +1,4 @@
+parameter,value,current_default,purpose,risk
+net.core.somaxconn,4096,128,同時接続待ちキューを増やし高負荷時の接続断を防ぐ,値が大きすぎるとメモリを消費する
+fs.file-max,2097152,131072,システム全体のファイルディスクリプタ上限を引き上げる,上限緩和だけでは個別プロセスのulimitは変わらない
+vm.swappiness,10,60,メモリ逼迫時にswapへ逃げる積極性を下げレイテンシを安定させる,0に近づけすぎるとOOM Killerが早まる場合がある

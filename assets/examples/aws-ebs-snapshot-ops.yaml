@@ -1,0 +1,5 @@
+volume_id: vol-0abc123def4567890
+snapshot_tag: app-data-daily
+retention_count: 7
+restore_az: ap-northeast-1a
+instance_id: i-0123456789abcdef0

@@ -1,0 +1,85 @@
+# UnboundによるキャッシュDNSサーバ構築
+
+社内向けのフルサービスリゾルバとして Unbound を構築し、アクセス制御・キャッシュ動作・DNSSEC検証を含めて検証します。
+
+## 目的
+
+Unbound をキャッシュDNSサーバとして構築し、フォワーダに依存しない再帰解決とキャッシュヒットによる高速応答、アクセス制御による外部からの不正利用防止を実施できるようになることを目指します。
+
+## 用語解説
+
+- **フルリゾルバ**: ルートサーバから辿って自ら名前解決を完結させるDNSサーバ。フォワーダを持たない
+- **フォワーダ**: 自身では解決せず上位のDNSサーバへ問い合わせを転送するDNSサーバ
+- **キャッシュTTL**: 解決結果を再利用できる有効期間。TTLの間は同じ問い合わせに即座に応答できる
+- **access-control**: 問い合わせを許可するクライアントの範囲を制限するUnboundの設定項目
+- **DNSSECバリデーション**: 応答の署名を検証し、改ざんされていないことを確認する仕組み
+- **unbound-checkconf**: 設定ファイルの構文を反映前に検証するコマンド
+
+## シナリオ設定
+
+リスンインターフェースは {{ listen_interfaces | join(", ") }}、許可クライアントは {{ allowed_clients | join(", ") }} に限定します。動作モードは `{{ forward_or_recursion }}`、キャッシュサイズは `{{ cache_size }}` とし、DNSSECバリデーションは {{ dnssec_validation }} とします。
+
+## 手順
+
+### 1. Unbound をインストールする
+
+```bash
+apt-get update
+apt-get install -y unbound
+```
+
+### 2. unbound.conf を設定する
+
+```bash
+cat > /etc/unbound/unbound.conf.d/local.conf <<'EOF'
+server:
+{% for i in listen_interfaces %}    interface: {{ i }}
+{% endfor %}{% for c in allowed_clients %}    access-control: {{ c }} allow
+{% endfor %}    msg-cache-size: {{ cache_size }}
+    rrset-cache-size: {{ cache_size }}
+    mode: {{ forward_or_recursion }}
+{% if dnssec_validation %}    auto-trust-anchor-file: "/var/lib/unbound/root.key"
+{% endif %}EOF
+```
+
+### 3. 構文を検証する
+
+```bash
+unbound-checkconf
+```
+
+### 4. 再起動して稼働を確認する
+
+```bash
+systemctl restart unbound
+systemctl status unbound --no-pager
+```
+
+### 5. 名前解決とキャッシュヒットを確認する
+
+```bash
+dig @{{ listen_interfaces[0] }} example.com A
+# 同じ問い合わせを再度実行し、2回目はキャッシュから応答されRTTが短くなることを確認する
+dig @{{ listen_interfaces[0] }} example.com A
+```
+
+### 6. アクセス制御を検証する
+
+```bash
+# 許可クライアント({{ allowed_clients[0] }})から実行し正常応答を確認する
+dig @{{ listen_interfaces[0] }} example.com A +short
+```
+
+## 動作確認
+
+- `unbound-checkconf` がエラーなく通ること
+- `systemctl status unbound` が `active (running)` であること
+- 許可クライアントからの問い合わせに正しい応答が返ること
+- 2回目以降の同一問い合わせでキャッシュヒットしRTTが短縮すること
+- 許可外クライアントからの問い合わせが REFUSED になること
+
+## 注意事項
+
+- `access-control` の設定漏れはオープンリゾルバ化につながり、DNS増幅攻撃の踏み台に悪用される危険がある。許可範囲を全世界に開放しないこと。
+- DNSSECバリデーションを有効にする場合は、ルート信頼アンカーの自動更新(`unbound-anchor`)を別途スケジュールしておくこと。更新を怠ると鍵ロールオーバー時に全ての検証が失敗する。
+- dnsmasq-office-dns(既存)は小規模拠点向けの簡易DNSであり、本手順はキャッシュ性能とDNSSEC検証を重視した本格リゾルバの構築に焦点を絞る。

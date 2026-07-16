@@ -1,0 +1,86 @@
+# nmcliによるネットワーク接続の作成と管理
+
+NetworkManager環境で`nmcli`を使い、静的IPを持つ接続プロファイルを作成・切替・検証します。リモート作業の場合は接続断のリスクがあるため、コンソールアクセスを確保した上で実施してください。root権限(sudo)で実施してください。
+
+## 目的
+
+`connection`と`device`の違いを理解し、`nmcli`で静的IP接続プロファイルを作成・適用・ロールバックできるようになることを目指します。
+
+## 用語解説
+
+- **connection(接続プロファイル)**: IPアドレスやDNSなどの設定をまとめた論理的な定義。1つのdeviceに複数のconnectionを紐づけて切り替えられる
+- **device(デバイス)**: 実際のネットワークインターフェース(物理・仮想)そのもの
+- **プロファイルの`up`/`down`**: 接続プロファイルを有効化・無効化する操作。deviceを直接操作するわけではない
+- **autoconnect**: 起動時・デバイス検出時に自動的にそのconnectionを有効化するかどうかの設定
+
+## シナリオ設定
+
+インターフェース`{{ interface }}`に、接続名`{{ connection_name }}`で静的IP`{{ ipv4_address }}`(ゲートウェイ`{{ gateway }}`)を割り当てます。DNSサーバは{% for d in dns_servers %}`{{ d }}`{% if not loop.last %}, {% endif %}{% endfor %}です。
+
+## 手順
+
+### 1. 現在のdevice・connection状態を確認する
+
+```bash
+nmcli device status
+nmcli connection show
+nmcli device show {{ interface }}
+```
+
+### 2. 静的IP接続プロファイルを作成する
+
+```bash
+nmcli connection add type ethernet con-name {{ connection_name }} ifname {{ interface }} \
+  ipv4.method manual \
+  ipv4.addresses {{ ipv4_address }} \
+  ipv4.gateway {{ gateway }} \
+  ipv4.dns "{{ dns_servers | join(' ') }}" \
+  connection.autoconnect {{ autoconnect | lower }}
+```
+
+### 3. 既存プロファイルとの切替を行う
+
+```bash
+nmcli connection show --active
+nmcli connection up {{ connection_name }}
+nmcli connection show --active
+```
+
+`up`によって、同じdeviceで有効だった他のプロファイルは自動的に無効化されます。
+
+### 4. 設定内容を`modify`で調整する(必要に応じて)
+
+```bash
+nmcli connection modify {{ connection_name }} ipv4.dns "{% for d in dns_servers %}{{ d }}{% if not loop.last %} {% endif %}{% endfor %}"
+nmcli connection up {{ connection_name }}
+```
+
+`modify`は即座には反映されないため、変更後に`up`で再適用します。
+
+### 5. 疎通を検証する
+
+```bash
+ip addr show {{ interface }}
+ip route show default
+{% for d in dns_servers %}ping -c 2 {{ d }}
+{% endfor %}```
+
+### 6. 問題発生時にプロファイルを`down`しロールバックする
+
+```bash
+nmcli connection down {{ connection_name }}
+nmcli connection show
+# 旧プロファイル(例: DHCP設定)を再度 up して復旧
+```
+
+## 動作確認
+
+- `nmcli connection show --active` に `{{ connection_name }}` が表示され、`DEVICE`欄が `{{ interface }}` であること
+- `ip addr show {{ interface }}` に `{{ ipv4_address }}` が付与されていること
+- `ip route show default` のゲートウェイが `{{ gateway }}` であること
+
+## 注意事項
+
+- リモートSSH接続中に`nmcli connection up`を実行すると、IPアドレス変更やゲートウェイ誤設定により接続が切断されロックアウトする可能性がある。コンソール(シリアル・VMコンソール等)を確保してから実施する。
+- 不要になった旧プロファイルを`nmcli connection show`に残したままにすると、再起動時にautoconnect競合が起きうる。検証完了後は`nmcli connection delete <旧プロファイル名>`で整理する。
+- `autoconnect {{ autoconnect | lower }}`で作成した場合、`true`であれば次回起動時からこのプロファイルが自動的に有効化される点に留意する。

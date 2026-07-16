@@ -1,0 +1,6 @@
+network_name: appnet
+subnet: 172.28.0.0/16
+frontend_container: web-frontend
+backend_container: api-backend
+published_ports:
+  - "8080:80"

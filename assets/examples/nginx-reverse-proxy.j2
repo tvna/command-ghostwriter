@@ -1,0 +1,99 @@
+# Nginxリバースプロキシの構築
+
+バックエンドAPIへのリバースプロキシをNginxで構成し、ヘッダ転送・タイムアウト・アップロードサイズ上限・ヘルスチェックを設定します。root権限（sudo）で実施してください。
+
+## 目的
+
+`proxy_pass` を用いたリバースプロキシの基本構成を理解し、クライアント情報を正しくバックエンドへ転送しつつ、タイムアウトとリクエストサイズを要件に合わせて設定できるようになることを目指します。
+
+## 用語解説
+
+- **リバースプロキシ**: クライアントからのリクエストを受け、内部のバックエンドサーバへ転送して応答を返すサーバ
+- **upstream**: プロキシ先のバックエンドサーバ群を指すNginxの設定ブロック
+- **X-Forwarded-For**: プロキシを経由したことでバックエンドから見えなくなる元クライアントのIPアドレスを伝えるヘッダ
+- **proxy_read_timeout**: バックエンドからの応答を待つ最大時間。これを超えると504エラーになる
+- **client_max_body_size**: クライアントからのリクエストボディの最大許容サイズ。超過すると413エラーになる
+
+## シナリオ設定
+
+`{{ server_name }}` 宛のポート `{{ listen_port }}` へのリクエストを、バックエンド `{{ upstream_host }}:{{ upstream_port }}` へ転送します。応答待ちタイムアウトは `{{ proxy_read_timeout }}`、アップロード上限は `{{ client_max_body_size }}` とします。
+
+## 手順
+
+### 1. Nginxを導入し設定配置場所を確認する
+
+```bash
+apt-get install -y nginx || dnf install -y nginx
+ls -l /etc/nginx/sites-available/ 2>/dev/null || ls -l /etc/nginx/conf.d/
+```
+
+### 2. upstreamとproxy_passを設定する
+
+```bash
+tee /etc/nginx/conf.d/{{ server_name }}.conf <<'EOF'
+upstream backend_{{ server_name | replace(".", "_") }} {
+    server {{ upstream_host }}:{{ upstream_port }};
+}
+
+server {
+    listen {{ listen_port }};
+    server_name {{ server_name }};
+
+    client_max_body_size {{ client_max_body_size }};
+
+    location / {
+        proxy_pass http://backend_{{ server_name | replace(".", "_") }};
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout {{ proxy_read_timeout }};
+    }
+
+    location /healthz {
+        proxy_pass http://backend_{{ server_name | replace(".", "_") }}/healthz;
+        access_log off;
+    }
+}
+EOF
+```
+
+### 3. 構文チェックしてから反映する
+
+```bash
+nginx -t
+systemctl reload nginx
+```
+
+`nginx -t` が `syntax is ok` / `test is successful` を返すことを確認してから `reload` します。エラーが出た場合は反映せず設定を見直します。
+
+### 4. ヘッダ転送と応答をcurlで検証する
+
+```bash
+curl -sv -H "Host: {{ server_name }}" http://127.0.0.1:{{ listen_port }}/ -o /dev/null 2>&1 | grep -i "^> \|^< "
+curl -s -H "Host: {{ server_name }}" http://127.0.0.1:{{ listen_port }}/healthz
+```
+
+バックエンド側のアクセスログで `X-Forwarded-For` に元クライアントIPが記録されていることも合わせて確認します。
+
+### 5. タイムアウトとアップロード上限を検証する
+
+```bash
+# 大きめのファイルでclient_max_body_sizeの上限確認(超過時は413が返る想定)
+dd if=/dev/zero of=/tmp/upload_test.bin bs=1M count=1
+curl -s -o /dev/null -w "%{http_code}\n" -H "Host: {{ server_name }}" -X POST --data-binary @/tmp/upload_test.bin http://127.0.0.1:{{ listen_port }}/
+rm -f /tmp/upload_test.bin
+```
+
+## 動作確認
+
+- `nginx -t` が成功し、`systemctl reload nginx` がエラーなく完了すること
+- `curl` のレスポンスヘッダにバックエンドの応答が反映されること、`/healthz` が200系で応答すること
+- バックエンドのアクセスログに `X-Forwarded-For` として元クライアントIPが記録されること
+- `client_max_body_size`（`{{ client_max_body_size }}`）を超えるリクエストが413で拒否されること
+
+## 注意事項
+
+- `proxy_read_timeout`（`{{ proxy_read_timeout }}`）を必要以上に長く設定すると、バックエンド障害時に接続が滞留しワーカープロセスを圧迫する。バックエンドの応答特性に合わせて調整する。
+- `client_max_body_size` を安易に大きくすると、大容量アップロードによるディスク・メモリ逼迫のリスクが上がる。実際に必要な最大サイズを把握した上で設定する。
+- 設定ファイルの反映前は必ず `nginx -t` で構文検証する。検証を省いて `reload` すると、既存の稼働中設定まで停止する可能性がある。

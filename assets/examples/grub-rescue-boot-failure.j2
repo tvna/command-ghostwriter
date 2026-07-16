@@ -1,0 +1,93 @@
+# GRUB破損によるOS起動不能の復旧 — {{ root_partition }}
+
+`grub rescue>` プロンプトで停止しOSが起動しない障害に対し、手動起動での応急復旧と、ブートローダ再インストールによる恒久復旧を行います。
+
+## 目的
+
+`{{ boot_mode }}` 構成のマシンで `{{ root_partition }}` が起動不能になった際に、rescueプロンプトからの手動起動で被害範囲を切り分け、`{{ live_media }}` を使った `grub-install` 再実行で恒久復旧できるようになることを目指します。
+
+## 用語解説
+
+- **grub rescue**: GRUBが自身の設定ファイルやコアイメージすら読み込めない、最も深刻な破損状態で表示されるプロンプト
+- **minimal grub**: 設定ファイル(grub.cfg)は読めないがGRUB自体は起動している中間的な破損状態。`grub>` プロンプトで区別する
+- **chroot復旧**: ライブメディアで起動し、対象システムのルートをマウントして `chroot` することで、あたかも対象OS上で作業しているかのようにコマンドを実行する手法
+- **grub-install**: MBRまたはEFIシステムパーティションにブートローダ本体を書き込むコマンド
+- **UEFIとBIOSの違い**: UEFIはESP(EFI System Partition)にブートローダを配置し、BIOSはMBRまたはブートセクタに書き込む点で復旧手順が異なる
+
+## シナリオ設定
+
+対象は `{{ boot_mode }}` モードのマシンで、ルートパーティションは `{{ root_partition }}`、ブートパーティションは `{{ boot_partition }}` です。復旧には `{{ live_media }}` を使用します。障害の背景として「{{ disk_layout_note }}」という状況があります。
+
+## 手順
+
+### 1. 症状を分類する
+
+```bash
+echo "表示されたプロンプトを記録: grub rescue> か grub> かを確認する"
+```
+
+→ `grub rescue>` はコアイメージ自体が見つからない深刻な破損、`grub>` は設定ファイルのみの破損です。表示プロンプトによって手動起動の要否が変わります。
+
+### 2. rescueプロンプトで手動起動する
+
+```bash
+ls
+set root=(hd0,gpt2)
+linux /boot/vmlinuz root={{ root_partition }}
+initrd /boot/initrd.img
+boot
+```
+
+→ `ls` でパーティション構成を確認し、`{{ root_partition }}` に対応するGRUBデバイス名を特定して手動でカーネルを指定起動します。これにより被害範囲(データは無事か)を先に確認できます。
+
+### 3. ライブメディアからchrootで復旧環境に入る
+
+```bash
+sudo mount {{ root_partition }} /mnt
+sudo mount {{ boot_partition }} /mnt/boot
+sudo mount --bind /dev /mnt/dev
+sudo mount --bind /proc /mnt/proc
+sudo mount --bind /sys /mnt/sys
+sudo chroot /mnt
+```
+
+→ `{{ live_media }}` で起動し、対象パーティションをマウントして `chroot` することで、対象OSの環境でGRUB関連コマンドを実行できるようにします。
+
+### 4. grub-installを再実行する
+
+```bash
+grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB
+update-grub
+```
+
+→ `{{ boot_mode }}` に応じたターゲットを指定します(UEFIなら `x86_64-efi`、BIOSなら対象ディスク全体を指定した `grub-install /dev/sda` 形式)。
+
+### 5. 設定を再生成し再起動して確認する
+
+```bash
+exit
+sudo umount -R /mnt
+sudo reboot
+```
+
+→ chrootを抜けてバインドマウントを解除し、ライブメディアを取り外して再起動します。通常のGRUBメニューが表示され、OSが起動することを確認します。
+
+### 6. 原因を記録する
+
+```bash
+echo "原因メモ: {{ disk_layout_note }}"
+```
+
+→ 「{{ disk_layout_note }}」のような再発要因を記録し、恒久対策(UUID指定の見直し等)につなげます。
+
+## 動作確認
+
+- 再起動後、`grub rescue>` に陥らず通常のGRUBメニューが表示されること
+- 選択したカーネルでOSが最後まで起動し、ログインできること
+- `update-grub`(または `grub2-mkconfig`)の出力にエラーがないこと
+
+## 注意事項
+
+- 手動起動(手順2)はあくまで一時措置であり、再起動すると元の状態に戻る。恒久復旧には必ず `grub-install` の再実行が必要。
+- `grub-install` のターゲット指定を誤る(BIOS機にEFI用を実行する等)と、さらに起動不能な状態を招く。`{{ boot_mode }}` を事前に確認する。
+- ディスクの増設・交換直後は「{{ disk_layout_note }}」のようにデバイス認識順が変わることがあるため、UUID指定への統一を恒久対策として検討する。

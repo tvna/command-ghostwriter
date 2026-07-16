@@ -1,0 +1,92 @@
+# BorgBackupによる重複排除バックアップ
+
+`{{ repo_path }}` に暗号化・重複排除バックアップ用のBorgリポジトリを作成し、日々のアーカイブ取得から `prune` による世代整理までを一巡します。
+
+## 目的
+
+Borgの重複排除(dedup)と暗号化の仕組みを理解し、リポジトリ初期化からアーカイブ作成、取り出し検証、世代整理までを安全に運用できるようになることを目指します。
+
+## 用語解説
+
+- **重複排除(deduplication)**: 同一内容のデータブロックを1度だけ保存し、複数アーカイブ間で共有する仕組み
+- **チャンク**: Borgがファイルを分割して重複排除の単位とする可変長データブロック
+- **アーカイブ**: 1回のバックアップ実行で作られる、特定時点のスナップショット相当のエントリ
+- **encryption_mode**: リポジトリの暗号化方式(`repokey-blake2` はパスフレーズ由来の鍵をリポジトリ内に保持する方式)
+- **prune**: 保持ポリシーに基づき古いアーカイブを削除する操作
+- **compact**: pruneで参照されなくなったチャンクを実際にディスクから解放する操作
+
+## シナリオ設定
+
+リポジトリは `{{ repo_path }}`、暗号化方式は `{{ encryption_mode }}` です。バックアップ対象は {{ source_paths | length }} 件({% for p in source_paths %}`{{ p }}`{% if not loop.last %}, {% endif %}{% endfor %})、除外パターンは {{ exclude_patterns | length }} 件({% for p in exclude_patterns %}`{{ p }}`{% if not loop.last %}, {% endif %}{% endfor %})です。保持ポリシーは日次 {{ prune_policy.daily }} 世代・週次 {{ prune_policy.weekly }} 世代・月次 {{ prune_policy.monthly }} 世代とします。
+
+## 手順
+
+### 1. リポジトリを初期化する
+
+```bash
+export BORG_PASSPHRASE='changeme-use-a-strong-passphrase'
+borg init --encryption={{ encryption_mode }} {{ repo_path }}
+```
+
+### 2. アーカイブを作成する
+
+```bash
+export BORG_PASSPHRASE='changeme-use-a-strong-passphrase'
+DATE=$(date +%Y-%m-%d_%H%M)
+borg create --stats --progress \
+{% for p in exclude_patterns %}  --exclude '{{ p }}' \
+{% endfor %}  {{ repo_path }}::${DATE} \
+{% for p in source_paths %}  {{ p }}{% if not loop.last %} \{% endif %}
+{% endfor %}```
+
+### 3. アーカイブ一覧と詳細を確認する
+
+```bash
+export BORG_PASSPHRASE='changeme-use-a-strong-passphrase'
+borg list {{ repo_path }}
+borg info {{ repo_path }}
+```
+
+### 4. マウントして取り出しを検証する
+
+```bash
+export BORG_PASSPHRASE='changeme-use-a-strong-passphrase'
+mkdir -p /mnt/borg-check
+borg mount {{ repo_path }} /mnt/borg-check
+ls /mnt/borg-check
+borg umount /mnt/borg-check
+```
+
+### 5. 保持ポリシーに従いpruneする
+
+```bash
+export BORG_PASSPHRASE='changeme-use-a-strong-passphrase'
+borg prune --list \
+  --keep-daily={{ prune_policy.daily }} \
+  --keep-weekly={{ prune_policy.weekly }} \
+  --keep-monthly={{ prune_policy.monthly }} \
+  {{ repo_path }}
+borg compact {{ repo_path }}
+```
+
+### 6. パスフレーズと鍵を保全する
+
+```bash
+export BORG_PASSPHRASE='changeme-use-a-strong-passphrase'
+borg key export {{ repo_path }} /root/borg-key-backup.txt
+chmod 600 /root/borg-key-backup.txt
+```
+
+## 動作確認
+
+- Step 1直後、`borg list {{ repo_path }}` がエラーなく空のリポジトリを返すこと
+- Step 2実行後、`borg info` の "Deduplicated size" が "Original size" より小さいこと(重複排除の効果)
+- Step 4のマウントで、{{ source_paths | length }} 件のバックアップ対象ディレクトリが `/mnt/borg-check` 配下から確認できること
+- Step 5実行後、`borg list {{ repo_path }}` の件数が保持ポリシー(日次{{ prune_policy.daily }}・週次{{ prune_policy.weekly }}・月次{{ prune_policy.monthly }})に収まっていること
+
+## 注意事項
+
+- `BORG_PASSPHRASE` を平文でシェル履歴やスクリプトに残さないこと。本番運用では `BORG_PASSCOMMAND` や鍵管理システムからの取得に切り替える。
+- `borg prune` はアーカイブを永続的に削除する破壊的操作であるため、`--dry-run` を付けて対象を確認してから実行する。
+- Step 6の鍵バックアップ(`/root/borg-key-backup.txt`)を紛失すると、パスフレーズを保持していてもリポジトリを復号できなくなる場合がある。鍵とパスフレーズは別経路で二重に保管する。
+- `rsync-daily-backup`(既存, ハードリンクによる世代管理)とは異なり、本手順は重複排除と暗号化を前提としたリポジトリ形式である点で焦点が異なる。

@@ -1,0 +1,4 @@
+hostname,ip_address,server_role,health_note
+www.example.jp,203.0.113.11,primary,通常時トラフィックの大半を受ける
+www.example.jp,203.0.113.12,secondary,予備系。障害時はレコードから除外して切り離す
+www.example.jp,203.0.113.13,secondary,夜間バッチのみ稼働する予備系

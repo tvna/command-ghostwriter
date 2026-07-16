@@ -1,0 +1,5 @@
+target_process: "worker.py"
+sampling_interval: "5m"
+observation_period: "24h"
+rss_threshold: "2048"
+restart_plan: "毎日03:00にsystemdタイマーで計画再起動しRSSをリセットする"

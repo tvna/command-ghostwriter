@@ -1,0 +1,5 @@
+storage_mode = "external"
+max_use = "2G"
+process_size_max = "1G"
+test_binary = "/usr/bin/yes"
+retention_note = "7日を超えたコアダンプは systemd-tmpfiles により自動削除される"

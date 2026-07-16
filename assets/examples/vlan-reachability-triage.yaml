@@ -1,0 +1,5 @@
+src_vlan: VLAN10 (フロア2 端末セグメント)
+dst_vlan: VLAN20 (基幹サーバセグメント)
+gateway_ip: 10.10.20.1
+trunk_links: core-sw01 Gi1/0/24 -- dist-sw02 Gi1/0/1
+recent_changes: 前日にcore-sw01のトランクポート許可VLANリストを変更

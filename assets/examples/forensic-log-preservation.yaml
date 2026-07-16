@@ -1,0 +1,9 @@
+incident_id: "INC-2026-0713"
+target_host: "web01.example.internal"
+evidence_items:
+  - "journalctl（直近72時間）"
+  - "プロセス一覧（ps auxww）"
+  - "ネットワーク接続一覧（ss -tunap）"
+  - "/var/log/secure"
+preservation_dir: "/mnt/forensics/INC-2026-0713"
+hash_algorithm: "sha256"

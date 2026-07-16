@@ -1,0 +1,4 @@
+export_path,allowed_clients,options,squash_policy,purpose
+/srv/nfs/shared,10.0.10.0/24,"rw,sync,no_subtree_check",root_squash,部門共有フォルダ
+/srv/nfs/backup,10.0.10.5/32,"rw,sync,no_subtree_check",all_squash,バックアップサーバ専用領域
+/srv/nfs/readonly,10.0.0.0/16,"ro,sync",root_squash,社内向け参照専用データ

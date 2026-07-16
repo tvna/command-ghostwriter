@@ -1,0 +1,5 @@
+rt_table_name = "mgmt"
+rule_selector = "192.168.100.0/24"
+table_gateway = "10.0.0.1"
+interface = "eth1"
+priority = 100

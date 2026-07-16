@@ -1,0 +1,5 @@
+image_ref: "registry.example.com/team/app:1.4.2"
+error_message: "unauthorized: authentication required"
+registry_host: "registry.example.com"
+proxy_env: "http_proxy=http://proxy.internal:3128"
+auth_status: "not logged in"

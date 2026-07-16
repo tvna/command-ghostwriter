@@ -1,0 +1,100 @@
+# LiteLLMによる複数LLMバックエンドの統合ゲートウェイ構築
+
+LiteLLM Proxy を使い、社内の複数推論サーバ（ollama, vLLM）と外部APIを単一エンドポイントに束ね、モデル別のルーティングを設定します。
+
+## 目的
+
+複数のLLMバックエンドを1つのOpenAI互換エンドポイントに統一し、呼び出し側のコード変更なしにバックエンドを切り替えられる状態を作ることを目指します。
+
+## 用語解説
+
+- **LiteLLM Proxy**: 複数のLLMプロバイダ・自前推論サーバをOpenAI互換APIとして単一エンドポイントに束ねるゲートウェイ
+- **model_alias**: クライアントが呼び出す際に指定する論理名。実体のバックエンド構成を隠蔽する
+- **backend_type**: 接続先の種別(ollama, vllm, 外部APIなど)。認証方式やレスポンス形式の違いに影響する
+- **フォールバック**: 優先度の高いバックエンドが失敗した際に、次点のバックエンドへ自動的に切り替える仕組み
+- **priority**: `model_alias` 内での優先順位。数値が小さいほど優先して使われる
+
+## シナリオ設定
+
+ルーティング台帳には {{ csv_rows | length }} 件のバックエンドが登録されています。
+
+| model_alias | backend_type | endpoint | actual_model | priority | budget_note |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["model_alias"] }} | {{ r["backend_type"] }} | {{ r["endpoint"] }} | {{ r["actual_model"] }} | {{ r["priority"] }} | {{ r["budget_note"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. config.yamlのmodel_listを設計する
+
+台帳の1行を `model_list` の1エントリに対応させます。
+
+```bash
+sudo mkdir -p /etc/litellm
+sudo tee /etc/litellm/config.yaml <<'EOF'
+model_list:
+{% for r in csv_rows %}  - model_name: {{ r["model_alias"] }}
+    litellm_params:
+      model: {{ r["actual_model"] }}
+      api_base: {{ r["endpoint"] }}
+      # backend_type: {{ r["backend_type"] }} / priority: {{ r["priority"] }}
+{% endfor %}
+EOF
+```
+
+### 2. プロキシを起動する
+
+```bash
+pip install 'litellm[proxy]'
+litellm --config /etc/litellm/config.yaml --port 4000
+```
+
+### 3. モデル別ルーティングを検証する
+
+```bash
+{% for r in csv_rows %}curl http://127.0.0.1:4000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "{{ r["model_alias"] }}", "messages": [{"role": "user", "content": "疎通確認"}]}'
+{% endfor %}```
+
+### 4. フォールバックを設定する
+
+同一用途で優先度の異なるバックエンドがある場合、`fallbacks` に登録します。
+
+```bash
+sudo tee -a /etc/litellm/config.yaml <<'EOF'
+router_settings:
+  fallbacks:
+{% for r in csv_rows %}    - {{ r["model_alias"] }}: ["{{ r["actual_model"] }}"]
+{% endfor %}
+EOF
+litellm --config /etc/litellm/config.yaml --port 4000
+```
+
+### 5. 利用ログと簡易コスト管理を確認する
+
+```bash
+curl http://127.0.0.1:4000/spend/logs
+```
+
+`budget_note` 列の内容(利用申請制・予算上限など)を運用ドキュメントとして参照し、高コストなバックエンドの利用状況を定期確認します。
+
+### 6. APIキーを管理する
+
+```bash
+export OPENAI_API_KEY=xxxxx   # 実際の値は環境変数またはシークレットストアで注入する
+export ANTHROPIC_API_KEY=xxxxx
+litellm --config /etc/litellm/config.yaml --port 4000
+```
+
+## 動作確認
+
+- 台帳に登録した {{ csv_rows | length }} 件すべての `model_alias` で手順3のcurlが200応答を返すこと
+- `priority` が異なる同用途のバックエンドで、優先度の高い方が先に呼び出されること
+- `/spend/logs` に各 `model_alias` の呼び出し記録が残ること
+
+## 注意事項
+
+- APIキーは設定ファイルに平文で書かず、環境変数またはシークレットストア経由で注入する。
+- `budget_note` に利用申請制と記載されたバックエンド(例: 高精度分析)は、利用前に申請フローを確認する。
+- 本手順はゲートウェイ層の構築に焦点を絞り、各バックエンド自体の構築(ollama, vLLM)は対象外とする。

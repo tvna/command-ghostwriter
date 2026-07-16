@@ -1,0 +1,95 @@
+# KVM仮想マシンが起動しない時の切り分け — {{ vm_name }}
+
+`virsh start {{ vm_name }}` が失敗し、次のエラーが出力されました。ストレージ・定義XML・ホスト側リソース不足のどこに原因があるかを切り分け、VMを復旧する手順です。
+
+```
+{{ virsh_error }}
+```
+
+## 目的
+
+virshのエラーメッセージからストレージ・定義XML・リソース不足のどこに問題があるかを分類し、原因に応じた復旧策を選べるようになることを目指します。
+
+## 用語解説
+
+- **ドメイン(VM)**: libvirtが管理する仮想マシンの呼称
+- **定義XML**: ドメインの構成（ディスク・メモリ・ネットワーク等）を記述したlibvirtの設定ファイル
+- **qcow2**: スナップショットに対応したQEMU標準のディスクイメージ形式
+- **libvirtログ**: `/var/log/libvirt` 配下に出力される、ドメインごとの起動ログ
+- **オーバーコミット**: ホストの物理リソースを超えて仮想リソースを割り当てる運用
+
+## シナリオ設定
+
+{{ vm_name }} が次のエラーで起動できませんでした。
+
+> {{ virsh_error }}
+
+対象ディスクは {{ disk_image_path }}、ホストの空きリソースは {{ host_free_resources }} です。定義XMLのバックアップは {{ xml_backup }} にあります。原因を切り分けて復旧してください。
+
+## 手順
+
+### 1. virshのエラーを分類する
+
+```bash
+virsh start {{ vm_name }}
+```
+
+エラー文言を「ストレージ系（Permission denied, No such file）」「定義系（XML関連のエラー）」「リソース系（cannot allocate memory）」のいずれかに分類します。今回は `{{ virsh_error }}` です。
+
+### 2. ホスト側ログを確認する
+
+```bash
+sudo tail -100 /var/log/libvirt/qemu/{{ vm_name }}.log
+```
+
+virshの要約メッセージより詳細な失敗理由（権限・パス・デバイスの状態）を確認します。
+
+### 3. ディスクイメージの存在・破損を確認する
+
+```bash
+ls -l {{ disk_image_path }}
+qemu-img check {{ disk_image_path }}
+```
+
+ファイルの有無・所有者・パーミッションと、qcow2イメージ自体の整合性を確認します。
+
+### 4. 定義XMLを検証する
+
+```bash
+virsh dumpxml {{ vm_name }} > /tmp/{{ vm_name }}.xml
+diff /tmp/{{ vm_name }}.xml {{ xml_backup }}
+virt-xml-validate /tmp/{{ vm_name }}.xml
+```
+
+現在の定義とバックアップ（{{ xml_backup }}）を比較し、意図しない変更やスキーマ不正がないか確認します。
+
+### 5. ホストのリソース不足を確認する
+
+```bash
+free -h
+df -h /var/lib/libvirt/images
+```
+
+現在のホスト空きリソース（{{ host_free_resources }}）とVMの要求量を比較し、メモリ・ディスクの不足がないか確認します。
+
+### 6. 復旧しスナップショットを活用する
+
+```bash
+sudo chown qemu:qemu {{ disk_image_path }}
+virsh start {{ vm_name }}
+virsh snapshot-list {{ vm_name }}
+```
+
+原因（権限・定義・リソースのいずれか）を是正して起動を再試行します。ディスク破損が疑われる場合はスナップショットからの復元も検討します。
+
+## 動作確認
+
+- `virsh list --all` で {{ vm_name }} が `running` 状態になっていること
+- `/var/log/libvirt/qemu/{{ vm_name }}.log` に新規のエラーが出力されていないこと
+- VM内部からサービス疎通が確認できること
+
+## 注意事項
+
+- 定義XMLは `virsh edit` で直接編集せず、必ず {{ xml_backup }} との差分を確認してから変更する。
+- `qemu-img check` で破損が確認された場合、修復（`-r`オプション）はデータ破損を伴いうるため、実施前に {{ escalation }} と復旧方針を協議する。
+- リソース不足が原因の場合、他ドメインの停止や割り当て変更は影響範囲を確認してから行う。

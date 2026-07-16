@@ -1,0 +1,6 @@
+ca_subject = "/C=JP/O=Example Corp/OU=Infra/CN=Example Internal Root CA"
+ca_days = 3650
+server_cn = "app01.internal.example.com"
+san_list = ["DNS:app01.internal.example.com", "DNS:app01", "IP:10.0.1.10"]
+cert_days = 825
+crl_note = "CRLは四半期ごとに再発行し、失効時は速やかに再発行して配布する"

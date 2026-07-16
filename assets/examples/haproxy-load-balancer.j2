@@ -1,0 +1,102 @@
+# HAProxyによるHTTPロードバランサ構築
+
+複数バックエンドへHTTPリクエストを分散するHAProxyを構成し、ヘルスチェック・statsページ・1台停止時の切り離し挙動までを検証します。root権限(sudo)で実施してください。
+
+## 目的
+
+`frontend`/`backend`の構成でHTTPロードバランサを構築し、ヘルスチェックによる自動切り離しをstatsページと実障害の両方で確認できるようになることを目指します。
+
+## 用語解説
+
+- **frontend**: クライアントからの接続を受け付ける定義。リッスンするポートやACLをここで指定する
+- **backend**: 実際にリクエストを転送する先のサーバ群の定義。負荷分散アルゴリズムをここで指定する
+- **ヘルスチェック**: `check`オプションで有効化される、バックエンドサーバの死活監視。`inter`(間隔)・`rise`/`fall`(復帰/切り離しの連続判定回数)で挙動を調整する
+- **weight**: バックエンドサーバへの振り分け比重。数値が大きいほど多くのリクエストが振られる
+- **statsページ**: HAProxyが提供する管理用Webページ。各バックエンドサーバの状態(UP/DOWN)をリアルタイムで確認できる
+
+## シナリオ設定
+
+以下{{ csv_rows | length }}台のバックエンドサーバへ`web-backend`として振り分けます。
+
+| backend_name | server_host | server_port | weight | check_option |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["backend_name"] }} | {{ r["server_host"] }} | {{ r["server_port"] }} | {{ r["weight"] }} | {{ r["check_option"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. HAProxyを導入する
+
+```bash
+sudo apt install -y haproxy
+haproxy -v
+```
+
+### 2. haproxy.cfgを作成する
+
+```bash
+sudo cp /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.bak
+sudo tee -a /etc/haproxy/haproxy.cfg <<'EOF'
+
+frontend fe_http
+    bind *:80
+    default_backend web-backend
+
+backend web-backend
+    balance roundrobin
+    option httpchk GET /healthz
+{% for r in csv_rows %}    server {{ r["backend_name"] }} {{ r["server_host"] }}:{{ r["server_port"] }} weight {{ r["weight"] }} {{ r["check_option"] }}
+{% endfor %}
+listen stats
+    bind *:8404
+    stats enable
+    stats uri /stats
+    stats refresh 10s
+EOF
+```
+
+### 3. 設定を検証してから反映する
+
+```bash
+sudo haproxy -c -f /etc/haproxy/haproxy.cfg
+sudo systemctl restart haproxy
+sudo systemctl status haproxy --no-pager
+```
+
+### 4. statsページで各サーバの状態を確認する
+
+```bash
+curl -s http://localhost:8404/stats | grep -o '{{ csv_rows[0]["backend_name"] }}[^<]*' | head
+```
+
+ブラウザで`http://<HAProxyホスト>:8404/stats`を開き、{{ csv_rows | length }}台すべてが`UP`表示になっていることを確認します。
+
+### 5. 1台を停止して切り離しを検証する
+
+```bash
+sudo systemctl stop myapp  # {{ csv_rows[0]["server_host"] }} 側のアプリを停止
+for i in $(seq 1 10); do curl -s -o /dev/null -w "%{http_code}\n" http://localhost/; done
+```
+
+statsページで停止したサーバが`DOWN`となり、他のサーバへリクエストが振り分けられていることを確認します。
+
+### 6. 復旧後の自動組み込みを確認する
+
+```bash
+sudo systemctl start myapp
+sleep 10
+curl -s http://localhost:8404/stats | grep -o '{{ csv_rows[0]["backend_name"] }}[^<]*' | head
+```
+
+## 動作確認
+
+- `haproxy -c -f /etc/haproxy/haproxy.cfg`が構文エラーなしで完了すること
+- statsページ(`/stats`)に登録した{{ csv_rows | length }}台すべてが表示され、正常時は`UP`であること
+- 1台停止時にその1台のみ`DOWN`となり、残りへ自動的にトラフィックが振り分けられ、HTTPレスポンスが継続すること
+- 復旧後、`rise`回数のヘルスチェック成功を経て自動的に`UP`へ復帰すること
+
+## 注意事項
+
+- `weight`に極端な差(0や非常に大きい値)をつけると、意図せず特定サーバへ負荷が集中するため、変更後はstatsページで実際の振り分け比率を確認する。
+- `check`のみでは実際のアプリケーションロジックの異常(500エラー多発等)までは検知できない場合がある。`option httpchk`のパス(`/healthz`)がアプリの実状態を反映しているか確認する。
+- `nginx-reverse-proxy`(本カタログ)は単一アップストリームへの転送に主眼を置くのに対し、本手順は複数バックエンドへのL7負荷分散とヘルスチェックによる自動切り離しに焦点を当てる。

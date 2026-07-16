@@ -1,0 +1,90 @@
+# RAID1縮退時のディスク交換と再同期 — {{ array_device }}
+
+mdadmアレイのディスク故障を検知し、故障ディスクの切り離し・交換・再同期完了までを行います。
+
+## 目的
+
+`{{ array_device }}` が縮退(degraded)状態にあることを検知し、故障ディスクを物理的に特定した上で安全に切り離し・交換し、再同期完了まで見届けられるようになることを目指します。
+
+## 用語解説
+
+- **縮退(degraded)**: メンバーディスクの一部が欠けた状態でアレイが稼働していること。この状態では冗長性がない
+- **/proc/mdstat**: 現在稼働中のRAIDアレイの状態・再同期進捗を確認する仮想ファイル
+- **faulty**: `mdadm --detail` の `State` 欄でディスクが故障とマークされている状態
+- **シリアル確認**: 論理デバイス名(`/dev/sdb`等)は再起動で変わり得るため、物理ディスクのシリアル番号で対象を確定すること
+- **再同期(resync)**: 交換後の新ディスクへ既存データをミラーリングし、冗長性を回復させる処理
+
+## シナリオ設定
+
+`{{ array_device }}` の縮退を検知しました。故障ディスクは `{{ failed_disk }}`、交換用ディスクは `{{ replacement_disk }}` です。物理特定には `{{ serial_check_command }}` を使用します。再同期の目安は `{{ resync_eta_note }}` です。
+
+## 手順
+
+### 1. 縮退を検知する
+
+```bash
+cat /proc/mdstat
+sudo mdadm --detail {{ array_device }}
+```
+
+→ `State` に `degraded` が表示され、メンバー一覧に `faulty` または `removed` があれば縮退状態です。
+
+### 2. 故障ディスクを物理特定する
+
+論理デバイス名だけでは取り違えの危険があるため、シリアル番号で確定します。
+
+```bash
+{{ serial_check_command }}
+sudo smartctl -a {{ failed_disk }} | grep -i "serial\|health"
+```
+
+→ 得られたシリアル番号を、ラック・筐体のラベルと突き合わせて交換対象を物理的に確定します。
+
+### 3. faultyディスクを切り離す
+
+```bash
+sudo mdadm {{ array_device }} --fail {{ failed_disk }}
+sudo mdadm {{ array_device }} --remove {{ failed_disk }}
+sudo mdadm --detail {{ array_device }}
+```
+
+### 4. ディスクを交換しパーティションを複製する
+
+物理交換後、稼働中の残りメンバー(`mdadm --detail` の出力に残るディスク)のパーティションレイアウトを新ディスクに複製します。
+
+```bash
+SURVIVOR=$(sudo mdadm --detail {{ array_device }} | awk '/active sync/{print $NF}')
+sudo sfdisk -d "$SURVIVOR" | sudo sfdisk {{ replacement_disk }}
+lsblk {{ replacement_disk }}
+```
+
+### 5. アレイに追加し再同期を監視する
+
+```bash
+sudo mdadm {{ array_device }} --add {{ replacement_disk }}
+watch cat /proc/mdstat
+```
+
+→ 再同期の目安は「{{ resync_eta_note }}」です。`/proc/mdstat` の進捗が100%かつ `State` が `clean` になるまで待ちます。
+
+### 6. ブートローダ再インストールの要否を確認する
+
+交換したディスクがブートディスクを含む構成の場合、ブートローダの再インストールが必要です。
+
+```bash
+sudo grub-install {{ replacement_disk }}
+sudo update-grub
+```
+
+## 動作確認
+
+- `sudo mdadm --detail {{ array_device }}` の `State` が `clean` であること(縮退表示が解消していること)
+- `/proc/mdstat` に全メンバーが `[UU]`(全メンバー正常)として表示されること
+- 再同期の進捗が100%に到達していること
+- ブート対象ディスクの場合、再起動後も正常に起動すること
+
+## 注意事項
+
+- `{{ failed_disk }}` のシリアル確認を怠って別の正常ディスクを抜くと、アレイ全体のデータを失う二重障害になる。手順2の照合は必ず行う。
+- 再同期中はディスクI/O負荷が高く、アレイ全体の性能が一時的に低下する。業務影響の少ない時間帯を選ぶ。
+- RAID1はハードウェア障害への冗長化であり、バックアップの代替にはならない。交換完了後もバックアップ運用は継続する。

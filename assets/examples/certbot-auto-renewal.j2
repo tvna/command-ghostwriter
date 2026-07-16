@@ -1,0 +1,90 @@
+# certbotによるTLS証明書の自動更新設定
+
+`certbot`でLet's Encrypt証明書を取得し、renewタイマーと`deploy-hook`による自動更新運用を構築します。sudo権限で実施してください。
+
+## 目的
+
+ACMEプロトコルとwebroot認証の仕組みを理解し、証明書取得から自動更新タイマー・`deploy-hook`によるサービスリロードまでの一連の運用を構築できるようになることを目指します。
+
+## 用語解説
+
+- **ACME**: Automatic Certificate Management Environment。Let's Encryptなどの認証局と自動でやり取りし証明書の発行・更新を行うプロトコル
+- **webroot認証**: 指定ディレクトリ配下に検証ファイルを配置し、Webサーバ経由でACMEサーバがアクセスできることでドメイン所有権を証明する方式
+- **deploy-hook**: 証明書の更新が実際に行われた時のみ実行されるスクリプト。サービスの再読み込みなどに使う
+- **renewタイマー**: certbotパッケージに同梱されるsystemdタイマー。1日複数回起動し、期限が近い証明書のみを自動更新する
+- **--dry-run**: 実際の証明書発行・更新を行わず、ステージング環境相当の手順のみを検証するオプション
+
+## シナリオ設定
+
+ドメイン `{{ domain }}` に対し、webrootパス `{{ webroot_path }}`、連絡先 `{{ email }}` で証明書を取得します。更新後は `{{ reload_command }}` を`deploy-hook`（`{{ renew_hook_path }}`）から実行してサービスをリロードします。
+
+## 手順
+
+### 1. certbotを導入し証明書を取得する
+
+```bash
+sudo apt-get install -y certbot
+sudo mkdir -p {{ webroot_path }}/.well-known/acme-challenge
+sudo certbot certonly --webroot -w {{ webroot_path }} \
+  -d {{ domain }} \
+  --email {{ email }} --agree-tos --non-interactive
+```
+
+### 2. renewタイマーが有効化されていることを確認する
+
+```bash
+systemctl status certbot.timer --no-pager
+systemctl list-timers certbot.timer
+```
+
+### 3. deploy-hookスクリプトを作成する
+
+```bash
+sudo mkdir -p "$(dirname {{ renew_hook_path }})"
+sudo tee {{ renew_hook_path }} <<'EOF'
+#!/bin/sh
+set -eu
+{{ reload_command }}
+EOF
+sudo chmod +x {{ renew_hook_path }}
+```
+
+`deploy-hook`は証明書が実際に更新された場合のみ実行され、更新不要と判定された場合は呼ばれません。
+
+### 4. --dry-runで更新テストを行う
+
+```bash
+sudo certbot renew --dry-run
+```
+
+エラーなく完了すれば、webroot認証と証明書更新経路が機能していることが確認できます。
+
+### 5. 証明書とdeploy-hookの内容を確認する
+
+```bash
+sudo certbot certificates -d {{ domain }}
+cat {{ renew_hook_path }}
+openssl x509 -in /etc/letsencrypt/live/{{ domain }}/cert.pem -noout -dates
+```
+
+### 6. 失敗時の通知経路を確認する
+
+```bash
+sudo systemctl show certbot.service -p OnFailure
+journalctl -u certbot.service --since "7 days ago" --no-pager
+```
+
+`OnFailure=`にアラート送信ユニットが設定されているか、または監視側で`certbot.service`の失敗を検知できる経路を確認します。
+
+## 動作確認
+
+- `systemctl list-timers certbot.timer`にタイマーが表示され、次回実行時刻が設定されていること
+- `sudo certbot renew --dry-run`がエラーなく完了すること
+- `sudo certbot certificates -d {{ domain }}`で有効期限・証明書パスが表示されること
+- `{{ renew_hook_path }}`が実行可能で、`{{ reload_command }}`を実行する内容であること
+
+## 注意事項
+
+- `--dry-run`はステージング環境相当の検証であり、本番の証明書発行回数制限（レート制限）は消費しない。ただし実発行時は失敗を繰り返すとレート制限に達するため、事前に`--dry-run`で確認してから本番実行する。
+- `{{ webroot_path }}`がWebサーバの実際のドキュメントルートと一致していない場合、ACMEチャレンジファイルにアクセスできず認証が失敗する。事前にドキュメントルート設定を確認する。
+- `deploy-hook`スクリプトの実行に失敗すると証明書は更新済みでもサービスには反映されない。`journalctl -u certbot.service`で毎回の実行結果を確認する運用を推奨する。

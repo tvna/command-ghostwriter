@@ -1,0 +1,80 @@
+# DNS over TLSによる暗号化フォワーディング設定
+
+社内リゾルバ `{{ resolver_software }}` から上位DNSサーバへの問い合わせを DNS over TLS (DoT) で暗号化し、平文DNSの盗聴・改ざんリスクを下げます。
+
+## 目的
+
+社内リゾルバが上位へ転送するクエリを暗号化し、経路上の盗聴・キャッシュポイズニングのリスクを下げたうえで、実際に平文の問い合わせが漏れていないことをパケットキャプチャで確認できるようになることを目指します。
+
+## 用語解説
+
+- **DoT (DNS over TLS)**: DNSの問い合わせをTLSで暗号化するプロトコル。専用ポートを使う
+- **853番ポート**: DoTで使用される標準ポート。平文DNSの53番とは別
+- **tls-auth-name**: 接続先証明書のSAN/CNと照合してなりすましを防ぐための認証名
+- **forward-tls-upstream**: unboundでDoT転送を有効化するオプション
+- **フォールバック**: 上位DoTサーバへの接続に失敗した際、平文DNSへ切り替えるかどうかの方針
+
+## シナリオ設定
+
+上位のDoTサーバは {% for s in upstream_dot_servers %}`{{ s }}`{% if not loop.last %}, {% endif %}{% endfor %} で、証明書の認証名は `{{ tls_auth_name }}` です。フォールバック方針は `{{ fallback_policy }}` とし、暗号化されていることの検証には `{{ verify_method }}` を使用します。
+
+## 手順
+
+### 1. 現状(平文DNS)での問い合わせを確認する
+
+```bash
+dig example.com A +short
+sudo tcpdump -i eth0 -n 'port 53' -c 5
+```
+
+### 2. リゾルバソフトウェアの導入状況を確認する
+
+```bash
+{{ resolver_software }} -V
+sudo systemctl status {{ resolver_software }}
+```
+
+### 3. forward-tls-upstreamを設定する
+
+```bash
+sudo tee -a /etc/unbound/unbound.conf.d/dot-forward.conf <<'EOF'
+forward-zone:
+    name: "."
+    forward-tls-upstream: yes
+{% for s in upstream_dot_servers %}    forward-addr: {{ s }}
+{% endfor %}EOF
+```
+
+### 4. 証明書検証名(tls-auth-name)を確認する
+
+```bash
+grep -A3 'forward-zone' /etc/unbound/unbound.conf.d/dot-forward.conf
+openssl s_client -connect {{ tls_auth_name }}:853 -servername {{ tls_auth_name }} </dev/null 2>/dev/null | openssl x509 -noout -subject
+```
+
+### 5. 設定を反映し名前解決を検証する
+
+```bash
+sudo unbound-checkconf
+sudo systemctl restart {{ resolver_software }}
+dig @127.0.0.1 example.com A +short
+```
+
+### 6. 平文が漏れていないことをパケットキャプチャで確認する
+
+```bash
+sudo {{ verify_method }} -c 20
+```
+
+## 動作確認
+
+- `unbound-checkconf` がエラーなく通ること
+- `dig @127.0.0.1` で従来どおり名前解決ができること
+- `{{ verify_method }}` の出力に53番ポートの平文DNSクエリが含まれず、853番ポートの通信のみが観測されること
+- `openssl s_client` で `{{ tls_auth_name }}` の証明書が正しく提示されること
+
+## 注意事項
+
+- フォールバック方針を `{{ fallback_policy }}` とした場合、上位DoTサーバが到達不能になると名前解決自体が完全に止まる。可用性の高い複数サーバを設定すること。
+- 上位サーバの証明書が失効・変更された際に `tls-auth-name` の不一致で解決不能になることがあるため、事前に監視・通知の仕組みを用意すること。
+- 本手順は社内リゾルバから上位への転送経路の暗号化に焦点を絞っており、クライアントからリゾルバまでの経路(社内LAN内)の暗号化は対象外とする。

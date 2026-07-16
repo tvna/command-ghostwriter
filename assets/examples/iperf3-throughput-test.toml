@@ -1,0 +1,6 @@
+server_host = "10.0.1.10"
+client_host = "10.0.1.20"
+expected_bandwidth = "900Mbps"
+duration = 30
+parallel_streams = 4
+udp_test = true

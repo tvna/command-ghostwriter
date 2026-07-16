@@ -1,0 +1,97 @@
+# ClamAVによる定期ウイルススキャン運用
+
+ClamAVでシグネチャ定義を更新しながら対象ディレクトリを定期スキャンし、検知時に隔離する運用を構築します。sudo権限で実施してください。
+
+## 目的
+
+シグネチャベースのオンデマンドスキャンの仕組みを理解し、定義更新から検知テスト・定期実行化・隔離運用までを一連の流れとして構築できるようになることを目指します。
+
+## 用語解説
+
+- **シグネチャ**: 既知のマルウェアのパターンを定義したデータベース。ClamAVはこれと対象ファイルを照合して検知する
+- **freshclam**: シグネチャデータベースを最新版へ更新するコマンド/デーモン
+- **オンデマンドスキャン**: 常駐監視ではなく、指定したタイミングでディレクトリを一括走査する方式(`clamscan`)
+- **EICARテストファイル**: 実害のない標準テスト文字列。アンチウイルス製品の検知動作確認に業界標準で用いられる
+- **隔離(quarantine)**: 検知したファイルを実行・アクセスできない専用ディレクトリへ移動し、影響を封じ込める運用
+
+## シナリオ設定
+
+対象ディレクトリ `{{ scan_targets }}` を、除外パス `{{ exclude_paths }}` を除いてスキャンします。検知ファイルは `{{ quarantine_dir }}` へ隔離し、スケジュール `{{ schedule }}` で定期実行、通知先は `{{ notify_mail }}` とします。
+
+## 手順
+
+### 1. ClamAVを導入し定義を更新する
+
+```bash
+sudo apt-get install -y clamav clamav-daemon
+sudo systemctl stop clamav-freshclam
+sudo freshclam
+sudo systemctl start clamav-freshclam
+```
+
+### 2. EICARテストファイルで検知動作を確認する
+
+```bash
+mkdir -p /tmp/clamav-eicar-test
+curl -fsSL https://secure.eicar.org/eicar.com.txt -o /tmp/clamav-eicar-test/eicar.com.txt || \
+  printf 'X5O!P%%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*' > /tmp/clamav-eicar-test/eicar.com.txt
+clamscan /tmp/clamav-eicar-test/
+```
+
+`Infected files: 1`と表示されれば検知エンジンが正しく機能しています。
+
+### 3. 隔離ディレクトリを準備する
+
+```bash
+sudo mkdir -p {{ quarantine_dir }}
+sudo chmod 700 {{ quarantine_dir }}
+```
+
+### 4. スキャンスクリプトを作成する
+
+```bash
+sudo tee /usr/local/sbin/clamav-scheduled-scan.sh <<'EOF'
+#!/bin/sh
+set -eu
+LOGFILE="/var/log/clamav/scheduled-scan.log"
+clamscan --recursive \
+  --exclude-dir="{{ exclude_paths }}" \
+  --move={{ quarantine_dir }} \
+  --log="${LOGFILE}" \
+  {{ scan_targets }}
+STATUS=$?
+if [ "${STATUS}" -eq 1 ]; then
+  echo "clamav detected infected files, quarantined to {{ quarantine_dir }}" | mail -s "ClamAV alert: infection detected" {{ notify_mail }}
+fi
+EOF
+sudo chmod +x /usr/local/sbin/clamav-scheduled-scan.sh
+```
+
+### 5. 定期実行を設定する
+
+cron形式 `{{ schedule }}` で登録します。
+
+```bash
+echo "{{ schedule }} root /usr/local/sbin/clamav-scheduled-scan.sh" | sudo tee /etc/cron.d/clamav-scheduled-scan
+```
+
+### 6. 検知・隔離・報告の一連の流れを検証する
+
+```bash
+sudo /usr/local/sbin/clamav-scheduled-scan.sh
+ls -la {{ quarantine_dir }}
+sudo tail -n 30 /var/log/clamav/scheduled-scan.log
+```
+
+## 動作確認
+
+- `clamscan`によるEICARテストで`Infected files: 1`が検出されること
+- 手動実行後、検知したテストファイルが `{{ quarantine_dir }}` に移動していること
+- `/etc/cron.d/clamav-scheduled-scan` にスケジュール `{{ schedule }}` が登録されていること
+- 検知時に `{{ notify_mail }}` 宛てへ通知メールが送信される経路が確認できること
+
+## 注意事項
+
+- `--move`オプションは検知ファイルを移動する破壊的操作。誤検知(過検知)によって業務ファイルが隔離される可能性があるため、隔離後すぐに削除せず一定期間 `{{ quarantine_dir }}` に保持してから判断する。
+- フルスキャンはディスクI/OとCPU負荷が高い。`{{ scan_targets }}` の範囲や実行時刻(`{{ schedule }}`)は業務影響の少ない時間帯に調整する。
+- freshclamの定義更新はネットワーク到達性に依存する。オフライン環境やプロキシ配下では定義が古いまま検知漏れになる可能性があるため、更新失敗の監視を別途組み込む。

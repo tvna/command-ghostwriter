@@ -1,0 +1,96 @@
+# rndcによるBINDの安全な運用操作手順
+
+`rndc` を使った BIND の日常運用コマンド（reload・flush・freeze/thaw など）を、鍵認証の設定から使い分けまで整理します。
+
+## 目的
+
+`rndc` の鍵認証の仕組みを理解し、reload・reconfig・flush・freeze/thaw といった運用コマンドを正しい場面で使い分け、`status` から稼働状態を読み取れるようになることを目指します。
+
+## 用語解説
+
+- **rndc**: `named` プロセスに対して制御コマンドを送るためのクライアントツール
+- **制御チャネル**: `named.conf` の `controls` ステートメントで定義される、`rndc` からの接続を受け付ける待受口
+- **鍵認証**: `rndc.key` に含まれる共有鍵によって、`rndc` と `named` の間の通信を認証する仕組み
+- **reload / reconfig**: `reload` はゾーンデータの再読み込み、`reconfig` は `named.conf` 全体の再読み込みという役割の違いがある
+- **freeze / thaw**: 動的更新中のゾーンを一時停止（freeze）してファイルを手動編集できるようにし、再開（thaw）する操作
+
+## シナリオ設定
+
+鍵ファイルは `{{ rndc_key_path }}` に配置し、日常的に使う操作は「{{ allowed_operations }}」に限定します。対象ゾーンは `{{ target_zones }}`、freeze の想定用途は「{{ freeze_use_case }}」とします。`status` 確認時は {{ status_checklist | length }} 項目をチェックリストとして確認します。
+
+## 手順
+
+### 1. rndc.keyの配置と権限を確認する
+
+```bash
+ls -l {{ rndc_key_path }}
+# named ユーザーのみ読み取り可能であることを確認
+stat -c "%U:%G %a" {{ rndc_key_path }}
+```
+
+### 2. rndcの疎通を確認する
+
+鍵認証が正しく機能しているかを、まず `status` で確認します。
+
+```bash
+rndc -k {{ rndc_key_path }} status
+```
+
+### 3. reloadとreconfigを使い分けて反映する
+
+ゾーンファイルのみ変更した場合は `reload`、`named.conf` 自体を変更した場合は `reconfig` を使います。対象ゾーンは `{{ target_zones }}` です。
+
+```bash
+# ゾーンファイルのみ更新した場合
+rndc reload {{ target_zones }}
+
+# named.conf自体を変更した場合
+rndc reconfig
+```
+
+### 4. flushでキャッシュを削除する
+
+古いキャッシュが問題を起こしている場合に、キャッシュのみを削除します。
+
+```bash
+rndc flush
+```
+
+### 5. freeze/thawで動的ゾーンを手動編集する
+
+「{{ freeze_use_case }}」の場面では、動的更新を止めてからファイルを直接編集します。
+
+```bash
+# 対象ゾーンをfreezeしてから手動編集する
+rndc freeze {{ target_zones }}
+vi /var/named/db.example.com
+named-checkzone {{ target_zones }} /var/named/db.example.com
+
+# 編集後、動的更新を再開する
+rndc thaw {{ target_zones }}
+```
+
+### 6. statusでチェックリストに沿って稼働状態を確認する
+
+以下の項目を確認します。
+
+```bash
+rndc -k {{ rndc_key_path }} status
+```
+
+{% for item in status_checklist %}
+- {{ loop.index }}. `{{ item }}` の行を確認
+{% endfor %}
+
+## 動作確認
+
+- `rndc status` が鍵認証エラーなく実行でき、`{{ status_checklist | length }}` 項目すべてが確認できること
+- `reload` 実行後、ゾーンファイルの変更内容が反映されること
+- `freeze` 中はゾーンファイルへの動的更新が保留され、`thaw` 後に再開されること
+- `flush` 実行後にキャッシュがクリアされ、以降の問い合わせが再度権威サーバへ問い合わせされること
+
+## 注意事項
+
+- `freeze` したまま `thaw` を忘れると、動的更新（`nsupdate` 等）が反映されなくなる。編集後は必ず `thaw` を実行すること。
+- `rndc.key` は `named` の実行権限に準じて厳格に管理し、第三者が読み取れる権限にしないこと。漏えいすると外部から `rndc` 経由でサーバを操作されるおそれがある。
+- `reconfig` はゾーンの追加・削除を伴う変更を反映できるが、`reload` より処理コストが高いため、必要な場合にのみ使うこと。

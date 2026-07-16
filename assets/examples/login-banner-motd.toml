@@ -1,0 +1,8 @@
+banner_text = "This system is for authorized use only. All activity is logged and monitored."
+motd_lines = [
+  "社内システムです。作業内容は監査ログに記録されます。",
+  "問い合わせ窓口: infra-support@example.com",
+  "定期メンテナンス: 毎週日曜 02:00-04:00",
+]
+disable_dynamic_motd = true
+legal_note = "無許可アクセスは就業規則および関連法令に基づき処罰の対象となります。"

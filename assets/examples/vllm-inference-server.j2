@@ -1,0 +1,95 @@
+# vLLMによるOpenAI互換推論サーバ構築 — {{ served_model_name }}
+
+vLLM で OpenAI互換API の推論サーバを立ち上げ、GPUメモリ設定・並列度を調整して動作検証まで行います。
+
+## 目的
+
+vLLMのPagedAttentionによるスループット重視の特性を理解し、GPUメモリ使用率・並列度を適切に設定してOpenAI互換APIとして常駐化できるようになることを目指します。
+
+## 用語解説
+
+- **PagedAttention**: KVキャッシュをページ単位で管理し、GPUメモリの断片化を抑えてスループットを高めるvLLMの中核技術
+- **gpu_memory_utilization**: vLLMがKVキャッシュ用に確保するGPUメモリの割合(0〜1)
+- **max_model_len**: 1リクエストあたりの最大トークン長。大きくするほどKVキャッシュに必要なメモリが増える
+- **tensor_parallel_size**: モデルを分割して複数GPUで並列実行する分割数
+- **OpenAI互換API**: `/v1/chat/completions` などOpenAI SDKと同じスキーマでリクエストを受け付けるAPI仕様
+
+## シナリオ設定
+
+モデル `{{ model_id }}` を `{{ served_model_name }}` として公開します。`gpu_memory_utilization={{ gpu_memory_utilization }}`、`max_model_len={{ max_model_len }}`、`tensor_parallel_size={{ tensor_parallel_size }}`、待受ポートは `{{ api_port }}` です。
+
+## 手順
+
+### 1. 環境を準備する(Python・CUDA)
+
+```bash
+nvidia-smi
+python3 -m venv /opt/vllm-env
+source /opt/vllm-env/bin/activate
+pip install vllm
+```
+
+### 2. サーバ起動オプションを設計し起動する
+
+```bash
+python3 -m vllm.entrypoints.openai.api_server \
+  --model {{ model_id }} \
+  --served-model-name {{ served_model_name }} \
+  --gpu-memory-utilization {{ gpu_memory_utilization }} \
+  --max-model-len {{ max_model_len }} \
+  --tensor-parallel-size {{ tensor_parallel_size }} \
+  --port {{ api_port }}
+```
+
+### 3. curlでchat completionsを検証する
+
+```bash
+curl http://127.0.0.1:{{ api_port }}/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "{{ served_model_name }}", "messages": [{"role": "user", "content": "こんにちは"}]}'
+```
+
+### 4. VRAM使用量を確認し調整する
+
+```bash
+nvidia-smi --query-gpu=memory.used,memory.total --format=csv
+```
+
+`gpu_memory_utilization`(現在値 `{{ gpu_memory_utilization }}`)が高すぎてOOMする場合は値を下げ、余裕がある場合は上げてスループットを改善します。
+
+### 5. systemdで常駐化する
+
+```bash
+sudo tee /etc/systemd/system/vllm-{{ served_model_name }}.service <<EOF
+[Unit]
+Description=vLLM OpenAI-compatible server ({{ served_model_name }})
+After=network.target
+
+[Service]
+ExecStart=/opt/vllm-env/bin/python3 -m vllm.entrypoints.openai.api_server \
+  --model {{ model_id }} --served-model-name {{ served_model_name }} \
+  --gpu-memory-utilization {{ gpu_memory_utilization }} \
+  --max-model-len {{ max_model_len }} \
+  --tensor-parallel-size {{ tensor_parallel_size }} \
+  --port {{ api_port }}
+Restart=on-failure
+User=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now vllm-{{ served_model_name }}
+```
+
+## 動作確認
+
+- 手順3のcurlが `{{ served_model_name }}` からの応答を含むJSONを返すこと
+- `nvidia-smi` のメモリ使用量が `gpu_memory_utilization={{ gpu_memory_utilization }}` の範囲内に収まりOOMしないこと
+- `systemctl status vllm-{{ served_model_name }}` が `active (running)` であること
+
+## 注意事項
+
+- `tensor_parallel_size={{ tensor_parallel_size }}` を変更する場合、搭載GPU数を上回る値を指定すると起動に失敗する。
+- `max_model_len={{ max_model_len }}` を大きくするとKVキャッシュのメモリ消費が増え、`gpu_memory_utilization` との兼ね合いでOOMしやすくなる。
+- 本手順はollamaによる簡易運用(dgx-spark-ollama)とは異なり、スループット重視の推論エンジンとしてvLLMを構築する点で差別化する。
