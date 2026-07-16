@@ -8,10 +8,14 @@
   outputs = { nixpkgs, ... }:
     let
       systems = [ "aarch64-linux" "x86_64-linux" ];
-      uvVersionSpec = (builtins.fromTOML (builtins.readFile ./pyproject.toml)).tool.uv.required-version;
+      # uv version is pinned in pyproject.toml under our own
+      # [tool.command-ghostwriter] table -- NOT [tool.uv].required-version, which
+      # would make Dependabot's uv image self-abort and block uv.lock updates
+      # (see #562). It is a plain version string used directly in the URL below.
       uvVersion =
-        assert nixpkgs.lib.hasPrefix "==" uvVersionSpec;
-        nixpkgs.lib.removePrefix "==" uvVersionSpec;
+        let raw = (builtins.fromTOML (builtins.readFile ./pyproject.toml)).tool.command-ghostwriter.uv-version;
+        in assert builtins.match "[0-9]+\\.[0-9]+\\.[0-9]+.*" raw != null;
+        raw;
       forAllSystems = nixpkgs.lib.genAttrs systems;
       mkPackages = system:
         let
