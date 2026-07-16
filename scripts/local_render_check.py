@@ -53,7 +53,7 @@ import tomllib
 from datetime import datetime
 from io import StringIO
 from pathlib import Path
-from typing import Optional
+from typing import Final, Optional
 
 import yaml
 from jinja2 import nodes
@@ -61,12 +61,12 @@ from jinja2.runtime import StrictUndefined
 from jinja2.sandbox import SandboxedEnvironment
 from markupsafe import Markup
 
-EXAMPLES = Path(__file__).resolve().parents[1] / "assets" / "examples"
-DATA_EXTS = ("toml", "yaml", "csv")
-WEB_DEFAULT_FILL = "#"  # web/src/worker/types.ts DEFAULT_SETTINGS.fillNanWith
-ALT_FILL = "\x01ALT\x01"  # any distinct value; used only to detect fill-dependence
-ENTITY_RE = re.compile(r"&(amp|lt|gt|quot|#39|#34);")
-UNSAFE_HTML = [r"<script", r"javascript:", r"data:", r"vbscript:", r"on\w+\s*="]
+EXAMPLES: Final[Path] = Path(__file__).resolve().parents[1] / "assets" / "examples"
+DATA_EXTS: Final[tuple[str, ...]] = ("toml", "yaml", "csv")
+WEB_DEFAULT_FILL: Final[str] = "#"  # web/src/worker/types.ts DEFAULT_SETTINGS.fillNanWith
+ALT_FILL: Final[str] = "\x01ALT\x01"  # any distinct value; used only to detect fill-dependence
+ENTITY_RE: Final[re.Pattern[str]] = re.compile(r"&(amp|lt|gt|quot|#39|#34);")
+UNSAFE_HTML: Final[list[str]] = [r"<script", r"javascript:", r"data:", r"vbscript:", r"on\w+\s*="]
 
 
 def _infer_scalar(value: str) -> int | float | str:
@@ -113,7 +113,7 @@ def _make_env() -> SandboxedEnvironment:
     return env
 
 
-def _load_context(data_path: Path, fill_value: Optional[str]) -> dict:
+def _load_context(data_path: Path, fill_value: Optional[str]) -> dict[str, object]:
     ext = data_path.suffix.lstrip(".")
     text = data_path.read_text(encoding="utf-8")
     if ext == "toml":
@@ -136,7 +136,7 @@ def _load_context(data_path: Path, fill_value: Optional[str]) -> dict:
     raise ValueError(f"unsupported ext: {ext}")
 
 
-def _render(env: SandboxedEnvironment, template_path: Path, ctx: dict) -> str:
+def _render(env: SandboxedEnvironment, template_path: Path, ctx: dict[str, object]) -> str:
     return env.from_string(template_path.read_text(encoding="utf-8")).render(**ctx)
 
 
