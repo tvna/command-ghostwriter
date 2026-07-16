@@ -36,8 +36,8 @@
 ### 2. セカンダリグループを作成する
 
 ```bash
-{% for r in csv_rows %}{% for g in r["secondary_groups"].split(",") %}sudo groupadd -f {{ g }}
-{% endfor %}{% endfor %}```
+{% for r in csv_rows %}for grp in $(echo "{{ r["secondary_groups"] }}" | tr ',' ' '); do sudo groupadd -f "$grp"; done
+{% endfor %}```
 
 ### 3. ユーザーを一括作成する
 

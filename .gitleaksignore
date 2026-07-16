@@ -1,0 +1,8 @@
+# inference-api-key-auth.j2 teaches API-key auth at an inference gateway. Its
+# verification step deliberately sends an unregistered key to demonstrate a
+# 401/403 response. gitleaks' curl-auth-header rule flags any value in an
+# X-Api-Key header, so the original literal ("WRONG_KEY", added in the commit
+# below) is a training placeholder, not a real secret. The template now uses a
+# shell variable ($INVALID_KEY) instead; this entry suppresses the historical
+# finding so the PR range scan stays green. Refs #567.
+2e105f78f12910f1ed32de3d09f3673c70bbc5d0:assets/examples/inference-api-key-auth.j2:curl-auth-header:61

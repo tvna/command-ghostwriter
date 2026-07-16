@@ -60,8 +60,9 @@ sudo nginx -t && sudo systemctl reload nginx
 ```bash
 {% for r in csv_rows %}curl -s -o /dev/null -w "{{ r['client_name'] }} valid key: %{http_code}\n" \
   -H "X-Api-Key: {{ r['api_key_placeholder'] }}" http://127.0.0.1/v1/models
-{% endfor %}curl -s -o /dev/null -w "invalid key: %{http_code}\n" \
-  -H "X-Api-Key: WRONG_KEY" http://127.0.0.1/v1/models
+{% endfor %}INVALID_KEY="this-key-is-not-registered"
+curl -s -o /dev/null -w "invalid key: %{http_code}\n" \
+  -H "X-Api-Key: $INVALID_KEY" http://127.0.0.1/v1/models
 ```
 
 ### 5. 未許可モデルへのアクセスを拒否する
@@ -83,7 +84,7 @@ sudo nginx -t && sudo systemctl reload nginx
 
 ## 動作確認
 
-- 手順4で有効なキーはHTTP 200、無効なキー(`WRONG_KEY`)はHTTP 401/403が返ること
+- 手順4で有効なキーはHTTP 200、無効なキー(`$INVALID_KEY`)はHTTP 401/403が返ること
 - 各利用者のレート制限(`rate_limit_rpm`)を超えるリクエストを送るとHTTP 429が返ること
 - `allowed_models`にないモデルを指定したリクエストが拒否されること
 - `expiry`超過後のキーでアクセスするとHTTP 401/403が返ること

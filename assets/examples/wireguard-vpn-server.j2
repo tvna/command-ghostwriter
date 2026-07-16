@@ -72,7 +72,7 @@ sudo wg show wg0
 
 ```bash
 sudo wg show wg0 latest-handshakes
-{% for r in csv_rows %}ping -c 3 {{ r["allowed_ips"].split('/')[0] }}
+{% for r in csv_rows %}ping -c 3 {{ r["peer_ip"] }}
 {% endfor %}```
 
 ### 6. 鍵ローテーションの準備をする
