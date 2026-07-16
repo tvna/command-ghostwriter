@@ -90,16 +90,6 @@ repos:
         files: ^\.claude/skills/.*|^apm\.lock\.yaml$
         entry: uv run python scripts/gen_superpowers_manifest.py --check
 
-  - repo: https://github.com/tox-dev/pyproject-fmt
-    rev: v2.5.1
-    hooks:
-      - id: pyproject-fmt
-        description: "Run 'pyproject-fmt' for extremely fast Python formatting"
-        name: fomart pyproject
-        # https://pyproject-fmt.readthedocs.io/en/latest/#calculating-max-supported-python-version
-        additional_dependencies: ["tox>=4.9"]
-        files: ^pyproject\.toml$
-
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.11.4
     hooks:
