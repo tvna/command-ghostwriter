@@ -27,6 +27,8 @@ zone/target の概念を理解した上で意図した通信境界を構築で�
 {% for r in csv_rows %}| {{ r["zone"] }} | {{ r["interface_or_source"] }} | {{ r["allowed_services"] }} | {{ r["allowed_ports"] }} | {{ r["target_policy"] }} | {{ r["purpose"] }} |
 {% endfor %}
 
+表中の `-` は該当なし・未指定を表します（例: サービス指定なし、ポート指定なし）。
+
 ## 手順
 
 ### 1. 現状のゾーン割当を確認する
@@ -53,8 +55,8 @@ firewall-cmd --get-default-zone
 ### 4. サービス・ポートの許可を投入する
 
 ```bash
-{% for r in csv_rows %}{% if r["allowed_services"] %}firewall-cmd --permanent --zone={{ r["zone"] }} --add-service={{ r["allowed_services"] }}
-{% endif %}{% if r["allowed_ports"] %}firewall-cmd --permanent --zone={{ r["zone"] }} --add-port={{ r["allowed_ports"] }}
+{% for r in csv_rows %}{% if r["allowed_services"] != "-" %}firewall-cmd --permanent --zone={{ r["zone"] }} --add-service={{ r["allowed_services"] }}
+{% endif %}{% if r["allowed_ports"] != "-" %}firewall-cmd --permanent --zone={{ r["zone"] }} --add-port={{ r["allowed_ports"] }}
 {% endif %}firewall-cmd --permanent --zone={{ r["zone"] }} --set-target={{ r["target_policy"] }}
 {% endfor %}```
 

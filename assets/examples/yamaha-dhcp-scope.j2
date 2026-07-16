@@ -64,8 +64,9 @@ show status dhcp
 ## 動作確認
 
 - `show status dhcp scope`に、投入した {{ csv_rows | selectattr("entry_type", "equalto", "scope") | list | length }} 件のスコープが表示されること
-- bind対象の端末(MACアドレス`{{ csv_rows[2]["mac_address"] }}`等)が、常に登録した固定アドレスを取得すること
-- 動的払い出し対象の端末が、bind済みのアドレス({{ csv_rows[2]["network_or_host"] }}等)を取得しないこと
+- bind対象の各端末が、常に登録した固定アドレスを取得すること
+{% for r in csv_rows %}{% if r["entry_type"] == "bind" %}  - MACアドレス`{{ r["mac_address"] }}`({{ r["description"] }})が`{{ r["network_or_host"] }}`を取得する
+{% endif %}{% endfor %}- 動的払い出し対象の端末が、上記のbind済みアドレスを取得しないこと
 - 同一アドレスが2台以上の端末に同時払い出しされていないこと(`show status dhcp`のリース一覧で重複がないか確認)
 
 ## 注意事項

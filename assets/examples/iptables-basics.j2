@@ -47,7 +47,7 @@ iptables -L INPUT -n --line-numbers
 ### 3. ルールを一括投入する
 
 ```bash
-{% for r in csv_rows %}iptables -A {{ r["chain"] }}{% if r["protocol"] != "all" %} -p {{ r["protocol"] }}{% endif %} -s {{ r["source"] }}{% if r["dport"] %} --dport {{ r["dport"] }}{% endif %} -m state --state {{ r["state"] }} -j {{ r["action"] }} -m comment --comment "{{ r["comment"] }}"
+{% for r in csv_rows %}iptables -A {{ r["chain"] }}{% if r["protocol"] != "all" %} -p {{ r["protocol"] }}{% endif %} -s {{ r["source"] }}{% if r["dport"] != "-" %} --dport {{ r["dport"] }}{% endif %} -m state --state {{ r["state"] }} -j {{ r["action"] }} -m comment --comment "{{ r["comment"] }}"
 {% endfor %}```
 
 ### 4. カウンタで検証する

@@ -1,4 +1,4 @@
 log_path,rotate_count,rotate_interval,compress,mode,postrotate_service
 /var/log/app/access.log,14,daily,yes,create,app
-/var/log/app/error.log,30,daily,yes,copytruncate,
-/var/log/batch/job.log,7,weekly,no,create,
+/var/log/app/error.log,30,daily,yes,copytruncate,-
+/var/log/batch/job.log,7,weekly,no,create,-

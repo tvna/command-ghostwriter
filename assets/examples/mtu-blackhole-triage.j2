@@ -1,10 +1,10 @@
-# MTU不一致による特定通信のみ失敗する障害の切り分け — {{ suspect_segment }}
+# MTU不一致による特定通信のみ失敗する障害の切り分け — {{ suspect_segment | safe }}
 
 pingなど小さなパケットは通るのに、ファイル転送や特定ページの読み込みだけが止まる・ハングする事象を、MTUブラックホールとして切り分け、解消します。
 
 ## 目的
 
-**{{ path_description }}** において、疑わしい区間 **{{ suspect_segment }}** のMTU不一致（現在値 {{ current_mtu }} バイト）が原因かどうかを `ping -M do` で特定し、MTU調整またはMSSクランプで解消できるようになることを目指します。
+**{{ path_description | safe }}** において、疑わしい区間 **{{ suspect_segment | safe }}** のMTU不一致（現在値 {{ current_mtu }} バイト）が原因かどうかを `ping -M do` で特定し、MTU調整またはMSSクランプで解消できるようになることを目指します。
 
 ## 用語解説
 
@@ -16,7 +16,7 @@ pingなど小さなパケットは通るのに、ファイル転送や特定ペ�
 
 ## シナリオ設定
 
-{{ path_description }} で、小さな通信は成功するのに大きなデータを含む通信だけが応答なしになる事象が発生しています。疑わしい区間は {{ suspect_segment }} で、現在のMTU設定は {{ current_mtu }} バイトです。切り分け用のテストサイズ候補は {{ test_sizes }} バイトです。{{ mss_clamp_note }}
+{{ path_description | safe }} で、小さな通信は成功するのに大きなデータを含む通信だけが応答なしになる事象が発生しています。疑わしい区間は {{ suspect_segment | safe }} で、現在のMTU設定は {{ current_mtu }} バイトです。切り分け用のテストサイズ候補は {{ test_sizes }} バイトです。{{ mss_clamp_note }}
 
 ## 手順
 
@@ -25,7 +25,7 @@ pingなど小さなパケットは通るのに、ファイル転送や特定ペ�
 小さな通信（ping、SSHログインなど）は成功するが、大きな通信（ファイル転送、特定ページ）だけがハングすることを確認します。
 
 ```bash
-ping -c 3 $(echo "{{ suspect_segment }}" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || echo "target-host")
+ping -c 3 $(echo "{{ suspect_segment | safe }}" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || echo "target-host")
 ```
 
 → 通常サイズのpingが成功する一方、大容量転送だけ失敗するなら、MTUブラックホールを疑う典型パターンです。
@@ -88,7 +88,7 @@ done
 - {{ test_sizes }} バイトすべてのサイズで `ping -M do` が成功すること
 - 実際のファイル転送・大容量ページ読み込みがハングせず完了すること
 - `tcpdump` でICMP Fragmentation Neededの遮断が解消されている、またはMSSクランプにより発生しなくなっていること
-- 変更後の {{ suspect_segment }} のMTU設定値が想定どおり反映されていること
+- 変更後の {{ suspect_segment | safe }} のMTU設定値が想定どおり反映されていること
 
 ## 注意事項
 

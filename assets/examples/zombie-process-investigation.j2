@@ -66,7 +66,7 @@ ps aux | wc -l
 ### 6. 発生源アプリへフィードバックし再発を確認する
 
 ```bash
-{{ recurrence_check }}
+{{ recurrence_check | safe }}
 ```
 
 wait漏れの原因(シグナルハンドラ未実装、子プロセス管理ライブラリの不具合など)を開発側へ報告します。
@@ -75,7 +75,7 @@ wait漏れの原因(シグナルハンドラ未実装、子プロセス管理ラ
 
 - ゾンビプロセス件数が {{ zombie_threshold }} 件未満に減少していること
 - {{ service_name }} が `active (running)` であること
-- 再発確認手順(`{{ recurrence_check }}`)を実施し記録済みであること
+- 再発確認手順(`{{ recurrence_check | safe }}`)を実施し記録済みであること
 
 ## 注意事項
 

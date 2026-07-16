@@ -20,7 +20,7 @@
 `{{ denied_service }}` から `{{ target_path }}` への書き込みが拒否されています。audit.logの該当行は以下の通りです。
 
 ```
-{{ audit_log_excerpt }}
+type=AVC msg=audit(1752624000.123:456): avc: denied { write } for pid=1234 comm="httpd" name="uploads" dev="xvda1" ino=98765 scontext=system_u:system_r:httpd_t:s0 tcontext=unconfined_u:object_r:var_t:s0 tclass=dir
 ```
 
 期待コンテキストは `{{ expected_context }}` で、切り分けの過程で `{{ boolean_candidate }}` の状態も確認します。
@@ -56,7 +56,7 @@ sudo ausearch -m avc -ts recent | audit2why
 → 記録された拒否は以下の通りです。
 
 ```
-{{ audit_log_excerpt }}
+type=AVC msg=audit(1752624000.123:456): avc: denied { write } for pid=1234 comm="httpd" name="uploads" dev="xvda1" ino=98765 scontext=system_u:system_r:httpd_t:s0 tcontext=unconfined_u:object_r:var_t:s0 tclass=dir
 ```
 
 `tcontext` が `{{ expected_context }}` と異なっている場合はコンテキスト不整合、`audit2why`が特定のポリシールール不足を示す場合はboolean変更やポリシーモジュール追加が必要と判断します。

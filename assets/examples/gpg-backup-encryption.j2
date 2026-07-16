@@ -16,7 +16,7 @@ GPGの鍵ペアを作成し、バックアップアーカイブを公開鍵暗�
 
 ## シナリオ設定
 
-鍵のUIDは `{{ key_uid }}`、鍵タイプは `{{ key_type }}` とします。暗号化対象は `{{ backup_source }}`、暗号化後の出力先は `{{ encrypted_dest }}` です。パスフレーズ運用方針は「{{ passphrase_policy }}」、鍵の紛失対策は「{{ escrow_note }}」とします。
+鍵のUIDは `{{ key_uid | safe }}`、鍵タイプは `{{ key_type }}` とします。暗号化対象は `{{ backup_source }}`、暗号化後の出力先は `{{ encrypted_dest }}` です。パスフレーズ運用方針は「{{ passphrase_policy }}」、鍵の紛失対策は「{{ escrow_note }}」とします。
 
 ## 手順
 
@@ -28,11 +28,11 @@ Key-Type: RSA
 Key-Length: 4096
 Subkey-Type: RSA
 Subkey-Length: 4096
-Name-Real: {{ key_uid }}
+Name-Real: {{ key_uid | safe }}
 Expire-Date: 2y
 %commit
 EOF
-gpg --list-keys "{{ key_uid }}"
+gpg --list-keys "{{ key_uid | safe }}"
 ```
 
 鍵タイプは `{{ key_type }}` を想定しています。実際に生成される鍵のパラメータ(長さ・アルゴリズム)がこれと一致するか `--list-keys` の出力で確認してください。
@@ -41,7 +41,7 @@ gpg --list-keys "{{ key_uid }}"
 
 ```bash
 tar -czf - -C "{{ backup_source }}" . \
-  | gpg --encrypt --recipient "{{ key_uid }}" \
+  | gpg --encrypt --recipient "{{ key_uid | safe }}" \
         --output "{{ encrypted_dest }}" \
         --trust-model always
 ls -lh "{{ encrypted_dest }}"
@@ -61,7 +61,7 @@ diff -rq "{{ backup_source }}" /tmp/restore-check
 ### 4. 秘密鍵をエクスポートしエスクロー保管する
 
 ```bash
-gpg --export-secret-keys --armor "{{ key_uid }}" > /root/gpg-secret-key-backup.asc
+gpg --export-secret-keys --armor "{{ key_uid | safe }}" > /root/gpg-secret-key-backup.asc
 chmod 600 /root/gpg-secret-key-backup.asc
 ```
 
@@ -75,7 +75,7 @@ rm -rf /tmp/restore-check
 
 ## 動作確認
 
-- Step 1実行後、`gpg --list-keys` に `{{ key_uid }}` の鍵が表示されること
+- Step 1実行後、`gpg --list-keys` に `{{ key_uid | safe }}` の鍵が表示されること
 - `{{ encrypted_dest }}` が生成され、`gpg --decrypt` で正常に復号できること
 - Step 3の `diff -rq` が差分なしで完了し、元データ(`{{ backup_source }}`)と復号結果が一致すること
 - 秘密鍵ファイル `/root/gpg-secret-key-backup.asc` の権限が `600` になっていること

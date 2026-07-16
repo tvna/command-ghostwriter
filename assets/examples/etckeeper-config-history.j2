@@ -16,7 +16,7 @@ etckeeperの仕組みを理解し、`/etc` の変更履歴をGitで追跡しな�
 
 ## シナリオ設定
 
-バージョン管理システムは `{{ vcs }}`、コミット作成者は `{{ commit_author }}` とします。日次自動コミットの有効化は `{{ daily_autocommit }}` です。履歴から除外する機微パスは {{ sensitive_ignore_paths | length }} 件({% for p in sensitive_ignore_paths %}`{{ p }}`{% if not loop.last %}, {% endif %}{% endfor %})で、履歴確認には `{{ review_command }}` を使用します。
+バージョン管理システムは `{{ vcs }}`、コミット作成者は `{{ commit_author | safe }}` とします。日次自動コミットの有効化は `{{ daily_autocommit }}` です。履歴から除外する機微パスは {{ sensitive_ignore_paths | length }} 件({% for p in sensitive_ignore_paths %}`{{ p }}`{% if not loop.last %}, {% endif %}{% endfor %})で、履歴確認には `{{ review_command }}` を使用します。
 
 ## 手順
 
@@ -24,7 +24,7 @@ etckeeperの仕組みを理解し、`/etc` の変更履歴をGitで追跡しな�
 
 ```bash
 sudo apt-get install -y etckeeper
-sudo git config --file /etc/.git/config user.email "{{ commit_author }}"
+sudo git config --file /etc/.git/config user.email "{{ commit_author | safe }}"
 sudo etckeeper init
 sudo etckeeper commit "initial import"
 ```

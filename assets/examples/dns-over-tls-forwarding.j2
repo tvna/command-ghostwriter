@@ -16,7 +16,7 @@
 
 ## シナリオ設定
 
-上位のDoTサーバは {% for s in upstream_dot_servers %}`{{ s }}`{% if not loop.last %}, {% endif %}{% endfor %} で、証明書の認証名は `{{ tls_auth_name }}` です。フォールバック方針は `{{ fallback_policy }}` とし、暗号化されていることの検証には `{{ verify_method }}` を使用します。
+上位のDoTサーバは {% for s in upstream_dot_servers %}`{{ s }}`{% if not loop.last %}, {% endif %}{% endfor %} で、証明書の認証名は `{{ tls_auth_name }}` です。フォールバック方針は `{{ fallback_policy }}` とし、暗号化されていることの検証には `{{ verify_method | safe }}` を使用します。
 
 ## 手順
 
@@ -63,14 +63,14 @@ dig @127.0.0.1 example.com A +short
 ### 6. 平文が漏れていないことをパケットキャプチャで確認する
 
 ```bash
-sudo {{ verify_method }} -c 20
+sudo {{ verify_method | safe }} -c 20
 ```
 
 ## 動作確認
 
 - `unbound-checkconf` がエラーなく通ること
 - `dig @127.0.0.1` で従来どおり名前解決ができること
-- `{{ verify_method }}` の出力に53番ポートの平文DNSクエリが含まれず、853番ポートの通信のみが観測されること
+- `{{ verify_method | safe }}` の出力に53番ポートの平文DNSクエリが含まれず、853番ポートの通信のみが観測されること
 - `openssl s_client` で `{{ tls_auth_name }}` の証明書が正しく提示されること
 
 ## 注意事項

@@ -1,4 +1,4 @@
-# ネットワーク遅延発生時の切り分け — {{ affected_path }}
+# ネットワーク遅延発生時の切り分け — {{ affected_path | safe }}
 
 pingとmtrの統計から遅延・揺らぎの発生区間を定量的に特定し、機器起因か回線起因かを判断します。
 
@@ -16,7 +16,7 @@ pingとmtrの統計から遅延・揺らぎの発生区間を定量的に特定�
 
 ## シナリオ設定
 
-{{ symptom }} という報告があり、対象経路は {{ affected_path }} です。平常時のRTTは {{ baseline_rtt }} 程度で、{{ measurement_duration }} 計測して原因区間を特定します。
+{{ symptom }} という報告があり、対象経路は {{ affected_path | safe }} です。平常時のRTTは {{ baseline_rtt }} 程度で、{{ measurement_duration }} 計測して原因区間を特定します。
 
 ## 手順
 
@@ -75,7 +75,7 @@ dig api01.internal.example +stats
 ```bash
 cat <<EOF
 症状: {{ symptom }}
-対象経路: {{ affected_path }}
+対象経路: {{ affected_path | safe }}
 平常時RTT: {{ baseline_rtt }}
 計測結果: (手順3-4の出力を要約して記入)
 判断: (機器起因/回線起因/自ホスト起因)

@@ -37,7 +37,7 @@ CSVで定義した {{ csv_rows | length }} 件のログに対し、logrotate設�
 {% else %}    create 0640 root adm
     missingok
     notifempty
-{% if r["postrotate_service"] is string and r["postrotate_service"] %}    postrotate
+{% if r["postrotate_service"] != "-" %}    postrotate
         # systemctl reload はサービス内部でHUPシグナル相当の設定再読み込みを送出する
         systemctl reload {{ r["postrotate_service"] }} > /dev/null 2>&1 || true
     endscript

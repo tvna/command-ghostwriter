@@ -1,5 +1,5 @@
 chain,action,protocol,source,dport,state,comment
 INPUT,ACCEPT,tcp,0.0.0.0/0,22,NEW,SSH管理アクセスを許可
 INPUT,ACCEPT,tcp,0.0.0.0/0,443,NEW,HTTPS公開サービスを許可
-INPUT,ACCEPT,all,0.0.0.0/0,,ESTABLISHED,応答パケットを許可
-INPUT,DROP,all,0.0.0.0/0,,NEW,その他の新規着信を拒否
+INPUT,ACCEPT,all,0.0.0.0/0,-,ESTABLISHED,応答パケットを許可
+INPUT,DROP,all,0.0.0.0/0,-,NEW,その他の新規着信を拒否

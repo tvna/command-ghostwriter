@@ -19,7 +19,7 @@ sudoersファイルの構文エラーや権限設定ミスによって `sudo` �
 `sudo` を実行すると次のエラーが出て使用できません。
 
 ```
-{{ error_message }}
+{{ error_message | safe }}
 ```
 
 root直接ログインの可否: {{ root_login_available }}。今回使用する代替昇格経路: {{ recovery_route }}。疑われる破損ファイルは `{{ broken_file }}` です。
@@ -35,7 +35,7 @@ sudo -l 2>&1 | head -n 5
 `syntax error` を含む場合は構文エラー、`is not in the sudoers file` はグループ外、`a password is required` かつパスワードが正しいのに拒否される場合は権限設定ミスを疑います。今回は次のメッセージから分類します。
 
 ```
-{{ error_message }}
+{{ error_message | safe }}
 ```
 
 ### 2. 代替の昇格経路を確認する

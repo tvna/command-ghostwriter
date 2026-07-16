@@ -16,7 +16,7 @@
 
 ## シナリオ設定
 
-機器 `{{ device_name }}` の`running-config`を、`{{ protocol }}`で `{{ backup_server }}` の `{{ backup_dir }}` へ退避します。ファイル名は命名規則 `{{ naming_rule }}` に従い、スケジュール `{{ schedule }}` で定期取得します。
+機器 `{{ device_name }}` の`running-config`を、`{{ protocol }}`で `{{ backup_server }}` の `{{ backup_dir }}` へ退避します。ファイル名は命名規則 `{{ naming_rule | safe }}` に従い、スケジュール `{{ schedule }}` で定期取得します。
 
 ## 手順
 
@@ -73,7 +73,7 @@ copy {{ protocol }}://{{ backup_server }}{{ backup_dir }}/{{ device_name }}_manu
 
 ## 動作確認
 
-- `{{ backup_server }}` の `{{ backup_dir }}` 配下に、命名規則 `{{ naming_rule }}` に沿ったファイルが作成されていること
+- `{{ backup_server }}` の `{{ backup_dir }}` 配下に、命名規則 `{{ naming_rule | safe }}` に沿ったファイルが作成されていること
 - 手動退避したファイルと直近の定期取得ファイルの内容(`hostname`、インターフェース設定等)が一致していること
 - kronで設定した定期実行が `{{ schedule }}` の意図した時刻に実行され、新しいタイムスタンプのファイルが増えていくこと
 - 意図的な設定変更後、次回の定期取得ファイルに差分が反映されていること

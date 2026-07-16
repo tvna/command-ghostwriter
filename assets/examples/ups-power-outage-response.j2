@@ -47,7 +47,7 @@ shutdown_order の昇順（Webフロント→アプリ→データベースの�
 
 ```bash
 {% for r in csv_rows %}echo "=== stopping {{ r["hostname"] }} (order {{ r["shutdown_order"] }}) ==="
-ssh {{ r["hostname"] }} "{{ r["graceful_command"] }}"
+ssh {{ r["hostname"] }} "{{ r["graceful_command"] | safe }}"
 {% endfor %}```
 
 ### 4. 復電を確認する

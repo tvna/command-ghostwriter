@@ -1,5 +1,5 @@
 zone,interface_or_source,allowed_services,allowed_ports,target_policy,purpose
 public,eth0,https,443/tcp,default,一般公開Webサービス用のインターネット向けゾーン
-internal,10.0.2.0/24,ssh,,default,社内保守ネットワークからの管理アクセス用
-dmz,eth1,,8443/tcp,default,DMZ上のAPIサーバ向け限定公開ゾーン
-trusted,10.0.9.0/28,,,ACCEPT,監視サーバセグメントからの全許可ゾーン
+internal,10.0.2.0/24,ssh,-,default,社内保守ネットワークからの管理アクセス用
+dmz,eth1,-,8443/tcp,default,DMZ上のAPIサーバ向け限定公開ゾーン
+trusted,10.0.9.0/28,-,-,ACCEPT,監視サーバセグメントからの全許可ゾーン

@@ -32,7 +32,7 @@ journalctl -u {{ affected_service }} --since "-30min" | grep -i "too many open f
 
 ```bash
 systemctl show {{ affected_service }} -p MainPID
-{{ fd_count_command }}
+{{ fd_count_command | safe }}
 lsof -p <PID> | wc -l
 ```
 
@@ -72,7 +72,7 @@ systemctl restart {{ affected_service }}
 ### 6. 再発監視を仕込む
 
 ```bash
-watch -n 60 "{{ fd_count_command }}"
+watch -n 60 "{{ fd_count_command | safe }}"
 ```
 
 一定間隔でFD数を観測し、単調増加が続く場合はリーク修正が完了していないと判断します。

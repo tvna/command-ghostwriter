@@ -3,7 +3,7 @@
 `virsh start {{ vm_name }}` が失敗し、次のエラーが出力されました。ストレージ・定義XML・ホスト側リソース不足のどこに原因があるかを切り分け、VMを復旧する手順です。
 
 ```
-{{ virsh_error }}
+{{ virsh_error | safe }}
 ```
 
 ## 目的
@@ -22,7 +22,7 @@ virshのエラーメッセージからストレージ・定義XML・リソース
 
 {{ vm_name }} が次のエラーで起動できませんでした。
 
-> {{ virsh_error }}
+> {{ virsh_error | safe }}
 
 対象ディスクは {{ disk_image_path }}、ホストの空きリソースは {{ host_free_resources }} です。定義XMLのバックアップは {{ xml_backup }} にあります。原因を切り分けて復旧してください。
 
@@ -34,7 +34,7 @@ virshのエラーメッセージからストレージ・定義XML・リソース
 virsh start {{ vm_name }}
 ```
 
-エラー文言を「ストレージ系（Permission denied, No such file）」「定義系（XML関連のエラー）」「リソース系（cannot allocate memory）」のいずれかに分類します。今回は `{{ virsh_error }}` です。
+エラー文言を「ストレージ系（Permission denied, No such file）」「定義系（XML関連のエラー）」「リソース系（cannot allocate memory）」のいずれかに分類します。今回は `{{ virsh_error | safe }}` です。
 
 ### 2. ホスト側ログを確認する
 

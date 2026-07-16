@@ -16,7 +16,7 @@ WireGuardサーバを構築し、複数のピア(拠点間接続・リモート�
 
 ## シナリオ設定
 
-以下の{{ csv_rows | length }}件のピアを登録します。
+以下の{{ csv_rows | length }}件のピアを登録します。`endpoint`列の`-`は「該当なし(Endpoint省略)」を表します。
 
 | peer_name | allowed_ips | endpoint | keepalive | purpose |
 |---|---|---|---|---|
@@ -50,7 +50,7 @@ ListenPort = 51820
 # {{ r["purpose"] }}
 PublicKey = {{ r["public_key_placeholder"] }}
 AllowedIPs = {{ r["allowed_ips"] }}
-{% if r["endpoint"] %}Endpoint = {{ r["endpoint"] }}
+{% if r["endpoint"] != "-" %}Endpoint = {{ r["endpoint"] }}
 {% endif %}PersistentKeepalive = {{ r["keepalive"] }}
 
 {% endfor %}EOF

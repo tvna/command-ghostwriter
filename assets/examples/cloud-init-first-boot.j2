@@ -37,7 +37,7 @@ packages:
 {% for p in packages %}  - {{ p }}
 {% endfor %}
 runcmd:
-{% for c in runcmd %}  - {{ c }}
+{% for c in runcmd %}  - {{ c | safe }}
 {% endfor %}
 EOF
 cat <<'EOF' > ~/cloud-init/nocloud/meta-data
