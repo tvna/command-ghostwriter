@@ -212,12 +212,12 @@ warn_unreachable = true
 [tool.uv]
 package = false
 
+[tool.command-ghostwriter]
 # Pinned uv version for reproducible provisioning. Single source of truth read
 # by flake.nix (devShell pinned-uv) and mirrored by the setup-python composite
 # action. Deliberately NOT [tool.uv].required-version: that pin makes uv
 # self-abort when Dependabot's uv image (0.11.8) runs, blocking uv.lock
 # regeneration under the `uv` Dependabot ecosystem. Refs #562.
-[tool.command-ghostwriter]
 uv-version = "0.8.17"
 
 [tool.benchmark]
