@@ -1,0 +1,84 @@
+[
+  {
+    "id": "slurm-gpu-gres-setup",
+    "name": "SlurmのGRESによるGPU資源定義と割り当て",
+    "desc": "slurm.confとgres.confでGPUをGRESとして定義し、ノードへの割り当てとジョブでの利用を検証する手順書を生成。",
+    "subCategory": "GPUクラスタ",
+    "format": "toml",
+    "outline": "GresTypesとNodeName定義をslurm.confへ追記; gres.confでGPUデバイスを宣言; scontrol reconfigureで設定を反映; sinfoでGRES公開状況を確認; srun --gres=gpu:1でジョブ割り当てを検証"
+  },
+  {
+    "id": "slurm-topology-aware-scheduling",
+    "name": "Slurmトポロジ考慮スケジューリングの設定",
+    "desc": "topology.confとtopology/treeプラグインでスイッチ配線を定義し、同一スイッチ配下へのジョブ集約を確認する手順書を生成。",
+    "subCategory": "GPUクラスタ",
+    "format": "yaml",
+    "outline": "物理配線からスイッチ階層を整理; topology.confを作成; slurm.confでtopology/treeを有効化; scontrol show topologyで反映を確認; --switchesオプション付きジョブで集約を検証"
+  },
+  {
+    "id": "nccl-allreduce-benchmark",
+    "name": "NCCLによるマルチノード集合通信ベンチマーク",
+    "desc": "nccl-testsのall_reduce_perfをmpirunで複数ノード実行し、集合通信帯域を測定して理論値と比較評価する手順書を生成。",
+    "subCategory": "GPUクラスタ",
+    "format": "toml",
+    "outline": "nccl-testsをビルド; ホストファイルとNCCL環境変数を準備; 単一ノードでall_reduce_perfを実行; mpirunで複数ノード実行; busbw測定値を理論帯域と比較評価"
+  },
+  {
+    "id": "dcgm-gpu-health-monitoring",
+    "name": "DCGMによるGPUヘルスチェックと常時監視",
+    "desc": "dcgmiによるGPUグループ作成・ヘルスウォッチ・レベル別診断と、dcgm-exporterによるメトリクス常時監視の手順書を生成。",
+    "subCategory": "GPUクラスタ",
+    "format": "yaml",
+    "outline": "datacenter-gpu-managerを導入しnvidia-dcgmを起動; dcgmi discoveryでGPUを確認; GPUグループを作成しヘルスウォッチを有効化; dcgmi diagでレベル別診断を実行; dcgm-exporterでメトリクスを公開"
+  },
+  {
+    "id": "k8s-gpu-operator-deploy",
+    "name": "GPU OperatorによるGPUノードの自動管理",
+    "desc": "HelmでNVIDIA GPU Operatorを導入し、ドライバ・デバイスプラグインの展開とGPU要求Podの実行を確認する手順書を生成。",
+    "subCategory": "GPUクラスタ",
+    "format": "yaml",
+    "outline": "Helmリポジトリを登録; values設定を準備; gpu-operatorをインストール; オペレータ各Podの起動を確認; nvidia.com/gpuを要求するテストPodで検証"
+  },
+  {
+    "id": "k8s-gpu-node-drain",
+    "name": "GPUノードの安全なドレインと保守復帰",
+    "desc": "kubectl cordon/drainでGPUノードからワークロードを退避し、保守作業後にuncordonで復帰させる手順書を生成。",
+    "subCategory": "GPUクラスタ",
+    "format": "csv",
+    "outline": "対象ノードをcordonで新規割当停止; 実行中Podを確認; drainでワークロードを退避; 保守作業を実施; uncordonで復帰しGPU Podのスケジュールを確認"
+  },
+  {
+    "id": "nvlink-fabric-manager-ops",
+    "name": "NVLink構成確認とFabric Manager運用",
+    "desc": "nvidia-smi nvlink/topoでNVLinkトポロジとリンク状態を確認し、Fabric Managerサービスを健全に運用する手順書を生成。",
+    "subCategory": "GPUクラスタ",
+    "format": "toml",
+    "outline": "nvidia-fabricmanagerパッケージを導入; サービスを起動し状態を確認; nvidia-smi topo -mでGPU間トポロジを確認; nvidia-smi nvlink -sでリンク状態を点検; GPU間帯域テストで疎通を検証"
+  },
+  {
+    "id": "infiniband-fabric-health-check",
+    "name": "InfiniBandファブリックの定期健全性点検",
+    "desc": "ibstat・iblinkinfo・ibdiagnetでリンク状態とエラーカウンタを定期点検し、劣化ポートを特定する手順書を生成。",
+    "subCategory": "GPUクラスタ",
+    "format": "csv",
+    "activity": "routine",
+    "outline": "対象ノード・スイッチ一覧を確認; ibstat/ibstatusでポート状態を点検; iblinkinfoでリンク速度・幅を確認; ibdiagnetでファブリック全体を診断; エラーカウンタを記録し前回値と比較"
+  },
+  {
+    "id": "gpu-xid-error-triage",
+    "name": "Xidエラーに基づくGPU故障の切り分け",
+    "desc": "dmesgのXidエラーとnvidia-smi・dcgmi diagの結果からGPU故障箇所を切り分け、交換要否を判断する手順書を生成。",
+    "subCategory": "GPUクラスタ",
+    "format": "csv",
+    "activity": "troubleshoot",
+    "outline": "dmesgとjournalctlでXidコードを収集; Xidコードの意味と深刻度を分類; nvidia-smi -qでECCエラーとRow Remappingを確認; dcgmi diagで診断を実行; 交換・リセット・経過観察を判定"
+  },
+  {
+    "id": "rack-power-capacity-design",
+    "name": "GPUラックの電源容量設計と実測検証",
+    "desc": "GPUサーバの消費電力を実測し、ラックPDU・ブレーカ容量と冗長構成を考慮した電源設計を行う手順書を生成。",
+    "subCategory": "GPUクラスタ",
+    "format": "csv",
+    "outline": "搭載機器の定格消費電力を棚卸し; nvidia-smiとipmitoolで実負荷時電力を実測; ラック合計電力とPDU容量を照合; ブレーカ余裕率と冗長構成を設計; 増設余地と電力閾値アラートを定義"
+  }
+]

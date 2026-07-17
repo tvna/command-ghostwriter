@@ -1,0 +1,84 @@
+[
+  {
+    "id": "triton-model-repository-deploy",
+    "name": "Tritonサーバによるモデルリポジトリ配備",
+    "desc": "モデルリポジトリの構成とconfig.pbtxtの記述、tritonserverコンテナの起動と推論確認を行う手順書を生成。",
+    "subCategory": "推論サーバ",
+    "format": "yaml",
+    "outline": "モデルリポジトリのディレクトリ構成を作成する; config.pbtxtを記述する; tritonserverコンテナを起動する; ヘルスエンドポイントを確認する; 推論リクエストを送信する"
+  },
+  {
+    "id": "tgi-server-deploy",
+    "name": "TGIによるLLM推論サーバの構築と運用",
+    "desc": "text-generation-inferenceコンテナをDocker Composeで起動し、量子化設定と生成APIの動作確認を行う手順書を生成。",
+    "subCategory": "推論サーバ",
+    "format": "yaml",
+    "outline": "モデルと量子化方式を選定する; docker-compose.ymlを記述する; コンテナを起動しログを確認する; 生成APIへリクエストを送信する; 起動パラメータを調整する"
+  },
+  {
+    "id": "sglang-server-deploy",
+    "name": "SGLangによる高速LLM推論サーバの構築",
+    "desc": "sglang.launch_serverによるサーバ起動とOpenAI互換APIの確認、ベンチマークによる性能測定を行う手順書を生成。",
+    "subCategory": "推論サーバ",
+    "format": "toml",
+    "outline": "sglangをインストールする; launch_serverでサーバを起動する; OpenAI互換APIで動作確認する; bench_servingで性能を測定する"
+  },
+  {
+    "id": "tensorrt-llm-engine-build",
+    "name": "TensorRT-LLMエンジンのビルドと配備",
+    "desc": "convert_checkpointとtrtllm-buildによるエンジン変換・ビルドと、trtllm-serveでの配信確認を行う手順書を生成。",
+    "subCategory": "推論サーバ",
+    "format": "yaml",
+    "outline": "ベースモデルのチェックポイントを取得する; convert_checkpointで形式変換する; trtllm-buildでエンジンをビルドする; trtllm-serveで配信を開始する; 推論結果を確認する"
+  },
+  {
+    "id": "llama-cpp-server-deploy",
+    "name": "llama.cppサーバによるローカルLLM配信",
+    "desc": "GGUFモデルをllama-serverで配信し、GPUオフロード層数の調整とOpenAI互換APIの動作確認を行う手順書を生成。",
+    "subCategory": "推論サーバ",
+    "format": "toml",
+    "outline": "GGUFモデルを取得する; llama-serverを起動する; GPUオフロード層数を調整する; OpenAI互換APIで動作確認する"
+  },
+  {
+    "id": "whisper-asr-server-deploy",
+    "name": "whisper.cppによる音声認識サーバの構築",
+    "desc": "whisper.cppのビルドとモデル選定、whisper-serverの起動と文字起こしAPIの動作確認を行う手順書を生成。",
+    "subCategory": "推論サーバ",
+    "format": "toml",
+    "outline": "whisper.cppをビルドする; ggmlモデルをダウンロードする; whisper-serverを起動する; 音声ファイルをAPIで文字起こしする; モデルサイズと速度のバランスを調整する"
+  },
+  {
+    "id": "inference-canary-release",
+    "name": "新モデルのカナリアデプロイと段階移行",
+    "desc": "Nginxの重み付きupstreamで新旧モデルへ段階的にトラフィックを移行し、指標監視と切り戻しを行う手順書を生成。",
+    "subCategory": "推論サーバ",
+    "format": "csv",
+    "outline": "新旧バージョンのコンテナを並行起動する; Nginxの重み付きupstreamを設定する; 初期比率でトラフィックを流す; 指標を監視し段階的に比率を上げる; 完全切替または切り戻しを実施する"
+  },
+  {
+    "id": "llm-ab-test-comparison",
+    "name": "LLM新旧モデルのA/Bテスト比較評価",
+    "desc": "新旧モデルのエンドポイントへ同一プロンプト集を送信し、応答品質とレイテンシを比較評価する手順書を生成。",
+    "subCategory": "推論サーバ",
+    "format": "csv",
+    "outline": "比較対象エンドポイントを準備する; プロンプト集をCSVで整備する; 両エンドポイントへ同一リクエストを送信する; レイテンシと応答内容を記録する; 評価基準に沿って採否を判定する"
+  },
+  {
+    "id": "inference-gpu-oom-triage",
+    "name": "推論サーバのGPUメモリ不足の切り分け",
+    "desc": "CUDA out of memory発生時にnvidia-smiとログで原因を特定し、メモリ設定を調整して復旧する手順書を生成。",
+    "subCategory": "推論サーバ",
+    "format": "toml",
+    "activity": "troubleshoot",
+    "outline": "エラーログでOOMの発生箇所を特定する; nvidia-smiでGPUメモリ使用状況を確認する; コンテキスト長とバッチ設定を見直す; メモリ利用率設定を調整して再起動する; 再発監視を設定する"
+  },
+  {
+    "id": "inference-endpoint-inventory",
+    "name": "推論エンドポイントの定期棚卸し点検",
+    "desc": "推論エンドポイント一覧に対しヘルスチェックと提供モデルの照合・応答確認を定期実施し、台帳を更新する手順書を生成。",
+    "subCategory": "推論サーバ",
+    "format": "csv",
+    "activity": "routine",
+    "outline": "エンドポイント一覧を読み込む; ヘルスチェックを実行する; 提供モデル一覧を照合する; 応答レイテンシを記録する; 台帳を更新し差分を報告する"
+  }
+]

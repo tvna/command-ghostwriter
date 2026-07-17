@@ -1,0 +1,84 @@
+[
+  {
+    "id": "qdrant-collection-setup",
+    "name": "Qdrantの導入とコレクション作成・検索の基本",
+    "desc": "DockerでQdrantを起動し、コレクション作成・ポイント登録・類似検索と距離関数の設定を行う手順書を生成。",
+    "subCategory": "ベクトルDB",
+    "format": "toml",
+    "outline": "DockerでQdrantを起動する; コレクションを作成し距離関数を設定する; ポイントを一括登録する; 類似検索とフィルタ検索を実行する; コレクション情報と容量を確認する"
+  },
+  {
+    "id": "milvus-standalone-deploy",
+    "name": "Milvusスタンドアロン構築とインデックス作成",
+    "desc": "Docker ComposeでMilvusスタンドアロンを構築し、コレクション定義・インデックス作成・検索確認を行う手順書を生成。",
+    "subCategory": "ベクトルDB",
+    "format": "yaml",
+    "outline": "Docker Composeで構成を定義し起動する; ヘルスチェックで各コンポーネントを確認する; コレクションとスキーマを定義する; ベクトルを挿入しインデックスを作成する; 検索を実行して応答を確認する"
+  },
+  {
+    "id": "weaviate-hybrid-search",
+    "name": "Weaviateのスキーマ設計とハイブリッド検索",
+    "desc": "Weaviateを起動してコレクションスキーマを定義し、BM25とベクトルを融合するハイブリッド検索を構成する手順書を生成。",
+    "subCategory": "ベクトルDB",
+    "format": "yaml",
+    "outline": "DockerでWeaviateを起動する; コレクションスキーマを定義する; オブジェクトとベクトルを登録する; hybridクエリでalpha値を調整する; キーワード検索とベクトル検索の結果を比較する"
+  },
+  {
+    "id": "pgvector-hnsw-index",
+    "name": "pgvector導入とHNSWインデックス設計",
+    "desc": "PostgreSQLにpgvector拡張を導入し、embedding列の定義・HNSWインデックス作成・近傍検索を行う手順書を生成。",
+    "subCategory": "ベクトルDB",
+    "format": "toml",
+    "outline": "pgvector拡張をインストールし有効化する; vector型の列を持つテーブルを作成する; embeddingデータを投入する; HNSWインデックスを作成しパラメータを設定する; EXPLAINで近傍検索の実行計画を確認する"
+  },
+  {
+    "id": "elasticsearch-knn-search",
+    "name": "ElasticsearchのkNNベクトル検索構築",
+    "desc": "dense_vectorフィールドのマッピング定義からベクトル投入・kNN検索・フィルタ併用までを構成する手順書を生成。",
+    "subCategory": "ベクトルDB",
+    "format": "yaml",
+    "outline": "dense_vectorマッピングでインデックスを作成する; ドキュメントとベクトルをbulk投入する; knnオプションで近傍検索を実行する; フィルタ条件と組み合わせる; num_candidatesを調整して精度と速度を確認する"
+  },
+  {
+    "id": "text-chunking-pipeline",
+    "name": "RAG向けドキュメントのチャンク分割パイプライン",
+    "desc": "対象ドキュメント一覧に対して、分割サイズ・オーバーラップを設計しチャンク化と品質確認を行う手順書を生成。",
+    "subCategory": "ベクトルDB",
+    "format": "csv",
+    "outline": "対象ドキュメントを棚卸しする; チャンクサイズとオーバーラップを設計する; 分割スクリプトを実行する; チャンクの文字数分布を集計する; 分割品質を抽出検査で確認する"
+  },
+  {
+    "id": "embedding-batch-generation",
+    "name": "embeddingバッチ生成とベクトルDB一括登録",
+    "desc": "コーパス一覧からembeddingをバッチ生成し、正規化・次元検証を経てベクトルDBへ一括登録する手順書を生成。",
+    "subCategory": "ベクトルDB",
+    "format": "csv",
+    "outline": "入力コーパスと出力先を確認する; embeddingモデルを準備する; バッチ生成スクリプトを実行する; 次元数と件数を検証する; ベクトルDBへ一括登録する; 登録件数を照合する"
+  },
+  {
+    "id": "vector-index-rebuild",
+    "name": "ベクトルインデックスの定期再構築と最適化",
+    "desc": "コレクション一覧を棚卸しし、断片化状況の確認・インデックス再構築・検索品質の再検証を定期実施する手順書を生成。",
+    "subCategory": "ベクトルDB",
+    "format": "csv",
+    "activity": "routine",
+    "outline": "対象コレクションを棚卸しする; 断片化とセグメント状態を確認する; 再構築の実施枠を確保する; インデックスを再構築する; 再構築後の検索品質と速度を検証する"
+  },
+  {
+    "id": "vector-search-quality-eval",
+    "name": "ベクトル検索の精度評価とパラメータ調整",
+    "desc": "評価クエリと正解データからRecall@kやMRRを算出し、検索パラメータの調整判断につなげる手順書を生成。",
+    "subCategory": "ベクトルDB",
+    "format": "csv",
+    "outline": "評価クエリと正解データを整備する; 評価対象の検索設定を固定する; 検索を一括実行し結果を記録する; Recall@kとMRRを算出する; パラメータを変えて再評価し比較する"
+  },
+  {
+    "id": "vector-search-latency-triage",
+    "name": "ベクトル検索の遅延・低精度切り分け",
+    "desc": "検索遅延や精度低下の発生時に、インデックス状態・検索パラメータ・リソースの観点で原因を切り分ける手順書を生成。",
+    "subCategory": "ベクトルDB",
+    "format": "toml",
+    "activity": "troubleshoot",
+    "outline": "事象と発生範囲を整理する; 検索パラメータとフィルタ条件を確認する; インデックス状態とセグメントを確認する; CPU・メモリ・ディスクI/Oを確認する; 暫定対処と恒久対策を判断する"
+  }
+]

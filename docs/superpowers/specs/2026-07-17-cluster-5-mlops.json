@@ -1,0 +1,84 @@
+[
+  {
+    "id": "mlflow-tracking-server",
+    "name": "MLflowトラッキングサーバの構築と実験記録管理",
+    "desc": "mlflow serverでバックエンドストアとアーティファクト保存先を設定し、実験記録を一元管理する手順書を生成。",
+    "subCategory": "MLOps",
+    "format": "yaml",
+    "outline": "バックエンドストアの準備; mlflow serverの起動; 実験記録の送信テスト; アーティファクト保存の確認; systemdによる常駐化"
+  },
+  {
+    "id": "dvc-data-versioning",
+    "name": "DVCによるデータセットのバージョン管理",
+    "desc": "dvc add/push/pullでデータセットをGitと連携してバージョン管理し、リモートストレージへ同期する手順書を生成。",
+    "subCategory": "MLOps",
+    "format": "toml",
+    "outline": "dvc initとリポジトリ初期化; リモートストレージの登録; dvc addによるデータ登録; dvc pushでの同期; 過去バージョンの復元"
+  },
+  {
+    "id": "wandb-selfhost-server",
+    "name": "W&Bセルフホストサーバの構築と実験可視化",
+    "desc": "Dockerでwandb/localコンテナを起動し、初期設定・ユーザー登録・実験ログの送信確認を行う手順書を生成。",
+    "subCategory": "MLOps",
+    "format": "toml",
+    "outline": "wandb/localコンテナの起動; 初期ユーザーとライセンスの設定; wandb loginによる接続確認; 実験ログの送信テスト; データ永続化とバックアップ設定"
+  },
+  {
+    "id": "feast-feature-store",
+    "name": "Feastによるフィーチャーストアの構築運用",
+    "desc": "feast init/apply/materializeで特徴量定義を登録し、オンラインストアへ特徴量を供給する手順書を生成。",
+    "subCategory": "MLOps",
+    "format": "yaml",
+    "outline": "feast initによるリポジトリ作成; 特徴量定義の記述; feast applyでの登録; feast materializeによるオンラインストア供給; 特徴量取得の確認"
+  },
+  {
+    "id": "airflow-ml-pipeline",
+    "name": "Airflowによる機械学習パイプラインの定期実行",
+    "desc": "学習・評価・成果物登録のDAGを配置し、airflow CLIでテスト実行とスケジュール運用を行う手順書を生成。",
+    "subCategory": "MLOps",
+    "format": "yaml",
+    "outline": "DAGファイルの配置; airflow tasks testによる単体確認; DAGの有効化とスケジュール設定; 手動トリガと実行監視; 失敗時リトライと通知の設定"
+  },
+  {
+    "id": "distributed-training-torchrun",
+    "name": "torchrunによるマルチノード分散学習ジョブ管理",
+    "desc": "torchrunのランデブー設定で複数ノードに学習ジョブを起動し、NCCL疎通と進捗を管理する手順書を生成。",
+    "subCategory": "MLOps",
+    "format": "csv",
+    "outline": "ノード間疎通とNCCL環境の確認; ランデブーエンドポイントの決定; 各ノードでのtorchrun起動; 学習進捗とGPU使用率の監視; ジョブの停止と再開"
+  },
+  {
+    "id": "training-checkpoint-cleanup",
+    "name": "学習チェックポイントの定期棚卸しと容量整理",
+    "desc": "保存済みチェックポイントを一覧し、保持ポリシーに沿って不要世代を削除し容量を回収する定期棚卸し手順書を生成。",
+    "subCategory": "MLOps",
+    "format": "csv",
+    "activity": "routine",
+    "outline": "チェックポイント一覧の取得; 保持ポリシーとの突合; 削除候補の確認; 不要世代の削除; 容量回収の確認"
+  },
+  {
+    "id": "optuna-hyperparameter-search",
+    "name": "Optunaによるハイパーパラメータ探索の運用",
+    "desc": "optuna CLIとRDBストレージでスタディを作成し、探索の実行・監視・結果集計を行う手順書を生成。",
+    "subCategory": "MLOps",
+    "format": "toml",
+    "outline": "RDBストレージの準備; optuna create-studyによるスタディ作成; 探索スクリプトの実行; optuna-dashboardによる監視; ベストトライアルの集計"
+  },
+  {
+    "id": "ml-experiment-reproducibility",
+    "name": "機械学習実験の再現性確保と環境固定",
+    "desc": "乱数シード固定・依存パッケージ凍結・コードとデータの版数記録により学習結果を再現可能にする手順書を生成。",
+    "subCategory": "MLOps",
+    "format": "toml",
+    "outline": "乱数シードの固定; 依存パッケージの凍結; コードとデータの版数記録; 学習の再実行; 結果一致の検証"
+  },
+  {
+    "id": "training-job-failure-triage",
+    "name": "分散学習ジョブ失敗の切り分けと復旧",
+    "desc": "分散学習ジョブの異常終了をGPU・NCCL・OOM・ストレージの観点で切り分けて復旧する手順書を生成。",
+    "subCategory": "MLOps",
+    "format": "csv",
+    "activity": "troubleshoot",
+    "outline": "異常終了ログの収集; GPUとメモリ状態の確認; NCCL通信エラーの切り分け; ストレージとデータ供給の確認; 再実行と再発防止策の記録"
+  }
+]
