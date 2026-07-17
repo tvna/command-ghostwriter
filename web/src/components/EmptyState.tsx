@@ -214,7 +214,7 @@ export function EmptyState({
                   Ciscoスイッチ設定の例を読み込み、すぐに結果まで体験できます（30秒）。
                 </div>
               </div>
-              <Button variant="primary" size="lg" icon={<Icon name="generate" size={17} />} onClick={() => onStart('sample')} style={{ flexShrink: 0 }}>サンプルで試す</Button>
+              <Button variant="primary" size="lg" icon={<Icon name="generate" size={17} />} onClick={() => onStart('sample')}>サンプルで試す</Button>
             </div>
 
             {/* divider */}
