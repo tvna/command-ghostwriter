@@ -127,12 +127,20 @@ ALLOWED_SUBCATEGORIES: Final[dict[str, frozenset[str]]] = {
     "ai": frozenset(
         {
                 "APIゲートウェイ",
+                "GPUクラスタ",
                 "GPUコンテナ",
                 "GPU基盤",
                 "GPU監視",
+                "MLOps",
                 "NVIDIA DGX",
                 "step-ca / Caddy",
+                "エージェント基盤",
+                "クラウドAI",
+                "セキュリティ・ガバナンス",
+                "データ基盤",
+                "ベクトルDB",
                 "モデル管理",
+                "監視・可観測性",
                 "推論サーバ",
         }
     ),
