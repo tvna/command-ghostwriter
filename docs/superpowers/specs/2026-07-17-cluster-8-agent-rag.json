@@ -1,0 +1,84 @@
+[
+  {
+    "id": "qdrant-rag-collection",
+    "name": "RAG向けQdrantベクトルDBの構築とコレクション設計",
+    "desc": "DockerでQdrantを起動し、REST APIによるコレクション作成・文書ベクトル投入・類似検索の確認を行う手順書を生成。",
+    "subCategory": "エージェント基盤",
+    "format": "yaml",
+    "outline": "Qdrantコンテナを起動する; コレクションを作成する; 文書ベクトルを投入する; 類似検索を実行する; スナップショットを取得する"
+  },
+  {
+    "id": "mcp-server-hosting",
+    "name": "MCPサーバのsystemd常駐ホスティング",
+    "desc": "npxで起動するMCPサーバをsystemdユニットとして常駐化し、自動再起動設定とログ確認を行う手順書を生成。",
+    "subCategory": "エージェント基盤",
+    "format": "toml",
+    "outline": "MCPサーバを単体起動で動作確認する; 専用ユーザーを作成する; systemdユニットを作成する; サービスを起動し自動起動を有効化する; journalctlでログを確認する"
+  },
+  {
+    "id": "langgraph-agent-server",
+    "name": "LangGraphエージェントサーバの構築とデプロイ",
+    "desc": "langgraph-cliでエージェントアプリをローカル起動し、Dockerイメージ化してAPIサーバとして公開する手順書を生成。",
+    "subCategory": "エージェント基盤",
+    "format": "yaml",
+    "outline": "langgraph-cliを導入する; langgraph.jsonを作成する; langgraph devでローカル起動する; langgraph buildでイメージ化する; langgraph upでサーバを起動する; APIエンドポイントを確認する"
+  },
+  {
+    "id": "mcp-tool-gateway",
+    "name": "mcpoによるMCPツールのAPIゲートウェイ公開",
+    "desc": "mcpoで複数のMCPサーバをOpenAPI互換のHTTPエンドポイントとして公開し、APIキーで保護する手順書を生成。",
+    "subCategory": "エージェント基盤",
+    "format": "csv",
+    "outline": "uvでmcpoを導入する; 公開対象のMCPサーバを一覧化する; 設定ファイルを作成する; APIキー付きでmcpoを起動する; OpenAPIドキュメントと疎通を確認する"
+  },
+  {
+    "id": "prompt-template-registry",
+    "name": "Gitによるプロンプトテンプレートの版管理",
+    "desc": "プロンプトテンプレート群をGitリポジトリで一元管理し、タグ付け・差分確認・配布までを運用する手順書を生成。",
+    "subCategory": "エージェント基盤",
+    "format": "csv",
+    "outline": "リポジトリとディレクトリ構成を作成する; テンプレート一覧を登録する; 変更をコミットしタグを付与する; git diffで版間差分を確認する; 利用側にタグ指定で取得させる"
+  },
+  {
+    "id": "agent-session-store",
+    "name": "Redisによるエージェント会話セッションの永続化",
+    "desc": "redis-cliでセッションキーのTTL設計・書き込み・容量監視を行い、エージェントの会話状態を保全する手順書を生成。",
+    "subCategory": "エージェント基盤",
+    "format": "toml",
+    "outline": "Redisの永続化設定を確認する; セッションキーの命名規則を設計する; TTL付きでセッションを書き込む; SCANとTTLで残存状況を確認する; INFOでメモリ使用量を監視する"
+  },
+  {
+    "id": "langfuse-llm-tracing",
+    "name": "LangfuseによるLLMツール呼び出しの監視基盤構築",
+    "desc": "Docker ComposeでLangfuseを自己ホストし、function callingを含むLLMトレースの収集・可視化を行う手順書を生成。",
+    "subCategory": "エージェント基盤",
+    "format": "yaml",
+    "outline": "Docker ComposeでLangfuseを起動する; 管理ユーザーとAPIキーを作成する; SDKからテストトレースを送信する; ツール呼び出しのスパンを確認する; ダッシュボードでエラー率を確認する"
+  },
+  {
+    "id": "playwright-headless-setup",
+    "name": "Playwrightによるヘッドレスブラウザ自動化基盤",
+    "desc": "npx playwrightでブラウザと依存パッケージを導入し、サーバ上にヘッドレス実行環境を整備する手順書を生成。",
+    "subCategory": "エージェント基盤",
+    "format": "toml",
+    "outline": "Node.jsとPlaywrightを導入する; ブラウザと依存パッケージをインストールする; ヘッドレスでスクリーンショットを取得する; 実行ユーザーと権限を設計する; 一時ファイルの後始末を設定する"
+  },
+  {
+    "id": "rag-retrieval-triage",
+    "name": "RAG検索品質低下の切り分けとチューニング",
+    "desc": "検索結果が期待と異なる際に、埋め込み・インデックス・スコア閾値の順で原因を切り分けて対処する手順書を生成。",
+    "subCategory": "エージェント基盤",
+    "format": "csv",
+    "activity": "troubleshoot",
+    "outline": "症状と再現クエリを整理する; ベクトルDBの件数と状態を確認する; 埋め込みモデルの一貫性を確認する; 検索スコアと閾値を検証する; チャンク分割を見直す; 改善結果を記録する"
+  },
+  {
+    "id": "mcp-server-inventory",
+    "name": "MCPサーバと公開ツールの定期棚卸し",
+    "desc": "稼働中のMCPサーバ・公開ツール・認証キーを一覧化し、不要サーバの停止と権限見直しを定期実施する手順書を生成。",
+    "subCategory": "エージェント基盤",
+    "format": "csv",
+    "activity": "routine",
+    "outline": "稼働プロセスと待ち受けポートを一覧化する; 台帳と公開ツール一覧を突き合わせる; 認証キーの有効期限を確認する; 不要サーバを停止する; 棚卸し結果を記録する"
+  }
+]
