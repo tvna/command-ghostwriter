@@ -1,0 +1,84 @@
+[
+  {
+    "id": "dvc-dataset-versioning",
+    "name": "DVCによるデータセットのバージョン管理",
+    "desc": "dvc initによる初期化・リモート設定・add/pushでデータセットをGitと連携して版管理する手順書を生成。",
+    "subCategory": "データ基盤",
+    "format": "toml",
+    "outline": "DVCの初期化とGit連携; リモートストレージの登録; dvc addによるデータセットの追跡; dvc pushによるデータ同期; 過去バージョンの取り出し(checkout)"
+  },
+  {
+    "id": "duckdb-dataset-etl",
+    "name": "DuckDBによるトレーニングデータのETL処理",
+    "desc": "duckdb CLIでCSVの読み込み・SQLによる変換・Parquet出力を行い、学習用データを整形する手順書を生成。",
+    "subCategory": "データ基盤",
+    "format": "yaml",
+    "outline": "DuckDB CLIの導入と動作確認; ソースCSVの読み込みとスキーマ確認; SQLによる変換・フィルタリング; COPY文によるParquet出力; 出力データの件数・スキーマ検証"
+  },
+  {
+    "id": "training-data-dedup",
+    "name": "学習データの重複排除とハッシュ検査",
+    "desc": "sha256sumとsort・uniqによる行単位、jdupesによるファイル単位の重複検出と除去を行う手順書を生成。",
+    "subCategory": "データ基盤",
+    "format": "csv",
+    "outline": "対象ファイルの棚卸しと件数確認; sha256sumによるファイル単位の重複検出; sort・uniqによる行単位の重複除去; jdupesによるディレクトリ横断の検査; 除去前後の件数比較と記録"
+  },
+  {
+    "id": "label-studio-setup",
+    "name": "Label Studioによるラベリング基盤の構築",
+    "desc": "pipによるLabel Studioの導入・起動・プロジェクト作成とアノテーション結果のエクスポートを行う手順書を生成。",
+    "subCategory": "データ基盤",
+    "format": "yaml",
+    "outline": "仮想環境の作成とpipによる導入; label-studio startによる起動; プロジェクト作成とデータインポート; アノテーション結果のエクスポート; systemdによる常時起動化"
+  },
+  {
+    "id": "pdf-text-extraction",
+    "name": "poppler-utilsによるPDFテキスト抽出",
+    "desc": "pdfinfoでの事前調査、pdftotextによる本文抽出、ocrmypdfによるスキャンPDFのOCR化を行う手順書を生成。",
+    "subCategory": "データ基盤",
+    "format": "csv",
+    "outline": "poppler-utilsとocrmypdfの導入; pdfinfoによるPDFの事前調査; pdftotextによるテキスト抽出; スキャンPDFへのOCR適用; 抽出テキストの文字化け・欠落確認"
+  },
+  {
+    "id": "image-preprocessing-batch",
+    "name": "ImageMagickによる学習用画像の一括前処理",
+    "desc": "identifyによる破損検査とmogrify・convertでのリサイズ・形式統一で学習用画像を整える手順書を生成。",
+    "subCategory": "データ基盤",
+    "format": "toml",
+    "outline": "ImageMagickの導入と対象画像の確認; identifyによる破損・メタデータ検査; mogrifyによる一括リサイズ; convertによる形式・カラースペース統一; 処理後の枚数・サイズ検証"
+  },
+  {
+    "id": "webdataset-shard-build",
+    "name": "マルチモーダル学習データのtarシャード構築",
+    "desc": "画像とキャプションの対応検査とtarによるWebDataset形式シャードへの分割梱包を行う手順書を生成。",
+    "subCategory": "データ基盤",
+    "format": "yaml",
+    "outline": "画像・キャプションの対応関係の検査; ファイル命名規則の統一; tarによるシャード作成; tar -tfによるシャード内容の検証; 破損シャードの検出と再作成"
+  },
+  {
+    "id": "csv-data-quality-check",
+    "name": "csvkitによるデータ品質の定期検査",
+    "desc": "csvclean・csvstat・csvgrepで欠損や型不整合を定期点検し、結果を記録して品質を維持する手順書を生成。",
+    "subCategory": "データ基盤",
+    "format": "csv",
+    "activity": "routine",
+    "outline": "csvkitの導入と対象データの確認; csvcleanによる構文エラー検出; csvstatによる統計・欠損の把握; csvgrepによる異常値の抽出; 検査結果の記録と共有"
+  },
+  {
+    "id": "eval-dataset-split",
+    "name": "評価用データセットの分割とサンプリング",
+    "desc": "shufとsplitによる再現可能な学習/評価データの分割と、commによるデータリーク検査を行う手順書を生成。",
+    "subCategory": "データ基盤",
+    "format": "toml",
+    "outline": "分割方針と乱数シードの決定; shufによる再現可能なシャッフル; splitによる学習/評価データの分割; commによるリーク(重複)検査; 件数と分布の確認"
+  },
+  {
+    "id": "dataset-encoding-triage",
+    "name": "テキストデータの文字化けの切り分け",
+    "desc": "file・uchardet・nkf・iconvで文字化けの原因を切り分け、安全な変換方針を確定する手順書を生成。",
+    "subCategory": "データ基盤",
+    "format": "csv",
+    "activity": "troubleshoot",
+    "outline": "症状の再現と対象ファイルの特定; fileとuchardetによるエンコーディング推定; nkf -gによる日本語コードの判定; iconvによる試験変換と差分比較; 原因の確定と恒久対応の決定"
+  }
+]

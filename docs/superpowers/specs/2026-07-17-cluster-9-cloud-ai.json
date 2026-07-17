@@ -1,0 +1,85 @@
+[
+  {
+    "id": "aws-bedrock-model-invocation",
+    "name": "AWS Bedrock基盤モデルの呼び出しと利用設定",
+    "desc": "aws bedrockコマンドで基盤モデルの一覧確認・アクセス設定・invoke-modelによる呼び出し検証を行う手順書を生成。",
+    "subCategory": "クラウドAI",
+    "format": "toml",
+    "outline": "モデルアクセスの有効化状況を確認する; list-foundation-modelsで利用可能モデルを確認する; invoke-modelでテキスト生成を検証する; converseで対話形式の呼び出しを行う; CloudWatchで呼び出しメトリクスを確認する"
+  },
+  {
+    "id": "sagemaker-realtime-endpoint-deploy",
+    "name": "SageMakerリアルタイム推論エンドポイントの構築",
+    "desc": "aws sagemakerコマンドでモデル登録からエンドポイント作成・推論呼び出しまでを行うデプロイ手順書を生成。",
+    "subCategory": "クラウドAI",
+    "format": "yaml",
+    "outline": "モデルアーティファクトをS3に配置する; create-modelでモデルを登録する; create-endpoint-configで構成を定義する; create-endpointでエンドポイントを作成する; invoke-endpointで推論を検証する"
+  },
+  {
+    "id": "azure-openai-deployment-setup",
+    "name": "Azure OpenAI Serviceのリソース作成とモデルデプロイ",
+    "desc": "az cognitiveservicesコマンドでAzure OpenAIリソースを作成し、モデルデプロイとキー管理を行う手順書を生成。",
+    "subCategory": "クラウドAI",
+    "format": "toml",
+    "outline": "az loginとサブスクリプションを選択する; cognitiveservices account createでリソースを作成する; account deployment createでモデルをデプロイする; keys listでAPIキーを取得し疎通確認する; キーローテーションとアクセス制御方針を設定する"
+  },
+  {
+    "id": "vertex-ai-model-deploy",
+    "name": "Vertex AIへのモデル登録とエンドポイント公開",
+    "desc": "gcloud aiコマンドでモデルをVertex AIに登録し、エンドポイント作成とデプロイ・予測検証を行う手順書を生成。",
+    "subCategory": "クラウドAI",
+    "format": "yaml",
+    "outline": "モデルアーティファクトをCloud Storageに配置する; gcloud ai models uploadでモデルを登録する; gcloud ai endpoints createでエンドポイントを作成する; endpoints deploy-modelでモデルを配備する; endpoints predictで推論を検証する"
+  },
+  {
+    "id": "cloud-gpu-spot-training",
+    "name": "スポットGPUインスタンスによるAI学習環境の構築",
+    "desc": "スポット価格の調査からGPUインスタンス起動・中断通知対応・チェックポイント保全までを行う手順書を生成。",
+    "subCategory": "クラウドAI",
+    "format": "toml",
+    "outline": "describe-spot-price-historyで価格動向を調査する; run-instancesのinstance-market-optionsでスポット起動する; nvidia-smiでGPUを確認し学習ジョブを開始する; IMDSの中断通知を監視する仕組みを整える; チェックポイントをS3へ定期保存する"
+  },
+  {
+    "id": "cross-cloud-model-migration",
+    "name": "クラウド間でのモデル成果物の移行",
+    "desc": "aws s3・gcloud storage・azcopyを使い分け、モデル成果物を検証付きで別クラウドへ移行する手順書を生成。",
+    "subCategory": "クラウドAI",
+    "format": "csv",
+    "outline": "移行対象モデルと転送先の一覧を確認する; 転送元ストレージからモデル成果物を取得する; 転送先クラウドのストレージへアップロードする; チェックサムで整合性を検証する; 転送元の後片付けとアクセス権を整理する"
+  },
+  {
+    "id": "multicloud-inference-failover",
+    "name": "マルチクラウド推論エンドポイントの切替訓練",
+    "desc": "プライマリ障害を想定し、Route 53のDNS切替でセカンダリ推論エンドポイントへ切り替える復旧訓練の手順書を生成。",
+    "subCategory": "クラウドAI",
+    "format": "yaml",
+    "activity": "drill",
+    "outline": "プライマリ・セカンダリ両系の正常性を確認する; プライマリ障害を擬似的に発生させる; change-resource-record-setsでDNSを切り替える; 切替後の推論応答とレイテンシを検証する; 切り戻しと訓練結果の記録を行う"
+  },
+  {
+    "id": "cloud-ai-cost-review",
+    "name": "クラウドAIサービスのコスト定期棚卸し",
+    "desc": "aws ceコマンドでAI関連サービスの利用コストを集計し、予算超過や不要リソースを点検する定期棚卸し手順書を生成。",
+    "subCategory": "クラウドAI",
+    "format": "csv",
+    "activity": "routine",
+    "outline": "get-cost-and-usageでサービス別コストを集計する; 対象AIサービスの内訳と増減を確認する; 未使用エンドポイントや遊休リソースを洗い出す; 予算アラートの設定状況を点検する; 棚卸し結果を記録し是正対応を起票する"
+  },
+  {
+    "id": "ai-workload-iam-design",
+    "name": "AIワークロード向けIAM最小権限設計",
+    "desc": "BedrockやSageMakerに絞ったIAMポリシー作成とロール付与・権限シミュレーション検証を行う手順書を生成。",
+    "subCategory": "クラウドAI",
+    "format": "csv",
+    "outline": "対象ワークロードと必要アクションを整理する; 最小権限のIAMポリシーを作成する; ロールを作成しポリシーをアタッチする; simulate-principal-policyで許可と拒否を検証する; 過剰権限がないことを確認し文書化する"
+  },
+  {
+    "id": "sagemaker-endpoint-troubleshoot",
+    "name": "SageMaker推論エンドポイントの障害切り分け",
+    "desc": "describe-endpointとCloudWatchログ・メトリクスでSageMaker推論障害の原因を切り分ける手順書を生成。",
+    "subCategory": "クラウドAI",
+    "format": "toml",
+    "activity": "troubleshoot",
+    "outline": "describe-endpointでステータスと失敗理由を確認する; CloudWatchログでコンテナのエラーを調査する; メトリクスでレイテンシとエラー率を確認する; インスタンスリソースの逼迫有無を切り分ける; 修正後の再デプロイと回復を確認する"
+  }
+]
