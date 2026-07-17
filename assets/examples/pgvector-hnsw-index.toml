@@ -1,0 +1,14 @@
+pg_version = "16"
+db_name = "app_db"
+db_user = "app_user"
+table_name = "documents"
+embedding_column = "embedding"
+embedding_dim = 1536
+distance_ops = "vector_cosine_ops"
+distance_metric_note = "コサイン距離(cosine)を採用し、投入前にembeddingを正規化しておく"
+hnsw_m = 16
+hnsw_ef_construction = 64
+hnsw_ef_search = 40
+top_k = 5
+maintenance_work_mem = "512MB"
+csv_import_path = "/data/embeddings/documents.csv"

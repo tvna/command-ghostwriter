@@ -1,0 +1,115 @@
+# 量子化モデルの品質劣化の切り分け
+
+量子化後モデルで応答品質の劣化が報告された際に、`llama-perplexity` によるPPL(perplexity)測定と `llama-bench` による速度測定を組み合わせ、原因が量子化そのものにあるのか他要因にあるのかを切り分け、必要であれば量子化タイプを再選定する手順を示します。
+
+## 目的
+
+比較対象{{ csv_rows | length }}件(基準となるf16と量子化候補)についてPPLと推論速度を測定し、量子化に起因する品質劣化かどうかを客観的な数値で切り分けたうえで、適切な量子化タイプへ再選定できるようになることを目指します。
+
+## 用語解説
+
+- **PPL(perplexity)**: モデルがテキストの次トークンをどれだけ正確に予測できるかを表す指標。値が小さいほど予測精度が高い
+- **llama-perplexity**: llama.cppに付属する、指定したテキストコーパスに対するPPLを計算するCLIツール
+- **llama-bench**: llama.cppに付属する、プロンプト処理速度(pp)とトークン生成速度(tg)を計測するベンチマークCLIツール
+- **量子化タイプ**: `Q4_K_M` のような識別子。数字はビット幅、`K`/`M`等は量子化アルゴリズムの種別を表す
+- **wikitext-2-raw**: PPL測定の標準的な評価コーパスとして使われるテキストデータセット。`scripts/get-wikitext-2.sh` で取得する
+- **ppl_threshold_pct**: 基準(baseline)モデルに対するPPL増加率の許容上限。これを超えると量子化による品質劣化と判断する目安値
+- **-ngl(n-gpu-layers)**: GPUにオフロードするレイヤー数の指定。VRAM容量に応じて調整する
+
+## シナリオ設定
+
+比較対象は{{ csv_rows | length }}件です。
+
+| quant_type | role | size_gb | ppl_threshold_pct | incident_note |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["quant_type"] }} | {{ r["role"] }} | {{ r["size_gb"] }} | {{ r["ppl_threshold_pct"] }} | {{ r["incident_note"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 事象と比較対象の整理
+
+比較対象の一覧と、そのうち品質劣化が報告されている行を整理します。
+
+```bash
+mkdir -p /data/gguf-eval
+{% for r in csv_rows %}echo "{{ r["quant_type"] }} ({{ r["role"] }}): {{ r["gguf_path"] }} size={{ r["size_gb"] }}GB"
+{% endfor %}```
+
+```bash
+{% for r in csv_rows %}{% if r["incident_note"] != "-" %}echo "事象あり: {{ r["quant_type"] }} - {{ r["incident_note"] }}"
+{% endif %}{% endfor %}```
+
+### 2. llama-perplexityによるPPL測定
+
+llama.cppをビルドし、評価用コーパス(wikitext-2-raw)を取得したうえで、比較対象すべてについてPPLを測定します。
+
+```bash
+test -d /opt/llama.cpp || git clone https://github.com/ggml-org/llama.cpp /opt/llama.cpp
+cd /opt/llama.cpp
+cmake -B build -DGGML_CUDA=ON
+cmake --build build --config Release -j
+./scripts/get-wikitext-2.sh
+```
+
+```bash
+{% for r in csv_rows %}/opt/llama.cpp/build/bin/llama-perplexity -m {{ r["gguf_path"] }} -f /opt/llama.cpp/wikitext-2-raw/wiki.test.raw --chunks 16 -ngl 999 > /data/gguf-eval/{{ r["quant_type"] }}-ppl.log
+{% endfor %}```
+
+### 3. 量子化タイプ間の比較
+
+各ログの `Final estimate` 行を抽出し、baseline(F16)に対する候補ごとのPPL増加率が `ppl_threshold_pct` 以内かを確認します。
+
+```bash
+{% for r in csv_rows %}grep "Final estimate" /data/gguf-eval/{{ r["quant_type"] }}-ppl.log
+{% endfor %}```
+
+```bash
+{% for r in csv_rows %}{% if r["role"] == "candidate" %}echo "{{ r["quant_type"] }}: baseline比の許容PPL増加率は{{ r["ppl_threshold_pct"] }}%。上記Final estimate同士を比較し超過有無を確認"
+{% endif %}{% endfor %}```
+
+### 4. llama-benchによる速度測定
+
+品質だけでなく速度面の劣化がないかを、同じ比較対象すべてについて確認します。
+
+```bash
+{% for r in csv_rows %}/opt/llama.cpp/build/bin/llama-bench -m {{ r["gguf_path"] }} -p 512 -n 128 -ngl 999 -r 5 -o md > /data/gguf-eval/{{ r["quant_type"] }}-bench.md
+{% endfor %}```
+
+```bash
+{% for r in csv_rows %}echo "=== {{ r["quant_type"] }} ==="
+cat /data/gguf-eval/{{ r["quant_type"] }}-bench.md
+{% endfor %}```
+
+### 5. 原因の特定と量子化タイプ再選定
+
+品質劣化が報告されている行について、PPL増加率が許容値を超えているかどうかで、量子化が原因か他要因(プロンプトや推論設定など)かを切り分けます。
+
+```bash
+{% for r in csv_rows %}{% if r["incident_note"] != "-" %}echo "調査対象: {{ r["quant_type"] }} ({{ r["incident_note"] }})"
+echo "手順3のPPL増加率が{{ r["ppl_threshold_pct"] }}%を超えていれば量子化が原因、超えていなければ量子化以外の要因(プロンプト・推論設定・入力データ等)を疑う"
+{% endif %}{% endfor %}```
+
+量子化が原因と判断した場合は、許容範囲内の候補の中からサイズと速度のバランスが良いものへ再選定します。
+
+```bash
+{% for r in csv_rows %}{% if r["role"] == "candidate" %}echo "再選定候補: {{ r["quant_type"] }} (size={{ r["size_gb"] }}GB, 許容PPL増加率={{ r["ppl_threshold_pct"] }}%)"
+{% endif %}{% endfor %}```
+
+```bash
+echo "quant-quality-triage: 再選定完了 $(date -Iseconds)" >> /var/log/quant-requalification.log
+```
+
+## 動作確認
+
+- {{ csv_rows | length }}件すべてについて `/data/gguf-eval/<quant_type>-ppl.log` に `Final estimate` のPPL値が記録されていること
+- {{ csv_rows | length }}件すべてについて `/data/gguf-eval/<quant_type>-bench.md` にpp/tgの速度が記録されていること
+- 品質劣化が報告された行について、量子化が原因かどうかの切り分け結論が出ていること
+- 再選定結果が `/var/log/quant-requalification.log` に記録されていること
+
+## 注意事項
+
+- `llama-perplexity` と `llama-bench` の実行はCPU/GPUリソースを占有するため、本番トラフィックへの影響が小さい時間帯に実施する。
+- PPLの比較は同一の評価コーパス(wikitext-2-raw)・同一の `--chunks` 数で実施しないと数値同士の比較に意味がなくなる。条件を変えて再測定した場合は過去の測定値と単純比較しない。
+- `-ngl 999` はGPUへの全レイヤーオフロードを意図した指定であり、VRAM容量を超えるとロードに失敗する。環境に応じて値を調整する。
+- PPL増加率が許容値内であっても、実運用で使う具体的なタスク(要約・コード生成など)での応答品質は別途サンプル確認することが望ましい。本手順の対象はPPLと速度による一次切り分けまでとする。

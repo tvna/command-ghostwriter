@@ -1,0 +1,4 @@
+node_name,gpu_product,namespace,grace_period_sec,drain_timeout,maintenance_task,owner
+gpu-node-03,NVIDIA A100 80GB,ml-training,120,600s,GPUドライバとファームウェアの更新,ai-platform-team
+gpu-node-07,NVIDIA H100 80GB,ml-training,180,900s,GPUメモリのECCエラーによるカード交換対応,ai-platform-team
+gpu-node-12,NVIDIA A100 40GB,batch-inference,60,300s,ホストOSのカーネルセキュリティパッチ適用,data-eng-team

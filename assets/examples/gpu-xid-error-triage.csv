@@ -1,0 +1,6 @@
+node_name,gpu_index,gpu_uuid,xid_code,xid_meaning,severity,occurrence_count_24h,judgment
+gpu-node-01,0,GPU-3a1f2c4e-9b2d-4e11-8f3a-1c2d3e4f5a6b,79,GPUがPCIeバスから応答しなくなった(Fell Off the Bus),重大,3,交換
+gpu-node-01,1,GPU-5b2e3d5f-0c3e-4f22-9a4b-2d3e4f5a6b7c,48,訂正不可能なダブルビットECCエラー(DBE),重大,1,交換
+gpu-node-02,2,GPU-7c3f4e6a-1d4f-4033-ab5c-3e4f5a6b7c8d,63,ECCページ退避またはRow Remappingの記録イベント(訂正可能),要注意,5,経過観察
+gpu-node-03,0,GPU-9d4a5f7b-2e5a-4144-bc6d-4f5a6b7c8d9e,13,Graphics Engine Exception(アプリケーション例外由来),軽度,2,リセット
+gpu-node-03,3,GPU-1e5b6a8c-3f6b-4255-cd7e-5a6b7c8d9e0f,31,GPUメモリのページフォールト(不正メモリアクセス),軽度,1,リセット

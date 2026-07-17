@@ -1,0 +1,127 @@
+# MLflowモデルレジストリによるバージョン管理
+
+MLflowトラッキングサーバとモデルレジストリを使い、モデルの登録・バージョン付与から、エイリアスによるステージ運用、`mlflow models serve` での動作確認、旧バージョンへのロールバックまでを行います。
+
+## 目的
+
+トラッキングサーバのバックエンドストア/アーティファクトストアの構成を理解したうえで、モデルバージョンを一意に管理し、エイリアスによる環境切り替えと即時ロールバックができる状態を目指します。
+
+## 用語解説
+
+- **トラッキングサーバ (Tracking Server)**: 実験・run・モデルレジストリのメタデータを一元管理するAPIサーバ。ここでは `{{ tracking_uri }}` で公開する
+- **バックエンドストア (backend store)**: 実験・run・モデルバージョンのメタデータを保存するDB。`{{ backend_store_uri }}` を使用する
+- **アーティファクトストア (artifact store)**: モデルファイルなど成果物の保存先。`{{ artifact_root }}` を使用する
+- **登録済みモデル (Registered Model)**: モデルレジストリ上でバージョン管理される名前付きモデル。`{{ model_name }}` として登録する
+- **エイリアス (alias)**: モデルバージョンに付与する可変ラベル。`{{ staging_alias }}` や `{{ production_alias }}` のように環境ごとの参照名として使い、廃止予定のstage機能の代替として推奨されている
+
+## シナリオ設定
+
+実験 `{{ experiment_name }}` で生成したモデルを登録済みモデル `{{ model_name }}` としてモデルレジストリに登録し、エイリアス `{{ staging_alias }}` / `{{ production_alias }}` で参照先バージョンを切り替えながら運用します。トラッキングサーバは `{{ tracking_uri }}` で稼働させ、`mlflow models serve` により `{{ serve_host }}:{{ serve_port }}` でモデルの動作を検証します。
+
+## 手順
+
+### 1. MLflowトラッキングサーバの起動
+
+```bash
+mlflow server --backend-store-uri {{ backend_store_uri }} --default-artifact-root {{ artifact_root }} --host {{ server_host }} --port {{ server_port }}
+```
+
+別ターミナルからクライアント操作を行う場合は、接続先を環境変数で指定します。
+
+```bash
+export MLFLOW_TRACKING_URI={{ tracking_uri }}
+```
+
+### 2. モデルの登録とバージョン付与
+
+学習実行(run)のrun_idを環境変数に設定してから、モデルを登録します。登録済みモデルが未作成の場合は自動的に作成され、既存の場合は新しいバージョンとして追加されます。
+
+```bash
+export MLFLOW_TRACKING_URI={{ tracking_uri }}
+export RUN_ID=<学習実行で生成されたrun_id>
+python3 -c "
+import mlflow
+mlflow.register_model('runs:/$RUN_ID/model', '{{ model_name }}')
+"
+```
+
+登録結果を確認します。
+
+```bash
+python3 -c "
+from mlflow import MlflowClient
+client = MlflowClient()
+for mv in client.search_model_versions(\"name='{{ model_name }}'\"):
+    print(mv.version, mv.status, mv.run_id)
+"
+```
+
+### 3. エイリアスによるステージ運用
+
+新規バージョンにまず `{{ staging_alias }}` エイリアスを付与し、検証環境から参照させます。
+
+```bash
+export MLFLOW_TRACKING_URI={{ tracking_uri }}
+python3 -c "
+from mlflow import MlflowClient
+client = MlflowClient()
+client.set_registered_model_alias('{{ model_name }}', '{{ staging_alias }}', '2')
+"
+```
+
+検証が完了したら、同じバージョンに `{{ production_alias }}` エイリアスを付け替えて昇格させます。
+
+```bash
+python3 -c "
+from mlflow import MlflowClient
+client = MlflowClient()
+client.set_registered_model_alias('{{ model_name }}', '{{ production_alias }}', '2')
+"
+```
+
+### 4. mlflow models serveでの動作確認
+
+`{{ production_alias }}` エイリアスが指すバージョンをそのままサービングし、推論APIとして動作するかを確認します。
+
+```bash
+export MLFLOW_TRACKING_URI={{ tracking_uri }}
+mlflow models serve -m models:/{{ model_name }}@{{ production_alias }} -h {{ serve_host }} -p {{ serve_port }} --env-manager local &
+sleep 5
+curl -s -X POST -H "Content-Type: application/json" -d '{"dataframe_split": {"columns": ["feature1", "feature2"], "data": [[0.1, 0.2]]}}' http://127.0.0.1:{{ serve_port }}/invocations
+```
+
+### 5. 旧バージョンへのロールバック
+
+サービング中のバージョンに問題があった場合は、`{{ production_alias }}` エイリアスをロールバック先のバージョンへ即座に付け替えます。モデルファイル自体は再取得せず、参照先の切り替えのみで反映されます。
+
+```bash
+export MLFLOW_TRACKING_URI={{ tracking_uri }}
+python3 -c "
+from mlflow import MlflowClient
+client = MlflowClient()
+client.set_registered_model_alias('{{ model_name }}', '{{ production_alias }}', '{{ rollback_target_version }}')
+"
+```
+
+`mlflow models serve` プロセスを再起動し、切り替え後のバージョンで応答することを確認します。
+
+```bash
+kill %1
+export MLFLOW_TRACKING_URI={{ tracking_uri }}
+mlflow models serve -m models:/{{ model_name }}@{{ production_alias }} -h {{ serve_host }} -p {{ serve_port }} --env-manager local &
+sleep 5
+curl -s -X POST -H "Content-Type: application/json" -d '{"dataframe_split": {"columns": ["feature1", "feature2"], "data": [[0.1, 0.2]]}}' http://127.0.0.1:{{ serve_port }}/invocations
+```
+
+## 動作確認
+
+- `client.get_model_version_by_alias('{{ model_name }}', '{{ production_alias }}')` の戻り値のversionが意図したバージョンと一致すること
+- `curl http://127.0.0.1:{{ serve_port }}/invocations` が200応答でpredictionsを含むJSONを返すこと
+- ロールバック後、`{{ production_alias }}` エイリアスが `{{ rollback_target_version }}` を指していること
+
+## 注意事項
+
+- {{ credential_note }}。
+- `mlflow.register_model` はモデルファイルを `{{ artifact_root }}` 配下にコピーするため、頻繁な再登録はストレージ容量を圧迫する。不要になった古いバージョンは削除方針を別途定める。
+- エイリアスの付け替えは即時反映されるため、`{{ production_alias }}` への昇格前に必ず `{{ staging_alias }}` 環境での動作確認を済ませる。
+- 廃止予定のstage(Staging/Production名の固定ステージ)機能とエイリアス機能を混在させない。新規運用はエイリアスに統一する。

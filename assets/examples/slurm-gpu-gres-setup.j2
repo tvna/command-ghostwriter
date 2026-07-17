@@ -1,0 +1,76 @@
+# SlurmのGRESによるGPU資源定義と割り当て
+
+`slurm.conf` と `gres.conf` でGPUをGRES(Generic RESource)として定義し、ノードへの割り当てとジョブでの利用を検証します。
+
+## 目的
+
+GRESの仕組みを理解し、Slurmクラスタ上のGPUノードを安全に登録・公開したうえで、ジョブがGPUを正しく確保できる状態を作ることを目指します。
+
+## 用語解説
+
+- **GRES (Generic Resource)**: SlurmがCPU・メモリ以外の汎用リソース(GPU等)をスケジューリング対象として管理する仕組み
+- **GresTypes**: `slurm.conf` でクラスタ全体に登録するGRESの種類名。ここでは `{{ gres_types }}` を使う
+- **NodeName行のGres指定**: 各ノードが公開するGRESの種類と数量を `Gres=種類:数` の形式で宣言するパラメータ
+- **gres.conf**: 各ノード上でGRESが実デバイス(例: `/dev/nvidiaX`)のどれに対応するかを宣言する設定ファイル
+- **scontrol reconfigure**: 稼働中の `slurmctld`・`slurmd` に設定ファイルの変更を反映させるコマンド
+
+## シナリオ設定
+
+対象ノード `{{ node_name }}`(CPU数: `{{ cpu_count }}`、実メモリ: `{{ real_memory_mb }}` MB)に、GPU `{{ gpu_count }}` 基を `{{ gres_types }}` としてSlurmへ登録します。設定ファイルは `{{ slurm_conf_path }}` と `{{ gres_conf_path }}`、対象デバイスは `{{ gpu_device_range }}` です。動作検証は `{{ partition_name }}` パーティションに対して行います。
+
+## 手順
+
+### 1. GresTypesとNodeName定義をslurm.confへ追記する
+
+```bash
+sudo tee -a {{ slurm_conf_path }} <<EOF
+GresTypes={{ gres_types }}
+NodeName={{ node_name }} CPUs={{ cpu_count }} RealMemory={{ real_memory_mb }} Gres={{ gres_types }}:{{ gpu_count }} State=UNKNOWN
+EOF
+```
+
+`GresTypes` は同一ファイル内で `NodeName` 行より前に定義する必要があります。追記順序を崩さないよう、既存の `{{ slurm_conf_path }}` にGresTypes行がない場合はここで初めて追加します。
+
+### 2. gres.confでGPUデバイスを宣言する
+
+```bash
+sudo tee -a {{ gres_conf_path }} <<EOF
+NodeName={{ node_name }} Name={{ gres_types }} File={{ gpu_device_range }}
+EOF
+```
+
+### 3. scontrol reconfigureで設定を反映する
+
+```bash
+sudo systemctl restart slurmd
+sudo scontrol reconfigure
+```
+
+`gres.conf` の変更はスケジューラの再読込だけでは反映されない場合があるため、対象ノードで `slurmd` を再起動してから `scontrol reconfigure` を実行します。
+
+### 4. sinfoでGRES公開状況を確認する
+
+```bash
+sinfo -o "%20N %10c %10m %25G %6t"
+scontrol show node {{ node_name }} | grep -i gres
+```
+
+`{{ node_name }}` のGRES列に `{{ gres_types }}:{{ gpu_count }}` が表示されていることを確認します。
+
+### 5. srun --gres=gpu:1でジョブ割り当てを検証する
+
+```bash
+srun --partition={{ partition_name }} --nodelist={{ node_name }} --gres={{ gres_types }}:1 {{ srun_test_command }}
+```
+
+## 動作確認
+
+- `sinfo -o "%20N %10c %10m %25G %6t"` の出力で `{{ node_name }}` のGRES列が `{{ gres_types }}:{{ gpu_count }}` を示すこと
+- `scontrol show node {{ node_name }}` の `Gres=` 行に `{{ gres_types }}:{{ gpu_count }}` が含まれること
+- 手順5の `srun` ジョブが `{{ partition_name }}` パーティションで正常終了し、`{{ srun_test_command }}` の実行結果としてGPUデバイスが確認できること
+
+## 注意事項
+
+- `GresTypes` は `slurm.conf` 内で `NodeName` 行より前に定義しないと反映されません。手順1の追記順序を必ず守ります。
+- `{{ real_memory_mb }}` MBは実機の搭載メモリ量を超えないように設定します。超過するとノードが `DOWN` 状態(low mem)になります。
+- 本手順は単一ノード `{{ node_name }}` へのGRES登録を対象とし、複数ノードへの一括展開や、GPU分割(MIG)の設定は対象外とします。

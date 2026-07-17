@@ -1,0 +1,31 @@
+container_name: elasticsearch
+elasticsearch_image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
+host_port: 9200
+storage_host_path: /data/elasticsearch
+storage_container_path: /usr/share/elasticsearch/data
+index_name: support-articles
+vector_field: content_vector
+title_field: title
+category_field: category
+vector_dim: 4
+similarity_metric: cosine
+bulk_file_path: /tmp/support-articles-bulk.ndjson
+sample_docs:
+  - id: "1"
+    vector: [0.9, 0.1, 0.2, 0.0]
+    title: ノートPCの電源が入らないときの確認手順
+    category: hardware
+  - id: "2"
+    vector: [0.1, 0.9, 0.2, 0.1]
+    title: Wi-Fiに接続できないときの対処法
+    category: network
+  - id: "3"
+    vector: [0.2, 0.1, 0.9, 0.3]
+    title: プリンタで印刷できないときのチェックリスト
+    category: hardware
+query_vector: [0.85, 0.15, 0.18, 0.05]
+knn_k: 3
+num_candidates_default: 50
+num_candidates_low: 10
+num_candidates_high: 200
+filter_category_value: hardware

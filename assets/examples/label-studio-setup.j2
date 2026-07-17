@@ -1,0 +1,133 @@
+# pipによるLabel Studioラベリング基盤の構築
+
+Label Studioを仮想環境 `{{ venv_dir }}` にpipで導入し、`{{ bind_host }}:{{ bind_port }}` での起動、プロジェクト作成とデータインポート、アノテーション結果のエクスポート、systemdによる常時起動化までを行います。
+
+## 目的
+
+Label Studioの導入からプロジェクト運用の一巡(起動→プロジェクト作成→データ投入→アノテーション結果の取り出し)を理解し、サーバ再起動後も自動復旧する常時起動サービスとして構築できるようになることを目指します。
+
+## 用語解説
+
+- **Label Studio**: 画像・テキスト・音声などのデータにラベルを付与するためのOSSアノテーションツール。Webサーバとして動作する
+- **プロジェクト**: ラベリング対象のタスク群と、ラベル付けのUI・出力形式を定義する`label_config`をひとまとめにした管理単位
+- **label_config**: プロジェクトごとに定義する、ラベリング画面のレイアウトと選択肢をXML風のタグ(`<View>`, `<Image>`, `<Choices>`など)で記述した設定
+- **タスク/アノテーション**: プロジェクトにインポートされたラベル付け対象データを「タスク」、作業者が付与した結果を「アノテーション」と呼ぶ
+- **APIトークン**: Label StudioのREST API(プロジェクト作成・データインポート・エクスポート)を呼び出す際に`Authorization: Token`ヘッダーへ渡す認証情報。Web UIの「Account & Settings」画面で発行する
+
+## シナリオ設定
+
+Label Studio `{{ label_studio_version }}` を仮想環境 `{{ venv_dir }}` に導入し、データディレクトリ `{{ data_dir }}` を使って `{{ bind_host }}:{{ bind_port }}` で起動します。管理者アカウントは `{{ admin_email }}`、プロジェクト名は `{{ project_title }}` とし、`{{ import_file_path }}` のデータをインポートしたのち、アノテーション結果を `{{ export_format }}` 形式で `{{ export_output_path }}` へエクスポートします。最終的にsystemdサービス `{{ systemd_service_name }}` として、専用ユーザー `{{ systemd_service_user }}` で常時起動化します。
+
+## 手順
+
+### 1. 仮想環境の作成とpipによる導入
+
+```bash
+python3 -m venv {{ venv_dir }}
+source {{ venv_dir }}/bin/activate
+pip install --upgrade pip
+pip install label-studio=={{ label_studio_version }}
+label-studio version
+```
+
+`{{ venv_dir }}` を専用の仮想環境として切り出すことで、Label Studioの依存パッケージがシステムのPython環境を汚染しません。
+
+### 2. label-studio startによる起動
+
+```bash
+source {{ venv_dir }}/bin/activate
+export LABEL_STUDIO_BASE_DATA_DIR={{ data_dir }}
+export LABEL_STUDIO_USERNAME={{ admin_email }}
+export LABEL_STUDIO_PASSWORD="<初回のみ設定する管理者パスワード>"
+label-studio start --host {{ bind_host }} --port {{ bind_port }} --no-browser
+```
+
+`LABEL_STUDIO_USERNAME` / `LABEL_STUDIO_PASSWORD` を設定した状態で初回起動すると、対話なしで管理者アカウント `{{ admin_email }}` が作成されます。起動を確認したら一度 `Ctrl+C` で停止し、ブラウザで `http://{{ bind_host }}:{{ bind_port }}` にログインして「Account & Settings」画面からAPIトークンを発行します。発行したトークンは以降のAPI呼び出し用に環境変数として保持します。
+
+```bash
+export {{ api_token_env }}="<Account & Settings画面で発行したトークン>"
+```
+
+### 3. プロジェクト作成とデータインポート
+
+```bash
+source {{ venv_dir }}/bin/activate
+PROJECT_ID=$(curl -s -X POST {{ base_url }}/api/projects/ \
+  -H "Authorization: Token ${{ api_token_env }}" \
+  -H "Content-Type: application/json" \
+  -d '{"title": "{{ project_title }}", "label_config": "<View><Image name=\"image\" value=\"$image\"/><Choices name=\"label\" toName=\"image\"><Choice value=\"cat\"/><Choice value=\"dog\"/></Choices></View>"}' \
+  | jq -r '.id')
+echo "PROJECT_ID=$PROJECT_ID"
+```
+
+`label_config`は最小構成のサンプル(画像への2択ラベル付け)です。実際の作業内容に合わせて`<Choice>`の項目やタグ構成を調整します。
+
+```bash
+mkdir -p $(dirname {{ import_file_path }})
+curl -s -X POST {{ base_url }}/api/projects/$PROJECT_ID/import \
+  -H "Authorization: Token ${{ api_token_env }}" \
+  -F "file=@{{ import_file_path }}"
+```
+
+### 4. アノテーション結果のエクスポート
+
+```bash
+mkdir -p $(dirname {{ export_output_path }})
+curl -s -X GET "{{ base_url }}/api/projects/$PROJECT_ID/export?exportType={{ export_format }}" \
+  -H "Authorization: Token ${{ api_token_env }}" \
+  --output {{ export_output_path }}
+```
+
+`$PROJECT_ID`は手順3のシェルセッションで設定した変数です。別セッションで実行する場合は、Web UIのプロジェクト画面URLに含まれるIDを確認して再度 `export PROJECT_ID=<id>` してから実行します。
+
+### 5. systemdによる常時起動化
+
+```bash
+sudo useradd --no-create-home --shell /usr/sbin/nologin {{ systemd_service_user }}
+sudo mkdir -p {{ data_dir }}
+sudo chown -R {{ systemd_service_user }}:{{ systemd_service_group }} {{ data_dir }}
+sudo install -d -m 0750 -o {{ systemd_service_user }} -g {{ systemd_service_group }} /etc/label-studio
+sudo tee /etc/label-studio/env <<'EOF'
+{{ admin_password_env }}=<初回起動時に設定した管理者パスワード>
+EOF
+sudo chmod 0600 /etc/label-studio/env
+sudo chown {{ systemd_service_user }}:{{ systemd_service_group }} /etc/label-studio/env
+```
+
+```bash
+sudo tee /etc/systemd/system/{{ systemd_service_name }}.service <<'EOF'
+[Unit]
+Description=Label Studio
+After=network.target
+
+[Service]
+User={{ systemd_service_user }}
+Group={{ systemd_service_group }}
+Environment=LABEL_STUDIO_BASE_DATA_DIR={{ data_dir }}
+Environment=LABEL_STUDIO_USERNAME={{ admin_email }}
+EnvironmentFile=/etc/label-studio/env
+ExecStart={{ venv_dir }}/bin/label-studio start --host {{ bind_host }} --port {{ bind_port }} --no-browser
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now {{ systemd_service_name }}
+```
+
+パスワードはユニットファイルに直書きせず、`root:{{ systemd_service_group }}`のみ読み取り可能な`/etc/label-studio/env`(0600)経由でsystemdに渡します。
+
+## 動作確認
+
+- `sudo systemctl status {{ systemd_service_name }} --no-pager` が `active (running)` であり、実行ユーザーが `{{ systemd_service_user }}` であること
+- `curl -s {{ base_url }}/api/projects/ -H "Authorization: Token ${{ api_token_env }}"` のレスポンスに `{{ project_title }}` が含まれること
+- `{{ export_output_path }}` が生成され、`{{ import_file_path }}` に投入したタスク件数と整合するアノテーション件数を含んでいること
+- サーバ再起動後も `sudo systemctl is-enabled {{ systemd_service_name }}` が `enabled` を返し、`{{ bind_host }}:{{ bind_port }}` へのアクセスが復旧すること
+
+## 注意事項
+
+- `{{ admin_password_env }}` の値や `{{ api_token_env }}` のトークン値をコミットやログに残さない。`/etc/label-studio/env` のパーミッションは必ず0600のまま維持する。
+- `{{ bind_host }}` を `0.0.0.0` のまま外部ネットワークに晒すと、認証を突破されない限りは安全だが、リバースプロキシでのTLS終端やアクセス元制限の追加を別途検討する。
+- `{{ data_dir }}` にはSQLiteのプロジェクトDBとメディアファイルの実体が保存される。バックアップ対象に含め、`{{ systemd_service_name }}` サービス停止中に取得することで整合性のあるバックアップにする。
+- 手順3の`label_config`はサンプルであり、実運用のラベリング要件に合わせてタグ構成を見直したうえでプロジェクトを作成する。

@@ -1,0 +1,91 @@
+# DuckDBによるトレーニングデータのETL処理 — {{ dataset_name }}
+
+duckdb CLIを使い、ソースCSVの読み込み・SQLによる変換とフィルタリング・Parquet形式での出力までを行い、学習用データセット `{{ dataset_name }}` を整形します。
+
+## 目的
+
+サーバプロセス不要のDuckDB CLIを使って、CSVの取り込みからSQL変換、Parquet出力までの軽量なETLフローを一通り実行できるようになることを目指します。
+
+## 用語解説
+
+- **DuckDB**: 埋め込み型のOLAP SQLエンジン。サーバプロセスを起動せず、CLIやライブラリから直接SQLを実行できる
+- **duckdb CLI**: DuckDBのコマンドラインインタフェース。`.duckdb` ファイルへの永続化と、ファイル未指定時のインメモリ実行の両方に対応する
+- **read_csv_auto**: CSVファイルの区切り文字・型・ヘッダーを自動推論して読み込むテーブル関数
+- **COPY文**: テーブルやクエリ結果をParquet・CSVなど外部ファイル形式へ書き出すSQL文
+- **Parquet**: 列指向のバイナリファイル形式。圧縮率と読み込み速度に優れ、学習パイプラインでの利用に適する
+- **DESCRIBE**: テーブルやクエリのスキーマ(列名・型)を確認するSQL文
+
+## シナリオ設定
+
+データセット `{{ dataset_name }}` を対象に、ソースCSV `{{ source_csv_path }}` をDuckDB `{{ duckdb_version }}` で読み込み、テーブル `{{ source_table_name }}` として取り込みます。列 `{{ filter_label_column }}` がNULLでなく、かつ `{{ filter_date_column }}` が `{{ filter_date_threshold }}` 以降の行のみを抽出してテーブル `{{ filtered_table_name }}` を作成し、Parquetファイル `{{ output_parquet_dir }}/{{ output_parquet_filename }}` として出力します。出力は最低 {{ expected_min_row_count }} 件、{{ expected_column_count }} 列を想定します。
+
+## 手順
+
+### 1. DuckDB CLIの導入と動作確認
+
+```bash
+mkdir -p {{ etl_work_dir }}
+curl -L -o /tmp/duckdb_cli.zip https://github.com/duckdb/duckdb/releases/download/v{{ duckdb_version }}/duckdb_cli-linux-amd64.zip
+unzip -o /tmp/duckdb_cli.zip -d /usr/local/bin
+chmod +x /usr/local/bin/duckdb
+duckdb --version
+```
+
+### 2. ソースCSVの読み込みとスキーマ確認
+
+```bash
+duckdb {{ db_file_path }} <<'EOF'
+CREATE OR REPLACE TABLE {{ source_table_name }} AS
+SELECT * FROM read_csv_auto('{{ source_csv_path }}', header=true);
+DESCRIBE {{ source_table_name }};
+SELECT COUNT(*) FROM {{ source_table_name }};
+EOF
+```
+
+`DESCRIBE` の出力を目視し、列名・型がソースCSVの想定と一致しているかをこの時点で確認します。自動推論した型が意図と異なる場合は、後続手順に進む前に読み込みオプションを見直します。
+
+### 3. SQLによる変換・フィルタリング
+
+```bash
+duckdb {{ db_file_path }} <<'EOF'
+CREATE OR REPLACE TABLE {{ filtered_table_name }} AS
+SELECT *
+FROM {{ source_table_name }}
+WHERE {{ filter_label_column }} IS NOT NULL
+  AND {{ filter_date_column }} >= '{{ filter_date_threshold }}';
+DESCRIBE {{ filtered_table_name }};
+SELECT COUNT(*) FROM {{ filtered_table_name }};
+EOF
+```
+
+### 4. COPY文によるParquet出力
+
+```bash
+mkdir -p {{ output_parquet_dir }}
+duckdb {{ db_file_path }} <<'EOF'
+COPY {{ filtered_table_name }} TO '{{ output_parquet_dir }}/{{ output_parquet_filename }}' (FORMAT PARQUET);
+EOF
+```
+
+### 5. 出力データの件数・スキーマ検証
+
+```bash
+duckdb <<'EOF'
+SELECT COUNT(*) FROM read_parquet('{{ output_parquet_dir }}/{{ output_parquet_filename }}');
+DESCRIBE SELECT * FROM read_parquet('{{ output_parquet_dir }}/{{ output_parquet_filename }}');
+EOF
+```
+
+## 動作確認
+
+- `duckdb --version` が `{{ duckdb_version }}` を表示すること
+- 手順2の `DESCRIBE {{ source_table_name }}` で列数が {{ expected_column_count }} 列であること
+- 手順5の `COUNT(*)` が {{ expected_min_row_count }} 件以上であること
+- 手順5の `DESCRIBE` が示す出力Parquetのスキーマが、手順2で確認した列構成と矛盾しないこと
+
+## 注意事項
+
+- CSVの文字コードや区切り文字が想定と異なると、`read_csv_auto` の自動推論が誤ったスキーマを生成することがある。手順2の `DESCRIBE` 結果は必ず目視確認し、想定と異なる場合は読み込みオプションを明示指定してからやり直す。
+- `CREATE OR REPLACE TABLE` は既存の同名テーブルを破棄して作り直す。`{{ db_file_path }}` を複数人・複数ジョブで共有している場合は、実行タイミングの競合に注意する。
+- Parquet出力先 `{{ output_parquet_dir }}/{{ output_parquet_filename }}` に既存ファイルがある場合、`COPY` は無条件に上書きする。過去の出力を残したい場合は出力先パスに日付やバージョンを含める運用にする。
+- 大容量CSVを扱う場合、DuckDBはクエリ実行時に一時ファイルをディスクへスピルすることがあるため、`{{ etl_work_dir }}` の空き容量を事前に確認する。

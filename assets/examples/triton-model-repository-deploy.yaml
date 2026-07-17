@@ -1,0 +1,18 @@
+model_repo_path: "/data/triton/model_repository"
+model_name: "resnet50_onnx"
+model_version: "1"
+model_source_path: "/home/deploy/models/resnet50/model.onnx"
+platform: "onnxruntime_onnx"
+max_batch_size: 8
+input_name: "input"
+input_dtype: "TYPE_FP32"
+input_dims: "3, 224, 224"
+output_name: "output"
+output_dtype: "TYPE_FP32"
+output_dims: "1000"
+container_name: "triton-server"
+container_image: "nvcr.io/nvidia/tritonserver:24.05-py3"
+sdk_image: "nvcr.io/nvidia/tritonserver:24.05-py3-sdk"
+http_port: 8000
+grpc_port: 8001
+metrics_port: 8002

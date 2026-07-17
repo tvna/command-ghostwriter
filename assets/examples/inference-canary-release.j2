@@ -1,0 +1,99 @@
+# 新モデルのカナリアデプロイと段階移行
+
+Nginxの重み付きupstreamを使い、新旧バージョンの推論コンテナを並行稼働させたうえでトラフィック比率を段階的に新バージョンへ移行します。各ステージで指標を監視し、異常があれば直ちに旧バージョンへ切り戻します。
+
+## 目的
+
+新旧モデルの推論コンテナを重み付きupstreamで共存させ、エラー率・p99レイテンシを監視しながら段階的にトラフィックを移行し、異常発生時には即座に切り戻せる運用を身につけることを目指します。
+
+## 用語解説
+
+- **カナリアリリース**: 新バージョンへ一度に全トラフィックを切り替えず、一部のトラフィックのみを新バージョンへ流して影響を限定的に確認しながら段階的に移行する手法
+- **重み付きupstream**: Nginxの`upstream`ブロックで各`server`行に`weight`を指定し、トラフィックの振り分け比率を制御する仕組み。数値が大きいほど多くのリクエストが振られる
+- **p99レイテンシ**: リクエスト全体のうち遅い方から数えて上位1%に相当する応答時間。平均値では見えない外れ値の悪化を捉える指標
+- **切り戻し(rollback)**: 新バージョンで問題が検知された際に、重みを旧バージョンへ100%戻し新バージョンへのトラフィックを止める対応
+- **完全切替(cutover)**: 監視で問題がないことを確認したうえで新バージョンの重みを100%にし、旧バージョンを停止する最終ステージ
+
+## シナリオ設定
+
+モデル`{{ csv_rows[0]["old_model_version"] }}`(コンテナ`{{ csv_rows[0]["old_container_name"] }}`、ポート`{{ csv_rows[0]["old_port"] }}`)から`{{ csv_rows[0]["new_model_version"] }}`(コンテナ`{{ csv_rows[0]["new_container_name"] }}`、ポート`{{ csv_rows[0]["new_port"] }}`)へ、Nginxのupstream`{{ csv_rows[0]["upstream_name"] }}`を使い次の{{ csv_rows | length }}段階でトラフィックを移行します。
+
+| stage_name | new_weight | old_weight | monitor_duration_min | error_rate_threshold_pct | latency_p99_threshold_ms |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["stage_name"] }} | {{ r["new_weight"] }} | {{ r["old_weight"] }} | {{ r["monitor_duration_min"] }} | {{ r["error_rate_threshold_pct"] }} | {{ r["latency_p99_threshold_ms"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 新旧バージョンのコンテナを並行起動する
+
+```bash
+docker run -d --name {{ csv_rows[0]["old_container_name"] }} -p {{ csv_rows[0]["old_port"] }}:8080 registry.internal/inference:{{ csv_rows[0]["old_model_version"] }}
+docker run -d --name {{ csv_rows[0]["new_container_name"] }} -p {{ csv_rows[0]["new_port"] }}:8080 registry.internal/inference:{{ csv_rows[0]["new_model_version"] }}
+docker ps --filter "name={{ csv_rows[0]["old_container_name"] }}" --filter "name={{ csv_rows[0]["new_container_name"] }}"
+```
+
+### 2. Nginxの重み付きupstreamを設定する
+
+```bash
+sudo tee /etc/nginx/conf.d/{{ csv_rows[0]["upstream_name"] }}.conf <<'EOF'
+upstream {{ csv_rows[0]["upstream_name"] }} {
+    server 127.0.0.1:{{ csv_rows[0]["old_port"] }} weight={{ csv_rows[0]["old_weight"] }};
+    server 127.0.0.1:{{ csv_rows[0]["new_port"] }} weight={{ csv_rows[0]["new_weight"] }};
+}
+
+server {
+    listen 80;
+    location / {
+        proxy_pass http://{{ csv_rows[0]["upstream_name"] }};
+    }
+}
+EOF
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+### 3. 初期比率でトラフィックを流す
+
+```bash
+echo "初期ステージ: {{ csv_rows[0]["stage_name"] }} (new_weight={{ csv_rows[0]["new_weight"] }} / old_weight={{ csv_rows[0]["old_weight"] }})"
+for i in $(seq 1 20); do curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1/health; done
+```
+
+### 4. 指標を監視し段階的に比率を上げる
+
+```bash
+{% for r in csv_rows %}echo "=== ステージ {{ r["stage_name"] }}: new_weight={{ r["new_weight"] }} old_weight={{ r["old_weight"] }} ==="
+sudo sed -i "s/server 127.0.0.1:{{ r["old_port"] }} weight=[0-9.]*/server 127.0.0.1:{{ r["old_port"] }} weight={{ r["old_weight"] }}/" /etc/nginx/conf.d/{{ r["upstream_name"] }}.conf
+sudo sed -i "s/server 127.0.0.1:{{ r["new_port"] }} weight=[0-9.]*/server 127.0.0.1:{{ r["new_port"] }} weight={{ r["new_weight"] }}/" /etc/nginx/conf.d/{{ r["upstream_name"] }}.conf
+sudo nginx -t && sudo systemctl reload nginx
+sleep {{ r["monitor_duration_min"] }}m
+echo "エラー率がしきい値 {{ r["error_rate_threshold_pct"] }}%、p99レイテンシがしきい値 {{ r["latency_p99_threshold_ms"] }}ms を超えていないことを監視ダッシュボードで確認する"
+{% endfor %}```
+
+### 5. 完全切替または切り戻しを実施する
+
+```bash
+# 正常系: 全ステージの監視で問題がなければ旧コンテナを停止する
+docker stop {{ csv_rows[0]["old_container_name"] }}
+docker rm {{ csv_rows[0]["old_container_name"] }}
+
+# 異常系: いずれかのステージでしきい値を超過した場合は直ちに旧バージョンへ100%戻す
+sudo sed -i "s/server 127.0.0.1:{{ csv_rows[0]["old_port"] }} weight=[0-9.]*/server 127.0.0.1:{{ csv_rows[0]["old_port"] }} weight=100/" /etc/nginx/conf.d/{{ csv_rows[0]["upstream_name"] }}.conf
+sudo sed -i "s/server 127.0.0.1:{{ csv_rows[0]["new_port"] }} weight=[0-9.]*/server 127.0.0.1:{{ csv_rows[0]["new_port"] }} weight=0/" /etc/nginx/conf.d/{{ csv_rows[0]["upstream_name"] }}.conf
+sudo nginx -t && sudo systemctl reload nginx
+docker stop {{ csv_rows[0]["new_container_name"] }}
+```
+
+## 動作確認
+
+- 手順1で`docker ps`に`{{ csv_rows[0]["old_container_name"] }}`と`{{ csv_rows[0]["new_container_name"] }}`が共に`Up`状態で表示されること
+- 手順2で`sudo nginx -t`が構文エラーなしで完了すること
+- 各ステージ適用後、`curl`で`http://127.0.0.1/health`がHTTP 200を返し続けること
+- 各ステージの監視期間中、エラー率が`error_rate_threshold_pct`、p99レイテンシが`latency_p99_threshold_ms`を超えていないこと
+- 最終ステージ(`full-cutover`)適用後、全トラフィックが新バージョンへ流れ、旧コンテナを安全に停止できること
+
+## 注意事項
+
+- しきい値(`error_rate_threshold_pct`、`latency_p99_threshold_ms`)を超過した場合は次のステージへ進まず、手順5の異常系(切り戻し)を直ちに実施する。
+- `sudo sed -i`によるNginx設定の書き換えは`weight=`部分のみを対象としており、他の設定行を巻き込んでいないことを`nginx -t`で必ず確認してから`reload`する。
+- 本手順はNginxの静的な重み付き`upstream`によるカナリアリリースであり、動的な重み変更や自動ロールバックを行うサービスメッシュ(Istio等)とは制御レイヤーが異なる。

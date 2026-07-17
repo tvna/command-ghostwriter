@@ -1,0 +1,100 @@
+# pgvector導入とHNSWインデックス設計
+
+PostgreSQL {{ pg_version }} に `pgvector` 拡張を導入し、embedding列の定義・HNSWインデックス作成・近傍検索の実行計画確認までを行います。
+
+## 目的
+
+`vector` 型とHNSWインデックスの基本パラメータ(`m` / `ef_construction` / `ef_search`)を理解し、近似最近傍探索(ANN)をPostgreSQL上で実運用できる状態にすることを目指します。
+
+## 用語解説
+
+- **pgvector**: PostgreSQLに `vector` 型と類似度演算子・ANNインデックスを追加する拡張機能
+- **vector型**: 固定次元の浮動小数点ベクトルを格納する列型。`vector({{ embedding_dim }})` のように次元数を指定する
+- **HNSW(Hierarchical Navigable Small World)**: グラフ構造で近似最近傍探索を高速化するインデックス手法。IVFFlatと異なり事前学習(トレーニング)が不要
+- **m**: HNSWグラフの各ノードが持つ接続数の上限。大きいほど再現率(recall)が上がるが、構築時間とインデックスサイズが増える
+- **ef_construction**: インデックス構築時に探索する候補数。大きいほど構築品質が上がるが構築時間が増える
+- **ef_search**: クエリ実行時に探索する候補数。実行時に `SET` で調整でき、大きいほど再現率が上がるがレイテンシが増える
+- **距離演算子**: pgvectorは `<->`(L2距離)、`<#>`(内積)、`<=>`(コサイン距離)の3種類を提供し、インデックスのopclassと一致させる必要がある
+
+## シナリオ設定
+
+データベース `{{ db_name }}`(PostgreSQL {{ pg_version }})上のテーブル `{{ table_name }}` に、次元数 `{{ embedding_dim }}` の `{{ embedding_column }}` 列を作成し、HNSWインデックス(`m = {{ hnsw_m }}`, `ef_construction = {{ hnsw_ef_construction }}`)を構築します。距離指標は{{ distance_metric_note }}。クエリ時は `ef_search = {{ hnsw_ef_search }}` を基準に、上位 `{{ top_k }}` 件を取得します。
+
+## 手順
+
+### 1. pgvector拡張をインストールし有効化する
+
+```bash
+sudo apt-get update
+sudo apt-get install -y postgresql-{{ pg_version }}-pgvector
+sudo -u postgres psql -d {{ db_name }} <<'SQL'
+CREATE EXTENSION IF NOT EXISTS vector;
+SQL
+```
+
+`postgresql-{{ pg_version }}-pgvector` パッケージはPGDG(PostgreSQL公式)のaptリポジトリから提供されます。事前に `apt-key`/`signed-by` によるPGDGリポジトリの登録が済んでいる前提です。`CREATE EXTENSION` はデータベースの所有者またはスーパーユーザー権限で実行します。
+
+### 2. vector型の列を持つテーブルを作成する
+
+```bash
+sudo -u postgres psql -d {{ db_name }} <<'SQL'
+CREATE TABLE {{ table_name }} (
+    id bigserial PRIMARY KEY,
+    content text NOT NULL,
+    {{ embedding_column }} vector({{ embedding_dim }})
+);
+SQL
+```
+
+`{{ embedding_column }}` 列の次元数は `{{ embedding_dim }}` に固定されます。異なる次元数のembeddingを投入しようとするとINSERT時にエラーになります。
+
+### 3. embeddingデータを投入する
+
+```bash
+psql -U {{ db_user }} -d {{ db_name }} -c "\copy {{ table_name }}(content, {{ embedding_column }}) FROM '{{ csv_import_path }}' WITH (FORMAT csv)"
+```
+
+CSV側の `{{ embedding_column }}` 列は `[0.0123,-0.045,0.981, ...]` のようにvectorのテキスト表現(角括弧+カンマ区切り)で `{{ embedding_dim }}` 個の値を並べておきます。`\copy` はクライアント側ファイルを読み込むpsqlのメタコマンドです。
+
+### 4. HNSWインデックスを作成しパラメータを設定する
+
+```bash
+sudo -u postgres psql -d {{ db_name }} <<'SQL'
+SET maintenance_work_mem = '{{ maintenance_work_mem }}';
+CREATE INDEX {{ table_name }}_{{ embedding_column }}_hnsw_idx
+    ON {{ table_name }}
+    USING hnsw ({{ embedding_column }} {{ distance_ops }})
+    WITH (m = {{ hnsw_m }}, ef_construction = {{ hnsw_ef_construction }});
+SQL
+```
+
+`{{ distance_ops }}` は距離指標に対応するopclassです。クエリ側の距離演算子(`<=>` / `<->` / `<#>`)がこのopclassと一致していないとインデックスが使われません。構築中は書き込みロックがかかるため、稼働中サービスに対しては `CREATE INDEX CONCURRENTLY` の利用を検討してください。
+
+### 5. EXPLAINで近傍検索の実行計画を確認する
+
+```bash
+psql -U {{ db_user }} -d {{ db_name }} <<'SQL'
+SET hnsw.ef_search = {{ hnsw_ef_search }};
+EXPLAIN ANALYZE
+SELECT id, content
+FROM {{ table_name }}
+ORDER BY {{ embedding_column }} <=> '[0.0123,-0.045,0.981]'
+LIMIT {{ top_k }};
+SQL
+```
+
+実行計画に `Index Scan using {{ table_name }}_{{ embedding_column }}_hnsw_idx` が現れることを確認します。`Seq Scan` になっている場合はopclassの不一致か、対象テーブルの行数が少なくプランナがシーケンシャルスキャンを選んでいる可能性があります。
+
+## 動作確認
+
+- `\d {{ table_name }}` の出力に `{{ table_name }}_{{ embedding_column }}_hnsw_idx` がhnsw方式で表示されること
+- `SELECT indexname, indexdef FROM pg_indexes WHERE tablename = '{{ table_name }}';` でインデックス定義に `USING hnsw` と `m={{ hnsw_m }}`, `ef_construction={{ hnsw_ef_construction }}` が含まれること
+- 手順5の `EXPLAIN ANALYZE` の実行計画に `Index Scan` が現れ、`Seq Scan` になっていないこと
+- `hnsw.ef_search` を変更すると返却順位や実行時間が変化することを確認し、再現率とレイテンシのトレードオフを把握すること
+
+## 注意事項
+
+- HNSWインデックスの構築はメモリを多く消費するため、`maintenance_work_mem`(本手順では`{{ maintenance_work_mem }}`)を一時的に引き上げてから実行する。設定値はセッション単位で、構築後は元の値に戻る
+- インデックス構築中はデフォルトで対象テーブルへの書き込みをブロックする。本番テーブルに対しては `CREATE INDEX CONCURRENTLY` を使い、事前にトランザクション内でないことを確認する
+- 距離指標(`{{ distance_ops }}`)とクエリの距離演算子は必ず対応させる。不一致のままではインデックスが使われず、性能劣化に気づきにくい
+- `ef_search` を大きくすると再現率は上がるがレイテンシも増える。本番導入前に再現率とレイテンシのベンチマークを取り、`{{ hnsw_ef_search }}` を初期値として調整する

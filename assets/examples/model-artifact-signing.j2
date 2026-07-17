@@ -1,0 +1,96 @@
+# cosignによるモデル成果物の署名と検証
+
+`sha256sum` によるマニフェスト作成と `cosign` の `sign-blob`/`verify-blob` を組み合わせ、モデル成果物の署名・検証と配布時の改ざん検知を行います。
+
+## 目的
+
+鍵ペアの生成からマニフェスト作成、署名、検証、配布先での確認までの一連の流れを理解し、モデル成果物が生成時点から改ざんされていないことを配布経路上で確認できるようになることを目指します。
+
+## 用語解説
+
+- **cosign**: Sigstoreプロジェクトの署名ツール。コンテナイメージに限らず任意のバイナリ(blob)にも署名・検証ができる
+- **sign-blob / verify-blob**: cosignで任意のファイル(blob)に対して署名・検証を行うサブコマンド
+- **マニフェスト**: `sha256sum` で生成する、ファイル名とハッシュ値の対応表。配布先での整合性確認に使う
+- **鍵ペア(cosign.key/cosign.pub)**: `cosign generate-key-pair` で生成される秘密鍵・公開鍵。秘密鍵はパスワードで暗号化され、環境変数 `COSIGN_PASSWORD` で復号する
+- **改ざん検知**: 配布されたファイルが署名時点から変更されていないことを、ハッシュ値と署名の両方で確認すること
+
+## シナリオ設定
+
+モデル成果物 `{{ artifact_id }}`(実体: `{{ artifact_path }}`)に署名し、配布先ホスト `{{ distribution_host }}` の `{{ distribution_dir }}` に転送したうえで検証します。鍵は `{{ key_dir }}` で管理し、秘密鍵を `{{ privkey_path }}`、公開鍵を `{{ pubkey_path }}` に配置します。マニフェストは `{{ manifest_path }}`、署名ファイルは `{{ signature_path }}` に出力します。パスワード方針は「{{ key_password_note }}」です。
+
+## 手順
+
+### 1. 署名鍵の生成と保管方針の確認
+
+鍵の保管ディレクトリを作成し、`cosign generate-key-pair` で鍵ペアを生成します。パスワードは環境変数経由で渡し、秘密鍵のパーミッションを制限します。
+
+```bash
+mkdir -p {{ key_dir }}
+chmod 700 {{ key_dir }}
+cd {{ key_dir }}
+export COSIGN_PASSWORD="<安全な方法で生成したパスフレーズ>"
+cosign generate-key-pair
+chmod 600 {{ privkey_path }}
+ls -l {{ privkey_path }} {{ pubkey_path }}
+```
+
+パスワード方針: {{ key_password_note }}。
+
+### 2. sha256sumによるマニフェスト作成
+
+署名対象のファイルからハッシュ値を計算し、マニフェストとして保存します。
+
+```bash
+mkdir -p $(dirname {{ manifest_path }})
+sha256sum {{ artifact_path }} > {{ manifest_path }}
+cat {{ manifest_path }}
+```
+
+### 3. cosign sign-blobによる署名
+
+秘密鍵 `{{ privkey_path }}` を使い、成果物 `{{ artifact_path }}` に署名します。
+
+```bash
+export COSIGN_PASSWORD="<手順1で設定したパスフレーズ>"
+mkdir -p $(dirname {{ signature_path }})
+cosign sign-blob --key {{ privkey_path }} --output-signature {{ signature_path }} --yes {{ artifact_path }}
+```
+
+### 4. cosign verify-blobによる検証
+
+公開鍵 `{{ pubkey_path }}` と署名ファイル `{{ signature_path }}` を使い、生成環境側で署名とマニフェストの両方を検証します。
+
+```bash
+cosign verify-blob --key {{ pubkey_path }} --signature {{ signature_path }} {{ artifact_path }}
+sha256sum -c {{ manifest_path }}
+```
+
+### 5. 配布先での検証手順の共有
+
+成果物・マニフェスト・署名ファイル・公開鍵を配布先ホスト `{{ distribution_host }}` に転送します。秘密鍵は転送対象に含めません。
+
+```bash
+ssh {{ distribution_user }}@{{ distribution_host }} mkdir -p {{ distribution_dir }}
+scp {{ artifact_path }} {{ manifest_path }} {{ signature_path }} {{ pubkey_path }} {{ distribution_user }}@{{ distribution_host }}:{{ distribution_dir }}/
+```
+
+配布先ホストにログインした担当者は、以下のコマンドで整合性と署名を検証します。
+
+```bash
+cd {{ distribution_dir }}
+sha256sum -c $(basename {{ manifest_path }})
+cosign verify-blob --key $(basename {{ pubkey_path }}) --signature $(basename {{ signature_path }}) $(basename {{ artifact_path }})
+```
+
+## 動作確認
+
+- 生成環境・配布先ホストの双方で `cosign verify-blob` の出力に `Verified OK` が含まれること
+- 生成環境・配布先ホストの双方で `sha256sum -c` の出力が `OK` になること
+- `{{ distribution_dir }}` 配下に秘密鍵ファイル(`{{ privkey_path }}` のコピー)が存在しないこと
+
+## 注意事項
+
+- 秘密鍵(`{{ privkey_path }}`)は生成環境の `{{ key_dir }}` に留め、配布先やCI/CDには絶対に転送しない。配布先に渡すのは公開鍵(`{{ pubkey_path }}`)のみとする。
+- パスワード方針「{{ key_password_note }}」を守り、`COSIGN_PASSWORD` をスクリプトやコミット履歴に直書きしない。
+- `sha256sum` によるマニフェスト検証と `cosign verify-blob` による署名検証はどちらか一方だけでは改ざん検知として不十分なため、必ず両方を実施する。
+- 鍵のローテーション方針(有効期限、失効手順、再配布手順)は本手順の対象外であり、別途定める。

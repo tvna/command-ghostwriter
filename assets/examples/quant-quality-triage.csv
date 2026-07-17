@@ -1,0 +1,6 @@
+quant_type,gguf_path,role,size_gb,ppl_threshold_pct,incident_note
+F16,/data/gguf-eval/llama-3.1-8b-f16.gguf,baseline,16.1,-,-
+Q8_0,/data/gguf-eval/llama-3.1-8b-Q8_0.gguf,candidate,8.5,2.0,-
+Q5_K_M,/data/gguf-eval/llama-3.1-8b-Q5_K_M.gguf,candidate,5.7,5.0,-
+Q4_K_M,/data/gguf-eval/llama-3.1-8b-Q4_K_M.gguf,candidate,4.9,8.0,本番投入後にユーザーから応答品質の劣化報告あり
+Q3_K_M,/data/gguf-eval/llama-3.1-8b-Q3_K_M.gguf,candidate,4.0,12.0,-

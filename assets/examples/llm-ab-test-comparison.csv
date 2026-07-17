@@ -1,0 +1,5 @@
+prompt_id,category,prompt_text,eval_criteria,old_endpoint,new_endpoint,old_model,new_model,latency_threshold_sec
+test-01,一般QA,日本の首都はどこですか。理由も一文で説明してください,事実として正しく理由が一文で述べられている,http://infer-old.internal:8000/v1,http://infer-new.internal:8000/v1,llama-3.1-8b-instruct,llama-3.1-8b-instruct-v2,3.0
+test-02,要約,次の文章を100文字以内で要約してください。クラウドサービスの障害対応では検知から復旧までの時間短縮が重要である,100文字以内に収まり原文の主旨を保持している,http://infer-old.internal:8000/v1,http://infer-new.internal:8000/v1,llama-3.1-8b-instruct,llama-3.1-8b-instruct-v2,3.0
+test-03,コード生成,Pythonでリストの重複を除去する関数を書いてください,実行可能なPythonコードが含まれ重複除去ロジックが正しい,http://infer-old.internal:8000/v1,http://infer-new.internal:8000/v1,llama-3.1-8b-instruct,llama-3.1-8b-instruct-v2,3.0
+test-04,推論,在庫が100個あり1日に15個ずつ売れる場合、何日で在庫が尽きるか計算してください,計算結果が7日と一致し根拠が示されている,http://infer-old.internal:8000/v1,http://infer-new.internal:8000/v1,llama-3.1-8b-instruct,llama-3.1-8b-instruct-v2,3.0

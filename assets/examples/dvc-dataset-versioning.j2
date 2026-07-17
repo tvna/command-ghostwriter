@@ -1,0 +1,106 @@
+# DVCによるデータセットのバージョン管理
+
+DVC(Data Version Control)を使い、`{{ project_dir }}` のデータセット `{{ dataset_dir }}` をGitと連携させて版管理します。初期化からリモートストレージ登録、追跡、同期、過去バージョンの取り出しまでを行います。
+
+## 目的
+
+大容量のデータセットをGitリポジトリに直接コミットすることなく、Gitのコミット履歴・タグと紐づけて版管理できるようになることを目指します。
+
+## 用語解説
+
+- **DVC(Data Version Control)**: Gitと組み合わせて使う、データセットや機械学習モデルなど大容量ファイルのバージョン管理ツール
+- **`.dvc`ファイル**: `dvc add` で生成される、追跡対象ファイル/ディレクトリのハッシュ値・サイズなどのメタデータを記録した小さなテキストファイル。Gitにはこのファイルだけをコミットする
+- **DVCリモート**: `dvc push`/`dvc pull` の転送先となるストレージ(S3・GCS・SSH先など)。Git remoteとは別物で、`.dvc/config` に登録する
+- **ワークスペースとキャッシュ**: 実際に作業するディレクトリ(ワークスペース)と、`dvc add` されたファイルの実体が保存される `.dvc/cache` を区別する。`dvc checkout` はキャッシュからワークスペースへファイルを復元する操作
+- **`dvc push` / `dvc pull`**: キャッシュの内容をDVCリモートとの間でアップロード/ダウンロードする操作。Gitの `git push`/`git pull` に相当する
+- **`dvc checkout`**: 現在Gitでチェックアウトされている `.dvc` ファイルのメタデータに合わせて、ワークスペース上のデータファイルの実体をキャッシュから復元する操作
+
+## シナリオ設定
+
+Gitリポジトリ `{{ project_dir }}`(リモート: `{{ git_remote_url }}`、既定ブランチ: `{{ git_default_branch }}`)で、データセット `{{ dataset_dir }}` をDVCで追跡します。DVCリモートには `{{ dvc_remote_url }}`(リモート名: `{{ dvc_remote_name }}`)を使い、認証プロファイル `{{ aws_profile }}` を通じてアクセスします。
+
+## 手順
+
+### 1. DVCの初期化とGit連携
+
+```bash
+cd {{ project_dir }}
+git remote add origin {{ git_remote_url }}
+dvc init
+git status
+```
+
+`dvc init` は `.dvc/` ディレクトリと `.dvcignore` を作成します。これらはデータの実体ではなくDVCの設定・キャッシュ管理用ファイルなので、そのままGitにコミットします。
+
+```bash
+git add .dvc .dvcignore
+git commit -m "Initialize DVC"
+```
+
+### 2. リモートストレージの登録
+
+```bash
+dvc remote add -d {{ dvc_remote_name }} {{ dvc_remote_url }}
+dvc remote modify --local {{ dvc_remote_name }} profile {{ aws_profile }}
+```
+
+`dvc init` が作成した `.dvc/.gitignore` には `config.local` が既定で含まれているため、`--local` オプションで書き込んだ認証プロファイル名は誤ってGitにコミットされません。リモートのURLだけを記録した `.dvc/config` をコミットします。
+
+```bash
+git add .dvc/config
+git commit -m "Configure DVC remote storage"
+```
+
+### 3. dvc addによるデータセットの追跡
+
+```bash
+dvc add {{ dataset_dir }}
+```
+
+`dvc add` はデータの実体を `.dvc/cache` に移し、ハッシュ値を記録した `{{ dataset_dir }}.dvc` を生成し、`{{ dataset_dir }}` 自体を自動的に `.gitignore` へ追記します。Gitにコミットするのは `.dvc` ファイルと `.gitignore` の更新分だけです。
+
+```bash
+git add {{ dataset_dir }}.dvc .gitignore
+git commit -m "{{ dataset_add_commit_message }}"
+git tag {{ dataset_version_tag }}
+```
+
+### 4. dvc pushによるデータ同期
+
+```bash
+dvc push
+git push origin {{ git_default_branch }}
+git push origin {{ dataset_version_tag }}
+```
+
+`dvc push` はキャッシュ上のデータ実体をDVCリモート `{{ dvc_remote_name }}` へアップロードします。Gitのコミット・タグとDVCリモートへのpushは別操作なので、両方を実行して初めてチーム内の他メンバーが同じバージョンのデータセットを再現できます。
+
+### 5. 過去バージョンの取り出し(checkout)
+
+```bash
+git checkout {{ previous_version_tag }}
+dvc checkout
+```
+
+`git checkout` はGit管理下の `.dvc` ファイルを過去バージョンのメタデータに戻すだけで、ワークスペース上のデータの実体は変わりません。続けて `dvc checkout` を実行することで、そのメタデータに対応するデータ実体がキャッシュ(またはリモートからの `dvc pull`)から復元されます。
+
+```bash
+git checkout {{ git_default_branch }}
+dvc checkout
+```
+
+最新バージョンに戻す際も同様に、`git checkout` の後に必ず `dvc checkout` を実行します。
+
+## 動作確認
+
+- `dvc status` の出力が `Data and pipelines are up to date.` となり、`{{ dataset_dir }}` に未追跡の差分がないこと
+- `dvc remote list` に `{{ dvc_remote_name }}` と `{{ dvc_remote_url }}` が表示されること
+- `git tag` の一覧に `{{ dataset_version_tag }}` と `{{ previous_version_tag }}` が含まれること
+- 手順5で `{{ previous_version_tag }}` をcheckoutした際、`{{ dataset_dir }}` の内容が該当バージョン時点のものに戻っていること(`dvc checkout` 実行後にファイルの中身や件数を確認する)
+
+## 注意事項
+
+- `{{ dataset_dir }}` を直接 `git add` しない。`dvc add` が自動生成した `.gitignore` の記載を消してしまうと、大容量データを誤ってGitリポジトリへコミットする事故につながる。
+- `git checkout` だけを行い `dvc checkout` を忘れると、Git上のメタデータとワークスペース上の実データが不一致のまま作業を進めてしまう。ブランチやタグを切り替えた直後は必ず `dvc checkout` (または `dvc pull`)を実行する。
+- 認証プロファイル `{{ aws_profile }}` のアクセスキー自体は `dvc remote modify --local` の対象にはならず、AWS CLI側の認証情報ファイル等で別途管理する。DVCの設定ファイルに生のアクセスキーを直接書き込まない。
+- DVCリモート `{{ dvc_remote_url }}` の容量・保持ポリシーは対象外とする。ストレージ費用や世代整理のポリシー設計は別途検討する。

@@ -1,0 +1,93 @@
+# TensorRT-LLMエンジンのビルドと配備 — {{ model_repo }}
+
+`convert_checkpoint.py` と `trtllm-build` でHugging Face形式のチェックポイントをTensorRT-LLMエンジンに変換・ビルドし、`trtllm-serve` で配信して推論結果を確認します。ビルドにはGPUと相応の計算時間を要するため、専用ホストまたは時間帯を確保したうえで実行してください。
+
+## 目的
+
+チェックポイント変換(`convert_checkpoint.py`)とエンジンビルド(`trtllm-build`)の流れを理解し、`trtllm-serve` で配信したエンジンに対して実際に推論結果が返ることを確認できるようになることを目指します。
+
+## 用語解説
+
+- **TensorRT-LLM checkpoint**: `convert_checkpoint.py` がHugging Face形式の重みを変換して生成する、`trtllm-build` 向けの中間フォーマット。`config.json` と分割済みの重みファイルから成る
+- **エンジン(engine)**: `trtllm-build` がTensorRT-LLM checkpointから生成する、GPU・精度・最大バッチサイズ等のビルド時設定に紐づいた実行可能形式。ビルド時の設定を変える場合は再ビルドが必要
+- **dtype**: エンジンの計算精度指定。`{{ dtype }}` のように `float16` や `bfloat16` を指定する
+- **tp_size(tensor parallel size)**: モデルを分割して複数GPUで並列実行する分割数。搭載GPU数を超える値は指定できない
+- **max_batch_size / max_input_len / max_seq_len**: `trtllm-build` がビルド時に確保するバッチサイズ・最大入力トークン長・最大シーケンス長(入力+出力の合計上限)。実行時にこれを超えるリクエストは受け付けられない
+- **trtllm-serve**: ビルド済みエンジンをOpenAI互換API(`/v1/completions` 等)として配信するCLI
+
+## シナリオ設定
+
+モデル `{{ model_repo }}`(モデルファミリ: `{{ model_family }}`)のHugging Faceチェックポイントを `{{ hf_checkpoint_dir }}` に取得し、TensorRT-LLMリポジトリ(`{{ trtllm_repo_dir }}`)の `convert_checkpoint.py` で `{{ trtllm_checkpoint_dir }}` へ変換します。dtype `{{ dtype }}`、tp_size `{{ tp_size }}`、max_batch_size `{{ max_batch_size }}`、max_input_len `{{ max_input_len }}`、max_seq_len `{{ max_seq_len }}` でエンジンを `{{ engine_dir }}` にビルドし、`{{ served_model_name }}` としてポート `{{ serve_port }}` で `trtllm-serve` 配信、推論結果を確認します。
+
+## 手順
+
+### 1. ベースモデルのチェックポイントを取得する
+
+```bash
+mkdir -p {{ hf_checkpoint_dir }}
+huggingface-cli download {{ model_repo }} --local-dir {{ hf_checkpoint_dir }} --local-dir-use-symlinks False
+ls {{ hf_checkpoint_dir }}
+```
+
+### 2. convert_checkpointで形式変換する
+
+```bash
+mkdir -p {{ trtllm_checkpoint_dir }}
+python3 {{ trtllm_repo_dir }}/examples/{{ model_family }}/convert_checkpoint.py \
+  --model_dir {{ hf_checkpoint_dir }} \
+  --output_dir {{ trtllm_checkpoint_dir }} \
+  --dtype {{ dtype }} \
+  --tp_size {{ tp_size }}
+ls {{ trtllm_checkpoint_dir }}
+```
+
+### 3. trtllm-buildでエンジンをビルドする
+
+```bash
+mkdir -p {{ engine_dir }}
+trtllm-build \
+  --checkpoint_dir {{ trtllm_checkpoint_dir }} \
+  --output_dir {{ engine_dir }} \
+  --gemm_plugin {{ dtype }} \
+  --max_batch_size {{ max_batch_size }} \
+  --max_input_len {{ max_input_len }} \
+  --max_seq_len {{ max_seq_len }}
+ls {{ engine_dir }}
+```
+
+### 4. trtllm-serveで配信を開始する
+
+```bash
+trtllm-serve {{ engine_dir }} \
+  --tokenizer {{ hf_checkpoint_dir }} \
+  --served_model_name {{ served_model_name }} \
+  --host 0.0.0.0 \
+  --port {{ serve_port }} \
+  --max_batch_size {{ max_batch_size }} \
+  --max_seq_len {{ max_seq_len }} &
+sleep 10
+curl http://127.0.0.1:{{ serve_port }}/v1/models
+```
+
+### 5. 推論結果を確認する
+
+```bash
+curl http://127.0.0.1:{{ serve_port }}/v1/completions \
+  -H "Content-Type: application/json" \
+  -d "{\"model\": \"{{ served_model_name }}\", \"prompt\": \"Hello,\", \"max_tokens\": 16}"
+```
+
+## 動作確認
+
+- `{{ trtllm_checkpoint_dir }}` に変換済みチェックポイント一式(`config.json` と分割済み重みファイル)が生成されていること
+- `{{ engine_dir }}` にエンジンファイル一式が生成されていること
+- `curl http://127.0.0.1:{{ serve_port }}/v1/models` のレスポンスに `{{ served_model_name }}` が含まれること
+- `/v1/completions` へのリクエストがエラーなく生成テキストを含む応答を返すこと
+
+## 注意事項
+
+- `trtllm-build` で指定した `max_batch_size={{ max_batch_size }}` / `max_input_len={{ max_input_len }}` / `max_seq_len={{ max_seq_len }}` を超える設定でエンジンを使い回すことはできず、変更する場合は再ビルドが必要です。
+- `tp_size={{ tp_size }}` を変更する場合、搭載GPU数を上回る値を指定するとビルドまたは起動に失敗します。
+- `convert_checkpoint.py` と `trtllm-build` はGPUメモリと計算時間を要するため、モデルサイズに応じて数十分かかる場合があります。実行前に十分な時間枠を確保してください。
+- `trtllm-serve` はバックグラウンド起動(`&`)のままだと動作確認後も稼働し続けるため、確認が終わったら `kill %1` 等で停止してください。
+- `{{ model_repo }}` のライセンス・利用条件を確認したうえで使用してください。ライセンス確認自体は本手順の対象外とします。

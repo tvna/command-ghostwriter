@@ -1,0 +1,86 @@
+# ImageMagickによる学習用画像の一括前処理
+
+`identify`・`mogrify`・`convert` を使い、学習用画像データセットの破損検査、リサイズ、形式・カラースペースの統一をバッチで行います。
+
+## 目的
+
+ImageMagickのCLIツール群を使い、収集直後の画像データセットから破損ファイルを検出したうえで、学習パイプラインが要求するサイズ・形式に一括変換できるようになることを目指します。
+
+## 用語解説
+
+- **identify**: 画像ファイルのフォーマット・サイズ・カラースペースなどのメタデータを表示するImageMagickのコマンド。`-regard-warnings` を付けると軽微な異常も検出対象にできる
+- **mogrify**: 指定ディレクトリ内の画像を対象に、リサイズなどの変換をその場または別出力先へ一括適用するコマンド。`convert` と異なりファイル名は保持される
+- **convert**: 1枚（または複数）の画像を読み込み、形式変換・カラースペース変換などを行って別ファイルへ書き出すコマンド
+- **カラースペース統一**: CMYKやグレースケールが混在するデータセットを `{{ colorspace }}` のような単一の色空間に揃える処理。学習時のチャンネル数不一致を防ぐ
+- **破損画像**: ヘッダは存在するがデータが途中で切れている、あるいはデコード時に例外を起こすファイル。学習ジョブのクラッシュ原因になりやすい
+
+## シナリオ設定
+
+元画像は `{{ source_dir }}` に格納されており、想定枚数は `{{ expected_count }}` 枚です。破損検査・リサイズ・形式統一を経て `{{ output_dir }}` に `{{ target_size }}` ・ `{{ target_format }}` 形式・カラースペース `{{ colorspace }}` へ統一した画像群を作成します。検出した破損ファイルの一覧は `{{ corrupt_log_path }}` に記録し、1枚あたりの出力サイズは `{{ max_file_size_mb }}` MB以下に収まることを想定しています。
+
+## 手順
+
+### 1. ImageMagickの導入と対象画像の確認
+
+```bash
+sudo apt-get update
+sudo apt-get install -y imagemagick
+convert -version
+mkdir -p {{ output_dir }}
+find {{ source_dir }} -type f | wc -l
+```
+
+`find` で数えた枚数が想定枚数 `{{ expected_count }}` に近いことを確認します。大きく乖離している場合は収集元データセットの取得漏れを先に調査します。
+
+### 2. identifyによる破損・メタデータ検査
+
+```bash
+find {{ source_dir }} -type f -print0 | xargs -0 identify -regard-warnings > /tmp/identify-report.txt 2> {{ corrupt_log_path }}
+wc -l < {{ corrupt_log_path }}
+```
+
+`{{ corrupt_log_path }}` に出力されたエラー行が破損候補です。件数が多い場合は該当ファイルを `{{ source_dir }}` から取り除いてから後続の手順に進みます。
+
+### 3. mogrifyによる一括リサイズ
+
+```bash
+mogrify -path {{ output_dir }} -resize {{ target_size }} {{ source_dir }}/*
+find {{ output_dir }} -type f | wc -l
+```
+
+`-path` で出力先を分けているため元画像は変更されません。出力枚数が手順1で数えた入力枚数と一致するかをここで確認します。
+
+### 4. convertによる形式・カラースペース統一
+
+```bash
+for f in {{ output_dir }}/*; do
+  convert "$f" -colorspace {{ colorspace }} -quality {{ jpeg_quality }} "${f%.*}.{{ target_format }}"
+done
+find {{ output_dir }} -type f ! -name "*.{{ target_format }}" -delete
+```
+
+拡張子が異なる中間ファイルを削除し、`{{ output_dir }}` 配下を `{{ target_format }}` 形式のみに揃えます。
+
+### 5. 処理後の枚数・サイズ検証
+
+```bash
+find {{ output_dir }} -type f -name "*.{{ target_format }}" | wc -l
+find {{ output_dir }} -type f -size +{{ max_file_size_mb }}M
+du -sh {{ output_dir }}
+```
+
+2番目の `find` で `{{ max_file_size_mb }}` MBを超えるファイルが出力されないことを確認します。出力がある場合は圧縮率や `-quality` の値を見直します。
+
+## 動作確認
+
+- `{{ output_dir }}` 配下のファイル数が想定枚数 `{{ expected_count }}` と一致すること
+- `{{ output_dir }}` 配下の全ファイルが `{{ target_format }}` 形式・`{{ colorspace }}` カラースペースで揃っていること
+- `{{ max_file_size_mb }}` MBを超える出力ファイルが存在しないこと
+- `{{ corrupt_log_path }}` に記録された破損ファイルが `{{ output_dir }}` に含まれていないこと
+
+## 注意事項
+
+- `mogrify` は対象を直接書き換えるコマンドであり、`-path` を指定し忘れると元画像 `{{ source_dir }}` を破壊的に上書きするため、必ず出力先指定を確認してから実行する。
+- 大量画像の一括処理はImageMagickのリソース制限(`policy.xml` のメモリ・ディスク上限)に達すると変換が失敗することがあるため、大規模データセットでは事前にバッチを分割するか制限値を確認する。
+- `{{ corrupt_log_path }}` に記録された破損ファイルは学習データから除外し、可能であれば収集元から再取得する。
+- カラースペース変換は非可逆的であり、元の `{{ source_dir }}` を保持したまま `{{ output_dir }}` へ出力することで元データを失わないようにする。

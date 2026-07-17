@@ -1,0 +1,105 @@
+# Tritonサーバによるモデルリポジトリ配備
+
+Triton Inference Server 向けにモデルリポジトリのディレクトリ構成と `config.pbtxt` を整備し、`tritonserver` コンテナの起動からヘルスチェック・推論リクエスト送信までを行います。
+
+## 目的
+
+Tritonのモデルリポジトリ規約(モデル名/バージョン番号ディレクトリ/`config.pbtxt`)を理解し、コンテナ起動後にKServe v2 APIでヘルス状態とモデルの推論応答を確認できるようになることを目指します。
+
+## 用語解説
+
+- **モデルリポジトリ**: Tritonが読み込むモデル群の格納ディレクトリ。直下に `モデル名/バージョン番号(数字)/モデル本体` の階層を持つ
+- **config.pbtxt**: モデルごとの入出力仕様(`platform`、`max_batch_size`、`input`/`output` のテンソル定義)を記述する設定ファイル
+- **platform(backend)**: モデルの実行エンジン指定。例えば `{{ platform }}` はONNX Runtimeでの実行を意味する
+- **KServe v2 API**: Tritonが提供する推論APIの標準プロトコル。`/v2/health/live`、`/v2/health/ready` などのヘルスエンドポイントを持つ
+- **perf_analyzer**: Triton SDKコンテナに同梱される負荷試験・疎通確認ツール。gRPC/HTTPで実際に推論リクエストを送信できる
+
+## シナリオ設定
+
+モデル `{{ model_name }}`(platform: `{{ platform }}`, バージョン: `{{ model_version }}`)を、モデルリポジトリ `{{ model_repo_path }}` に配置します。コンテナ `{{ container_name }}`(イメージ: `{{ container_image }}`)をGPU付きで起動し、HTTPポート `{{ http_port }}`、gRPCポート `{{ grpc_port }}`、メトリクスポート `{{ metrics_port }}` を公開します。
+
+## 手順
+
+### 1. モデルリポジトリのディレクトリ構成を作成する
+
+```bash
+sudo mkdir -p {{ model_repo_path }}/{{ model_name }}/{{ model_version }}
+sudo chown -R $(id -u):$(id -g) {{ model_repo_path }}
+cp {{ model_source_path }} {{ model_repo_path }}/{{ model_name }}/{{ model_version }}/model.onnx
+find {{ model_repo_path }}/{{ model_name }} -maxdepth 2
+```
+
+バージョンディレクトリ名は数字のみとし、Tritonはこの数字を昇順でスキャンして利用可能なバージョンを判定します。
+
+### 2. config.pbtxtを記述する
+
+```bash
+sudo tee {{ model_repo_path }}/{{ model_name }}/config.pbtxt <<EOF
+name: "{{ model_name }}"
+platform: "{{ platform }}"
+max_batch_size: {{ max_batch_size }}
+input [
+  {
+    name: "{{ input_name }}"
+    data_type: {{ input_dtype }}
+    dims: [ {{ input_dims }} ]
+  }
+]
+output [
+  {
+    name: "{{ output_name }}"
+    data_type: {{ output_dtype }}
+    dims: [ {{ output_dims }} ]
+  }
+]
+EOF
+cat {{ model_repo_path }}/{{ model_name }}/config.pbtxt
+```
+
+`input`/`output` の `dims` は `max_batch_size` を除いた1サンプルあたりの形状を指定します。実モデルの入出力形状と一致していないと、次のコンテナ起動時にロードエラーになります。
+
+### 3. tritonserverコンテナを起動する
+
+```bash
+docker run -d \
+  --name {{ container_name }} \
+  --gpus all \
+  -p {{ http_port }}:8000 \
+  -p {{ grpc_port }}:8001 \
+  -p {{ metrics_port }}:8002 \
+  -v {{ model_repo_path }}:/models \
+  {{ container_image }} \
+  tritonserver --model-repository=/models
+docker logs -f {{ container_name }}
+```
+
+`docker logs` に `READY` の表示とともに `{{ model_name }}` がモデル一覧に含まれることを確認してから次に進みます。
+
+### 4. ヘルスエンドポイントを確認する
+
+```bash
+curl -v http://localhost:{{ http_port }}/v2/health/live
+curl -v http://localhost:{{ http_port }}/v2/health/ready
+curl -s http://localhost:{{ http_port }}/v2/models/{{ model_name }}/ready
+```
+
+### 5. 推論リクエストを送信する
+
+```bash
+docker run --rm --net host {{ sdk_image }} \
+  perf_analyzer -m {{ model_name }} -u localhost:{{ grpc_port }} -i grpc --concurrency-range 1
+```
+
+## 動作確認
+
+- `curl http://localhost:{{ http_port }}/v2/health/live` と `/v2/health/ready` がいずれもHTTP 200を返すこと
+- `curl http://localhost:{{ http_port }}/v2/models/{{ model_name }}/ready` がHTTP 200を返すこと
+- `perf_analyzer -m {{ model_name }} -u localhost:{{ grpc_port }} -i grpc` がエラーなく完了し、スループット・レイテンシの計測結果が出力されること
+- `docker logs {{ container_name }}` にモデルロード失敗(`UNAVAILABLE` 等)のエラーが出ていないこと
+
+## 注意事項
+
+- `config.pbtxt` の `input`/`output` の `dims`・`data_type` が実モデルの形状と不一致だと、コンテナ起動時ではなくモデルロード時にエラーとなるため、`docker logs {{ container_name }}` で必ず確認する。
+- `--gpus all` を使うには事前にホストへNVIDIA Container Toolkitが導入済みであること。未導入の場合はCPUのみの `platform` 設定に切り替える。
+- `max_batch_size: {{ max_batch_size }}` を実モデルが対応しないバッチサイズに設定すると、推論時に形状エラーが発生する。モデル変換時のバッチ設定と一致させる。
+- 本手順は単一モデル・単一バックエンドの配備を対象とし、アンサンブルモデルやマルチモデルルーティングの構成は対象外とする。

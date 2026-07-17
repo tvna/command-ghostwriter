@@ -1,0 +1,94 @@
+# SGLangによる高速LLM推論サーバの構築
+
+SGLangを使い、`sglang.launch_server` によるLLM推論サーバの起動、OpenAI互換APIでの動作確認、`bench_serving` によるスループット・レイテンシ測定までを行います。
+
+## 目的
+
+SGLangサーバをローカルGPU上に起動し、OpenAI互換エンドポイントとして疎通確認したうえで、負荷試験ツールにより性能特性を把握できるようになることを目指します。
+
+## 用語解説
+
+- **SGLang**: RadixAttentionによるKVキャッシュ再利用を特徴とする高速LLM推論エンジン兼サービングフレームワーク
+- **launch_server**: SGLangに同梱される推論サーバ起動用のPythonモジュール(`python3 -m sglang.launch_server`)
+- **OpenAI互換API**: `/v1/chat/completions` など、OpenAI API仕様に準拠したエンドポイント群。既存のOpenAIクライアントからそのまま利用できる
+- **tp_size(テンソル並列数)**: モデルを複数GPUに分割して配置する際の分割数。単一GPUで動かす場合は1を指定する
+- **mem_fraction_static**: KVキャッシュなどの静的メモリ割り当てに使うGPUメモリ使用率の上限
+- **bench_serving**: SGLang付属のベンチマークツール(`python3 -m sglang.bench_serving`)。稼働中サーバに対しリクエストを送り、スループットとレイテンシを測定する
+
+## シナリオ設定
+
+モデル `{{ model_repo }}` を、ホスト `{{ host }}` のポート `{{ port }}` でSGLangサーバとして起動します。テンソル並列数は `{{ tp_size }}`、GPUメモリ使用率上限は `{{ mem_fraction_static }}` とし、OpenAI互換APIでは公開モデル名を `{{ served_model_name }}` とします。性能測定は `{{ bench_num_prompts }}` 件のプロンプトで行います。
+
+## 手順
+
+### 1. sglangをインストールする
+
+```bash
+pip install --upgrade pip
+pip install "sglang[all]"
+```
+
+インストール後、バージョンを確認します。
+
+```bash
+python3 -c "import sglang; print(sglang.__version__)"
+```
+
+### 2. launch_serverでサーバを起動する
+
+```bash
+python3 -m sglang.launch_server \
+  --model-path {{ model_repo }} \
+  --host {{ host }} \
+  --port {{ port }} \
+  --tp {{ tp_size }} \
+  --mem-fraction-static {{ mem_fraction_static }} \
+  --served-model-name {{ served_model_name }}
+```
+
+起動ログに `The server is fired up and ready to roll` のようなメッセージが出力されるまで待機します。長時間かかる場合はバックグラウンド実行(`&`)やsystemd等のプロセス管理を検討します。
+
+### 3. OpenAI互換APIで動作確認する
+
+別ターミナルからヘルスチェックとモデル一覧を確認します。
+
+```bash
+curl -s http://{{ host }}:{{ port }}/health
+curl -s http://{{ host }}:{{ port }}/v1/models
+```
+
+チャット補完APIを呼び出し、応答が返ることを確認します。
+
+```bash
+curl -s http://{{ host }}:{{ port }}/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "{{ served_model_name }}", "messages": [{"role": "user", "content": "こんにちは"}], "max_tokens": 64}'
+```
+
+### 4. bench_servingで性能を測定する
+
+```bash
+python3 -m sglang.bench_serving \
+  --backend sglang \
+  --host {{ host }} \
+  --port {{ port }} \
+  --model {{ served_model_name }} \
+  --dataset-name random \
+  --num-prompts {{ bench_num_prompts }}
+```
+
+実行結果に出力されるスループット(requests/s、output tokens/s)とレイテンシ(median TTFT、median E2E latency)を記録します。
+
+## 動作確認
+
+- `curl http://{{ host }}:{{ port }}/health` が200系レスポンスを返すこと
+- `curl http://{{ host }}:{{ port }}/v1/models` の一覧に `{{ served_model_name }}` が含まれること
+- `/v1/chat/completions` 呼び出しに対しモデルの応答が返ること
+- `bench_serving` の実行が完了し、スループット・レイテンシの測定結果が出力されること
+
+## 注意事項
+
+- `--tp {{ tp_size }}` はGPU枚数以下であることを事前に確認する。GPU枚数を超えるテンソル並列数を指定すると起動に失敗する。
+- `mem_fraction_static` を高く設定しすぎるとOOM(メモリ不足)を招くため、他プロセスのGPUメモリ使用量を踏まえて調整する。
+- `{{ host }}` を `0.0.0.0` として外部公開する場合は、ネットワーク到達性とアクセス制御(ファイアウォール、認証プロキシ等)を別途設計する。本手順の対象外とする。
+- `bench_serving` はサーバに実負荷をかけるため、本番トラフィックが流れている環境では実行しない。

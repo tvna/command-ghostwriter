@@ -1,0 +1,13 @@
+tracking_uri = "http://mlflow-tracking.internal.example.com:5000"
+backend_store_uri = "postgresql://mlflow_svc@mlflow-db.internal.example.com:5432/mlflow"
+artifact_root = "s3://mlflow-artifacts-prod/mlflow"
+server_host = "0.0.0.0"
+server_port = 5000
+experiment_name = "fraud-detection"
+model_name = "fraud-detection-classifier"
+staging_alias = "staging"
+production_alias = "production"
+serve_host = "0.0.0.0"
+serve_port = 5001
+rollback_target_version = "3"
+credential_note = "バックエンドストアの接続パスワードはURIに埋め込まず、PGPASSWORDまたは.pgpass経由でmlflow serverプロセスに渡す"

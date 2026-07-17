@@ -1,0 +1,19 @@
+work_dir = "/opt/nccl-tests"
+cuda_home = "/usr/local/cuda"
+mpi_home = "/usr/lib/x86_64-linux-gnu/openmpi"
+num_nodes = 4
+gpus_per_node = 8
+hostfile_path = "/etc/nccl-tests/hostfile"
+hosts = ["gpu-node01 slots=8", "gpu-node02 slots=8", "gpu-node03 slots=8", "gpu-node04 slots=8"]
+network_interface = "eth0"
+ib_hca = "mlx5_0"
+nccl_debug_level = "INFO"
+min_bytes = "128M"
+max_bytes = "8G"
+step_factor = 2
+result_log_path = "/var/log/nccl-tests/allreduce.log"
+interconnect_desc = "InfiniBand HDR200 x4 HCA構成"
+
+[expected_bandwidth]
+theoretical_busbw_gbs = 350
+efficiency_threshold_percent = 70

@@ -1,0 +1,105 @@
+# 学習データの重複排除とハッシュ検査
+
+sha256sumによるファイル単位の重複検出、sort・uniqによる行単位の重複除去、jdupesによるディレクトリ横断の検査を組み合わせ、対象 {{ csv_rows | length }} 件のデータセットから重複を排除する手順書です。
+
+## 目的
+
+学習データセット内の重複ファイル・重複レコードを検出・除去し、除去前後の件数を記録することで、重複混入によるモデル学習への悪影響を防止できるようになることを目指します。
+
+## 用語解説
+
+- **sha256sum**: ファイルの内容からSHA-256ハッシュ値を計算するコマンド。同一ハッシュ値を持つファイルはバイト単位で内容が一致する
+- **行単位の重複(line-level duplicate)**: JSONL形式のように1行が1レコードに対応するファイルにおいて、同一内容の行が複数存在する状態
+- **sort・uniq**: `sort` でテキストを整列し、隣接する同一行を `uniq` で1行にまとめることで行単位の重複を除去する組み合わせ
+- **jdupes**: 複数ディレクトリを横断してバイト単位で一致する重複ファイルを検出・削除できるツール。fdupesの後継として開発されている
+- **クロスディレクトリ重複**: 異なるデータセット間(例: `ja_wiki_corpus` と `chat_logs`)に同一ファイルが混入している状態
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 件のデータセットを対象に重複排除を行います。
+
+| dataset_name | target_dir | file_pattern | backup_dir | exclude_pattern | report_path |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["dataset_name"] }} | {{ r["target_dir"] }} | {{ r["file_pattern"] }} | {{ r["backup_dir"] }} | {{ r["exclude_pattern"] }} | {{ r["report_path"] }} |
+{% endfor %}
+
+`exclude_pattern` が `-` のデータセットは除外対象なしとして扱います。
+
+## 手順
+
+### 1. 対象ファイルの棚卸しと件数確認
+
+```bash
+{% for r in csv_rows %}mkdir -p {{ r["backup_dir"] }}
+echo "=== {{ r["dataset_name"] }}: {{ r["target_dir"] }} ==="
+{% if r["exclude_pattern"] != "-" %}find {{ r["target_dir"] }} -type f -name "{{ r["file_pattern"] }}" ! -name "{{ r["exclude_pattern"] }}" > {{ r["backup_dir"] }}/file_list_before.txt
+{% else %}find {{ r["target_dir"] }} -type f -name "{{ r["file_pattern"] }}" > {{ r["backup_dir"] }}/file_list_before.txt
+{% endif %}wc -l < {{ r["backup_dir"] }}/file_list_before.txt
+xargs cat < {{ r["backup_dir"] }}/file_list_before.txt | wc -l
+{% endfor %}```
+
+ファイル件数は `wc -l < file_list_before.txt` で、レコード(行)件数は各ファイルを連結して `wc -l` で確認します。
+
+### 2. sha256sumによるファイル単位の重複検出
+
+```bash
+{% for r in csv_rows %}xargs sha256sum < {{ r["backup_dir"] }}/file_list_before.txt > {{ r["backup_dir"] }}/sha256sum.txt
+sort {{ r["backup_dir"] }}/sha256sum.txt | uniq -w64 -D > {{ r["backup_dir"] }}/dup_files_by_hash.txt
+wc -l < {{ r["backup_dir"] }}/dup_files_by_hash.txt
+{% endfor %}```
+
+`uniq -w64 -D` はハッシュ値の先頭64文字(SHA-256の全桁)が一致する行をすべて出力するため、内容が完全一致するファイルの組が `dup_files_by_hash.txt` に列挙されます。
+
+### 3. sort・uniqによる行単位の重複除去
+
+```bash
+{% for r in csv_rows %}while read -r f; do
+    cp "$f" {{ r["backup_dir"] }}/$(basename "$f").bak
+    sort "$f" | uniq > "$f.dedup"
+    mv "$f.dedup" "$f"
+done < {{ r["backup_dir"] }}/file_list_before.txt
+xargs cat < {{ r["backup_dir"] }}/file_list_before.txt | wc -l
+{% endfor %}```
+
+各ファイルは `{{ r["backup_dir"] }}` に `.bak` 拡張子でコピーしてから上書きします。`sort` は行順序を変更するため、行順序に意味を持たせているパイプラインでは事前に影響範囲を確認してください。
+
+### 4. jdupesによるディレクトリ横断の検査
+
+```bash
+jdupes -r {% for r in csv_rows %}{{ r["target_dir"] }}{% if not loop.last %} {% endif %}{% endfor %} > /var/log/dedup/cross_dataset_report.txt
+
+jdupes -r -m {% for r in csv_rows %}{{ r["target_dir"] }}{% if not loop.last %} {% endif %}{% endfor %}
+```
+
+出力とサマリー件数を確認し、想定外の重複が無いことを確認したうえで、確認済みの重複のみを対象に自動削除します。
+
+```bash
+jdupes -r -d -N {% for r in csv_rows %}{{ r["target_dir"] }}{% if not loop.last %} {% endif %}{% endfor %}
+```
+
+`-d` は重複削除、`-N` は確認プロンプトを省略して各重複グループの先頭ファイルのみを残す指定です。事前に `cross_dataset_report.txt` を確認してから実行してください。
+
+### 5. 除去前後の件数比較と記録
+
+```bash
+{% for r in csv_rows %}mkdir -p $(dirname {{ r["report_path"] }})
+before_files=$(wc -l < {{ r["backup_dir"] }}/file_list_before.txt)
+before_lines=$(xargs cat < {{ r["backup_dir"] }}/file_list_before.txt | wc -l)
+after_files=$(find {{ r["target_dir"] }} -type f -name "{{ r["file_pattern"] }}" | wc -l)
+after_lines=$(find {{ r["target_dir"] }} -type f -name "{{ r["file_pattern"] }}" -exec cat {} + | wc -l)
+echo "{{ r["dataset_name"] }}: files ${before_files} -> ${after_files}, lines ${before_lines} -> ${after_lines}" | tee -a {{ r["report_path"] }}
+{% endfor %}```
+
+## 動作確認
+
+- 各データセットの `report_path` にbefore/after件数が1行ずつ記録されていること
+- `after_files` が `before_files` 以下、`after_lines` が `before_lines` 以下になっていること(重複が無かった場合は同数)
+- `dup_files_by_hash.txt` に列挙されたファイルの組が、除去後は片方のみ残っていること
+- `cross_dataset_report.txt` を再実行しても新たな重複が検出されないこと
+
+## 注意事項
+
+- `sort` による行単位の重複除去は行順序を変更するため、順序に依存する学習パイプラインでは適用前に影響を確認する。
+- `jdupes -d -N` は確認なしで削除を実行するため、必ず `cross_dataset_report.txt` の内容を確認してから実行し、可能であればテスト環境で先に検証する。
+- ステップ3で作成する `.bak` バックアップはファイル名のみを基準に各データセットの `backup_dir` へ配置されるため、同名ファイルが複数サブディレクトリに存在する構成では衝突しないよう配置先を分けることを検討する。
+- 本手順はファイル・行単位の完全一致による重複排除を対象としており、意味的に類似するが完全一致しないデータ(near-duplicate)の検出は対象外とする。

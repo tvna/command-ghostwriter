@@ -1,0 +1,91 @@
+# whisper.cppによる音声認識サーバの構築
+
+whisper.cppをソースからビルドし、ggml形式の音声認識モデルを取得したうえで、HTTP API経由で文字起こしができる`whisper-server`を起動するまでの手順を示します。
+
+## 目的
+
+whisper.cppのビルド手順とggmlモデルの取得方法を理解し、オンプレミス環境で音声ファイルをHTTP API経由で文字起こしできる推論サーバを構築できるようになることを目指します。
+
+## 用語解説
+
+- **whisper.cpp**: OpenAIのWhisper音声認識モデルをC/C++で実装した推論エンジン。GPUなしのCPU環境でも動作する
+- **ggmlモデル**: whisper.cppが読み込む量子化済みモデルファイル形式。`ggml-<モデル名>.bin`という命名規則を持つ
+- **whisper-server**: whisper.cppに同梱されるHTTPサーバ実装。`/inference`エンドポイントに音声ファイルをPOSTすると文字起こし結果を返す
+- **モデルサイズ**: `tiny`/`base`/`small`/`medium`/`large`の段階があり、大きいほど精度が上がる一方、推論速度とメモリ使用量が悪化する
+- **スレッド数**: CPU推論時に使用するスレッド数。コア数に応じて調整することで推論速度に影響する
+
+## シナリオ設定
+
+リポジトリ`{{ repo_url }}`を`{{ build_dir }}`にクローンしてビルドし、モデル`{{ model_name }}`を`{{ model_dir }}`配下に取得します。`whisper-server`は`{{ server_host }}:{{ server_port }}`で待ち受けさせ、スレッド数は`{{ thread_count }}`とします。動作確認には音声ファイル`{{ test_audio_path }}`を使用します。
+
+## 手順
+
+### 1. whisper.cppをビルドする
+
+```bash
+git clone {{ repo_url }} {{ build_dir }}
+cd {{ build_dir }}
+cmake -B build
+cmake --build build -j --config Release
+```
+
+ビルドが完了すると、`{{ build_dir }}/build/bin/`配下に`whisper-cli`や`whisper-server`などの実行ファイルが生成されます。
+
+### 2. ggmlモデルをダウンロードする
+
+```bash
+cd {{ build_dir }}
+sh ./models/download-ggml-model.sh {{ model_name }}
+ls -lh {{ model_dir }}/ggml-{{ model_name }}.bin
+```
+
+ダウンロードスクリプトは既定で`{{ model_dir }}`ディレクトリ配下にモデルファイルを保存します。
+
+### 3. whisper-serverを起動する
+
+```bash
+cd {{ build_dir }}
+./build/bin/whisper-server \
+  -m {{ model_dir }}/ggml-{{ model_name }}.bin \
+  --host {{ server_host }} \
+  --port {{ server_port }} \
+  -t {{ thread_count }}
+```
+
+起動後、指定したホスト・ポートでHTTPリクエストを待ち受けます。
+
+### 4. 音声ファイルをAPIで文字起こしする
+
+```bash
+curl -s \
+  -F file=@{{ test_audio_path }} \
+  -F response_format=json \
+  http://{{ server_host }}:{{ server_port }}/inference
+```
+
+レスポンスのJSONに文字起こしテキストが含まれていることを確認します。
+
+### 5. モデルサイズと速度のバランスを調整する
+
+```bash
+cd {{ build_dir }}
+sh ./models/download-ggml-model.sh {{ alt_model_name }}
+./build/bin/whisper-bench -m {{ model_dir }}/ggml-{{ model_name }}.bin -t {{ thread_count }}
+./build/bin/whisper-bench -m {{ model_dir }}/ggml-{{ alt_model_name }}.bin -t {{ thread_count }}
+```
+
+`whisper-bench`で`{{ model_name }}`と`{{ alt_model_name }}`の推論時間を比較し、要求精度と許容レイテンシに応じてサーバ起動時の`-m`引数を切り替えます。
+
+## 動作確認
+
+- `{{ build_dir }}/build/bin/whisper-server`プロセスが`{{ server_host }}:{{ server_port }}`でLISTENしていること
+- `{{ model_dir }}/ggml-{{ model_name }}.bin`のファイルサイズが0バイトでなく、破損なくダウンロードされていること
+- `/inference`エンドポイントへの`{{ test_audio_path }}`のPOSTに対し、HTTP 200と文字起こしテキストを含むJSONが返ること
+- `whisper-bench`の結果を比較し、`{{ model_name }}`と`{{ alt_model_name }}`の速度・精度のトレードオフを把握できていること
+
+## 注意事項
+
+- `whisper-server`は既定で認証機構を持たないため、`{{ server_host }}`を`0.0.0.0`など外部到達可能なアドレスにする場合は、リバースプロキシでの認証やファイアウォールでのアクセス制限を別途設ける。
+- モデルファイルのダウンロードには相応の帯域と一時ディスク容量が必要であり、`{{ model_dir }}`の空き容量を事前に確認する。
+- CPU推論時の`{{ thread_count }}`は物理コア数を超えて設定してもスループットが向上しない場合があるため、`whisper-bench`の結果を見ながら調整する。
+- モデルの切り替えはサーバプロセスの再起動が必要であり、無停止での切り替えには別途ロードバランサ等の仕組みが要る。本手順の対象外とする。

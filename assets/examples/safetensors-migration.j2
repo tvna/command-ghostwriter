@@ -1,0 +1,108 @@
+# PyTorchモデルのsafetensors形式移行
+
+pickle形式（`pytorch_model.bin`）で配布されているモデルを`safetensors`形式へ一括変換し、テンソル数と数値の整合性を検証したうえで安全に切り替えます。
+
+## 目的
+
+pickle形式の任意コード実行リスクと`safetensors`形式のゼロコピー・安全読み込みという特性の違いを理解し、既存モデル資産を変換後もテンソルの欠落・破損なく切り替えられるようになることを目指します。
+
+## 用語解説
+
+- **pickle形式(`pytorch_model.bin`)**: Pythonの`pickle`モジュールでシリアライズされた重みファイル。`torch.load`はデシリアライズ時に任意コードを実行しうるため、出所不明のファイルはリスクを伴う
+- **safetensors形式**: Hugging Faceが提供する安全なテンソル保存フォーマット。ヘッダにテンソルのメタデータのみを持ち、実行コードを含まないためデシリアライズが安全かつ高速
+- **state_dict**: モデルのレイヤー名をキー、テンソルを値とする辞書。重みファイルの実体はこの辞書のシリアライズ
+- **tied weights（重み共有）**: 埋め込み層と出力層で同一テンソルを共有する等、複数のキーが同じメモリ領域を参照する構造。`safetensors`は重複データの保存を避けるため、共有のまま保存すると失敗する場合がある
+- **テンソル整合性検証**: 変換前後でテンソルのキー集合と数値がそれぞれ一致しているかを確認する作業。キー集合の不一致は変換漏れ、数値の不一致は精度劣化やバグを示す
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} モデルを移行対象とします。
+
+| model_name | model_dir | bin_filename | size_gb | status |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["model_name"] }} | {{ r["model_dir"] }} | {{ r["bin_filename"] }} | {{ r["size_gb"] }} | {{ r["status"] }} |
+{% endfor %}
+
+`status`が「変換済み」の行は移行の対象外とし、変換・検証・切替の各手順ではスキップします。
+
+## 手順
+
+### 1. 対象モデルディレクトリの棚卸し
+
+```bash
+{% for r in csv_rows %}test -f {{ r["model_dir"] }}/{{ r["bin_filename"] }} && du -h {{ r["model_dir"] }}/{{ r["bin_filename"] }}
+{% endfor %}```
+
+各行の`size_gb`（想定サイズ）と`du`の実測値に大きな乖離がないかを確認します。乖離がある場合は台帳側を先に修正します。
+
+### 2. 変換スクリプトの準備
+
+```bash
+mkdir -p ~/safetensors-migration
+cat <<'PYEOF' > ~/safetensors-migration/convert_to_safetensors.py
+import sys
+
+import torch
+from safetensors.torch import save_file
+
+src_path, dst_path = sys.argv[1], sys.argv[2]
+state_dict = torch.load(src_path, map_location="cpu")
+state_dict = {k: v.contiguous() for k, v in state_dict.items()}
+save_file(state_dict, dst_path, metadata={"format": "pt"})
+print(f"converted: {src_path} -> {dst_path}")
+PYEOF
+
+cat <<'PYEOF' > ~/safetensors-migration/verify_conversion.py
+import sys
+
+import torch
+from safetensors.torch import load_file
+
+src_path, dst_path = sys.argv[1], sys.argv[2]
+src = torch.load(src_path, map_location="cpu")
+dst = load_file(dst_path)
+
+assert set(src.keys()) == set(dst.keys()), "テンソル数（キー集合）が一致しません"
+for key in src:
+    assert torch.allclose(src[key].float(), dst[key].float(), atol=1e-6), f"値が一致しません: {key}"
+print(f"verified: {dst_path} ({len(dst)} tensors)")
+PYEOF
+```
+
+`save_file`はtied weights（重み共有）が残ったままだと失敗することがあります。失敗した場合は変換対象モデルの`config.json`と実装を確認し、共有元・共有先のいずれか一方のキーを保持するよう`state_dict`を調整してから再実行します。
+
+### 3. pickleからsafetensorsへの一括変換
+
+```bash
+{% for r in csv_rows %}{% if r["status"] != "変換済み" %}python3 ~/safetensors-migration/convert_to_safetensors.py {{ r["model_dir"] }}/{{ r["bin_filename"] }} {{ r["model_dir"] }}/model.safetensors
+{% endif %}{% endfor %}```
+
+### 4. テンソル数と数値の整合性検証
+
+```bash
+{% for r in csv_rows %}{% if r["status"] != "変換済み" %}python3 ~/safetensors-migration/verify_conversion.py {{ r["model_dir"] }}/{{ r["bin_filename"] }} {{ r["model_dir"] }}/model.safetensors
+{% endif %}{% endfor %}```
+
+`AssertionError`が出た場合は変換をやり直さず、まず該当モデルの`state_dict`のキー一覧を出力して手順2のtied weights調整が必要かを切り分けます。
+
+### 5. 旧ファイルの退避と切替
+
+```bash
+{% for r in csv_rows %}{% if r["status"] != "変換済み" %}mkdir -p {{ r["model_dir"] }}/.pickle-backup
+mv {{ r["model_dir"] }}/{{ r["bin_filename"] }} {{ r["model_dir"] }}/.pickle-backup/{{ r["bin_filename"] }}
+{% endif %}{% endfor %}```
+
+`pytorch_model.bin`を削除せず`.pickle-backup`へ退避することで、切替後に問題が見つかった場合も即座に戻せる状態を保ちます。
+
+## 動作確認
+
+- 手順4の検証スクリプトが対象モデルすべてで`AssertionError`なく`verified:`を出力すること
+- 各モデルディレクトリに`model.safetensors`が存在し、`.pickle-backup/`配下に元の`pytorch_model.bin`が退避されていること
+- `python3 -c "from safetensors.torch import load_file; print(len(load_file('model.safetensors')))"`を各モデルディレクトリで実行し、テンソル数が手順4の検証結果と一致すること
+
+## 注意事項
+
+- `torch.load`はpickleベースであるため、検証用に旧ファイルを読み込む手順2・4の実行環境は、出所を信頼できるモデルファイルに限定して使う。
+- tied weights（重み共有）を持つモデルでは、共有のまま保存すると`safetensors`側のサイズが不必要に増えたり保存自体が失敗したりする。手順2の注記に従い、共有関係を確認してから変換する。
+- `status`が「変換済み」の行は今回の対象外として自動的にスキップされる。台帳の`status`を更新し忘れると、次回実行時に誤って再変換・再退避されるため、手順5完了後は台帳側の`status`も「変換済み」に更新する。
+- 退避した`.pickle-backup`は切替後も一定期間（社内のバックアップ保持方針に従う）は削除せず、safetensors運用が安定してから改めて削除を検討する。

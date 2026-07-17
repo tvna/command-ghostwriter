@@ -1,0 +1,22 @@
+model_repo: Qwen/Qwen2.5-7B-Instruct
+work_dir: /data/quantization/qwen2.5-7b
+calibration:
+  dataset: mit-han-lab/pile-val-backup
+  split: validation
+  num_samples: 128
+  seq_len: 512
+awq:
+  bits: 4
+  group_size: 128
+  zero_point: true
+  output_dir: /data/quantization/qwen2.5-7b/awq-4bit
+gptq:
+  bits: 4
+  group_size: 128
+  desc_act: false
+  output_dir: /data/quantization/qwen2.5-7b/gptq-4bit
+vllm:
+  served_model_name: qwen2.5-7b-awq
+  port: 8000
+  gpu_memory_utilization: 0.90
+  max_model_len: 4096

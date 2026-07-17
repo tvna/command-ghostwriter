@@ -1,0 +1,107 @@
+# LLM新旧モデルのA/Bテスト比較評価
+
+新旧2つのモデルエンドポイントへ同一のプロンプト集を送信し、応答内容とレイテンシを横並びで比較して、新モデルへの切り替え可否を判断します。
+
+## 目的
+
+プロンプト集に定義した {{ csv_rows | length }} 件のテストケースを新旧両エンドポイントに同一条件で送信し、応答品質とレイテンシの差分を記録・判定できるようになることを目指します。感覚的な比較ではなく、記録に基づいて採否を判断できる状態を作ります。
+
+## 用語解説
+
+- **A/Bテスト比較**: 新旧2つのモデル(またはバージョン)に同一入力を与え、出力を比較して優劣や差分を評価する手法
+- **OpenAI互換API**: `/v1/chat/completions` のようなエンドポイント形式を持つ推論サーバのAPI仕様。vLLMやTGIなど多くの推論エンジンが対応する
+- **eval_criteria**: プロンプトごとに定義する合否判定基準。応答内容がこの基準を満たすかを人手または評価スクリプトで確認する
+- **latency_threshold_sec**: 許容できる応答時間の上限(秒)。`curl` の `%{time_total}` で計測した実測値と比較する
+- **temperature**: 応答のランダム性を制御するパラメータ。比較の再現性を高めるため、本手順では `0` に固定する
+
+## シナリオ設定
+
+旧モデル `{{ csv_rows[0]["old_model"] }}`(`{{ csv_rows[0]["old_endpoint"] }}`)と新モデル `{{ csv_rows[0]["new_model"] }}`(`{{ csv_rows[0]["new_endpoint"] }}`)に対し、以下 {{ csv_rows | length }} 件のプロンプトを送信します。レイテンシ許容値は {{ csv_rows[0]["latency_threshold_sec"] }} 秒です。
+
+| prompt_id | category | prompt_text | eval_criteria |
+|---|---|---|---|
+{% for r in csv_rows %}| {{ r["prompt_id"] }} | {{ r["category"] }} | {{ r["prompt_text"] }} | {{ r["eval_criteria"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 比較対象エンドポイントを準備する
+
+両エンドポイントが応答可能な状態であることを確認します。
+
+```bash
+curl -s {{ csv_rows[0]["old_endpoint"] }}/models | head -c 500
+echo
+curl -s {{ csv_rows[0]["new_endpoint"] }}/models | head -c 500
+echo
+```
+
+`{{ csv_rows[0]["old_model"] }}` と `{{ csv_rows[0]["new_model"] }}` の両方がモデル一覧に含まれていることを確認します。
+
+### 2. プロンプト集をCSVで整備する
+
+送信対象のプロンプト集を確認し、件数の過不足がないかを点検します。
+
+```bash
+{% for r in csv_rows %}echo "{{ r['prompt_id'] }} [{{ r['category'] }}]: {{ r['prompt_text'] }}"
+{% endfor %}echo "合計 {{ csv_rows | length }} 件"
+```
+
+### 3. 両エンドポイントへ同一リクエストを送信する
+
+`jq -n --arg` でプロンプト本文を安全に埋め込み、新旧それぞれに同一内容のリクエストを送ります。`temperature` は `0` に固定し、再現性を確保します。
+
+```bash
+mkdir -p /tmp/ab-test/responses
+: > /tmp/ab-test/latency.csv
+{% for r in csv_rows %}OLD_BODY=$(jq -n --arg prompt "{{ r['prompt_text'] }}" --arg model "{{ r['old_model'] }}" \
+  '{"model": $model, "messages": [{"role": "user", "content": $prompt}], "temperature": 0}')
+curl -s -o /tmp/ab-test/responses/{{ r['prompt_id'] }}_old.json \
+  -w "{{ r['prompt_id'] }},old,%{time_total},%{http_code}\n" \
+  {{ r['old_endpoint'] }}/chat/completions -H "Content-Type: application/json" -d "$OLD_BODY" >> /tmp/ab-test/latency.csv
+NEW_BODY=$(jq -n --arg prompt "{{ r['prompt_text'] }}" --arg model "{{ r['new_model'] }}" \
+  '{"model": $model, "messages": [{"role": "user", "content": $prompt}], "temperature": 0}')
+curl -s -o /tmp/ab-test/responses/{{ r['prompt_id'] }}_new.json \
+  -w "{{ r['prompt_id'] }},new,%{time_total},%{http_code}\n" \
+  {{ r['new_endpoint'] }}/chat/completions -H "Content-Type: application/json" -d "$NEW_BODY" >> /tmp/ab-test/latency.csv
+{% endfor %}
+```
+
+### 4. レイテンシと応答内容を記録する
+
+計測したレイテンシ一覧と、プロンプトごとの応答内容を並べて確認します。
+
+```bash
+column -s, -t /tmp/ab-test/latency.csv
+{% for r in csv_rows %}echo "--- {{ r['prompt_id'] }} ({{ r['category'] }}) ---"
+echo "旧({{ r['old_model'] }})の応答:"
+jq -r '.choices[0].message.content' /tmp/ab-test/responses/{{ r['prompt_id'] }}_old.json
+echo "新({{ r['new_model'] }})の応答:"
+jq -r '.choices[0].message.content' /tmp/ab-test/responses/{{ r['prompt_id'] }}_new.json
+{% endfor %}
+```
+
+### 5. 評価基準に沿って採否を判定する
+
+`eval_criteria` 列の基準に照らして応答内容を判定し、レイテンシ超過がないかを機械的にも確認します。
+
+```bash
+{% for r in csv_rows %}echo "{{ r['prompt_id'] }} 評価基準: {{ r['eval_criteria'] }}"
+{% endfor %}awk -F, -v threshold={{ csv_rows[0]['latency_threshold_sec'] }} \
+  '{ if ($3 > threshold) print $1","$2" はレイテンシ超過 ("$3"s > "threshold"s)" }' /tmp/ab-test/latency.csv
+```
+
+超過がなく、かつ全プロンプトの応答が `eval_criteria` を満たしていれば新モデルは採用候補とします。
+
+## 動作確認
+
+- `/tmp/ab-test/responses/` に {{ csv_rows | length }} 件 × 2(新旧)、計 {{ (csv_rows | length) * 2 }} 件のJSONファイルが生成されていること
+- `/tmp/ab-test/latency.csv` に同数の行が記録され、各行の `http_code` が `200` であること
+- 手順5のawk実行結果にレイテンシ超過(`> {{ csv_rows[0]["latency_threshold_sec"] }}` 秒)の出力がないこと、あるいは超過理由が説明できること
+- 各プロンプトについて `eval_criteria` を満たすかどうかの判定結果が記録されていること
+
+## 注意事項
+
+- `temperature: 0` に固定しても、モデルやサーバの実装によっては完全な再現性が保証されない場合がある。差分が見られた際は複数回実行して傾向を確認する。
+- レイテンシは実行時のネットワーク状況やサーバ負荷に影響されるため、`latency_threshold_sec`(`{{ csv_rows[0]["latency_threshold_sec"] }}` 秒)超過が1回発生しただけで即座に不採用と判断せず、複数回計測する。
+- 本手順は同一プロンプト集による定性的・定量的な比較評価に焦点を絞り、統計的有意性を伴う大規模評価やLLM-as-a-judgeによる自動採点は対象外とする。

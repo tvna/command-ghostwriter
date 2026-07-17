@@ -1,0 +1,113 @@
+# Slurmトポロジ考慮スケジューリング(topology/tree)の設定
+
+物理スイッチ配線を `topology.conf` として定義し、`topology/tree` プラグインを有効化したうえで、`--switches` オプション付きジョブが同一スイッチ配下のノードに集約されることを検証する手順です。
+
+## 目的
+
+Slurmが物理ネットワークのスイッチ階層を認識する仕組みを理解し、`topology.conf` の作成から `slurm.conf` での有効化、`scontrol show topology` による反映確認、`--switches` オプションを使ったジョブ集約の検証までを一人で完結できるようになることを目指します。
+
+## 用語解説
+
+- **TopologyPlugin**: `slurm.conf` でノード配置の際にネットワークトポロジを考慮させるプラグインを指定する設定項目。`topology/tree` は木構造のスイッチ階層を扱うプラグイン
+- **topology.conf**: スイッチとノード(またはスイッチ同士)の接続関係を定義する設定ファイル。`SwitchName` + `Nodes` でリーフスイッチ配下のノードを、`SwitchName` + `Switches` で上位スイッチ配下の子スイッチを記述する
+- **リーフスイッチ / スパインスイッチ**: リーフスイッチは計算ノードに直接接続する末端スイッチ、スパインスイッチはリーフスイッチ同士を接続する上位スイッチ
+- **--switches オプション**: `sbatch`/`srun` でジョブが利用してよいスイッチ数の上限を指定するオプション。`count[@max-time]` の形式で、`max-time` を超えても要求スイッチ数内に収まらない場合は制約を緩めて配置される
+- **scontrol reconfigure**: 稼働中の `slurmctld` に設定ファイルの変更を反映させるコマンド。プロセスの再起動なしに `slurm.conf`/`topology.conf` の変更を読み込む
+
+## シナリオ設定
+
+クラスタ `{{ cluster_name }}` のパーティション `{{ partition_name }}` を対象に、以下の2段構成のスイッチ階層を `{{ topology_conf_path }}` に定義します。
+
+- リーフスイッチ `{{ switch_leaf1_name }}`: 配下ノード `{{ switch_leaf1_nodes }}`
+- リーフスイッチ `{{ switch_leaf2_name }}`: 配下ノード `{{ switch_leaf2_nodes }}`
+- スパインスイッチ `{{ switch_spine_name }}`: `{{ switch_leaf1_name }}` と `{{ switch_leaf2_name }}` を接続
+
+`{{ slurm_conf_path }}` に `TopologyPlugin=topology/tree` を追記して `{{ slurmctld_service_name }}` に反映したうえで、`--switches={{ job_switches_count }}` を付けたジョブ(ノード数 `{{ test_nodes_count }}`)が単一リーフスイッチ配下に集約されることを確認します。
+
+## 手順
+
+### 1. 物理配線からスイッチ階層を整理する
+
+対象パーティションのノード一覧と現在の状態を確認し、ネットワーク図・配線表と突き合わせてノードがどのリーフスイッチに接続されているかを整理します。
+
+```bash
+sinfo -N -o "%N %P %T" --partition={{ partition_name }}
+scontrol show node | grep -E "NodeName|NodeAddr"
+```
+
+整理結果として、`{{ switch_leaf1_name }}` 配下に `{{ switch_leaf1_nodes }}`、`{{ switch_leaf2_name }}` 配下に `{{ switch_leaf2_nodes }}` が接続されていること、両リーフスイッチが `{{ switch_spine_name }}` に接続されていることをネットワーク担当と確認します。
+
+### 2. topology.confを作成する
+
+整理したスイッチ階層を `{{ topology_conf_path }}` に記述します。
+
+```bash
+sudo tee {{ topology_conf_path }} <<'EOF'
+SwitchName={{ switch_leaf1_name }} Nodes={{ switch_leaf1_nodes }}
+SwitchName={{ switch_leaf2_name }} Nodes={{ switch_leaf2_nodes }}
+SwitchName={{ switch_spine_name }} Switches={{ switch_leaf1_name }},{{ switch_leaf2_name }}
+EOF
+sudo chown slurm:slurm {{ topology_conf_path }}
+sudo chmod 644 {{ topology_conf_path }}
+```
+
+パーティション `{{ partition_name }}` の全ノードがいずれかの `Nodes=` 行に含まれていることを確認します。記載漏れのノードがあると、後続の `reconfigure` で認識されません。
+
+### 3. slurm.confでtopology/treeを有効化する
+
+```bash
+sudo tee -a {{ slurm_conf_path }} <<'EOF'
+TopologyPlugin=topology/tree
+EOF
+sudo systemctl restart {{ slurmctld_service_name }}
+scontrol reconfigure
+```
+
+`slurmctld` の再起動中は新規ジョブの受付が一時的に止まるため、利用者の少ない時間帯に実施します。
+
+### 4. scontrol show topologyで反映を確認する
+
+```bash
+scontrol show topology
+scontrol show topology | grep -A2 "SwitchName={{ switch_leaf1_name }}"
+scontrol show topology | grep -A2 "SwitchName={{ switch_spine_name }}"
+```
+
+`{{ switch_leaf1_name }}` の `Nodes=` に `{{ switch_leaf1_nodes }}` が、`{{ switch_spine_name }}` の `Switches=` に `{{ switch_leaf1_name }},{{ switch_leaf2_name }}` が表示されることを確認します。
+
+### 5. --switchesオプション付きジョブで集約を検証する
+
+```bash
+tee {{ test_job_script_path }} <<'EOF'
+#!/bin/bash
+#SBATCH --job-name={{ test_job_name }}
+#SBATCH --partition={{ partition_name }}
+#SBATCH --nodes={{ test_nodes_count }}
+#SBATCH --switches={{ job_switches_count }}@{{ job_switches_max_time }}
+#SBATCH --ntasks-per-node=1
+#SBATCH --output=%x-%j.out
+
+srun hostname
+EOF
+
+chmod +x {{ test_job_script_path }}
+JOB_ID=$(sbatch --parsable {{ test_job_script_path }})
+echo "JOB_ID=$JOB_ID"
+
+sacct -j "$JOB_ID" --format=JobID,NodeList,State --noheader
+```
+
+割り当てられた `NodeList` が `{{ switch_leaf1_nodes }}` または `{{ switch_leaf2_nodes }}` のいずれか一方の範囲内に収まっており、両方のリーフスイッチにまたがっていないことを確認します。
+
+## 動作確認
+
+- `scontrol show topology` に `{{ switch_leaf1_name }}`・`{{ switch_leaf2_name }}`・`{{ switch_spine_name }}` の3スイッチが、手順1で整理した接続関係のとおりに表示されること
+- 手順3の `scontrol reconfigure` がエラーなく完了し、`sinfo --partition={{ partition_name }}` で全ノードが `idle` または `alloc` 状態として認識されていること
+- 手順5のテストジョブについて、`sacct` の `NodeList` が単一のリーフスイッチ配下(`{{ switch_leaf1_nodes }}` または `{{ switch_leaf2_nodes }}`)に収まっていること
+
+## 注意事項
+
+- `topology.conf` にパーティション `{{ partition_name }}` の全ノードを記載する。記載漏れのノードは `scontrol reconfigure` 後にスイッチ未所属として扱われ、`--switches` を指定したジョブの配置対象から外れることがある。
+- `--switches={{ job_switches_count }}@{{ job_switches_max_time }}` の `@` 以降は待機上限時間で、この時間を超えるとSlurmはスイッチ数制約を緩めてジョブを配置する。制約を必ず守らせたい場合は待機上限を付けずに運用方針を別途検討する。
+- `{{ slurmctld_service_name }}` の再起動は新規ジョブ受付を一時的に止めるため、稼働中ジョブが少ない時間帯に実施し、事前に利用者へ周知する。
+- ネットワーク担当が確認した配線表と `{{ topology_conf_path }}` の内容に差異がないか、変更のたびに突き合わせる。配線変更後の更新漏れは誤った配置判断につながる。

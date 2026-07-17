@@ -1,0 +1,10 @@
+slurm_conf_path = "/etc/slurm/slurm.conf"
+gres_conf_path = "/etc/slurm/gres.conf"
+gres_types = "gpu"
+node_name = "gpu-node01"
+cpu_count = 32
+real_memory_mb = 257536
+gpu_count = 2
+gpu_device_range = "/dev/nvidia[0-1]"
+partition_name = "gpu"
+srun_test_command = "nvidia-smi -L"

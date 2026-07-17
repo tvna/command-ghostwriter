@@ -1,0 +1,94 @@
+# NCCLによるマルチノード集合通信ベンチマーク
+
+`nccl-tests` の `all_reduce_perf` を使い、単一ノードから複数ノードへと段階的に規模を広げながらAllReduceの集合通信帯域を測定し、`{{ interconnect_desc }}` の理論帯域と比較評価します。
+
+## 目的
+
+`busbw`(バス帯域)の指標の意味を理解し、単一ノード実行と `mpirun` による複数ノード実行を切り分けて測定することで、実測帯域が理論帯域に対してどの程度の効率で出ているかを判定できるようになることを目指します。
+
+## 用語解説
+
+- **algbw / busbw**: `all_reduce_perf` が出力する2種類の帯域指標。`algbw` はアルゴリズム上の転送量から算出した帯域、`busbw` はAllReduceの通信量モデルに基づき実際のバスが使われた帯域に換算した値で、理論帯域との比較には `busbw` を用いる
+- **hostfile**: `mpirun` に渡すノード一覧ファイル。ホスト名と `slots=N` でそのノードに割り当てるプロセス数を指定する
+- **NCCL_SOCKET_IFNAME**: NCCLの帯域外制御通信(セットアップ・同期)に使うネットワークインターフェースを指定する環境変数
+- **NCCL_IB_HCA**: NCCLがデータ転送に使うInfiniBand HCA(Host Channel Adapter)デバイスを指定する環境変数
+- **npernode**: `mpirun` が各ノードに起動するプロセス数。GPU 1枚に1プロセスを割り当てる構成では `gpus_per_node` と一致させる
+
+## シナリオ設定
+
+`{{ num_nodes }}` ノード、各ノード `{{ gpus_per_node }}` GPU(合計 `{{ num_nodes * gpus_per_node }}` GPU)の構成で、`{{ interconnect_desc }}` を経由したAllReduce帯域を測定します。ホストファイルは `{{ hostfile_path }}` に配置し、対象ホストは次の通りです。
+
+{% for h in hosts %}- `{{ h }}`
+{% endfor %}
+測定範囲はメッセージサイズ `{{ min_bytes }}` から `{{ max_bytes }}` まで、倍率 `{{ step_factor }}` で段階的に広げます。比較対象の理論バス帯域は `{{ expected_bandwidth.theoretical_busbw_gbs }}` GB/sとし、効率のしきい値は `{{ expected_bandwidth.efficiency_threshold_percent }}` %とします。
+
+## 手順
+
+### 1. nccl-testsをビルドする
+
+```bash
+git clone https://github.com/NVIDIA/nccl-tests.git {{ work_dir }}
+cd {{ work_dir }}
+make MPI=1 MPI_HOME={{ mpi_home }} CUDA_HOME={{ cuda_home }}
+```
+
+### 2. ホストファイルとNCCL環境変数を準備する
+
+```bash
+sudo mkdir -p $(dirname {{ hostfile_path }})
+sudo tee {{ hostfile_path }} <<EOF
+{% for h in hosts %}{{ h }}
+{% endfor %}EOF
+
+export NCCL_DEBUG={{ nccl_debug_level }}
+export NCCL_SOCKET_IFNAME={{ network_interface }}
+export NCCL_IB_HCA={{ ib_hca }}
+```
+
+### 3. 単一ノードでall_reduce_perfを実行する
+
+MPIを介さず、1プロセスが同一ノード内の複数GPUを直接扱う構成で、まずNVLink経由の帯域をベースラインとして測定します。
+
+```bash
+cd {{ work_dir }}
+./build/all_reduce_perf -b {{ min_bytes }} -e {{ max_bytes }} -f {{ step_factor }} -g {{ gpus_per_node }}
+```
+
+### 4. mpirunで複数ノード実行する
+
+```bash
+sudo mkdir -p $(dirname {{ result_log_path }})
+mpirun --hostfile {{ hostfile_path }} \
+  -np {{ num_nodes * gpus_per_node }} -npernode {{ gpus_per_node }} \
+  -x NCCL_DEBUG={{ nccl_debug_level }} -x NCCL_SOCKET_IFNAME={{ network_interface }} -x NCCL_IB_HCA={{ ib_hca }} \
+  --mca btl_tcp_if_include {{ network_interface }} \
+  {{ work_dir }}/build/all_reduce_perf -b {{ min_bytes }} -e {{ max_bytes }} -f {{ step_factor }} -g 1 \
+  | tee {{ result_log_path }}
+```
+
+`-g 1` はプロセスあたり1GPUを意味し、ノードをまたいだ通信経路(`{{ interconnect_desc }}`)を測定対象にします。
+
+### 5. busbw測定値を理論帯域と比較評価する
+
+```bash
+measured_busbw=$(awk '/^# Avg bus bandwidth/ {print $NF}' {{ result_log_path }})
+awk -v measured="$measured_busbw" -v theoretical="{{ expected_bandwidth.theoretical_busbw_gbs }}" -v threshold="{{ expected_bandwidth.efficiency_threshold_percent }}" 'BEGIN {
+  efficiency = (measured / theoretical) * 100
+  printf "measured_busbw=%.2f GB/s theoretical_busbw=%.2f GB/s efficiency=%.1f%%\n", measured, theoretical, efficiency
+  if (efficiency < threshold) {
+    print "WARNING: efficiency is below threshold"
+  }
+}'
+```
+
+## 動作確認
+
+- 手順3の単一ノード実行で、エラーなく最終行に `# Avg bus bandwidth` が出力されること
+- 手順4の複数ノード実行が `{{ num_nodes }}` ノード・合計 `{{ num_nodes * gpus_per_node }}` プロセスで完走し、`{{ result_log_path }}` にログが残ること
+- 手順5で算出した効率が `{{ expected_bandwidth.efficiency_threshold_percent }}` %以上であること。下回る場合は `NCCL_SOCKET_IFNAME` / `NCCL_IB_HCA` の指定誤りや、ノード間の物理配線・スイッチ設定を疑う
+
+## 注意事項
+
+- 単一ノード(手順3, NVLink経由)と複数ノード(手順4, `{{ interconnect_desc }}` 経由)ではbusbwの水準が大きく異なるため、同じ理論帯域と比較しない。手順5の比較対象は手順4の複数ノード測定値に限る。
+- `NCCL_IB_HCA={{ ib_hca }}` はハードウェア構成に依存するため、実機の `ibstat` 等で実在デバイス名を確認してから設定する。
+- 本手順は帯域の定量評価が目的であり、通信障害発生時の切り分け(トラブルシューティング)は対象外とする。

@@ -1,0 +1,115 @@
+# OptimumによるONNXエクスポートと推論検証 — {{ model_id }}
+
+Hugging Face `optimum-cli` を使い、Transformersモデル `{{ model_id }}` をONNX形式へエクスポートし、ONNX Runtimeでの推論結果がPyTorch実行時と一致することを検証します。
+
+## 目的
+
+`optimum-cli export onnx` によるエクスポートの流れと出力ファイル構成を理解し、ONNX Runtimeでの推論結果をPyTorch出力と突き合わせて、変換後モデルを安全に配布・運用できるようになることを目指します。
+
+## 用語解説
+
+- **ONNX(Open Neural Network Exchange)**: フレームワーク非依存のモデル交換フォーマット。PyTorchで学習したモデルをONNX Runtime等の別ランタイムで実行できるようにする
+- **optimum-cli export onnx**: Hugging Face `optimum` パッケージが提供する、TransformersモデルをONNX形式へ変換するCLIサブコマンド
+- **opset**: ONNX演算子セットのバージョン番号。値が大きいほど新しい演算子に対応するが、実行側ランタイムの対応バージョンとの整合が必要
+- **task**: エクスポート対象のタスク種別(`text-classification` 等)。モデルの出力ヘッド構成をoptimumに伝えるための指定
+- **ONNX Runtime**: ONNX形式のモデルを実行する推論エンジン。`InferenceSession` でモデルを読み込み、`run()` で推論する
+
+## シナリオ設定
+
+モデル `{{ model_id }}`(タスク: `{{ task }}`)を opset `{{ opset }}` でONNXへエクスポートし、`{{ export_dir }}` に出力します。生成される主要ファイルは `{{ onnx_filename }}` です。検証には入力テキスト「{{ input_text }}」を用い、PyTorchとONNX Runtimeの出力logitsの最大差分が `{{ max_diff_threshold }}` を下回ることを確認します。
+
+## 手順
+
+### 1. optimumと依存パッケージを導入する
+
+```bash
+python3 -m venv /opt/onnx-export-env
+source /opt/onnx-export-env/bin/activate
+pip install "optimum[exporters]" onnxruntime transformers torch
+```
+
+### 2. optimum-cli export onnxでエクスポートする
+
+```bash
+mkdir -p {{ export_dir }}
+optimum-cli export onnx \
+  --model {{ model_id }} \
+  --task {{ task }} \
+  --opset {{ opset }} \
+  {{ export_dir }}
+```
+
+### 3. 出力ファイル構成を確認する
+
+```bash
+ls -la {{ export_dir }}
+test -f {{ export_dir }}/{{ onnx_filename }}
+python3 -c "import onnx; m = onnx.load('{{ export_dir }}/{{ onnx_filename }}'); onnx.checker.check_model(m); print('opset:', m.opset_import[0].version)"
+```
+
+`{{ export_dir }}` には `{{ onnx_filename }}` のほか、`config.json` や `tokenizer.json` などトークナイザ・設定ファイルが一式出力されます。
+
+### 4. ONNX Runtimeで推論検証する
+
+```bash
+python3 <<'PYEOF'
+import onnxruntime as ort
+from transformers import AutoTokenizer
+
+export_dir = "{{ export_dir }}"
+onnx_path = f"{export_dir}/{{ onnx_filename }}"
+tokenizer = AutoTokenizer.from_pretrained(export_dir)
+inputs = tokenizer("{{ input_text }}", return_tensors="np")
+
+session = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
+feed = {k: v for k, v in inputs.items() if k in {i.name for i in session.get_inputs()}}
+outputs = session.run(None, feed)
+print("onnxruntime logits shape:", outputs[0].shape)
+print("onnxruntime logits:", outputs[0])
+PYEOF
+```
+
+### 5. PyTorch出力との差分を比較する
+
+```bash
+python3 <<'PYEOF'
+import numpy as np
+import onnxruntime as ort
+import torch
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
+model_id = "{{ model_id }}"
+export_dir = "{{ export_dir }}"
+onnx_path = f"{export_dir}/{{ onnx_filename }}"
+
+tokenizer = AutoTokenizer.from_pretrained(model_id)
+torch_inputs = tokenizer("{{ input_text }}", return_tensors="pt")
+torch_model = AutoModelForSequenceClassification.from_pretrained(model_id)
+torch_model.eval()
+with torch.no_grad():
+    torch_logits = torch_model(**torch_inputs).logits.numpy()
+
+onnx_inputs = tokenizer("{{ input_text }}", return_tensors="np")
+session = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
+feed = {k: v for k, v in onnx_inputs.items() if k in {i.name for i in session.get_inputs()}}
+onnx_logits = session.run(None, feed)[0]
+
+max_diff = float(np.max(np.abs(torch_logits - onnx_logits)))
+print("max_diff:", max_diff)
+print("threshold:", {{ max_diff_threshold }})
+print("within_threshold:", max_diff < {{ max_diff_threshold }})
+PYEOF
+```
+
+## 動作確認
+
+- 手順3の `onnx.checker.check_model` がエラーなく完了し、opsetが `{{ opset }}` と表示されること
+- 手順4のONNX Runtime推論が例外なく完了し、logitsが出力されること
+- 手順5の `max_diff` が `{{ max_diff_threshold }}` を下回り、`within_threshold` が `True` と表示されること
+
+## 注意事項
+
+- `--opset {{ opset }}` はONNX Runtimeの対応バージョンと整合させる。古いONNX Runtimeで新しいopsetのモデルを読み込むと `InferenceSession` の初期化に失敗する。
+- 差分比較(手順5)はCPU実行同士の比較を前提とする。GPU実行やfp16化を行う場合は数値誤差が広がるため `{{ max_diff_threshold }}` の見直しが必要になる。
+- エクスポート元モデル `{{ model_id }}` がgated modelの場合、手順1の前に `huggingface-cli login` 等でアクセストークンを設定しておく必要がある(本手順の対象外)。
+- `{{ export_dir }}` を配布する際は、`{{ onnx_filename }}` だけでなくトークナイザ・設定ファイル一式を含めないと推論側で読み込みに失敗する。

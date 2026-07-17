@@ -1,0 +1,89 @@
+# NVLink構成確認とFabric Manager運用
+
+`nvidia-smi` の `nvlink`/`topo` サブコマンドでGPU間のNVLinkトポロジとリンク状態を確認し、NVSwitch搭載サーバで必須となるFabric Managerサービスを健全に運用します。
+
+## 目的
+
+マルチGPUサーバにおけるNVLink接続構成を把握し、Fabric Managerサービスの導入・起動・状態確認から、トポロジ確認・リンク状態点検・GPU間帯域テストまでの一連の手順を実行できるようになることを目指します。
+
+## 用語解説
+
+- **NVLink**: GPU間を直接接続する高速インターコネクト。PCIeより高い帯域でGPU間のデータ転送を行う
+- **NVSwitch**: 複数GPU間のNVLinkをフルメッシュ状に中継するスイッチASIC。搭載サーバでは全GPUが均等な帯域で相互接続される
+- **Fabric Manager**: NVSwitch搭載サーバでNVLinkファブリックの初期化・監視・エラー処理を担うNVIDIA提供サービス(`nvidia-fabricmanager`)。GPU利用前にこのサービスが正常稼働している必要がある
+- **`nvidia-smi topo -m`**: GPU・NIC間の接続経路(NVLink/PCIe/QPIなど)を行列形式で表示するコマンド
+- **`nvidia-smi nvlink -s`**: 各GPUのNVLinkリンクごとの状態(Active/Inactive)と速度を表示するコマンド
+
+## シナリオ設定
+
+対象サーバ `{{ node_hostname }}` にはGPUが `{{ gpu_count }}` 基搭載されており、`{{ topology_note }}` です。各GPUは `{{ expected_nvlink_per_gpu }}` 本のNVLinkを持つ構成を想定します。{{ driver_version_note }}。Fabric Managerパッケージは `{{ fabricmanager_package }}` を導入し、サービス名 `{{ fabricmanager_service }}` で管理します。
+
+## 手順
+
+### 1. nvidia-fabricmanagerパッケージを導入する
+
+```bash
+sudo apt-get update
+sudo apt-get install -y {{ fabricmanager_package }}
+```
+
+導入前にGPUドライバのバージョンを確認し、{{ driver_version_note }}。バージョン不一致があるとFabric Managerが起動時にエラーを出して停止します。
+
+### 2. サービスを起動し状態を確認する
+
+```bash
+sudo systemctl enable {{ fabricmanager_service }}
+sudo systemctl start {{ fabricmanager_service }}
+sudo systemctl status {{ fabricmanager_service }}
+```
+
+`active (running)` になっていることを確認します。失敗している場合は `/var/log/fabricmanager.log` を確認します。
+
+```bash
+sudo tail -n 50 /var/log/fabricmanager.log
+```
+
+### 3. nvidia-smi topo -mでGPU間トポロジを確認する
+
+```bash
+nvidia-smi topo -m
+```
+
+行列内の接続種別を確認し、GPU同士の交点が `NV` から始まる表記(NVLink経由の接続を示す)になっていることを確認します。`{{ topology_note }}` の想定どおり、`{{ gpu_count }}` 基のGPU全組み合わせがNVLink経由で接続されているかを確認します。
+
+### 4. nvidia-smi nvlink -sでリンク状態を点検する
+
+```bash
+nvidia-smi nvlink -s
+```
+
+各GPUについて `{{ expected_nvlink_per_gpu }}` 本のリンクが表示され、すべて `Active` であることを確認します。あわせてエラーカウンタも確認します。
+
+```bash
+nvidia-smi nvlink -e
+```
+
+エラーカウンタがゼロ、または前回確認時から増加していないことを確認します。
+
+### 5. GPU間帯域テストで疎通を検証する
+
+```bash
+{{ bandwidth_test_binary_path }} --device=all
+```
+
+実測帯域が `{{ min_bandwidth_gbps }}` GB/s を下回っていないかを確認します。単一GPUペアのみ低下している場合は、手順4のエラーカウンタと照合してリンク単位の異常を切り分けます。
+
+## 動作確認
+
+- `systemctl status {{ fabricmanager_service }}` が `active (running)` を示すこと
+- `nvidia-smi topo -m` の全GPUペアがNVLink経由の接続(`NV`表記)になっていること
+- `nvidia-smi nvlink -s` で `{{ gpu_count }}` 基すべてのGPUのリンクが `Active` であること
+- `nvidia-smi nvlink -e` のエラーカウンタが増加していないこと
+- `{{ bandwidth_test_binary_path }} --device=all` の実測帯域が `{{ min_bandwidth_gbps }}` GB/s 以上であること
+
+## 注意事項
+
+- Fabric Managerが停止した状態でGPUを使用しようとすると、NVSwitch搭載サーバではCUDA初期化エラーが発生する場合がある。GPUワークロード開始前に必ずサービス状態を確認する。
+- {{ driver_version_note }}。ドライバをアップグレードした場合はFabric Managerパッケージも合わせて更新し、サービスを再起動する。
+- `nvidia-smi nvlink -s` でリンクが `Inactive` の場合、物理的な接続不良やGPU/NVSwitchの故障が疑われる。ハードウェア交換が必要かどうかはベンダーサポートの切り分け手順に従う。
+- 帯域テストはGPUを占有するため、他のワークロードが動作していない保守ウィンドウ内で実行する。

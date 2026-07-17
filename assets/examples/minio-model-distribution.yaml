@@ -1,0 +1,11 @@
+minio_alias: internal-minio
+minio_endpoint: https://minio.internal.example.com:9000
+bucket_name: ml-models
+model_name: qwen3-coder-30b
+model_version: v1
+local_model_dir: /srv/models/qwen3-coder-30b
+readonly_policy_name: model-readonly
+policy_file_path: /tmp/model-readonly-policy.json
+share_expire: 72h
+checksum_manifest: checksums.sha256
+consumer_download_dir: /tmp/model-download

@@ -1,0 +1,4 @@
+model_repo,current_license_label,expected_license,model_card_status,review_owner
+acme-ai/ja-llm-13b,apache-2.0,apache-2.0,整備済み,tanaka
+acme-ai/vision-clip-l,unknown,cc-by-nc-4.0,不備あり,kobayashi
+acme-ai/speech-tts-ja,unknown,custom-commercial,未作成,sato

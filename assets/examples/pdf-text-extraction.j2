@@ -1,0 +1,96 @@
+# poppler-utilsによるPDFテキスト抽出
+
+`pdfinfo` による事前調査、`pdftotext` による本文抽出、`ocrmypdf` によるスキャンPDFのOCR化までを一巡し、抽出テキストの文字化け・欠落を確認します。
+
+## 目的
+
+PDFの内部構造(テキスト埋め込み済みか、画像のみのスキャンPDFか)を事前調査で見極め、それぞれに適した抽出手段を選んだうえで、抽出結果の文字化けや欠落を検出できるようになることを目指します。
+
+## 用語解説
+
+- **pdfinfo**: poppler-utils付属のコマンド。ページ数・PDFバージョン・暗号化有無などのメタ情報を表示する
+- **pdftotext**: PDFに埋め込まれたテキストレイヤーを抽出するコマンド。`-layout` オプションで元のレイアウト(段組・表組み)をできるだけ保った抽出ができる
+- **スキャンPDF**: ページが画像として格納され、テキストレイヤーを持たないPDF。`pdftotext` では本文を抽出できない
+- **OCR(光学文字認識)**: 画像中の文字を認識してテキスト化する処理。`ocrmypdf` はTesseract OCRエンジンを使い、スキャンPDFに検索可能なテキストレイヤーを付与する
+- **サイドカーテキスト(--sidecar)**: `ocrmypdf` がOCR結果のテキストのみを別ファイルとして書き出すオプション
+- **置換文字(U+FFFD)**: 文字コードの解釈に失敗した箇所に挿入される記号。抽出テキスト中に出現すると文字化けの疑いがある
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 件のPDFを対象とします。
+
+| file_name | doc_type | ocr_lang | expected_pages | purpose |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["file_name"] }} | {{ r["doc_type"] }} | {{ r["ocr_lang"] }} | {{ r["expected_pages"] }} | {{ r["purpose"] }} |
+{% endfor %}
+
+`doc_type` が `text` の対象は `pdftotext` で、`scanned` の対象は `ocrmypdf` でテキスト化します。`ocr_lang` が `-` の対象はOCR不要(テキストPDF)であることを示します。
+
+## 手順
+
+### 1. poppler-utilsとocrmypdfを導入する
+
+```bash
+sudo apt-get update
+sudo apt-get install -y poppler-utils ocrmypdf tesseract-ocr-jpn tesseract-ocr-eng
+```
+
+`tesseract-ocr-jpn` は日本語の学習済みモデルを追加するパッケージです。対象PDFの言語に合わせて言語パックを揃えます。
+
+### 2. pdfinfoで対象PDFを事前調査する
+
+```bash
+{% for r in csv_rows %}pdfinfo {{ r["file_name"] }}
+{% endfor %}```
+
+`Pages:` の値が上表の `expected_pages` と一致するか、`Encrypted:` が `no` になっているか、`Page size` に極端な値がないかを確認します。相違があれば、以降の手順に進む前に原因(欠損ページ・保護PDF等)を切り分けます。
+
+### 3. pdftotextでテキストPDFから本文を抽出する
+
+```bash
+{% for r in csv_rows %}{% if r["doc_type"] == "text" %}pdftotext -layout {{ r["file_name"] }} {{ r["file_name"] }}.txt
+{% endif %}{% endfor %}```
+
+`-layout` は元の段組・表組みの位置関係をできるだけ保って抽出するオプションです。指定しない場合、複数段組のPDFで行の順序が崩れることがあります。
+
+### 4. ocrmypdfでスキャンPDFにOCRを適用する
+
+```bash
+{% for r in csv_rows %}{% if r["ocr_lang"] != "-" %}ocrmypdf --language {{ r["ocr_lang"] }} --sidecar {{ r["file_name"] }}.txt {{ r["file_name"] }} {{ r["file_name"] }}.ocr.pdf
+{% endif %}{% endfor %}```
+
+`--language` にはTesseractの言語コードを `+` 区切りで指定します(例: `jpn+eng` は日本語と英語が混在する文書向け)。`--sidecar` を付けると、OCR結果のテキストのみを `.txt` ファイルとしても取得できます。
+
+### 5. 抽出結果のテキスト量を確認する
+
+```bash
+{% for r in csv_rows %}wc -lc {{ r["file_name"] }}.txt
+{% endfor %}```
+
+手順3・4のいずれかで生成された、上表の `file_name` に `.txt` を付与した名前のファイルについて、行数・バイト数を確認します。`expected_pages` に対して極端に行数が少ない場合、抽出漏れ(欠落)の疑いがあります。
+
+### 6. 抽出テキストの文字化け・欠落を確認する
+
+```bash
+{% for r in csv_rows %}grep -c $'\xEF\xBF\xBD' {{ r["file_name"] }}.txt
+{% endfor %}```
+
+```bash
+{% for r in csv_rows %}test -s {{ r["file_name"] }}.txt && echo "OK: {{ r["file_name"] }}" || echo "NG(空ファイル): {{ r["file_name"] }}"
+{% endfor %}```
+
+1つ目のコマンドはUTF-8の置換文字(U+FFFD)の出現回数を数えます。0より大きい場合、文字コードの解釈に失敗した箇所(文字化け)が含まれます。2つ目のコマンドは抽出結果が空でないか(欠落していないか)を確認します。
+
+## 動作確認
+
+- 全 {{ csv_rows | length }} 件について、`pdfinfo` の `Pages:` が上表の `expected_pages` と一致すること
+- `doc_type` が `text` の対象は手順3で、`scanned` の対象は手順4で、いずれも同名の `.txt` ファイルが生成されていること
+- 手順6の `grep -c` の結果が全ファイルで `0` であること(置換文字が含まれない)
+- 手順6の `test -s` が全ファイルで `OK` と表示されること(空の抽出結果がない)
+
+## 注意事項
+
+- スキャンPDFに `pdftotext` を実行してもエラーにはならず、空またはごく短いテキストが出力されるだけの場合がある。手順2の `pdfinfo` 調査と `doc_type` の分類を必ず先に行い、抽出手段を取り違えない。
+- `ocrmypdf` は既にテキストレイヤーを持つPDFにはデフォルトでエラーを返す(`--skip-text` や `--force-ocr` で挙動を変更できる)。本手順では `doc_type=scanned` の対象のみに絞って実行し、テキストPDFに誤って適用しない。
+- OCR結果の精度は元画像の解像度に依存する。`receipt_009_scan.pdf` のように解像度が低くかすれのある原稿は誤認識が増えやすいため、手順6の確認結果が悪い場合は原本の再スキャン(300dpi以上を推奨)を検討する。
+- 抽出したテキストに個人情報(契約書・請求書等)が含まれる場合があるため、`.txt` ファイルの保存先・共有範囲は原本PDFと同等のアクセス制御下に置く。

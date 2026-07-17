@@ -1,0 +1,4 @@
+model_name,model_dir,bin_filename,size_gb,status
+llm-jp-13b-instruct,/data/models/llm-jp-13b-instruct,pytorch_model.bin,26.4,未変換
+elyza-japanese-llama2-7b,/data/models/elyza-japanese-llama2-7b,pytorch_model.bin,13.5,未変換
+whisper-large-v3-ja,/data/models/whisper-large-v3-ja,pytorch_model.bin,3.1,変換済み

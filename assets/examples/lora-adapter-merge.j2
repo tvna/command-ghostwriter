@@ -1,0 +1,122 @@
+# LoRAアダプタのマージと配布用モデル生成
+
+`peft` の `merge_and_unload` でLoRAアダプタをベースモデルへマージしてsafetensors形式で保存し、`convert_lora_to_gguf.py` でアダプタ単体をGGUF化したうえで、マージ前後の出力を比較します。
+
+## 目的
+
+LoRAアダプタとベースモデルの関係(分離状態と統合状態の違い)を理解し、配布形態(safetensors統合モデル、GGUF LoRAアダプタ)ごとの生成手順と、マージによる劣化がないことの確認方法を身につけることを目指します。
+
+## 用語解説
+
+- **LoRA(Low-Rank Adaptation)**: ベースモデルの重みを固定したまま、低ランク行列の差分のみを学習するファインチューニング手法。学習結果は「アダプタ」として個別に保存される
+- **peft**: Hugging Faceが提供するパラメータ効率的ファインチューニングのライブラリ。LoRAアダプタの読み込み・適用・マージを扱う
+- **merge_and_unload**: `PeftModel` が持つメソッド。LoRAの差分行列をベースモデルの重みに加算して単一モデルへ統合し、以後はpeft層なしで通常のモデルとして扱えるようにする
+- **safetensors**: PyTorchモデルの重みを安全に(pickleの任意コード実行リスクなしに)保存するファイル形式。`save_pretrained(..., safe_serialization=True)` で出力する
+- **convert_lora_to_gguf.py**: llama.cpp付属のPythonスクリプト。PEFT形式のLoRAアダプタを、ベースモデルとは別のGGUF LoRAファイルへ変換し、`llama-cli` の `--lora` オプションで実行時に適用できるようにする
+- **GGUF LoRAアダプタ**: マージ済みモデルとは異なり、ベースモデルのGGUFに対して実行時に差分を適用する形式。ベースモデルを複数のアダプタで使い分けたい場合に容量を節約できる
+
+## シナリオ設定
+
+ベースモデル `{{ base_model_repo }}` を `{{ base_model_dir }}` に、LoRAアダプタ `{{ adapter_repo }}` を `{{ adapter_dir }}` に取得します。マージ済みモデルはsafetensors形式で `{{ merged_model_dir }}` に保存し、並行してアダプタ単体を `{{ lora_gguf_path }}` へGGUF変換します。マージの効果はプロンプト「{{ compare_prompt }}」に対する応答をマージ前後で比較して確認します。
+
+## 手順
+
+### 1. ベースモデルとLoRAアダプタを取得する
+
+```bash
+mkdir -p {{ base_model_dir }} {{ adapter_dir }}
+huggingface-cli download {{ base_model_repo }} --local-dir {{ base_model_dir }} --local-dir-use-symlinks False
+huggingface-cli download {{ adapter_repo }} --local-dir {{ adapter_dir }} --local-dir-use-symlinks False
+```
+
+### 2. peft環境を準備する
+
+```bash
+python3 -m venv {{ work_dir }}/venv
+source {{ work_dir }}/venv/bin/activate
+pip install peft transformers accelerate safetensors torch
+```
+
+### 3. merge_and_unloadでマージしsafetensors形式で保存する
+
+```bash
+source {{ work_dir }}/venv/bin/activate
+mkdir -p {{ merged_model_dir }}
+python3 <<'PYEOF'
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import PeftModel
+import torch
+
+base_model_dir = "{{ base_model_dir }}"
+adapter_dir = "{{ adapter_dir }}"
+merged_model_dir = "{{ merged_model_dir }}"
+
+tokenizer = AutoTokenizer.from_pretrained(base_model_dir)
+base_model = AutoModelForCausalLM.from_pretrained(base_model_dir, torch_dtype=torch.bfloat16)
+
+lora_model = PeftModel.from_pretrained(base_model, adapter_dir)
+merged_model = lora_model.merge_and_unload()
+merged_model.save_pretrained(merged_model_dir, safe_serialization=True)
+tokenizer.save_pretrained(merged_model_dir)
+print("merged model saved to:", merged_model_dir)
+PYEOF
+```
+
+`merge_and_unload` はベースモデルの重みへLoRA差分を直接加算するため、実行後は元のアダプタ層を持たない通常のモデルとして扱えます。マージ元の `{{ adapter_dir }}` は変更されません。
+
+### 4. convert_lora_to_gguf.pyでLoRAアダプタをGGUF化する
+
+```bash
+source {{ work_dir }}/venv/bin/activate
+test -d {{ llama_cpp_dir }} || git clone https://github.com/ggerganov/llama.cpp {{ llama_cpp_dir }}
+pip install -r {{ llama_cpp_dir }}/requirements.txt
+cd {{ llama_cpp_dir }}
+python3 convert_lora_to_gguf.py --base {{ base_model_dir }} --outfile {{ lora_gguf_path }} --outtype f16 {{ adapter_dir }}
+```
+
+こちらはマージ済みモデルとは別に、アダプタ単体をGGUF化する経路です。ベースモデルのGGUFを複数のアダプタで使い分ける場合に、`llama-cli -m <ベースGGUF> --lora {{ lora_gguf_path }}` の形で実行時適用できます。
+
+### 5. マージ前後の出力を比較する
+
+```bash
+source {{ work_dir }}/venv/bin/activate
+python3 <<'PYEOF'
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import PeftModel
+import torch
+
+prompt = "{{ compare_prompt }}"
+base_model_dir = "{{ base_model_dir }}"
+adapter_dir = "{{ adapter_dir }}"
+merged_model_dir = "{{ merged_model_dir }}"
+
+tokenizer = AutoTokenizer.from_pretrained(base_model_dir)
+inputs = tokenizer(prompt, return_tensors="pt")
+
+base_model = AutoModelForCausalLM.from_pretrained(base_model_dir, torch_dtype=torch.bfloat16)
+lora_model = PeftModel.from_pretrained(base_model, adapter_dir)
+with torch.no_grad():
+    lora_out = lora_model.generate(**inputs, max_new_tokens=64)
+print("adapter-applied output:")
+print(tokenizer.decode(lora_out[0], skip_special_tokens=True))
+
+merged_model = AutoModelForCausalLM.from_pretrained(merged_model_dir, torch_dtype=torch.bfloat16)
+with torch.no_grad():
+    merged_out = merged_model.generate(**inputs, max_new_tokens=64)
+print("merged model output:")
+print(tokenizer.decode(merged_out[0], skip_special_tokens=True))
+PYEOF
+```
+
+## 動作確認
+
+- `{{ merged_model_dir }}` 配下に `model.safetensors`(またはshard分割ファイル)と `config.json`、`tokenizer.json` が生成されていること
+- `test -f {{ lora_gguf_path }}` がGGUF LoRAファイルの存在を確認できること
+- 手順5で出力される「adapter-applied output」と「merged model output」が同一のプロンプトに対して一致すること(マージによる劣化がないことの確認)
+
+## 注意事項
+
+- `merge_and_unload` は不可逆(マージ後にLoRA差分だけを取り出すことはできない)のため、元の `{{ adapter_dir }}` はマージ後も削除せず保持する。
+- ベースモデル・アダプタ・マージ処理を通じてdtype(本手順では`bfloat16`)を統一する。異なるdtypeを混在させると、手順5の比較で意図しない差分が生じる。
+- `{{ merged_model_dir }}` はベースモデル1つ分のサイズをまるごと複製するため、アダプタ数が増えると容量を圧迫する。恒常的に複数アダプタを配布する場合は手順4のGGUF LoRA経路(容量を共有できる)との使い分けを検討する。
+- ベースモデル `{{ base_model_repo }}` およびアダプタ `{{ adapter_repo }}` のライセンス条項(再配布・商用利用可否)の確認は本手順の対象外とする。

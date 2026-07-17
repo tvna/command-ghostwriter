@@ -1,0 +1,142 @@
+# GPUラックの電源容量設計と実測検証
+
+GPUサーバの消費電力を定格値だけでなく実負荷時の実測値で棚卸しし、ラックPDU・
+ブレーカの容量と冗長構成(A系/B系)を踏まえた電源設計を行い、増設余地と閾値ア
+ラートまで定義する手順です。
+
+## 目的
+
+搭載機器の定格消費電力を棚卸しし、`nvidia-smi` と `ipmitool` で実負荷時の実
+測電力を取得したうえで、ラック合計電力とPDU容量、ブレーカの余裕率(デレーティ
+ング)を照合し、冗長構成の妥当性を判断して電源設計を是正できるようになること
+を目指します。あわせて増設余地の把握と電力閾値アラートの仕組みを定義します。
+
+## 用語解説
+
+- **PDU(Power Distribution Unit)**: ラック内で商用電源を各機器に分配するユ
+  ニット。内部に複数のブレーカ保護されたアウトレット系統(本手順のbreaker)を
+  持つ
+- **kVA(皮相電力)とW(有効電力)**: PDUの容量は皮相電力(kVA)で表記されるこ
+  とが多く、有効電力(W)に換算するには力率(PF)を掛ける。本手順では力率0.9
+  として概算する(正確な力率は実測または機器仕様で確認する)
+- **ブレーカ余裕率(デレーティング)**: 継続負荷に対してブレーカ定格電流の一
+  部(慣例的に80%)までしか使わない設計原則。定格ぎりぎりまで使うと発熱や誤ト
+  リップのリスクが高まる
+- **冗長構成(A系/B系)**: 独立した2系統の電源経路(PDU・ブレーカ・分電盤)を
+  用意し、片系統が停止しても運用を継続できるようにする設計
+- **ipmitool dcmi power reading**: サーバのBMC(IPMI)から瞬時消費電力を取得
+  するコマンド。DCMI(Data Center Manageability Interface)拡張機能を使う
+
+## シナリオ設定
+
+ラック `RACK-A12` に {{ csv_rows | length }} 台のGPUサーバを設置します。実測
+データの台帳は `/opt/rack-power/rack-power-capacity-design.csv`(本手順のデー
+タファイルと同一)としてラック管理サーバに配置済みとします。
+
+| hostname | gpu_model | pdu_id | breaker_id | redundancy_group |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["hostname"] }} | {{ r["gpu_model"] }} | {{ r["pdu_id"] }} | {{ r["breaker_id"] }} | {{ r["redundancy_group"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 搭載機器の定格消費電力を棚卸しする
+
+```bash
+{% for r in csv_rows %}echo "{{ r["hostname"] }}: {{ r["gpu_model"] }} {{ r["gpu_count"] }}基構成 定格={{ r["rated_power_w"] }}W"
+{% endfor %}```
+
+台帳の `rated_power_w` はメーカー公表の定格消費電力であり、実負荷時の消費電力
+とは異なる点に注意します(手順2で実測値と突合します)。
+
+### 2. nvidia-smiとipmitoolで実負荷時電力を実測する
+
+```bash
+{% for r in csv_rows %}ssh {{ r["hostname"] }} "nvidia-smi --query-gpu=index,power.draw --format=csv,noheader"
+ssh {{ r["hostname"] }} "sudo ipmitool dcmi power reading"
+{% endfor %}```
+
+トレーニング等の高負荷ワークロードを実行した状態で取得した値を台帳の
+`measured_power_w` に記録します。今回の実測記録は以下のとおりです。
+
+```bash
+{% for r in csv_rows %}echo "{{ r["hostname"] }}: 実測記録値={{ r["measured_power_w"] }}W"
+{% endfor %}```
+
+### 3. ラック合計電力とPDU容量を照合する
+
+PDUごとに実測合計を集計し、PDU容量(kVA)を力率0.9でW換算した値と比較します。
+
+```bash
+awk -F, 'NR>1 {sum[$6]+=$5; cap[$6]=$7*1000*0.9} END {for (p in sum) printf "%s: 実測合計=%dW PDU容量(力率0.9換算)=%.0fW 使用率=%.1f%%\n", p, sum[p], cap[p], sum[p]/cap[p]*100}' /opt/rack-power/rack-power-capacity-design.csv
+```
+
+`PDU-A12-1` は3台分の実測合計がPDU容量(力率0.9換算で19800W)を超過します。個
+別のブレーカには余裕があっても、PDU本体の入力容量を超える組み合わせは危険な
+ため、手順4で是正します。
+
+### 4. ブレーカ余裕率と冗長構成を設計する
+
+各ブレーカについて、三相200V・力率0.9・80%デレーティングを適用した許容値と実
+測値を比較します。
+
+```bash
+awk -F, 'NR>1 {printf "%s(%s): 実測=%dW 許容(三相200V,力率0.9,80%%デレーティング)=%.0fW 使用率=%.1f%%\n", $8, $11, $5, $9*$10*1.732*0.9*0.8, $5/($9*$10*1.732*0.9*0.8)*100}' /opt/rack-power/rack-power-capacity-design.csv
+```
+
+個々のブレーカ(1台1系統)の使用率はいずれも70%前後で余裕がありますが、手順3
+のとおりPDU本体の容量はA系(`PDU-A12-1`)側で超過しています。冗長構成として
+は、A系・B系のいずれか片系統が停止しても残る系統だけで重要ワークロードを継続
+できることが望ましいため、A系に3台を集約せず、`gpu-a12-03` を新設する3台目の
+PDU(`PDU-A12-3` 相当)へ移設し、A系・B系それぞれ2台構成に平準化することを設
+計変更として提案します。
+
+### 5. 増設余地と電力閾値アラートを定義する
+
+是正後を前提に、PDUごとの増設余地(headroom)と警戒閾値(容量の90%)を算出しま
+す。
+
+```bash
+awk -F, 'NR>1 {sum[$6]+=$5; cap[$6]=$7*1000*0.9} END {for (p in sum) printf "%s: 増設余地=%.0fW 警戒閾値(容量の90%%)=%.0fW\n", p, cap[p]-sum[p], cap[p]*0.9}' /opt/rack-power/rack-power-capacity-design.csv
+```
+
+閾値超過を継続的に検知するため、定期実行スクリプトを作成します。
+
+```bash
+sudo tee /usr/local/bin/rack-power-threshold-check.sh <<'SCRIPT'
+#!/bin/bash
+set -eu
+awk -F, 'NR>1 {sum[$6]+=$5; cap[$6]=$7*1000*0.9} END {for (p in sum) if (sum[p] > cap[p]*0.9) printf "%s\n", p}' /opt/rack-power/rack-power-capacity-design.csv | while read -r pdu; do
+  logger -t rack-power-alert "PDU ${pdu} が警戒閾値(容量の90%)を超過しました"
+done
+SCRIPT
+sudo chmod +x /usr/local/bin/rack-power-threshold-check.sh
+echo "*/15 * * * * root /usr/local/bin/rack-power-threshold-check.sh" | sudo tee /etc/cron.d/rack-power-threshold-check
+```
+
+`rack-power-capacity-design.csv` の `measured_power_w` は、手順2の再実測結果
+で定期的に更新する運用を前提とします(本スクリプト自体はリアルタイム実測は行
+わず、直近の台帳値を評価します)。
+
+## 動作確認
+
+- 全 {{ csv_rows | length }} 台について `nvidia-smi` と `ipmitool dcmi power reading` の実測値が台帳に記録されていること
+- 是正後、全PDUの実測合計がPDU容量(力率0.9換算)以内に収まっていること
+- 全ブレーカの使用率が80%デレーティング後の許容値以内であること
+- `/usr/local/bin/rack-power-threshold-check.sh` が実行可能であり、`/etc/cron.d/rack-power-threshold-check` が登録されていること
+- A系・B系のいずれかを停止しても、残る系統の使用率が容量を超過しないこと
+
+## 注意事項
+
+- 力率0.9および三相200V・√3(1.732)による換算はあくまで概算であり、正確な設
+  計には電気主任技術者等による現地測定・確認を要する。本手順の数値をそのまま
+  最終設計値として扱わない。
+- ブレーカ容量を超える負荷は分電盤のトリップを招き、そのブレーカ配下の全GPU
+  サーバが同時停止する重大障害になる。手順3・4で超過が判明した場合は是正(機
+  器の移設・PDU追加)を優先し、超過状態のまま運用を継続しない。
+- PDU・ブレーカの結線変更や機器移設は該当系統の電源停止を伴うため、事前にメ
+  ンテナンスウィンドウを確保し、移設対象サーバのワークロードを退避してから実
+  施する。
+- 本手順はMIGによるGPU資源のソフトウェア的な分割(`mig-gpu-partitioning`)や
+  GPU温度・電力上限の設定(`gpu-power-thermal-limits`)とは異なり、ラックの物
+  理的な電源容量設計に焦点を当てる。

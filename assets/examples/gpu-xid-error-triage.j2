@@ -1,0 +1,82 @@
+# Xidエラーに基づくGPU故障の切り分け
+
+dmesg/journalctlに記録されたXidエラーコードを起点に、`nvidia-smi -q` のECC・Row Remapping状態と `dcgmi diag` の診断結果を突き合わせ、GPU故障箇所を切り分けて交換・リセット・経過観察のいずれで対処すべきかを判断します。
+
+## 目的
+
+Xidコードの意味と深刻度を正しく分類し、ECCエラー・Row Remappingの状態とdcgmi診断結果を根拠として、ハードウェア交換が必要なGPUと、ソフトウェア的なリセットや経過観察で足りるGPUを誤りなく切り分けられるようになることを目指します。
+
+## 用語解説
+
+- **Xid**: NVIDIAドライバがGPUの異常を検出した際に `NVRM: Xid (PCI:xxxx): <code>, ...` の形式でカーネルログへ出力するエラーコード
+- **Fell Off the Bus(Xid 79)**: GPUがPCIeバス上で応答しなくなる致命的なハードウェア障害。多くの場合ハードウェア交換が必要になる
+- **Double Bit ECC Error / DBE(Xid 48)**: GPUメモリ上で訂正不可能な2ビットエラーが発生したことを示すXid。再発する場合は交換対象になる
+- **Row Remapping**: Ampere世代以降のGPUで、ECCエラーが発生したメモリ行を予備行に置き換える機能。訂正可能エラーはPending状態で記録され、GPUリセットで反映される
+- **dcgmi diag**: NVIDIA DCGMが提供するGPU診断コマンド。実行レベル1〜4があり、レベルが高いほど詳細だが実行時間とワークロードへの影響も大きい
+
+## シナリオ設定
+
+直近24時間でXidエラーが検出されたGPUは次の{{ csv_rows | length }}件です。
+
+| node_name | gpu_index | xid_code | xid_meaning | severity | occurrence_count_24h |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["node_name"] }} | {{ r["gpu_index"] }} | {{ r["xid_code"] }} | {{ r["xid_meaning"] }} | {{ r["severity"] }} | {{ r["occurrence_count_24h"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. dmesgとjournalctlでXidコードを収集する
+
+```bash
+{% for r in csv_rows %}ssh {{ r["node_name"] }} "dmesg -T | grep -i xid; journalctl -k --since '24 hours ago' | grep -i xid"
+{% endfor %}```
+
+対象ノードごとに出力を保存し、以降の手順で対象CSVの `xid_code` 列と突き合わせます。
+
+### 2. Xidコードの意味と深刻度を分類する
+
+```bash
+{% for r in csv_rows %}echo "{{ r["node_name"] }} GPU{{ r["gpu_index"] }} ({{ r["gpu_uuid"] }}): Xid {{ r["xid_code"] }} = {{ r["xid_meaning"] }} / 深刻度={{ r["severity"] }} / 24h発生回数={{ r["occurrence_count_24h"] }}"
+{% endfor %}```
+
+深刻度が「重大」のものはハードウェア障害の疑いが強く、手順5で交換を優先検討します。「軽度」はアプリケーション起因の可能性があるため、手順3・4の結果を確認したうえで判断します。
+
+### 3. nvidia-smi -qでECCエラーとRow Remappingを確認する
+
+```bash
+{% for r in csv_rows %}ssh {{ r["node_name"] }} "nvidia-smi -i {{ r["gpu_index"] }} -q -d ECC,ROW_REMAPPER"
+{% endfor %}```
+
+`ECC Errors` の `Volatile`/`Aggregate` カウントと、`Row Remapping` の `Pending` および `Remapping Failure Occurred` を確認します。`Pending` が `Yes` の場合はGPUリセット(手順5)で反映されるまで訂正が完了しません。
+
+### 4. dcgmi diagで診断を実行する
+
+```bash
+{% for r in csv_rows %}ssh {{ r["node_name"] }} "dcgmi diag -r 3 -i {{ r["gpu_index"] }}"
+{% endfor %}```
+
+レベル3の診断はGPUを占有するため、対象GPU上のワークロードが完了していることを実行前に確認します。診断がエラーで終了した場合は、その項目名(メモリ・PCIe・NVLink等)を記録し、手順5の判断材料にします。
+
+### 5. 交換・リセット・経過観察を判定する
+
+```bash
+{% for r in csv_rows %}{% if r["judgment"] == "交換" %}echo "REPLACE: {{ r["node_name"] }} GPU{{ r["gpu_index"] }} ({{ r["gpu_uuid"] }}) Xid{{ r["xid_code"] }} - 保守契約窓口へRMA申請し現地交換をスケジュールする"
+{% elif r["judgment"] == "リセット" %}ssh {{ r["node_name"] }} "sudo nvidia-smi -i {{ r["gpu_index"] }} -r"
+{% elif r["judgment"] == "経過観察" %}echo "{{ r["node_name"] }} GPU{{ r["gpu_index"] }} Xid{{ r["xid_code"] }}: 経過観察対象、次回定期点検まで発生回数を追跡" >> /var/log/gpu-xid-watch.log
+{% endif %}{% endfor %}```
+
+「交換」はXid 79(バス応答なし)やXid 48(訂正不可能なECC)のように再現性のあるハードウェア障害が根拠にある場合に限り選択します。「リセット」は手順3・4で恒常的なハードウェア障害の兆候が見られない場合の暫定対処です。「経過観察」はRow Remappingの`Pending`件数や発生回数を次回点検まで追跡する対象です。
+
+## 動作確認
+
+- 対象{{ csv_rows | length }}件すべてについて、dmesg/journalctlの出力とCSVの `xid_code` 列が一致していること
+- `judgment` が「交換」のGPUについて、RMA申請または交換作業のチケットが起票されていること
+- `judgment` が「リセット」のGPUについて、`nvidia-smi -i <gpu_index> -q -d ECC,ROW_REMAPPER` の再実行でエラーカウントが増加していないこと
+- `judgment` が「経過観察」のGPUについて、`/var/log/gpu-xid-watch.log` に追跡記録が残っていること
+
+## 注意事項
+
+- `nvidia-smi -r`(GPUリセット)は対象GPU上で稼働中の全プロセスを停止させる。実行前に対象GPUを使用しているジョブが完了しているか、または安全に退避済みであることを確認する。
+- Xid 79(Fell Off the Bus)やXid 48(訂正不可能なDBE)など、深刻度「重大」かつハードウェア起因が濃厚なXidに対してリセットのみで運用を継続すると、再発時に突然の停止(ジョブロスト)につながる。診断根拠が揃わないまま「経過観察」や「リセット」に倒さない。
+- Row Remappingが`Pending`のままGPUリセットを行わずに運用を続けると、同一メモリ行での再エラーを繰り返す。手順5で「リセット」または「交換」を選んだ場合は、リセット後に手順3を再実行してPendingが解消したことを確認する。
+- dcgmi diagのレベル3・4は実行時間が長く対象GPUを占有するため、稼働中クラスタでは事前に保守ウィンドウを確保してから実施する。

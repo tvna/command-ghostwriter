@@ -1,0 +1,91 @@
+# 評価用データセットの分割とサンプリング
+
+`shuf` と `split` を使い、再現可能な手順で学習用データと評価用データを分割し、`comm` によって両者の間にレコードの重複(データリーク)が無いことを検査します。
+
+## 目的
+
+乱数シードを固定した分割手順を確立し、実行のたびに結果が変わらないこと、および学習用データと評価用データの間にレコードの重複が無いことを、コマンドの出力から機械的に確認できるようになることを目指します。
+
+## 用語解説
+
+- **データリーク**: 学習用データに含まれるレコードが評価用データにも重複して含まれてしまい、評価指標が実力より高く出てしまう現象
+- **乱数シード**: シャッフル処理の再現性を担保するための初期値。同じシードであれば同じ順序のシャッフル結果が得られる
+- **`shuf --random-source`**: 通常の `shuf` はシステムの乱数を使うため実行のたびに結果が変わるが、`--random-source` に固定のバイト列を渡すことで再現可能なシャッフルにできる
+- **`split -l`**: ファイルを指定行数ごとに分割するコマンド。1回の呼び出しで指定行数の先頭ブロックと、残り全行の2ブロックに分けられる
+- **`comm -12`**: ソート済みの2つのファイルを比較し、両方に共通して存在する行だけを抽出するコマンド
+
+## シナリオ設定
+
+対象データセットは `{{ source_dataset_path }}`({{ dataset_format_note }})です。分割方針は「{{ split_policy_note }}」とし、学習用 {{ train_ratio_percent }}% / 評価用 {{ eval_ratio_percent }}% の比率で分割します。乱数シードは `{{ random_seed }}` に固定し、誰が実行しても同じ分割結果になるようにします。
+
+## 手順
+
+### 1. 分割方針と乱数シードを決定する
+
+```bash
+wc -l {{ source_dataset_path }}
+```
+
+分割方針は「{{ split_policy_note }}」、比率は学習用 {{ train_ratio_percent }}% / 評価用 {{ eval_ratio_percent }}%、乱数シードは `{{ random_seed }}` に固定することをここで決定し、以降の手順ではこの値を変更しません。
+
+### 2. shufによる再現可能なシャッフルを行う
+
+ヘッダー行はシャッフル対象から外し、本体行だけをシャッフルします。
+
+```bash
+head -n 1 {{ source_dataset_path }} > {{ header_line_path }}
+tail -n +2 {{ source_dataset_path }} > {{ body_only_path }}
+shuf --random-source=<(yes {{ random_seed }}) {{ body_only_path }} -o {{ shuffled_dataset_path }}
+```
+
+`--random-source` に同じシード由来のバイト列を渡しているため、この2行を何度実行しても `{{ shuffled_dataset_path }}` の行順は変わりません。
+
+### 3. splitによる学習/評価データの分割を行う
+
+```bash
+TOTAL_LINES=$(wc -l < {{ shuffled_dataset_path }})
+TRAIN_LINES=$(( TOTAL_LINES * {{ train_ratio_percent }} / 100 ))
+split -l "$TRAIN_LINES" -d -a 2 {{ shuffled_dataset_path }} {{ split_prefix }}
+cat {{ header_line_path }} {{ train_split_path }} > {{ train_output_path }}
+cat {{ header_line_path }} {{ eval_split_path }} > {{ eval_output_path }}
+```
+
+`split -l "$TRAIN_LINES"` は先頭から `$TRAIN_LINES` 行を1つ目のブロック(`{{ train_split_path }}`)、残り全行を2つ目のブロック(`{{ eval_split_path }}`)として書き出します。各ブロックにヘッダー行を結合したものを、それぞれ `{{ train_output_path }}` / `{{ eval_output_path }}` として保存します。
+
+### 4. commによるリーク(重複)検査を行う
+
+`comm` はソート済みの入力を前提とするため、ヘッダーを含まない分割済みファイルをソートしてから比較します。
+
+```bash
+sort {{ train_split_path }} -o {{ train_sorted_path }}
+sort {{ eval_split_path }} -o {{ eval_sorted_path }}
+comm -12 {{ train_sorted_path }} {{ eval_sorted_path }} > {{ leak_report_path }}
+wc -l {{ leak_report_path }}
+```
+
+`comm -12` の出力は学習用データと評価用データの両方に存在する行、すなわちデータリークの疑いがあるレコードです。`{{ leak_report_path }}` の行数が0であることを確認します。
+
+### 5. 件数と分布の確認を行う
+
+```bash
+wc -l {{ train_output_path }} {{ eval_output_path }}
+cut -d, -f{{ label_column_number }} {{ train_split_path }} | sort | uniq -c
+cut -d, -f{{ label_column_number }} {{ eval_split_path }} | sort | uniq -c > {{ label_distribution_report_path }}
+cat {{ label_distribution_report_path }}
+```
+
+学習用/評価用それぞれの件数が意図した比率(学習用 {{ train_ratio_percent }}% / 評価用 {{ eval_ratio_percent }}%)に近いこと、および `label` 列(列番号: {{ label_column_number }})のクラス分布が学習用と評価用の間で大きく偏っていないことを確認します。
+
+## 動作確認
+
+- `{{ leak_report_path }}` の行数が0であること(`comm -12` の出力が空、すなわちデータリークが無いこと)
+- `{{ train_output_path }}` と `{{ eval_output_path }}` の行数の比率が、おおむね {{ train_ratio_percent }}:{{ eval_ratio_percent }} になっていること
+- 同じ `{{ random_seed }}` で手順2〜3を再実行した際に、`{{ shuffled_dataset_path }}` および分割結果のファイル内容が変化しないこと
+- `{{ label_distribution_report_path }}` のクラスごとの件数比率が、学習用データ側の分布と大きく乖離していないこと
+
+## 注意事項
+
+- 乱数シード `{{ random_seed }}` を変更すると分割結果も変わるため、既存の学習/評価結果と比較する際はシード値を必ず記録・共有する。
+- `comm -12` の比較はレコード全体の完全一致を前提とするため、表記揺れ(空白や改行コードの違いなど)による見かけ上の非重複を誤って「リーク無し」と判定しないよう、必要に応じて正規化してから比較する。
+- `split -l "$TRAIN_LINES"` は総行数が奇数や比率の丸め誤差により、意図した比率と数行分ずれる場合がある。行数を厳密に一致させたい場合は `TRAIN_LINES` の算出方法を要件に合わせて調整する。
+- 本手順はオフラインでの一括分割を前提としており、新規データが継続的に追加される環境での差分更新は対象外とする。

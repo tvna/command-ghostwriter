@@ -1,0 +1,13 @@
+qdrant_image = "qdrant/qdrant:v1.9.0"
+container_name = "qdrant"
+host_port_rest = 6333
+host_port_grpc = 6334
+storage_host_path = "/data/qdrant/storage"
+storage_container_path = "/qdrant/storage"
+collection_name = "docs_embeddings"
+vector_size = 768
+distance_metric = "Cosine"
+points_file_path = "/data/qdrant/points.json"
+search_top_k = 5
+payload_filter_key = "category"
+payload_filter_value = "faq"

@@ -1,0 +1,138 @@
+# ElasticsearchのkNNベクトル検索構築
+
+Elasticsearchの`dense_vector`フィールドを使い、マッピング定義からドキュメントのbulk投入、kNN検索、フィルタ併用、`num_candidates`の調整までを一通り行います。
+
+## 目的
+
+`dense_vector`フィールドとkNN検索APIの役割を理解し、REST APIを使ってマッピング定義から近傍検索・フィルタ併用・精度と速度のトレードオフ調整までを自力で実行できるようになることを目指します。
+
+## 用語解説
+
+- **dense_vectorフィールド**: 固定次元数の浮動小数点ベクトルを格納するフィールド型。`index: true`にすると近似最近傍検索(ANN)用の索引が構築される
+- **similarity(類似度計算方式)**: `dense_vector`フィールドで使うベクトル間の類似度指標。`cosine`(コサイン類似度)・`l2_norm`(ユークリッド距離)・`dot_product`(内積)から選択し、埋め込みモデルの学習時の指標と一致させる必要がある
+- **kNN検索**: `_search`リクエストの`knn`句で指定する近似最近傍検索。`field`・`query_vector`・`k`(取得件数)・`num_candidates`(候補数)を指定する
+- **num_candidates**: 各シャードでkNN探索時に保持する候補ベクトル数。`k`以上を指定し、値が大きいほど精度は上がるが検索速度は低下する
+- **filter句**: kNN検索の`knn`句内に指定できる絞り込み条件。ベクトル探索の前段でドキュメント集合を絞り込むため、単純な事後フィルタより効率的
+- **_bulk API**: 複数ドキュメントの登録・更新・削除をNDJSON(1行1JSON)形式でまとめて実行するAPI
+
+## シナリオ設定
+
+コンテナ `{{ container_name }}`(イメージ: `{{ elasticsearch_image }}`)をポート `{{ host_port }}` で起動し(開発用にセキュリティ機能は無効化)、永続化先を `{{ storage_host_path }}` とします。作成するインデックスは `{{ index_name }}`(ベクトルフィールド`{{ vector_field }}`、次元数`{{ vector_dim }}`、similarity: `{{ similarity_metric }}`)で、`{{ title_field }}`と`{{ category_field }}`を併せ持つサポートFAQ記事を`{{ sample_docs | length }}`件投入します。クエリベクトルに対してkNN検索(`k={{ knn_k }}`)を実行し、`{{ category_field }}`が`{{ filter_category_value }}`の記事に絞り込むフィルタ検索も行ったうえで、`num_candidates`を`{{ num_candidates_low }}`と`{{ num_candidates_high }}`で比較します。
+
+## 手順
+
+### 1. dense_vectorマッピングでインデックスを作成する
+
+```bash
+mkdir -p {{ storage_host_path }}
+docker run -d --name {{ container_name }} \
+  -p {{ host_port }}:9200 \
+  -e "discovery.type=single-node" \
+  -e "xpack.security.enabled=false" \
+  -e "ES_JAVA_OPTS=-Xms1g -Xmx1g" \
+  -v {{ storage_host_path }}:{{ storage_container_path }} \
+  {{ elasticsearch_image }}
+```
+
+起動確認:
+
+```bash
+curl "http://localhost:{{ host_port }}/_cluster/health?pretty"
+```
+
+`status`が`green`または`yellow`になったら、`{{ vector_field }}`を`dense_vector`型で定義してインデックスを作成します。
+
+```bash
+curl -X PUT "http://localhost:{{ host_port }}/{{ index_name }}" \
+  -H "Content-Type: application/json" \
+  --data-raw '{"mappings": {"properties": {"{{ vector_field }}": {"type": "dense_vector", "dims": {{ vector_dim }}, "index": true, "similarity": "{{ similarity_metric }}"}, "{{ title_field }}": {"type": "text"}, "{{ category_field }}": {"type": "keyword"}}}}'
+```
+
+作成内容の確認:
+
+```bash
+curl "http://localhost:{{ host_port }}/{{ index_name }}/_mapping?pretty"
+```
+
+### 2. ドキュメントとベクトルをbulk投入する
+
+各ドキュメントの次元数を`{{ vector_dim }}`に揃え、NDJSON形式のファイルを作成してから`_bulk` APIで一括登録します。
+
+```bash
+cat > {{ bulk_file_path }} <<'EOF'
+{% for d in sample_docs -%}
+{"index": {"_id": "{{ d.id }}"}}
+{"{{ vector_field }}": [{{ d.vector | join(", ") }}], "{{ title_field }}": "{{ d.title }}", "{{ category_field }}": "{{ d.category }}"}
+{% endfor -%}
+EOF
+
+curl -X POST "http://localhost:{{ host_port }}/{{ index_name }}/_bulk" \
+  -H "Content-Type: application/x-ndjson" \
+  --data-binary @{{ bulk_file_path }}
+```
+
+登録件数の確認:
+
+```bash
+curl "http://localhost:{{ host_port }}/{{ index_name }}/_count?pretty"
+```
+
+### 3. knnオプションで近傍検索を実行する
+
+```bash
+curl -X POST "http://localhost:{{ host_port }}/{{ index_name }}/_search" \
+  -H "Content-Type: application/json" \
+  --data-raw '{"knn": {"field": "{{ vector_field }}", "query_vector": [{{ query_vector | join(", ") }}], "k": {{ knn_k }}, "num_candidates": {{ num_candidates_default }}}, "_source": ["{{ title_field }}", "{{ category_field }}"]}'
+```
+
+レスポンスの`hits.hits`が`_score`の高い順に`{{ knn_k }}`件並んでいることを確認します。
+
+### 4. フィルタ条件と組み合わせる
+
+`knn`句に`filter`を追加し、`{{ category_field }}`が`{{ filter_category_value }}`のドキュメントに絞り込んでから近傍検索を行います。
+
+```bash
+curl -X POST "http://localhost:{{ host_port }}/{{ index_name }}/_search" \
+  -H "Content-Type: application/json" \
+  --data-raw '{"knn": {"field": "{{ vector_field }}", "query_vector": [{{ query_vector | join(", ") }}], "k": {{ knn_k }}, "num_candidates": {{ num_candidates_default }}, "filter": {"term": {"{{ category_field }}": "{{ filter_category_value }}"}}}, "_source": ["{{ title_field }}", "{{ category_field }}"]}'
+```
+
+フィルタなしの手順3の結果と比較し、`{{ category_field }}`が`{{ filter_category_value }}`以外のドキュメントが除外されていることを確認します。
+
+### 5. num_candidatesを調整して精度と速度を確認する
+
+`num_candidates`を`{{ num_candidates_low }}`(小さい値)と`{{ num_candidates_high }}`(大きい値)に変えて同じクエリを実行し、応答時間(`took`、ミリ秒)とヒット結果を比較します。
+
+`num_candidates={{ num_candidates_low }}`:
+
+```bash
+curl -X POST "http://localhost:{{ host_port }}/{{ index_name }}/_search" \
+  -H "Content-Type: application/json" \
+  --data-raw '{"knn": {"field": "{{ vector_field }}", "query_vector": [{{ query_vector | join(", ") }}], "k": {{ knn_k }}, "num_candidates": {{ num_candidates_low }}}, "_source": ["{{ title_field }}", "{{ category_field }}"]}'
+```
+
+`num_candidates={{ num_candidates_high }}`:
+
+```bash
+curl -X POST "http://localhost:{{ host_port }}/{{ index_name }}/_search" \
+  -H "Content-Type: application/json" \
+  --data-raw '{"knn": {"field": "{{ vector_field }}", "query_vector": [{{ query_vector | join(", ") }}], "k": {{ knn_k }}, "num_candidates": {{ num_candidates_high }}}, "_source": ["{{ title_field }}", "{{ category_field }}"]}'
+```
+
+`num_candidates`を上げるほど`took`が増える傾向と、上位ヒットの`_score`や順位が安定するかを見比べ、インデックス規模に見合った値を選定します。
+
+## 動作確認
+
+- `curl "http://localhost:{{ host_port }}/{{ index_name }}/_mapping?pretty"` で`{{ vector_field }}`が`dense_vector`型・次元数`{{ vector_dim }}`・similarity `{{ similarity_metric }}`で定義されていること
+- `curl "http://localhost:{{ host_port }}/{{ index_name }}/_count?pretty"` の`count`が`{{ sample_docs | length }}`件と一致すること
+- 手順3のkNN検索が`hits.hits`を`{{ knn_k }}`件、`_score`の高い順に返すこと
+- 手順4のフィルタ検索の`hits.hits`に含まれる`{{ category_field }}`がすべて`{{ filter_category_value }}`であること
+- 手順5で`num_candidates`を`{{ num_candidates_low }}`から`{{ num_candidates_high }}`に増やしたとき、`took`の値と上位ヒットの傾向を記録できること
+
+## 注意事項
+
+- `xpack.security.enabled=false`は認証なしでAPIを公開する設定のため、社内ネットワークなどlocal/dev用途に留め、インターネットに直接公開しない。
+- `similarity`(`{{ similarity_metric }}`)は埋め込みモデルの学習時の類似度指標と一致させる。インデックス作成後の変更はできないため、指標を変える場合はインデックスを再作成してドキュメントを登録し直す。
+- 登録するベクトルの次元数は`{{ vector_dim }}`と一致させる。埋め込みモデルを変更して次元数が変わった場合もインデックスの再作成が必要になる。
+- `num_candidates`は`k`以上の値を指定する。値を大きくしすぎると検索速度が低下するため、インデックス規模と要求レイテンシに応じて調整する。
+- `{{ storage_host_path }}`はコンテナのデータ永続化先であるため、削除や上書きを行う前にバックアップを取得する。

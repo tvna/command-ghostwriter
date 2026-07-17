@@ -1,0 +1,106 @@
+# テキストデータの文字化けの切り分け
+
+`file`・`uchardet`・`nkf`・`iconv` を組み合わせ、文字化けの原因(推定エンコーディングの不一致)を切り分け、安全な変換方針を確定するための手順です。対象は {{ csv_rows | length }} 件のファイルです。
+
+## 目的
+
+`file`/`uchardet` による自動推定と `nkf -g` による日本語コード判定を突き合わせ、`iconv` の試験変換と往復差分比較で情報損失なく変換できるかを検証したうえで、恒久対応方針を決定できるようになることを目指します。
+
+## 用語解説
+
+- **file -i**: MIME種別と推定文字コードを`Content-Type`ヘッダ形式で出力するコマンド。内容によっては推定精度が低い
+- **uchardet**: Mozilla由来のchardet実装を用いた文字コード自動判定コマンド。推定した文字コード名のみを1行で出力する
+- **nkf -g**: 日本語文字コード変換ツール`nkf`が持つ判定専用オプション。ファイルを変換せず、推定した日本語コード名(Shift_JIS/EUC-JP/ISO-2022-JP/UTF-8等)のみを出力する
+- **iconv -f/-t**: 指定したエンコーディング間でテキストを変換するコマンド。`-f`に変換元、`-t`に変換先のエンコーディング名を指定する
+- **往復変換(round-trip conversion)**: 変換元コードでA→Bへ変換した結果を再びB→Aへ戻し、元のファイルと一致するかを比較する手法。一致すれば、その変換元コードの推定が妥当であったことを確認できる
+- **文字化け(mojibake)**: 実際のエンコーディングと異なるエンコーディングで解釈されたことにより、元の文字列とは異なる文字列として表示される現象
+
+## シナリオ設定
+
+データ基盤チームは、以下 {{ csv_rows | length }} 件の対象ファイルについて文字化けの原因切り分けを行います。
+
+| file_id | file_path | symptom_desc | guessed_encoding | target_encoding |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["file_id"] }} | {{ r["file_path"] }} | {{ r["symptom_desc"] }} | {{ r["guessed_encoding"] }} | {{ r["target_encoding"] }} |
+{% endfor %}
+
+`guessed_encoding` が `-` の対象は、事前情報がなく変換元コードが未確定であることを示します。
+
+## 手順
+
+### 1. 症状の再現と対象ファイルの特定
+
+```bash
+mkdir -p {{ csv_rows[0]["work_dir"] }}
+{% for r in csv_rows %}test -f {{ r["file_path"] }} && echo "対象確認: {{ r["file_id"] }} ({{ r["file_path"] }})"
+{% endfor %}```
+
+各対象の症状は次のとおりです。
+
+{% for r in csv_rows %}- {{ r["file_id"] }}: {{ r["symptom_desc"] }}
+{% endfor %}
+
+### 2. fileとuchardetによるエンコーディング推定
+
+```bash
+{% for r in csv_rows %}echo "=== {{ r["file_id"] }}: file -i ==="
+file -i {{ r["file_path"] }}
+echo "=== {{ r["file_id"] }}: uchardet ==="
+uchardet {{ r["file_path"] }}
+{% endfor %}```
+
+`file -i` は `Content-Type` ヘッダ形式でcharsetを推定し、`uchardet` は推定した文字コード名のみを1行で出力します。両者の結果が一致しない場合は、次の手順で `nkf -g` の判定も加えて突き合わせます。
+
+### 3. nkf -gによる日本語コードの判定
+
+```bash
+{% for r in csv_rows %}echo "=== {{ r["file_id"] }}: nkf -g ==="
+nkf -g {{ r["file_path"] }}
+{% endfor %}```
+
+`nkf -g` は変換を行わず、日本語コードの判定結果のみを出力します。手順2の結果と一致するかを確認し、3ツールの判定が一致しない対象は、判定に使うサンプル範囲を広げて再実行します。
+
+### 4. iconvによる試験変換と差分比較
+
+```bash
+{% for r in csv_rows %}{% if r["guessed_encoding"] != "-" %}echo "=== {{ r["file_id"] }}: iconv試験変換 ({{ r["guessed_encoding"] }} -> {{ r["target_encoding"] }}) ==="
+iconv -f {{ r["guessed_encoding"] }} -t {{ r["target_encoding"] }} {{ r["file_path"] }} > {{ csv_rows[0]["work_dir"] }}/{{ r["file_id"] }}.{{ r["target_encoding"] }}.txt
+iconv -f {{ r["target_encoding"] }} -t {{ r["guessed_encoding"] }} {{ csv_rows[0]["work_dir"] }}/{{ r["file_id"] }}.{{ r["target_encoding"] }}.txt > {{ csv_rows[0]["work_dir"] }}/{{ r["file_id"] }}.roundtrip.txt
+diff {{ r["file_path"] }} {{ csv_rows[0]["work_dir"] }}/{{ r["file_id"] }}.roundtrip.txt && echo "{{ r["file_id"] }}: 往復変換で差分なし"
+{% else %}echo "=== {{ r["file_id"] }}: guessed_encoding未確定のため手順2/3の結果から変換元コードを決めてから同様に試験変換する ==="
+{% endif %}{% endfor %}```
+
+`diff` の終了コードが0(差分なし)であれば、往復変換で情報が失われておらず、推定した変換元コードが妥当であると判断できます。差分がある対象は、変換元コードの推定を見直します。
+
+### 5. 原因の確定と恒久対応の決定
+
+```bash
+{% for r in csv_rows %}cp {{ r["file_path"] }} {{ csv_rows[0]["work_dir"] }}/{{ r["file_id"] }}.bak
+{% endfor %}cat <<EOF
+判定結果サマリー(手順2から4の出力をもとに記入):
+{% for r in csv_rows %}{{ r["file_id"] }}: (file/uchardet/nkf -gの一致状況と往復差分の結果を記入)
+{% endfor %}EOF
+```
+
+差分なしと確認できた対象には、恒久対応として本変換を適用します。
+
+```bash
+{% for r in csv_rows %}{% if r["guessed_encoding"] != "-" %}iconv -f {{ r["guessed_encoding"] }} -t {{ r["target_encoding"] }} {{ r["file_path"] }} > {{ csv_rows[0]["work_dir"] }}/{{ r["file_id"] }}.final.txt
+mv {{ csv_rows[0]["work_dir"] }}/{{ r["file_id"] }}.final.txt {{ r["file_path"] }}
+{% endif %}{% endfor %}```
+
+`guessed_encoding` が未確定だった対象は、手順2から4で確定したコード名を用いて同様に変換を適用します。
+
+## 動作確認
+
+- {{ csv_rows | length }} 件全ての対象で `file -i` / `uchardet` / `nkf -g` の推定結果を突き合わせ、矛盾がないことを確認していること
+- 手順4の `diff`(往復変換比較)で差分がないことを確認できていること
+- 恒久対応を適用したファイルを再度 `file -i` で確認し、`{{ csv_rows[0]["target_encoding"] }}` と表示されること
+- `{{ csv_rows[0]["work_dir"] }}` 配下の `.bak` ファイルにより変換前の内容が保全されていること
+
+## 注意事項
+
+- `iconv` は変換先で表現できない文字があると `//IGNORE` や `//TRANSLIT` なしではエラー終了します。本手順ではこのエラー終了自体も「その変換元コードでは説明できない」という切り分け材料として扱います。
+- 往復変換の差分比較は変換元コードの推定を検証する手段であり、差分がないことは推定コードと矛盾しないことを示すに留まり、唯一の正解を保証するものではありません。
+- 本番ファイルへの上書きは、手順5でバックアップ(`.bak`)を取得した後にのみ行います。
+- `guessed_encoding` が未確定(`-`)の対象は、必ず手順2から4の結果を人が確認してから変換元コードを決定し、確証のないまま一括変換しないでください。

@@ -1,0 +1,13 @@
+gpu_group_name: "prod-a100-pool"
+gpu_ids:
+  - 0
+  - 1
+  - 2
+  - 3
+health_watch_flags: "mpi"
+diag_level: 2
+exporter_version: "3.3.9-3.6.1-ubuntu22.04"
+exporter_listen_port: 9400
+firewall_allow_from:
+  - "10.0.0.20"
+  - "10.0.0.21"

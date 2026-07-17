@@ -1,0 +1,9 @@
+source_dir = "/data/datasets/raw-images"
+output_dir = "/data/datasets/processed-images"
+corrupt_log_path = "/data/datasets/processed-images/corrupt-list.txt"
+target_size = "512x512"
+target_format = "png"
+colorspace = "sRGB"
+jpeg_quality = 90
+expected_count = 12000
+max_file_size_mb = 5
