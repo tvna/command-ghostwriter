@@ -61,6 +61,7 @@ export function FileUploader({
         style={{
           display: 'flex',
           alignItems: 'center',
+          flexWrap: 'wrap',
           gap: 'var(--space-4)',
           background: 'var(--surface-raised)',
           border: `1px dashed ${hover ? 'var(--cg-red)' : 'var(--border-default)'}`,
@@ -74,7 +75,7 @@ export function FileUploader({
           <path d="M12 12.5 v6" />
           <path d="M9.5 15 L12 12.5 L14.5 15" />
         </svg>
-        <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ flex: '1 1 120px', minWidth: 0 }}>
           <div style={{ fontSize: 'var(--text-sm)', color: 'var(--text-body)' }}>Drag and drop file here</div>
           <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', marginTop: 2 }}>
             Limit {maxSize} per file{(acceptLabel || accept) ? ` · ${acceptLabel || accept}` : ''}
@@ -93,6 +94,7 @@ export function FileUploader({
             padding: '6px 14px',
             cursor: 'pointer',
             whiteSpace: 'nowrap',
+            flexShrink: 0,
           }}
           onClick={handleBrowse}
         >
