@@ -1,0 +1,121 @@
+# Zeek conn.log による通信ベースライン把握手順
+
+conn.log を zeek-cut で集計し、正常時の通信相手・ポート・データ量のベースラインを
+可視化します。フィールド辞書は {{ csv_rows | length }} 項目を対象とし、
+以降の逸脱検知（新規通信先・想定外サービスの出現）の判断基準として使用します。
+
+## 目的
+
+conn.log の主要フィールドを zeek-cut で抽出・集計し、「上位通信先」「使用サービス」
+「時間帯別通信量」の正常時ベースラインを作成できるようになることを目指します。
+作成したベースラインは、以後の逸脱（未知の宛先・未許可サービスの出現）を
+検知するための比較基準として利用します。
+
+## 用語解説
+
+- **zeek-cut**: Zeek のログ(TSV形式)から指定フィールドのみを抽出するコマンドラインツール
+- **conn_state**: 接続の終了状態を表すコード。主な値は次の通り。
+  - `SF`: 正常に確立・終了した接続
+  - `S0`: SYN のみ送信され応答がなかった接続(到達不能/フィルタ済みの可能性)
+  - `REJ`: 接続が明示的に拒否された(RST等での即時応答)
+  - `RSTO`: 発信元(originator)からのRSTで終了した接続
+  - `RSTR`: 応答側(responder)からのRSTで終了した接続
+  - `S1`: 接続確立後、終了(FIN)が観測されなかった接続
+- **history**: 接続中に観測されたTCPフラグ等をコード化した履歴文字列(例: `ShADadfF` の
+  ような大文字/小文字の並び)。片方向のみの通信やスキャン挙動の兆候把握に使う
+- **duration**: 接続が継続した秒数。極端に短い/長い接続は異常の手がかりになる
+
+## シナリオ設定
+
+以下は本手順で扱う conn.log フィールドの辞書です。
+
+| field | description | baseline_note |
+|-------|-------------|----------------|
+{% for r in csv_rows %}| {{ r["field"] }} | {{ r["description"] }} | {{ r["baseline_note"] }} |
+{% endfor %}
+
+## 1. conn.log から主要フィールドを抽出する
+
+zeek-cut で必要フィールドのみをタブ区切りで抽出します。`-d` はタイムスタンプを
+人間可読なISO8601形式に変換するオプションです。
+
+```bash
+zeek-cut -d ts id.orig_h id.resp_h id.resp_p proto service orig_bytes resp_bytes conn_state \
+  < conn.log > conn_extracted.tsv
+```
+
+## 2. 宛先・サービス別に集計してベースラインを作る
+
+上位通信先(id.resp_h)を集計します。
+
+```bash
+awk -F'\t' '{print $3}' conn_extracted.tsv | sort | uniq -c | sort -rn | head -20
+```
+
+使用サービス(service)別の件数を集計します。
+
+```bash
+awk -F'\t' '{print $5}' conn_extracted.tsv | sort | uniq -c | sort -rn
+```
+
+宛先・宛先ポート・サービスの組み合わせで集計し、正常時の通信パターンとして記録します。
+
+```bash
+awk -F'\t' '{print $3, $4, $5}' conn_extracted.tsv | sort | uniq -c | sort -rn | head -30 \
+  > baseline_dest_service.txt
+```
+
+時間帯別の通信量を、ISO8601タイムスタンプの時刻部分(HH)で集計します。
+
+```bash
+awk -F'\t' '{print substr($1, 12, 2)}' conn_extracted.tsv | sort | uniq -c
+```
+
+## 3. ベースラインとして記録する
+
+上記の集計結果から、次の3点を「正常時ベースライン」として記録・保存してください。
+
+1. 上位通信先(id.resp_h)の一覧と件数
+2. 使用サービス(service)の一覧と件数、および対応する宛先ポート
+3. 時間帯別(HH単位)の通信量の分布
+
+以降の分析では、この記録にない宛先・サービス・時間帯外の急増を逸脱候補として扱います。
+
+## 動作確認
+
+1. `conn_extracted.tsv` の行数が、元の `conn.log` の接続数と一致すること
+   (`zeek-cut ts < conn.log | wc -l` と比較する)
+2. conn_state の内訳を集計し、`SF`(正常終了)以外の割合が過大でないか確認する
+   ```bash
+   awk -F'\t' '{print $8}' conn_extracted.tsv | sort | uniq -c | sort -rn
+   ```
+3. duration/history を追加抽出し、極端に長い接続や片方向のみのhistory
+   (応答側からの正常な返答パケットを示す `a`/`A` が現れない等)がないか確認する
+   ```bash
+   zeek-cut -d ts id.orig_h id.resp_h id.resp_p proto service duration history conn_state \
+     < conn.log > conn_detail.tsv
+   sort -t $'\t' -k5 -rn conn_detail.tsv | head -20
+   ```
+4. 内部から外部への想定外サービス(irc等)・未知ポートの通信がないか洗い出す
+   ```bash
+   awk -F'\t' '$2 ~ /^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)/ && \
+     $3 !~ /^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)/ && \
+     ($5 == "irc" || $5 == "-") {print}' conn_extracted.tsv
+   ```
+5. 上記4件のいずれもベースライン記録(手順3)と突き合わせ、新規の宛先・サービス
+   ・時間帯であれば逸脱候補として扱うこと
+
+## 注意事項
+
+- Zeek の `conn.log` は既定でログローテーションされるため(zeekctl運用では
+  多くの場合1時間ごと)、単一の `conn.log` だけでは集計期間が短くなる。
+  複数世代を跨いで集計する場合は `zcat conn.*.log.gz | zeek-cut ...` のように
+  ローテーション済みファイルを連結してから処理し、集計対象期間を明記すること。
+- ログ保持期間(retention)がベースライン算出に必要な観測期間より短いと、
+  平常時パターンとして不十分な母数になりうる。最低でも業務サイクル
+  (曜日変動を含む1週間程度)をカバーできる保持期間を確保することが望ましい。
+- 本手順は観測・分析のみを行うものであり、ファイアウォールルールやACLの変更は
+  含まない。逸脱候補を検知した場合は、別途正式な調査・変更手順を経ること。
+- 集計対象の conn.log がサンプリングや切り詰め(truncation)を受けている場合、
+  バイト数(orig_bytes/resp_bytes)や件数集計が実態と乖離するため、
+  収集基盤側の設定(サンプリング有無)を事前に確認しておくこと。

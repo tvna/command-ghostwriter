@@ -1,0 +1,6 @@
+monitor_interface: eth1
+local_networks:
+  - 10.0.0.0/16
+  - 192.168.100.0/24
+lb_procs: 4
+log_dir: /opt/zeek/logs

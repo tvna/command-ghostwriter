@@ -1,0 +1,4 @@
+filter_name,failregex_pattern,ignoreregex,test_log_line,expected_matches
+myapp-auth,"^\s*\S+ myapp\[\d+\]: authentication failure from <HOST> user=\S+\s*$","^\s*\S+ myapp\[\d+\]: authentication failure from <HOST> user=healthcheck\s*$","2026-07-17 10:22:01 myapp[1234]: authentication failure from 203.0.113.7 user=admin",1
+myapp-auth,"^\s*\S+ myapp\[\d+\]: authentication failure from <HOST> user=\S+\s*$","^\s*\S+ myapp\[\d+\]: authentication failure from <HOST> user=healthcheck\s*$","2026-07-17 10:22:05 myapp[1234]: authentication success from 203.0.113.7 user=admin",0
+myapp-auth,"^\s*\S+ myapp\[\d+\]: authentication failure from <HOST> user=\S+\s*$","^\s*\S+ myapp\[\d+\]: authentication failure from <HOST> user=healthcheck\s*$","2026-07-17 10:22:10 myapp[1234]: authentication failure from 203.0.113.10 user=healthcheck",0

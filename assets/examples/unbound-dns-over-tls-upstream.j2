@@ -1,0 +1,93 @@
+# Unbound上流DoT転送による暗号化解決
+
+Unbound の forward-zone を使い、上流DNSサーバへの問い合わせを DNS over TLS (DoT) で暗号化して転送します。
+
+## 目的
+
+forward-zone に複数の DoT 上流サーバを登録し、ホスト名ピンニングによる証明書検証つきで上流への問い合わせを暗号化できるようになることを目指します。あわせて、上流の暗号化通信が実際に確立していること、証明書検証に失敗した場合の挙動を確認します。
+
+## 用語解説
+
+- **forward-zone**: 特定ゾーン(ここでは `.` = 全ドメイン)への問い合わせを、自前の再帰解決ではなく指定した上流サーバへ転送する Unbound の設定ブロック
+- **forward-tls-upstream**: forward-zone 内の forward-addr への接続を DoT(TLS暗号化)で行うことを指定するオプション
+- **DoT (DNS over TLS)**: DNSの問い合わせをTLSで暗号化するプロトコル。標準ポートは 853番で、平文DNSの53番とは別
+- **ホスト名ピンニング**: `forward-addr` に `IP@ポート#ホスト名` の形式でホスト名を指定し、上流サーバの証明書に含まれる Subject Alternative Name (SAN) とそのホスト名が一致することを検証する仕組み
+- **tls-cert-bundle**: 上流サーバ証明書の検証に使用するCA証明書バンドルのパス。システムのトラストストアを指定する
+- **forward-first**: 上流への転送に失敗した場合に、Unbound自身の再帰解決にフォールバックするかどうかを制御するオプション。`no` の場合は上流失敗時に解決を停止する
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| tls-cert-bundle | `{{ tls_cert_bundle }}` |
+| forward-first | `{{ forward_first }}` |
+{% for s in upstream_servers %}| 上流サーバ{{ loop.index }} | `{{ s.ip }}@{{ s.port }}#{{ s.hostname }}` |
+{% endfor %}
+## 手順
+
+### 1. 現状(平文DNS)での問い合わせを確認する
+
+```bash
+dig example.com A +short
+sudo tcpdump -i eth0 -n 'port 53' -c 5
+```
+
+### 2. tls-cert-bundle を確認する
+
+```bash
+ls -l {{ tls_cert_bundle }}
+openssl crl2pkcs7 -nocrl -certfile {{ tls_cert_bundle }} | openssl pkcs7 -print_certs -noout | head -n 20
+```
+
+### 3. forward-zone を設定する
+
+```bash
+sudo tee /etc/unbound/unbound.conf.d/dot-forward.conf <<'EOF'
+server:
+    tls-cert-bundle: "{{ tls_cert_bundle }}"
+
+forward-zone:
+    name: "."
+    forward-tls-upstream: yes
+    forward-first: {{ forward_first }}
+{% for s in upstream_servers %}    forward-addr: {{ s.ip }}@{{ s.port }}#{{ s.hostname }}
+{% endfor %}EOF
+```
+
+### 4. 構文を検証する
+
+```bash
+sudo unbound-checkconf /etc/unbound/unbound.conf.d/dot-forward.conf
+```
+
+### 5. 別セッションを維持したまま反映し、名前解決を検証する
+
+```bash
+# ロックアウト防止のため、この手順を実行するセッションとは別に
+# 既存の平文経路が生きているセッション(別ターミナル)を維持したまま反映する
+sudo systemctl restart unbound
+dig @127.0.0.1 example.com A +short
+```
+
+## 動作確認
+
+- `unbound-checkconf` がエラーなく通ること
+- `dig @127.0.0.1 example.com A +short` で従来どおり名前解決ができること
+- 以下のように tcpdump で 853番ポートへの暗号化通信のみが観測され、53番への平文クエリが含まれないこと
+
+```bash
+sudo tcpdump -i eth0 -n 'port 853' -c 20
+```
+
+- 上流サーバの証明書を意図的に不一致なホスト名で検証し、失敗時に解決不能(SERVFAIL)となることを確認する
+
+```bash
+openssl s_client -connect {{ upstream_servers[0].ip }}:{{ upstream_servers[0].port }} -servername invalid.example.test </dev/null 2>/dev/null | openssl x509 -noout -subject
+```
+
+## 注意事項
+
+- `forward-first: {{ forward_first }}` のため、登録した上流DoTサーバが全て到達不能になると名前解決が完全に停止する。上記の複数上流({{ upstream_servers | length }}台)による冗長化を維持し、単一障害点を作らないこと。
+- `tls-cert-bundle` (`{{ tls_cert_bundle }}`) はOSのCAバンドル更新に追従させること。バンドルが古いまま上流サーバの証明書が更新されると、検証失敗で全解決が止まる。
+- `forward-addr` のホスト名(`#`以降)が上流サーバ証明書のSAN/CNと一致しない場合、TLSハンドシェイクの時点で検証に失敗し、平文53番へのフォールバックは行われない(forward-tls-upstream使用時は暗号化必須)。
+- 本手順の適用前後で必ず別セッション(または既存の平文フォワーダ設定を並行稼働させたまま)で名前解決が継続することを確認してから、旧来の平文フォワーダ設定を無効化すること。先に旧設定を削除すると、新設定の疎通確認前に全ロックアウトが発生しうる。

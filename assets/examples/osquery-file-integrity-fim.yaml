@@ -1,0 +1,19 @@
+file_paths:
+  etc_config:
+    - /etc/passwd
+    - /etc/shadow
+    - /etc/ssh/sshd_config
+  app_config:
+    - /srv/app/config/%%
+  cron_jobs:
+    - /etc/cron.d/%%
+    - /var/spool/cron/crontabs/%%
+file_accesses:
+  - etc_config
+exclude_paths:
+  - /srv/app/config/tmp/%%
+  - /srv/app/config/cache/%%
+interval: 300
+osquery_conf_path: /etc/osquery/osquery.conf
+osqueryi_path: /usr/bin/osqueryi
+watch_test_file: /srv/app/config/app.yaml

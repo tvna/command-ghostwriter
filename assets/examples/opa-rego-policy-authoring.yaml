@@ -1,0 +1,23 @@
+package_name: "example.authz"
+default_decision: "false"
+input_schema:
+  method: "GET"
+  path: "/api/orders"
+  user_role: "viewer"
+  mfa_verified: true
+test_cases:
+  - name: "viewerはGET許可"
+    input_method: "GET"
+    input_role: "viewer"
+    input_mfa: "true"
+    expect: "true"
+  - name: "viewerはDELETE拒否"
+    input_method: "DELETE"
+    input_role: "viewer"
+    input_mfa: "true"
+    expect: "false"
+  - name: "MFA未検証は拒否"
+    input_method: "GET"
+    input_role: "admin"
+    input_mfa: "false"
+    expect: "false"

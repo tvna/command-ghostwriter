@@ -1,0 +1,20 @@
+server:
+  host: "kc-prod-01"
+  kc_home: "/opt/keycloak"
+
+db_vendor: "postgres"
+db_url: "jdbc:postgresql://db-01.internal:5432/keycloak"
+db_username: "keycloak"
+
+hostname: "https://sso.example.com"
+tls_cert_path: "/etc/keycloak/certs/fullchain.pem"
+tls_key_path: "/etc/keycloak/certs/privkey.pem"
+proxy_headers: "xforwarded"
+
+admin_bootstrap: true
+admin_username: "kcadmin"
+
+kcadm:
+  server_url: "https://sso.example.com"
+  realm: "master"
+  client_id: "admin-cli"

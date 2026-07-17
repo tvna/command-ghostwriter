@@ -1,0 +1,139 @@
+# Suricata による AF_PACKET 構成 IDS の構築
+
+ミラーポートから受信したトラフィックを AF_PACKET モードの Suricata で解析し、
+検知ルールが正しく動作するところまでを手順化します。監視対象インターフェース
+は `{{ monitor_interface }}` です。
+
+## 目的
+
+ミラーポートに接続したインターフェース `{{ monitor_interface }}` から Suricata
+を AF_PACKET モードで動作させ、`suricata.yaml` の基本設定（af-packet /
+HOME_NET / ルールパス）を行ったうえで、実際に検知ログが出力されることを
+確認できるようになることを目指します。
+
+## 用語解説
+
+- **AF_PACKET**: Linuxカーネルのソケットタイプ。NICから受信した生パケット
+  をユーザー空間のSuricataへゼロコピーに近い形で渡すキャプチャ方式
+- **cluster-id / cluster-type**: 複数スレッドでパケットを分散処理する際の
+  グループ識別子と分散アルゴリズム。`cluster_flow`はフロー単位でハッシュ
+  分散し、同一フローを同一スレッドに固定する
+- **HOME_NET / EXTERNAL_NET**: ルール中で自組織内アドレスと外部アドレスを
+  区別するための変数。ルールの誤検知・見逃しに直結する
+- **defrag**: 断片化されたIPパケットを解析前に再構成する処理
+- **オフロード機能（GRO/LRO）**: NICやドライバがパケットを結合してCPU負荷
+  を下げる機能。結合後のパケットはSuricataが正しく解析できないため監視用
+  インターフェースでは無効化が必須
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 監視インターフェース | `{{ monitor_interface }}` |
+| cluster-id | `{{ cluster_id }}` |
+| cluster-type | `cluster_flow` |
+| HOME_NET | {% for net in home_net %}`{{ net }}`{% if not loop.last %}, {% endif %}{% endfor %} |
+| ルールファイル | `{{ ruleset_source }}` |
+| ミラー元VLANタグ付与 | {% if mirror_vlan_tagged %}あり{% else %}なし{% endif %} |
+
+## 手順
+
+### 1. Suricata をインストールする
+
+```bash
+apt update
+apt install -y suricata
+```
+
+### 2. af-packet 設定を行う
+
+`/etc/suricata/suricata.yaml` の `af-packet` セクションを次のように設定します。
+
+```yaml
+af-packet:
+  - interface: {{ monitor_interface }}
+    cluster-id: {{ cluster_id }}
+    cluster-type: cluster_flow
+    defrag: yes
+    threads: auto
+```
+
+### 3. HOME_NET / EXTERNAL_NET とルールパスを設定する
+
+`suricata.yaml` の `vars.address-groups` と `default-rule-path` を編集します。
+
+```yaml
+vars:
+  address-groups:
+    HOME_NET: "[{% for net in home_net %}{{ net }}{% if not loop.last %},{% endif %}{% endfor %}]"
+    EXTERNAL_NET: "!$HOME_NET"
+
+default-rule-path: /etc/suricata/rules
+rule-files:
+  - suricata.rules
+```
+
+```bash
+cp {{ ruleset_source }} /etc/suricata/rules/suricata.rules
+```
+
+### 4. ミラー用インターフェースのオフロード機能を無効化する
+
+GRO/LROが有効なままだと結合済みパケットが解析できず検知漏れの原因となる
+ため、監視インターフェースでは必ず無効化します。
+
+```bash
+ethtool -K {{ monitor_interface }} gro off lro off
+ethtool -k {{ monitor_interface }} | grep -E 'generic-receive-offload|large-receive-offload'
+```
+
+### 5. 設定ファイルを検証する
+
+```bash
+suricata -T -c /etc/suricata/suricata.yaml -v
+```
+
+`Configuration provided was successfully loaded` の行が出力されることを
+確認してください。エラーがあれば起動前に必ず解消します。
+
+### 6. Suricata を起動する
+
+```bash
+systemctl enable --now suricata
+systemctl status suricata
+```
+
+## 動作確認
+
+1. `suricata -T -c /etc/suricata/suricata.yaml -v` の設定検証がエラー無しで
+   完了していること
+2. `systemctl status suricata` が active (running) であること
+3. 検知テスト用URLへアクセスし、GPL ATTACK_RESPONSE 系ルール（sid:2100498）
+   が発火することを確認する
+
+```bash
+curl http://testmynids.org/uid/index.html
+tail -n 20 /var/log/suricata/fast.log | grep 2100498
+```
+
+`fast.log` に `sid:2100498` を含むアラート行が出力されていれば、
+AF_PACKETキャプチャからルールマッチまでが一貫して動作しています。
+
+## 注意事項
+
+- ミラー元スイッチがトランクポートをそのままミラーしVLANタグ付きフレーム
+  を送出する構成では、HOME_NETの判定がタグの有無で変わりうる（Suricata側
+  でVLANを考慮しない設定だとタグ付きフレームの内側アドレスと外側アドレス
+  の扱いがずれ、誤検知・見逃しにつながる）。本シナリオのミラー元VLANタグ
+  付与は「{% if mirror_vlan_tagged %}あり{% else %}なし{% endif %}」のため、
+  タグ付与ありの環境へ変更する場合は`vlan.use-for-tracking`設定とHOME_NET
+  定義を必ず見直すこと。
+- 本構成は受信専用（ミラーポート）のIDSであり、通信経路上のIPS動作は行わ
+  ない。既存の検知・監視経路を無効化する前に、必ず新しいSuricataが
+  `fast.log`へアラートを出力できることを動作確認章の手順で確認してから、
+  旧来の監視の停止・切替を行うこと。
+- オフロード無効化（`ethtool -K`）はリブート等で設定が失われる場合がある
+  ため、恒久化する場合はNetworkManagerのdispatcherスクリプトや
+  `/etc/network/interfaces`相当の永続化手段に組み込むこと。
+- ルールファイルの更新（`suricata-update`等）を行う際は、必ず
+  `suricata -T`による検証を経てから本番反映すること。

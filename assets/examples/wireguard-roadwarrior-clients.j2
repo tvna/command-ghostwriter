@@ -1,0 +1,124 @@
+# WireGuard ロードウォーリア型リモートアクセス構築手順
+
+サーバエンドポイント **{{ server_endpoint }}** に対して、社員が私物端末を含む複数端末から接続する
+ロードウォーリア（roadwarrior）型 WireGuard VPN を構築します。端末ごとに個別の鍵ペアと /32 の
+固定アドレスを割り当て、端末単位でのアクセス制御・識別・失効を可能にします。
+
+## 目的
+
+このシナリオでは、WireGuard サーバに端末ごとの Peer を登録し、各端末に配布するクライアント設定
+（全量トンネル / 分割トンネル）を作成した上で、ハンドシェイクと社内リソースへの疎通・DNS 解決を
+確認できるようになることを目指します。ゼロトラストの考え方に基づき、端末ごとに鍵と ID を分離し、
+紛失・退職時に該当端末のみを即座に切り離せる設計とします。
+
+## 用語解説
+
+- **ロードウォーリア (roadwarrior)**: 社外の様々な場所・端末から VPN 接続してくる利用形態。サーバ
+  側は接続元 IP を固定できないため、Peer は公開鍵で識別する
+- **Peer**: WireGuard の通信相手（サーバから見た各クライアント、クライアントから見たサーバ）
+- **AllowedIPs**: そのトンネルを経由させる宛先範囲。サーバ側では「その Peer から受け付ける送信元」
+  も兼ねるため、端末ごとに `/32` を割り当てることでなりすまし・IP 重複を防ぐ
+- **全量トンネル (フルトンネル)**: クライアントの全トラフィックを VPN 経由にする設定
+  （`AllowedIPs = 0.0.0.0/0`）
+- **分割トンネル (スプリットトンネル)**: 社内網宛のみ VPN 経由にし、それ以外はローカルの
+  インターネット接続をそのまま使う設定
+- **DNS リーク**: 分割トンネル利用時に、クライアント OS が VPN の DNS サーバではなく通常の
+  DNS サーバへ問い合わせてしまい、社内名前解決や通信内容の一部が VPN 外に漏れる状態
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| サーバ公開鍵 | `{{ server_pubkey }}` |
+| サーバエンドポイント | `{{ server_endpoint }}` |
+| 配布する DNS サーバ | `{{ dns_server }}` |
+| 分割トンネル対象ネットワーク | {{ split_tunnel_networks | join(', ') }} |
+| 収容端末数 | {{ clients | length }} 台 |
+
+| 端末名 | 割当アドレス | トンネル方式 |
+| --- | --- | --- |
+{% for c in clients %}
+| {{ c.name }} | `{{ c.client_address }}` | {{ c.tunnel_mode }} |
+{% endfor %}
+
+## 1. サーバ側 wg0.conf へ端末別 Peer を追加する
+
+サーバの `/etc/wireguard/wg0.conf` に、端末ごとの `[Peer]` セクションを追記します。
+`AllowedIPs` を `/32` にすることで、その公開鍵の端末以外からの送信元 IP を受け付けません。
+
+```bash
+sudo tee -a /etc/wireguard/wg0.conf <<'EOF'
+{% for c in clients %}
+[Peer]
+# {{ c.name }}
+PublicKey = {{ c.pubkey }}
+AllowedIPs = {{ c.client_address }}
+EOF
+{% endfor %}
+```
+
+設定を再読込し、再起動なしで反映します。
+
+```bash
+sudo wg syncconf wg0 <(wg-quick strip wg0)
+sudo systemctl reload wg-quick@wg0 || sudo wg syncconf wg0 <(wg-quick strip wg0)
+```
+
+## 2. 端末ごとにクライアント設定を作成する
+
+各端末で鍵ペアを生成し、秘密鍵は端末内にのみ保存します（サーバへは公開鍵のみ渡します）。
+
+```bash
+wg genkey | tee client_privatekey | wg pubkey > client_publickey
+```
+
+生成した秘密鍵を用いて、端末ごとに `wg0.conf` を作成します。`tunnel_mode` が `full` の端末は
+全量トンネル、`split` の端末は社内網宛のみを VPN 経由にします。
+{% for c in clients %}
+### {{ c.name }} 用クライアント設定（{{ c.tunnel_mode }}）
+
+```ini
+[Interface]
+Address = {{ c.client_address }}
+DNS = {{ dns_server }}
+PrivateKey = <{{ c.name }}の秘密鍵>
+
+[Peer]
+PublicKey = {{ server_pubkey }}
+Endpoint = {{ server_endpoint }}
+{% if c.tunnel_mode == "full" %}
+AllowedIPs = 0.0.0.0/0
+{% else %}
+AllowedIPs = {{ split_tunnel_networks | join(', ') }}
+{% endif %}
+PersistentKeepalive = 25
+```
+{% endfor %}
+
+この設定ファイルを各利用者へ安全な方法（対面での受け渡し、社内チャットの暗号化DMなど）で配布し、
+`wg-quick up wg0` で接続を開始させます。
+
+## 動作確認
+
+1. サーバ側で `sudo wg show wg0` を実行し、対象端末の公開鍵ごとに `latest handshake` が数分以内の
+   値になっていることを確認する（端末別に切り分けて確認できるため、特定端末だけ接続できない場合の
+   切り分けにも使える）
+2. 各端末から社内リソース（例: `ping 10.20.0.1`）へ疎通できることを確認する
+3. 各端末で `nslookup intranet.example.local {{ dns_server }}` を実行し、配布した DNS サーバで
+   名前解決できることを確認する
+4. 分割トンネル端末では、社外向け通信（例: `curl https://example.com`）が VPN を経由せず
+   ローカル回線から出ていること（`traceroute` の初段が自宅ルータ等になること）も確認し、
+   意図通りの分割になっているかを確認する
+
+## 注意事項
+
+- 分割トンネル端末は、社内向け以外の DNS 問い合わせが VPN の DNS サーバを経由しない設定
+  （OS 側で「この接続では優先的に使う DNS」を明示していない等）だと DNS リークが発生しうる。
+  端末の DNS 設定が `{{ dns_server }}` を確実に使うことを、動作確認の 3 番の手順で必ず確認する。
+- 端末の紛失・盗難・退職が判明した場合は、他端末への影響を確認したうえで、まず新しい端末・鍵で
+  接続経路が確立できることを確認してから、紛失端末の `[Peer]` ブロックのみをサーバの
+  `wg0.conf` から削除し `wg syncconf` で即時反映すること。秘密鍵は再利用せず、必ず新規に
+  `wg genkey` で生成し直す。
+- Peer を `/32` ではなく広い範囲で `AllowedIPs` 設定すると、他端末になりすました通信を
+  受け付けてしまう可能性があるため、必ず端末ごとに専用の `/32` を割り当てる。
+- サーバの秘密鍵・各端末の秘密鍵は VCS やチャットに平文で残さないこと。

@@ -1,0 +1,5 @@
+domain,rpz_action,source,tlp,added_at
+malware-c2.example.net,nxdomain,AbuseFeed,TLP:CLEAR,2026-07-10
+phishing-bank.example.com,nxdomain,AbuseFeed,TLP:CLEAR,2026-07-12
+adtrack.example.org,nodata,InternalSOC,TLP:AMBER,2026-07-14
+partner-cdn.example.com,passthru,InternalSOC,TLP:AMBER,2026-07-15

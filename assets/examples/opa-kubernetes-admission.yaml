@@ -1,0 +1,62 @@
+cluster_name: prod-cluster-01
+gatekeeper_namespace: gatekeeper-system
+excluded_namespaces:
+  - kube-system
+  - gatekeeper-system
+enforcement_action: dryrun
+constraint_templates:
+  - name: k8sdenyprivileged
+    kind: K8sDenyPrivileged
+    rego: |
+      package k8sdenyprivileged
+
+      violation[{"msg": msg}] {
+        c := input.review.object.spec.containers[_]
+        c.securityContext.privileged == true
+        msg := sprintf("privileged container is not allowed: %v", [c.name])
+      }
+  - name: k8srequiredlabels
+    kind: K8sRequiredLabels
+    rego: |
+      package k8srequiredlabels
+
+      violation[{"msg": msg}] {
+        required := input.parameters.labels
+        provided := input.review.object.metadata.labels
+        missing := required[_]
+        not provided[missing]
+        msg := sprintf("missing required label: %v", [missing])
+      }
+  - name: k8sallowedrepos
+    kind: K8sAllowedRepos
+    rego: |
+      package k8sallowedrepos
+
+      violation[{"msg": msg}] {
+        c := input.review.object.spec.containers[_]
+        repo := input.parameters.repos[_]
+        not startswith(c.image, repo)
+        msg := sprintf("image registry not allowed: %v", [c.image])
+      }
+constraints:
+  - name: deny-privileged-containers
+    kind: K8sDenyPrivileged
+    template_ref: k8sdenyprivileged
+    match_kinds:
+      - Pod
+    parameters: "(none)"
+  - name: require-owner-label
+    kind: K8sRequiredLabels
+    template_ref: k8srequiredlabels
+    match_kinds:
+      - Pod
+      - Deployment
+    parameters: 'labels: ["owner"]'
+  - name: restrict-image-registry
+    kind: K8sAllowedRepos
+    template_ref: k8sallowedrepos
+    match_kinds:
+      - Pod
+    parameters: 'repos: ["registry.internal.example.com/"]'
+violating_pod_manifest: examples/pod-privileged-violating.yaml
+compliant_pod_manifest: examples/pod-compliant.yaml

@@ -1,0 +1,12 @@
+tls_cert_bundle = "/etc/ssl/certs/ca-certificates.crt"
+forward_first = false
+
+[[upstream_servers]]
+ip = "1.1.1.1"
+port = 853
+hostname = "cloudflare-dns.com"
+
+[[upstream_servers]]
+ip = "9.9.9.9"
+port = 853
+hostname = "dns.quad9.net"
