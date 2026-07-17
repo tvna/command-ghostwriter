@@ -225,7 +225,7 @@ export function EmptyState({
             </div>
 
             {/* uploads */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 16 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(220px, 100%), 1fr))', gap: 16 }}>
               <FileUploader
                 label="① 設定定義ファイル"
                 accept=".toml,.yaml,.yml,.csv"
