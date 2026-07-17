@@ -1,0 +1,17 @@
+[analysis]
+pcap_path = "/evidence/case-2026-0417/capture_full.pcap"
+output_dir = "/tmp/analysis/case-2026-0417"
+ruleset_snapshot = "/etc/suricata/rules/snapshot-2026-04-17"
+checksum_verify = true
+
+[suricata]
+config_path = "/etc/suricata/suricata.yaml"
+runmode = "single"
+
+[file_store]
+enabled = true
+hash_algorithm = "sha256"
+stored_dir = "/tmp/analysis/case-2026-0417/filestore"
+
+[event_types]
+list = ["alert", "http", "dns", "tls", "fileinfo"]

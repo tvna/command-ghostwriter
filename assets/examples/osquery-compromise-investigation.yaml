@@ -1,0 +1,11 @@
+target_host: web01.example.internal
+collect_tables:
+  - process_open_sockets
+  - processes
+  - logged_in_users
+  - authorized_keys
+  - crontab
+  - shell_history
+output_dir: /forensics/case-2026-0717/web01
+preserve_volatile: true
+escalation: "secops-oncall@example.com (Slack: #secops-incident)"

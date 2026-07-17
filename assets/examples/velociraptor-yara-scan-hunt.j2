@@ -1,0 +1,103 @@
+# VelociraptorによるYARAスキャンHunt
+
+YARAルールを`Generic.Detection.Yara.Process`（プロセスメモリ）/`Generic.Detection.Yara.Glob`（ファイル）アーティファクトに渡し、Velociraptorのfleet-wide Huntとして対象ホスト群へ配布・実行し、一致結果を解析するまでの手順です。
+
+## 目的
+
+既知マルウェアのYARAルールを用いて、複数エンドポイントのプロセスメモリ/ファイルを横断的にスキャン（Hunt）し、一致（Hit）の有無を確認・トリアージできるようになることを目指します。
+
+## 用語解説
+
+- **YARAルール**: バイナリ/テキストパターンでマルウェアや不審な特徴を識別するためのシグネチャ定義。`strings`セクションで検出対象の文字列・バイトパターンを、`condition`セクションでそれらの組み合わせ条件（例: `any of them`、`2 of them`）を記述する。
+- **Generic.Detection.Yara.Process**: 稼働中プロセスのメモリ空間にYARAルールを適用するVelociraptor標準アーティファクト。`YaraRule`（ルール本文）と`ProcessRegex`（対象プロセス名の正規表現）を引数に取る。
+- **Generic.Detection.Yara.Glob**: ファイルシステム上のファイルにYARAルールを適用するアーティファクト。`YaraRule`と`TargetGlob`（走査対象のパスglob）を引数に取る。
+- **Hunt**: 単一クライアントではなく、ラベルやOS条件で選んだクライアント群にアーティファクト収集を配布し、結果を集約する仕組み。GUIの「New Hunt」ウィザード、またはサーバーAPI経由で作成する。
+- **メモリスキャン vs ファイルスキャン**: メモリスキャンは実行中の悪性コード（ファイルレス攻撃・パックされたペイロード）を検出できるが、対象プロセス数に比例してCPU/メモリ負荷が高い。ファイルスキャンはディスク上の静的な検体を検出できるが、メモリ上でのみ展開される検体は検出できない。両者は補完関係にあり、疑わしいホストでは併用する。
+- **Hit(一致)**: ルールの`condition`を満たしたという事実にすぎず、確定的な悪性判定ではない。誤検知（他ソフトウェアが類似文字列を含む等）もあり得るため、追加調査の起点として扱う。
+
+## シナリオ設定
+
+| yara_rule_name | scan_target | rule_summary | hit_action | note |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["yara_rule_name"] }} | {{ r["scan_target"] }} | {{ r["rule_summary"] }} | {{ r["hit_action"] }} | {{ r["note"] }} |
+{% endfor %}
+
+## 1. YARAルールを作成し、構文を事前検証する
+
+Huntに投入する前に、ルール単体で構文エラーがないことをローカルで確認します（本番Hunt実行前の必須ステップです）。
+
+```bash
+{% for r in csv_rows %}cat <<'EOF' > {{ r["yara_rule_name"] }}.yar
+rule {{ r["yara_rule_name"] }}
+{
+    meta:
+        description = "{{ r["rule_summary"] }}"
+        author = "soc-team"
+    strings:
+        $s1 = "PLACEHOLDER_STRING_1" ascii wide
+        $s2 = "PLACEHOLDER_STRING_2" ascii
+    condition:
+        any of them
+}
+EOF
+yarac {{ r["yara_rule_name"] }}.yar /tmp/{{ r["yara_rule_name"] }}.compiled
+{% endfor %}```
+
+`yarac`（YARAコンパイラ）がエラーなく`.compiled`ファイルを出力できれば構文は正しいと判断できます。`strings`のプレースホルダは実際の脅威インテリジェンス（ベンダーレポート等）から得た具体的な文字列・バイトパターンに置き換えてください。
+
+## 2. 単一ホストでローカルテスト収集する（Hunt配布前の疎通確認）
+
+Fleet全体に配布する前に、手元の1台（自身の検証端末）でアーティファクトが正しく動作することを確認します。
+
+```bash
+{% for r in csv_rows %}{% if r["scan_target"] == "process" %}velociraptor --config client.config.yaml artifacts collect Generic.Detection.Yara.Process \
+  --args YaraRule="$(cat {{ r["yara_rule_name"] }}.yar)" \
+  --args ProcessRegex=".*" \
+  --format csv --output {{ r["yara_rule_name"] }}_local.csv
+{% else %}velociraptor --config client.config.yaml artifacts collect Generic.Detection.Yara.Glob \
+  --args YaraRule="$(cat {{ r["yara_rule_name"] }}.yar)" \
+  --args TargetGlob="/tmp/**" \
+  --format csv --output {{ r["yara_rule_name"] }}_local.csv
+{% endif %}{% endfor %}```
+
+## 3. GUIでHuntを作成し対象ホスト群へ配布する
+
+Velociraptor GUIの `Hunt Manager` → `New Hunt` から、以下を指定してHuntを作成します（本手順ではCLIではなくGUIウィザードを使う点に注意。誤ってfleet全体を対象にしないよう、まずラベルで台数を絞ります）。
+
+1. Artifact: 対象に応じて `Generic.Detection.Yara.Process` または `Generic.Detection.Yara.Glob` を選択
+2. Parameters: `YaraRule` にルール本文を貼り付け、`ProcessRegex`（プロセス走査時）または `TargetGlob`（ファイル走査時）を設定
+3. Condition: `Label` で調査対象ホスト群（例: `investigation-scope`）に限定
+4. `Run Hunt` で配布を開始し、Hunt IDを控える
+
+対象規模を`investigation-scope`ラベルの数台に限定してから開始し、想定外の広範囲配布を防ぎます。
+
+## 4. Hunt結果をVQLで集約・解析する
+
+サーバーAPI経由でHunt IDごとの結果を取得します。
+
+```bash
+velociraptor --config server.config.yaml query \
+  "SELECT * FROM hunt_results(hunt_id='H.CHANGEME', artifact='Generic.Detection.Yara.Process') WHERE Rule =~ 'CHANGEME'" \
+  --format csv > hunt_results.csv
+```
+
+```bash
+{% for r in csv_rows %}echo "ルール {{ r["yara_rule_name"] }} の一致件数を確認し、{{ r["hit_action"] }} の要否を判断する（{{ r["note"] }}）"
+{% endfor %}```
+
+`hit_action`が`isolate`のルールでヒットした場合は隔離対応（マルウェア感染疑いホストの隔離手順）へ、`quarantine`の場合は検体隔離・保全へ、`escalate`の場合はエスカレーション先へ即時共有します。
+
+## 動作確認
+
+1. `EICAR_Test_File`のようなテスト用ルールで、既知の無害なテストパターン（EICARテスト文字列）を含むファイル/プロセスに対してHuntを実行し、Hit記録が生成されることを確認する
+2. Hunt Managerで対象Huntの状態が `Finished`（全対象クライアントからの応答完了）になっていることを確認する
+3. `hunt_results()`で取得したCSVの行数が、シナリオ設定表の想定件数と整合していることを確認する
+4. Hit記録に含まれる`Rule`列がシナリオ設定表の`yara_rule_name`と一致していることを確認する
+
+## 注意事項
+
+- 出所不明・未レビューのYARAルールをそのまま本番Huntに投入しない。ルール作成者・入手元（脅威インテリジェンスフィード、社内SOC作成分など）を確認し、Step 1のローカル構文検証と少数ホストでのテスト実行（Step 2）を経てからfleet配布すること。
+- メモリスキャン（`Generic.Detection.Yara.Process`）は全プロセスのメモリを走査するため、対象ホスト数・プロセス数に応じてCPU負荷が高く、業務影響のあるサーバでは実行時間帯を調整するか対象プロセスを`ProcessRegex`で絞り込むこと。
+- Hit（一致）は確定的なマルウェア判定ではない。誤検知の可能性を踏まえ、Hitを調査開始の起点として扱い、確定判断は追加の証跡（プロセスツリー、ネットワーク接続、ファイルハッシュ等）と突き合わせてから行うこと。
+- Hunt結果（`hunt_results()`の出力）とヒットしたファイル/プロセスのハッシュは、調査記録として改変されない形で保全する（証跡保全手順に準拠）。
+- 隔離・検体削除などの是正アクションを取る前に、Hitが誤検知でないことをStep 4のVQL結果と手動確認の両方で裏付けてから実施すること。

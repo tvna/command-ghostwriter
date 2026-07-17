@@ -1,0 +1,114 @@
+# Zeekクラスタ構成による高帯域対応
+
+単一プロセスのZeekでは1コアが飽和すると取りこぼしが発生するため、manager/logger/proxy/workerに役割を分割し、workerをAF_PACKETロードバランシングで水平分割するクラスタ構成を構築します。`zeekctl`が導入済みのmanagerホストで作業してください。
+
+## 目的
+
+高帯域リンクを複数workerプロセスへ分散処理させ、単一コア飽和によるパケット取りこぼしを解消できる状態を作ることを目指します。
+
+## 用語解説
+
+- **manager**: クラスタ全体の制御・ログ集約の起点となるノード。`zeekctl`のコマンドを実行する
+- **logger**: 各ノードのログを集約して保存するノード。ディスク容量を最も消費する
+- **proxy**: worker間の状態(接続追跡テーブルなど)を共有・仲介するノード
+- **worker**: 実際にパケットを解析するノード。`lb_procs`個のプロセスに分割して並列処理する
+- **AF_PACKET / lb_method**: LinuxカーネルのAF_PACKETソケットを使い、RSS(Receive Side Scaling)キューに応じてパケットをworkerプロセスへ振り分ける方式
+- **capture_loss**: Zeek組み込みスクリプトで、キャプチャ側の取りこぼし率を定期的に算出・記録する機能
+
+## シナリオ設定
+
+以下のノード構成でクラスタを組みます。ログ集約先(logger_host)は`{{ logger_host }}`です。
+
+| name | type | host | interface | lb_procs | pin_cpus |
+| --- | --- | --- | --- | --- | --- |
+{% for n in cluster_nodes %}| {{ n.name }} | {{ n.type }} | {{ n.host }} | {{ n.interface }} | {{ n.lb_procs }} | {{ n.pin_cpus }} |
+{% endfor %}
+
+対象のローカルネットワーク(networks.cfg)は以下の通りです。
+
+{% for net in local_networks %}- {{ net }}
+{% endfor %}
+
+## 手順
+
+### 1. node.cfgでクラスタノードを定義する
+
+`/opt/zeek/etc/node.cfg`に、managerを起点として各ノードを記述します。
+
+```ini
+{% for n in cluster_nodes %}
+[{{ n.name }}]
+type={{ n.type }}
+host={{ n.host }}
+{% if n.type == "worker" %}
+interface={{ n.interface }}
+lb_method=af_packet
+lb_procs={{ n.lb_procs }}
+pin_cpus={{ n.pin_cpus }}
+{% endif %}
+{% endfor %}
+```
+
+`lb_procs`は対象NICのRSSキュー数と一致させてください。キュー数より`lb_procs`が多いと一部プロセスにパケットが偏り、少ないとキューを使い切れず取りこぼしの原因になります。RSSキュー数は次で確認できます。
+
+```bash
+ethtool -l {{ cluster_nodes[3].interface.split("::")[1] }}
+```
+
+### 2. networks.cfgでローカルネットを定義する
+
+`/opt/zeek/etc/networks.cfg`に、内部と見なすアドレス空間を列挙します。
+
+```
+{% for net in local_networks %}{{ net }}    ローカルネットワーク
+{% endfor %}
+```
+
+ここに含まれないアドレスは全て外部(external)として分類され、`Site::local_nets`の判定に使われます。
+
+### 3. 設定を全ノードへ配布する
+
+managerからSSH鍵認証で各ノードへ設定を反映します。
+
+```bash
+zeekctl install
+```
+
+`zeekctl install`はnode.cfg・networks.cfg・local.zeekなどをmanagerから各ノードへコピーし、Zeekスクリプトを再コンパイルします。
+
+### 4. クラスタを起動する
+
+```bash
+zeekctl deploy
+```
+
+`deploy`は`check`(構文検証)・`install`・`start`を一括実行します。初回はまず`zeekctl check`単体で構文エラーがないことを確認してから`deploy`することを推奨します。
+
+```bash
+zeekctl check
+```
+
+## 動作確認
+
+### 5. 全ノードの起動状態を確認する
+
+```bash
+zeekctl status
+```
+
+出力の`Name`列に定義した全ノード({{ cluster_nodes | map(attribute="name") | join(", ") }})が表示され、それぞれの`Status`列が`running`であることを確認します。1台でも`crashed`や`stopped`があれば`zeekctl diag <ノード名>`で原因を確認します。
+
+### 6. capture_lossスクリプトで取りこぼし率を確認する
+
+```bash
+zeekctl exec "grep -i capture_loss {{ logger_host }}:/opt/zeek/logs/current/capture_loss.log"
+```
+
+`capture_loss.log`の`percent_lost`が継続的に高い(目安として数パーセント以上)場合、`lb_procs`の増加やNICのRSSキュー数拡張、`pin_cpus`によるコア割当の見直しを検討します。
+
+## 注意事項
+
+- クラスタ内の全ノードで時刻同期(NTP/chrony)が取れていることを事前に確認してください。ノード間の時刻ずれはログの相関分析(同一セッションのログ突合)を狂わせます。
+- `logger`ノード({{ logger_host }})はクラスタ全体のログを集約するため、ディスク容量とログローテーション設定を高帯域運用に合わせて事前に見積もってください。容量枯渇はクラスタ全体のログ欠落につながります。
+- `lb_procs`はworkerの対象NICが持つRSSキュー数と整合させる必要があります。不整合はパケット偏在や取りこぼしの原因になるため、変更時は`ethtool -l`でキュー数を再確認してから反映してください。
+- 既存の単一プロセス構成からクラスタ構成へ切り替える際は、旧構成を停止する前に新クラスタを`zeekctl deploy`で起動し、`zeekctl status`で全ノード`running`かつ`capture_loss.log`が正常に出力されることを確認してから、旧プロセスを停止・撤去してください。

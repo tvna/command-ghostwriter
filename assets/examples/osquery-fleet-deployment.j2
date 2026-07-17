@@ -1,0 +1,137 @@
+# osqueryエージェント配備とスケジュール構成
+
+osquerydをTLSでの配信・認証込みで配備し、スケジュールクエリで資産・状態を継続収集できるようにします。root権限（sudo）で実施してください。
+
+## 目的
+
+osquerydのflagfileとosquery.confを整備し、スケジュールクエリ（schedule）・パック（packs）による定期収集と、TLSによる安全な設定配信を組み合わせた運用を構築できるようになることを目指します。
+
+## 用語解説
+
+- **osqueryd**: バックグラウンドで常駐し、スケジュールクエリを定期実行してログ出力するosqueryのデーモンプロセス
+- **osqueryi**: 対話的にSQLクエリを実行してその場で結果を確認するosqueryのシェル
+- **schedule_queries（スケジュールクエリ）**: osquery.confのscheduleセクションに定義する、name/query/intervalの組。intervalの秒数ごとに自動実行される
+- **differential（差分）結果**: スケジュールクエリの実行結果を前回実行時と比較し、追加・削除された行だけをログへ出力する仕組み。全件出力ではなく変化分のみを記録するためログ量を抑えられる
+- **host識別（host_identifier）**: ログにホストを一意に紐付けるための識別子。`hostname`のほか`uuid`（`host_uuid`）などを選択できる
+- **pack（クエリパック）**: 複数のスケジュールクエリを目的別（インシデント対応、ハードウェア監視など）にまとめた設定ファイル
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| flagfile内 config_path | `{{ config_path }}` |
+| logger_plugin | `{{ logger_plugin }}` |
+| ログ出力先（log_dir） | `{{ log_dir }}` |
+| TLS配信先ホスト（tls_hostname） | `{{ tls_hostname }}` |
+| TLSサーバ証明書（tls_server_certs） | `{{ tls_server_certs }}` |
+| enroll secretパス（enroll_secret_path） | `{{ enroll_secret_path }}` |
+| host_identifier | `{{ host_identifier }}` |
+
+スケジュールクエリ:
+
+| name | query | interval(秒) |
+| --- | --- | --- |
+{% for q in schedule_queries %}| {{ q.name }} | `{{ q.query }}` | {{ q.interval }} |
+{% endfor %}
+クエリパック:
+
+| name | path |
+| --- | --- |
+{% for p in packs %}| {{ p.name }} | `{{ p.path }}` |
+{% endfor %}
+## 手順
+
+### 1. flagfileを作成する
+
+`{{ config_path }}` と同じディレクトリに `osquery.flags` を作成します。
+
+```
+--config_plugin=filesystem
+--config_path={{ config_path }}
+--logger_plugin={{ logger_plugin }}
+--logger_path={{ log_dir }}
+--host_identifier={{ host_identifier }}
+--tls_hostname={{ tls_hostname }}
+--tls_server_certs={{ tls_server_certs }}
+--enroll_secret_path={{ enroll_secret_path }}
+--enroll_tls_endpoint=/api/v1/osquery/enroll
+--config_tls_endpoint=/api/v1/osquery/config
+--config_tls_refresh=60
+--disable_watchdog=false
+```
+
+配布物であるTLSサーバ証明書（`{{ tls_server_certs }}`）とenroll secret（`{{ enroll_secret_path }}`）は、事前に配布先ホストへ安全な経路（構成管理ツールやオフラインコピー）で配置しておきます。
+
+### 2. osquery.confにscheduleとpacksを定義する
+
+`{{ config_path }}` を以下の内容で作成します。
+
+```json
+{
+  "options": {
+    "host_identifier": "{{ host_identifier }}",
+    "schedule_splay_percent": 10
+  },
+  "schedule": {
+{% for q in schedule_queries %}    "{{ q.name }}": {
+      "query": "{{ q.query }}",
+      "interval": {{ q.interval }}
+    }{% if not loop.last %},{% endif %}
+
+{% endfor %}  },
+  "packs": {
+{% for p in packs %}    "{{ p.name }}": "{{ p.path }}"{% if not loop.last %},{% endif %}
+
+{% endfor %}  }
+}
+```
+
+各クエリの`interval`は収集したい鮮度と対象ホスト台数・収集項目の重さに応じて調整します。設定ファイルの構文はデプロイ前に必ず検証します。
+
+```bash
+osqueryd --flagfile=/etc/osquery/osquery.flags --config_check
+```
+
+### 3. TLS配信設定を確認してからosqueryを起動する
+
+```bash
+openssl x509 -in {{ tls_server_certs }} -noout -subject -dates
+systemctl restart osqueryd
+systemctl status osqueryd --no-pager
+```
+
+証明書の`subject`が`{{ tls_hostname }}`宛てに発行されたものであること、有効期限（`notAfter`）が十分先であることを確認してから常駐運用に切り替えます。
+
+## 動作確認
+
+1. `osqueryi`で対話的に実行できることを確認する
+
+   ```bash
+   osqueryi "SELECT * FROM osquery_info;"
+   ```
+
+   `pid`, `version`, `config_valid`, `extensions`などの列が返り、`config_valid`が`1`（真）であることを確認します。
+
+2. osquerydの稼働状態を確認する
+
+   ```bash
+   osqueryi --connect /var/osquery/osquery.sock "SELECT * FROM osquery_info;"
+   ```
+
+   デーモンのosqueryプロセスが応答し、`config_hash`が`{{ config_path }}`のロード内容と一致していることを確認します。
+
+3. スケジュールクエリの結果がログへ出力されていることを確認する
+
+   ```bash
+   tail -f {{ log_dir }}/osqueryd.results.log
+   ```
+
+   各`schedule_queries`のnameごとに、intervalで指定した周期でログ行（differential形式の`added`/`removed`を含むJSON）が出力され続けることを確認します。
+
+## 注意事項
+
+- スケジュールクエリのintervalを短くしすぎるとホストのCPU・I/O負荷が増大する。対象ホスト台数が多い環境では特に、`{{ log_dir }}`への書き込み量とサーバ側の受信負荷も合わせて見積もる。
+- `listening_ports`・`process_open_sockets`・`logged_in_users`はプロセス・ユーザー・ネットワーク接続という機微な情報を収集するため、`{{ log_dir }}`配下のログファイルへのアクセスは監査ログ担当者・SOC要員などの必要最小限のユーザー/グループに制限する（例: `chmod 750`、専用グループへの`chown`）。
+- `{{ enroll_secret_path }}`とTLS秘密鍵はosquery設定配信・エンロールの認証情報そのものであり、Gitやバックアップに平文で含めない。ローテーションの経路をあらかじめ決めておく。
+- `{{ tls_server_certs }}`の証明書は有効期限があるため、期限切れ前に更新し、更新後は新しい証明書で`osqueryd --config_check`が通ることを配備前に検証してから、既存の稼働中プロセスへ反映する。
+- 設定変更後にosquerydを再起動する際は、まず1台の検証用ホストで新しいflagfile・osquery.confを適用して`osquery_info`のconfig_validと`schedule`テーブルの内容を確認し、問題がないことを確かめてから他ホストへ展開する。

@@ -1,0 +1,104 @@
+# Squid LDAP認証プロキシ構成手順 — {{ squid.ldap_host }}
+
+Squid フォワードプロキシに `basic_ldap_auth` ヘルパーを組み込み、LDAP ディレクトリでユーザー認証を行った上でのみ外部アクセスを許可する構成を行います。
+
+## 目的
+
+このシナリオでは、匿名で誰でも使えるプロキシを、LDAP ディレクトリに登録された利用者だけが使えるプロキシへ移行します。認証済みの利用者だけが外部アクセスできるようにし、誰がいつどの宛先にアクセスしたかを `access.log` のユーザー名から追跡できる状態を目指します。
+
+## 用語解説
+
+- **basic_ldap_auth**: Squid 付属の外部認証ヘルパー。ブラウザ/クライアントから Basic 認証で送られたユーザー名・パスワードを LDAP に bind して検証する
+- **bind DN / bind password**: LDAP に検索権限で接続するためのサービスアカウントの識別名とパスワード
+- **base DN**: ユーザーエントリを検索する起点となる LDAP ツリーの位置
+- **search filter**: base DN 配下からログイン名に一致する1件のエントリを絞り込む LDAP フィルタ式
+- **acl proxy_auth REQUIRED**: 認証済みユーザー名が存在することを条件にする ACL
+- **407 Proxy Authentication Required**: 未認証のリクエストに Squid が返す応答コード
+- **認証済みプロキシの利点**: 匿名アクセスでは「誰が」アクセスしたか分からないが、認証を課すことで `access.log` にユーザー名が残り、アクセス制御とログの追跡（誰が・いつ・どこへ）が個人単位で紐付けられるようになる
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| LDAP ホスト | {{ squid.ldap_host }} |
+| Base DN | {{ squid.base_dn }} |
+| Bind DN（サービスアカウント） | {{ squid.bind_dn }} |
+| 検索属性 | {{ squid.uid_attr }} |
+| 対象 objectClass | {{ squid.object_class }} |
+| Realm 表示文字列 | {{ squid.auth_realm }} |
+| Bind パスワード格納ファイル | {{ squid.bind_password_file }} |
+
+## 1. bind 用サービスアカウントのパスワードファイルを準備する
+
+`basic_ldap_auth` の `-w` オプションでパスワードファイルを渡せるようにし、平文パスワードをプロセス引数（`ps` で見える形）に残さないようにします。
+
+```bash
+sudo install -o proxy -g proxy -m 600 /dev/null {{ squid.bind_password_file }}
+sudo tee {{ squid.bind_password_file }} > /dev/null <<'EOF'
+CHANGE_ME_BIND_PASSWORD
+EOF
+sudo chmod 600 {{ squid.bind_password_file }}
+sudo chown proxy:proxy {{ squid.bind_password_file }}
+```
+
+## 2. squid.conf に LDAP 認証パラメータを追加する
+
+既存の匿名アクセス用 ACL はこの時点ではまだ残したまま、認証ヘルパーの定義だけを追加します（後述の通り、切り替えは動作確認後に行います）。
+
+```bash
+sudo tee -a /etc/squid/squid.conf > /dev/null <<'EOF'
+auth_param basic program /usr/lib/squid/basic_ldap_auth -Z -b "{{ squid.base_dn }}" -D "{{ squid.bind_dn }}" -w {{ squid.bind_password_file }} -f "(&({{ squid.object_class }}={{ squid.uid_attr }})({{ squid.uid_attr }}=%s))" -h {{ squid.ldap_host }}
+auth_param basic realm {{ squid.auth_realm }}
+auth_param basic credentialsttl 2 hours
+acl authenticated proxy_auth REQUIRED
+EOF
+```
+
+`-Z` は LDAP を TLS（LDAPS 相当のネゴシエーション）で接続するオプションです。平文 LDAP（`-h` のみ）は bind パスワードが盗聴されるため、必ず `-Z` を付けるか `ldaps://` ホストを指定してください。
+
+## 3. 認証ルールを既存ルールと並行して先に検証する
+
+いきなり匿名アクセスの許可ルールを削除せず、`http_access allow authenticated` を既存ルールの**手前**に追記し、認証ヘルパー自体が正しく動くかをまず確認します。既存の許可ルールはこの段階では残しておきます。
+
+```bash
+sudo sed -i '/^http_access allow localnet/i http_access allow authenticated' /etc/squid/squid.conf
+sudo squid -k parse
+sudo systemctl reload squid
+```
+
+`squid -k parse` は設定ファイルの文法チェックのみで実際のトラフィックには影響しません。ここで LDAP 認証を試し、期待通りに認証が通ること・通らないことを両方確認してから次の手順に進みます（手順4の動作確認を参照）。
+
+## 4. 動作確認後、匿名アクセスの許可ルールを外す
+
+手順3の動作確認（下記「動作確認」節）で認証済みアクセスが正しく機能していることを確認できたら、旧来の匿名許可ルールを削除し、認証必須の構成に切り替えます。
+
+```bash
+sudo sed -i '/^http_access allow localnet/d' /etc/squid/squid.conf
+sudo tee -a /etc/squid/squid.conf > /dev/null <<'EOF'
+http_access deny all
+EOF
+sudo squid -k parse
+sudo systemctl reload squid
+```
+
+## 動作確認
+
+- 手順3の時点（新旧ルール併存中）で、認証情報なしのリクエストが `407 Proxy Authentication Required` を返すこと
+  ```bash
+  curl -sv -x http://{{ squid.ldap_host }}:3128/ https://example.com/ 2>&1 | grep "407"
+  ```
+- 手順3の時点で、LDAP に登録済みのユーザー名/パスワードを指定したリクエストが成功する（`200`）こと
+  ```bash
+  curl -sv -x http://alice:CHANGE_ME_USER_PASSWORD@{{ squid.ldap_host }}:3128/ https://example.com/ -o /dev/null -w "%{http_code}\n"
+  ```
+- `sudo tail -f /var/log/squid/access.log` を実行しながら上記 curl を叩き、ログの該当行にリクエスト元 IP に加えて認証済みユーザー名（`alice` など）が記録されていること
+- 手順4で匿名許可ルールを削除した後、認証情報なしのリクエストが引き続き `407` を返し、既存の localnet 許可では通らなくなっていること
+- `sudo tail -n 50 /var/log/squid/cache.log` に `basic_ldap_auth` の bind エラー（証明書エラー・bind DN 誤りなど）が出ていないこと
+
+## 注意事項
+
+- 認証・ACL の切り替えを伴う変更のため、手順3で新しい LDAP 認証ルールを既存の匿名許可ルールと**並行稼働**させ、動作確認が完了するまでは匿名許可ルールを削除しないこと。先に削除すると、LDAP 側の設定ミスに気づかないまま全利用者がアクセス不能になる。
+- bind パスワードは squid.conf に直書きせず、`-w {{ squid.bind_password_file }}` でファイル経由にし、パーミッションを `600`・所有者を Squid 実行ユーザー（`proxy` など）に限定すること。世界読み取り可能なままにすると bind アカウントの資格情報が漏洩する。
+- `basic_ldap_auth` は素の Basic 認証であり、クライアント〜Squid 間の通信が平文の場合はユーザー名・パスワードがそのまま流れる。Squid 自体を `https_port` 等で TLS 化するか、少なくとも社内の暗号化された経路に限定して運用すること。
+- LDAP サーバへの bind 通信は `-Z`（TLS ネゴシエーション）を必ず有効にすること。無効のまま平文 LDAP で bind すると、サービスアカウントのパスワードがネットワーク上で盗聴される可能性がある。
+- 変更前に `sudo cp /etc/squid/squid.conf /etc/squid/squid.conf.bak.$(date +%Y%m%d)` などでバックアップを取り、`squid -k parse` の文法チェックに失敗した場合は復元できるようにしておくこと。

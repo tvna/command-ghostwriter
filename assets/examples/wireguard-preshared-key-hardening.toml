@@ -1,0 +1,24 @@
+[global]
+interface = "wg0"
+config_path = "/etc/wireguard/wg0.conf"
+maintenance_window = "2026-07-20 02:00-02:30 JST"
+side_a_host = "wg-hub-tokyo"
+side_b_host = "wg-branch-osaka"
+
+[[peers]]
+peer_name = "branch-osaka"
+psk_set = false
+rotation_schedule = "180日ごと"
+allowed_ips = "10.10.0.2/32"
+endpoint = "osaka.example.net:51820"
+psk_file_a = "/etc/wireguard/psk-branch-osaka.key"
+psk_file_b = "/etc/wireguard/psk-hub-tokyo.key"
+
+[[peers]]
+peer_name = "branch-fukuoka"
+psk_set = false
+rotation_schedule = "180日ごと"
+allowed_ips = "10.10.0.3/32"
+endpoint = "fukuoka.example.net:51820"
+psk_file_a = "/etc/wireguard/psk-branch-fukuoka.key"
+psk_file_b = "/etc/wireguard/psk-hub-tokyo.key"

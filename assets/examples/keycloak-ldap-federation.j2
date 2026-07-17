@@ -1,0 +1,128 @@
+# KeycloakのLDAP/AD federationユーザー連携 — {{ realm }}レルム
+
+外部LDAP/AD（{{ connection_url }}）を Keycloak の User Federation として連携し、`{{ provider_name }}` プロバイダ経由でユーザーとグループを同期します。バインド資格情報は平文で kcadm コマンドや設定ファイルに残さず、Keycloak Vault 経由で参照します。
+
+## 目的
+
+LDAP/AD を Keycloak の外部ユーザーストアとして接続し、editMode によるパスワード管理責任の違いを理解したうえで、ユーザー・グループ同期を安全に構築・検証できるようになることを目指します。
+
+## 用語解説
+
+- **User Federation**: Keycloak が LDAP/AD などの外部ディレクトリをユーザーストアとして参照する仕組み。ユーザーは Keycloak DB に複製されず、必要時に LDAP へ問い合わせる（またはキャッシュ同期する）
+- **editMode**: LDAP連携の書き込み権限モード。`READ_ONLY` は Keycloak からのパスワード変更・属性更新を許可せず、パスワード管理責任は LDAP/AD 側に委譲される。`WRITABLE` は Keycloak からの変更を LDAP へ反映する
+- **bindDn / bindCredential**: Keycloak が LDAP に検索接続する際のサービスアカウントDNとその資格情報。bindCredential は機微情報であり、平文保存を避け Vault 参照（`${vault.{{ bind_credential_vault_key }}}`）で扱う
+- **group-ldap-mapper**: LDAP側のグループ（`groupOfNames` 等）を Keycloak のグループへマッピングするコンポーネント。同期方向は基本的に LDAP → Keycloak の一方向で、Keycloak側でのグループ編集はLDAPへ反映されない
+- **sync（フル同期 / 差分同期）**: `fullSyncPeriod` は全ユーザーを対象にした定期同期、`changedSyncPeriod` は更新分のみを対象にした定期同期。手動トリガーも可能
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| レルム | {{ realm }} |
+| Keycloakサーバー | {{ kc_server_url }} |
+| プロバイダ名 | {{ provider_name }} |
+| LDAP接続URL | {{ connection_url }} |
+| bindDn | {{ bind_dn }} |
+| usersDn | {{ users_dn }} |
+| userObjectClasses | {{ user_object_classes }} |
+| editMode | {{ edit_mode }} |
+| 同期周期（秒） | {{ sync_period }} |
+| groupsDn | {{ groups_dn }} |
+| グループマッパー名 | {{ group_mapper_name }} |
+
+## 1. kcadm.sh でログインし現状を確認する
+
+```bash
+kcadm.sh config credentials --server {{ kc_server_url }} --realm master --user admin
+kcadm.sh get components -r {{ realm }} -q type=org.keycloak.storage.UserStorageProvider
+```
+
+## 2. LDAP接続用のVaultシークレットを登録する
+
+`bindCredential` を平文で kcadm コマンド履歴やコンポーネント設定に残さないよう、Keycloak Vault ディレクトリにシークレットファイルとして配置します（ファイル名がエイリアスになります）。
+
+```bash
+sudo install -o keycloak -g keycloak -m 600 /dev/stdin \
+  "/opt/keycloak/data/vault/{{ realm }}_{{ bind_credential_vault_key }}" <<< "<バインドアカウントのパスワードを対話入力>"
+```
+
+## 3. LDAP User Federationプロバイダを作成する
+
+`connectionUrl` は必ず `ldaps://` または StartTLS 対応の設定とし、平文 `ldap://` で bindCredential を送出しないようにします。
+
+```bash
+kcadm.sh create components -r {{ realm }} \
+  -s name={{ provider_name }} \
+  -s providerId=ldap \
+  -s providerType=org.keycloak.storage.UserStorageProvider \
+  -s 'config.connectionUrl=["{{ connection_url }}"]' \
+  -s 'config.bindDn=["{{ bind_dn }}"]' \
+  -s 'config.bindCredential=["${vault.{{ bind_credential_vault_key }}}"]' \
+  -s 'config.usersDn=["{{ users_dn }}"]' \
+  -s 'config.userObjectClasses=["{{ user_object_classes }}"]' \
+  -s 'config.editMode=["{{ edit_mode }}"]' \
+  -s 'config.vendor=["other"]' \
+  -s 'config.useTruststoreSpi=["ldapsOnly"]' \
+  -s 'config.pagination=["true"]' \
+  -s 'config.fullSyncPeriod=["{{ sync_period }}"]' \
+  -s 'config.changedSyncPeriod=["{{ sync_period }}"]'
+```
+
+## 4. コンポーネントIDを取得し、group-ldap-mapperを追加する
+
+```bash
+PROVIDER_ID=$(kcadm.sh get components -r {{ realm }} -q name={{ provider_name }} --fields id --format csv --noquotes)
+
+kcadm.sh create components -r {{ realm }} \
+  -s name={{ group_mapper_name }} \
+  -s parentId="$PROVIDER_ID" \
+  -s providerId=group-ldap-mapper \
+  -s providerType=org.keycloak.storage.ldap.mappers.LDAPStorageMapper \
+  -s 'config."groups.dn"=["{{ groups_dn }}"]' \
+  -s 'config."group.name.ldap.attribute"=["cn"]' \
+  -s 'config."group.object.classes"=["groupOfNames"]' \
+  -s 'config."membership.ldap.attribute"=["member"]' \
+  -s 'config."membership.attribute.type"=["DN"]' \
+  -s 'config."preserve.group.inheritance"=["true"]' \
+  -s 'config.mode=["READ_ONLY"]'
+```
+
+グループマッパーの同期方向は LDAP → Keycloak の一方向です。Keycloak管理コンソール上でグループ構成を編集しても LDAP には反映されないため、グループの正本管理はLDAP/AD側で行ってください。
+
+## 5. 既存のローカル認証を残したままLDAPユーザーで疎通確認する
+
+既存のローカル管理者アカウントによるログインセッションを別途保持したまま、LDAP連携が正しく機能するかを確認します。連携が失敗してもローカル管理者でログインし直せる状態を維持することが目的です。
+
+```bash
+# 別セッション（ブラウザの別ウィンドウ等）でローカル管理者セッションを維持したまま実行する
+curl -s -X POST "{{ kc_server_url }}/realms/{{ realm }}/protocol/openid-connect/token" \
+  -d client_id=admin-cli \
+  -d grant_type=password \
+  -d username={{ test_ldap_user }} \
+  -d password="<LDAPユーザーのパスワードを対話入力>" \
+  | grep -o '"access_token"' && echo "LDAPユーザー疎通OK: {{ test_ldap_user }}"
+```
+
+## 6. フル同期を実行し、ユーザー・グループの取り込み結果を確認する
+
+```bash
+kcadm.sh get "user-storage/$PROVIDER_ID/sync?action=triggerFullSync" -r {{ realm }}
+kcadm.sh get users -r {{ realm }} -q username={{ test_ldap_user }} --fields id,username,email,federationLink
+kcadm.sh get groups -r {{ realm }} --fields id,name
+```
+
+## 動作確認
+
+- 手順1で `{{ provider_name }}` が `providerType=org.keycloak.storage.UserStorageProvider` として登録されていること
+- 手順5で LDAPユーザー `{{ test_ldap_user }}` がKeycloakの認証（トークン発行）に成功すること
+- 手順6の同期後、`kcadm.sh get users` に `{{ test_ldap_user }}` が `federationLink` 付きで現れ、対応するLDAPグループがKeycloakのグループ一覧に反映されていること
+- editModeが `{{ edit_mode }}` の場合、Keycloak管理コンソールから `{{ test_ldap_user }}` のパスワードリセット操作が拒否される（または警告が表示される）こと
+
+## 注意事項
+
+- `bindCredential` は平文でコンポーネント設定・コマンド履歴・ログに残さず、Keycloak Vault（`${vault.{{ bind_credential_vault_key }}}`）等の秘密情報ストアで管理する。手順2のVaultファイルはパーミッション600・所有者keycloakに限定する。
+- `connectionUrl` は必ず `ldaps://` またはStartTLS対応とし、平文 `ldap://` でバインド資格情報を送出しない。証明書検証を無効化する設定（truststoreSpi=always等）は使用しない。
+- editModeが `READ_ONLY` の場合、パスワード管理責任はLDAP/AD側に委譲される。Keycloak側でのパスワードリセット要求はLDAPには反映されない点を利用者に周知すること。
+- 手順5のとおり、LDAP連携を有効化した直後は既存のローカル管理者セッションを維持したまま疎通確認を行い、連携設定に不備があってもロックアウトされないことを確認してから、ローカル認証のみに依存した運用手順を廃止すること。
+- 初回のフル同期では、LDAP/AD側の全ユーザーが一括で流入するため、同一メールアドレスや同一ユーザー名を持つ既存Keycloakローカルユーザーとの重複（`ユーザー名/メール重複エラー`）が発生し得る。事前にLDAP側の対象OU・フィルタを絞り込み、必要に応じて`usersDn`配下を限定してから同期すること。
+- 退職者などLDAP/AD側で無効化・削除されたアカウントは、`fullSyncPeriod`/`changedSyncPeriod`による定期同期、または手順6の手動同期を実行しない限りKeycloak側に即時反映されない。失効の即時性が求められる場合は同期周期を短縮するか、LDAP側の無効化と同時に手動フル同期を実施する運用を徹底する。

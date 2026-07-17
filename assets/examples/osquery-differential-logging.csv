@@ -1,0 +1,6 @@
+query_name,mode,tracks_change,interval,use_case
+listening_ports,differential,yes,300,新規リスニングポートの発生検知
+installed_packages,differential,yes,3600,パッケージの追加・削除検知
+local_users,differential,yes,900,ユーザーアカウントの追加・削除検知
+system_info,snapshot,no,86400,ホスト基本情報の定期棚卸し
+logged_in_users,snapshot,no,60,現在ログイン中セッションの一覧取得

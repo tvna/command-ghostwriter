@@ -1,0 +1,141 @@
+# OPA による API 認可の外部化手順
+
+アプリ本体から認可判定ロジックを切り離し、Open Policy Agent（OPA）に
+Rego で一元管理させる構成を導入します。CSV で定義した {{ csv_rows | length }} 件の
+認可ケースを例に、サイドカー構成での導入から動作確認までを手順化します。
+
+## 目的
+
+アプリの認可判定（PEP: Policy Enforcement Point）とポリシー評価
+（PDP: Policy Decision Point）を分離し、OPA と Rego による RBAC/ABAC の
+集中ポリシー管理を安全に導入・検証できるようになることを目指します。
+
+## 用語解説
+
+- **PDP（Policy Decision Point）**: ポリシーを評価し allow/deny を判定する主体。本手順では OPA が担う。
+- **PEP（Policy Enforcement Point）**: PDP の判定結果を実際に強制（enforce）する主体。本手順ではアプリ本体（API サーバ）が担う。
+- **Rego**: OPA のポリシー記述言語。ルールとして RBAC/ABAC を宣言的に書ける。
+- **RBAC（Role-Based Access Control）**: 役割（role）に基づく認可制御。
+- **ABAC（Attribute-Based Access Control）**: 属性（部署・所有者等）に基づく認可制御。
+- **default deny**: ポリシーが一致しない場合は必ず拒否する原則。認可漏れを防ぐための前提。
+- **decision log**: OPA が下した各判定（入力・結果・時刻）の監査ログ。
+
+## シナリオ設定
+
+| resource | action | subject_attr | policy_rule | decision |
+|----------|--------|--------------|-------------|----------|
+{% for r in csv_rows %}| {{ r["resource"] }} | {{ r["action"] }} | {{ r["subject_attr"] }} | {{ r["policy_rule"] }} | {{ r["decision"] }} |
+{% endfor %}
+
+## 1. OPA をサイドカーとして起動する
+
+アプリと同一 Pod / ホスト内にサイドカーとして OPA を起動し、ネットワーク越しの
+判定呼び出しをローカルホスト内に閉じます（レイテンシ削減、認可のクリティカル
+パスを外部ネットワーク越しにしない）。
+
+```bash
+docker run -d --name opa-sidecar \
+  -p 127.0.0.1:8181:8181 \
+  -v $(pwd)/policy:/policy \
+  openpolicyagent/opa:latest \
+  run --server \
+  --addr=0.0.0.0:8181 \
+  --set=decision_logs.console=true \
+  /policy/authz.rego
+```
+
+```bash
+curl -s http://127.0.0.1:8181/health?bundles
+```
+
+## 2. RBAC/ABAC を Rego ポリシーとして定義する
+
+`policy/authz.rego` に RBAC（role ベース）と ABAC（属性ベース）のルールを実装し、
+最後に **default deny** を明示します。
+
+```rego
+package http.authz
+
+import future.keywords.in
+
+# default は必ず deny（何にも一致しなければ拒否）
+default allow = false
+
+# --- RBAC: role:viewer は read のみ許可 ---
+allow {
+    input.subject_attr == "role:viewer"
+    input.action == "read"
+}
+
+# --- ABAC: 部署属性がリソースの所管部署と一致する場合のみ許可 ---
+allow {
+    startswith(input.resource, "/v1/invoices")
+    input.subject_attr == "dept:finance"
+    input.action == "read"
+}
+
+# admin リソースへの delete は role:viewer では常に拒否（default deny に委ねる）
+```
+
+```bash
+# 構文チェック（デプロイ前に必ず実施）
+opa check policy/authz.rego
+```
+
+## 3. アプリ（PEP）から判定を要求する
+
+アプリ側の enforcement 層は、リクエストごとに `subject_attr` / `action` /
+`resource` を input として OPA に POST し、`result` が `true` の場合のみ
+処理を継続します。
+
+```bash
+{% for r in csv_rows %}curl -s -X POST http://127.0.0.1:8181/v1/data/http/authz/allow \
+  -H 'Content-Type: application/json' \
+  -d '{"input": {"resource": "{{ r["resource"] }}", "action": "{{ r["action"] }}", "subject_attr": "{{ r["subject_attr"] }}"}}'
+{% endfor %}```
+
+期待される戻り値は `{"result": true}`（allow）または `{"result": false}`（deny、
+または未定義でも default deny により false 扱い）です。
+
+## 4. ポリシー変更を即時反映する
+
+Rego ファイルを更新した際、OPA を再起動せずポリシーバンドルを差し替えて
+即時反映できることを確認します。
+
+```bash
+curl -s -X PUT http://127.0.0.1:8181/v1/policies/authz \
+  --data-binary @policy/authz.rego
+```
+
+```bash
+curl -s http://127.0.0.1:8181/v1/policies/authz
+```
+
+## 動作確認
+
+- シナリオ設定の各行について、`curl` での判定結果（allow/deny）が
+  CSV の `decision` 列の期待値と一致すること。
+- ポリシー更新（手順 4）の直後に、更新前と異なる判定結果が得られること
+  （再起動なしで即時反映されていること）。
+- `--set=decision_logs.console=true` により、各判定の入力・結果・タイムスタンプが
+  OPA のログ（コンソール出力または `/var/log` 転送先）に記録されていること。
+- ポリシーに一致しない未知の `resource`/`action` の組み合わせで判定した場合、
+  `default allow = false` により deny（default deny）となること。
+
+## 注意事項
+
+- OPA は認可判定のクリティカルパスに乗る。OPA が停止・応答不能になった場合、
+  PEP 側は **fail-closed（判定不能時は deny）** で実装し、認可バイパスを防ぐこと。
+- 判定レイテンシを抑えるため、OPA はアプリと同一ホスト/Pod のサイドカーとして
+  配置し、リモートの中央サービス呼び出しは避けるか、結果をタイムアウト付きで
+  短時間キャッシュすること。ただしキャッシュは権限剥奪の反映遅延を生むため、
+  キャッシュ TTL は権限変更の許容反映遅延より十分短く設定する。
+- `default allow = false`（default deny）を必ず先頭付近に明示し、想定外の
+  input やルール漏れが「拒否」側に倒れることを保証する。
+- input（`subject_attr` 等）はアプリ側で認証済みトークンから安全に導出したもの
+  のみを渡すこと。クライアントが自己申告した属性をそのまま input に渡さない。
+- 新しい OPA 判定（PDP 分離構成）へ切り替える際は、既存の認可ロジックと
+  並行稼働させ、両者の判定結果を突き合わせる shadow モードや dry-run で
+  一致を確認してから、旧ロジックを無効化・削除すること。
+- decision log（判定監査ログ）は認可判定の証跡として保全し、意図しない
+  allow が発生していないか定期的に確認すること。

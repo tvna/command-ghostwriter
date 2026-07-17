@@ -1,0 +1,93 @@
+# Lynisカスタムテストの作成
+
+Lynis標準テストではカバーできない自組織ポリシーを、`include/custom_test` に置くカスタムテスト（プラグイン）として実装し、監査（`lynis audit system`）に組み込みます。
+
+## 目的
+
+自組織のセキュリティポリシー（SSH設定・監査ログの書き込み権限・ポリシーベースラインの配布状況など）を、Lynisの標準テストデータベースに依存せずに監査項目として追加できるようになることを目指します。テストIDの採番規則を守って標準テストと衝突させず、`Register`/`Display`/`ReportSuggestion`/`ReportWarning` の各関数を使って判定結果を正しくレポートに反映させる手順を身につけます。
+
+## 用語解説
+
+- **`include/custom_test`**: Lynisが読み込むカスタムテストファイルの標準配置場所（`/etc/lynis/custom_test` またはLynisインストールディレクトリ配下の同名ファイル）
+- **`custom.prf`**: カスタムテストを有効化するプロファイル（`/etc/lynis/custom.prf`）。`config-file=` や `include-custom-tests=yes` の指定を行う
+- **`Register`**: テストIDの登録・実行条件（前提条件・重み・ネットワーク要否・カテゴリ）を宣言するLynis組み込み関数
+- **`Display`**: 監査実行中の画面出力（インデント・結果ラベル・色）を行う関数
+- **`ReportSuggestion`**: pass以外の判定時に改善提案をレポート（`lynis-report.dat`、`suggestion[]=`）へ書き込む関数
+- **`ReportWarning`**: 重大な逸脱を警告としてレポート（`warning[]=`）へ書き込む関数
+- **`AddHP`**(Hardening Index加算): テスト結果に応じてHardening Indexへ加点する関数。自組織要件では加点よりレポート反映を優先し、必要な場合のみ使用する
+- **テストIDのローカル帯**: Lynis公式テストは4文字カテゴリ+4桁（例 `SSH-7408`）を使用するため、自組織カスタムテストは公式が使わない接頭辞・番号帯（本手順では `CUST-88xx`）を採番して衝突を避ける
+
+## シナリオ設定
+
+| test_id | category | check_logic | expected | suggestion_text |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["test_id"] }} | {{ r["category"] }} | `{{ r["check_logic"] }}` | {{ r["expected"] }} | {{ r["suggestion_text"] }} |
+{% endfor %}
+
+## 1. テストID採番の衝突確認
+
+自組織の番号帯（`CUST-8800`〜`CUST-8899`）が既存の公式テストIDと衝突していないことを確認します。
+
+```bash
+sudo lynis show tests | grep -E "CUST-88[0-9]{2}" || echo "衝突なし: CUST-88xx帯は未使用"
+```
+
+## 2. カスタムテストファイルを作成する
+
+`/etc/lynis/custom_test` に、シナリオ設定の各行を1テストずつ実装します。以下はシナリオ設定の全行を反映したテストスクリプトです（そのままコードブロック内テキストとして配置してください）。
+
+```bash
+#!/bin/bash
+# カスタムテスト: 自組織ポリシー監査
+# 配置先: /etc/lynis/custom_test
+
+{% for r in csv_rows %}# Test        : {{ r["test_id"] }}
+# Category    : {{ r["category"] }}
+# Description : 自組織ポリシーの適合性チェック（{{ r["category"] }}）
+Register --test-no {{ r["test_id"] }} --preqs-met YES --weight L --network NO --category security --description "custom policy check {{ r["category"] }}"
+
+if [ ${SKIPTEST} -eq 0 ]; then
+    LogText "Test: {{ r["test_id"] }} ({{ r["category"] }}) を実行"
+    if {{ r["check_logic"] }}; then
+        Display --indent 2 --text "- {{ r["test_id"] }}: {{ r["category"] }} check" --result OK --color GREEN
+        LogText "Result: {{ r["test_id"] }} は合格（expected=={{ r["expected"] }}）"
+    else
+        Display --indent 2 --text "- {{ r["test_id"] }}: {{ r["category"] }} check" --result WARNING --color RED
+        ReportWarning "${TEST_NO}" "{{ r["suggestion_text"] }}"
+        ReportSuggestion "${TEST_NO}" "{{ r["suggestion_text"] }}"
+    fi
+fi
+
+{% endfor %}```
+
+## 3. custom.prf で有効化する
+
+```bash
+sudo tee -a /etc/lynis/custom.prf >/dev/null <<'EOF'
+include-custom-tests=yes
+config-file=/etc/lynis/custom_test
+EOF
+```
+
+## 4. シンタックスチェックと単体実行
+
+本番監査に組み込む前に、監査全体を回さずカスタムテスト単体で構文と挙動を確認します。
+
+```bash
+sudo bash -n /etc/lynis/custom_test
+{% for r in csv_rows %}sudo lynis audit system --tests {{ r["test_id"] }} --quick --no-colors
+{% endfor %}```
+
+## 動作確認
+
+- `lynis audit system --quick` を実行した際に、シナリオ設定の各 `test_id` が監査ログ（`/var/log/lynis.log`）に出現し、独自テストとして評価されること
+- 判定基準（`check_logic` の終了コードが `expected` と一致）を満たす行は `OK`（pass）、満たさない行は `WARNING`（warn）として表示され、`ReportSuggestion`/`ReportWarning` の内容が `/var/log/lynis-report.dat` の `suggestion[]`/`warning[]` に反映されること
+- `sudo lynis show tests | grep CUST-88` で採番したテストIDのみが表示され、公式テストIDと重複していないこと
+
+## 注意事項
+
+- テストIDは公式データベースの番号帯と衝突しない自組織専用のローカル帯（本手順では `CUST-8800`〜`CUST-8899`）を必ず使用し、採番台帳で管理する。新規追加時は必ずStep 1の衝突確認を先に実行する。
+- カスタムテストが実行するコマンド（`check_logic`）は読み取り専用の点検に限定し、設定変更・削除・再起動などを伴うコマンドを含めない。含める場合は別途承認と実行前レビューを必須とする。
+- 誤判定（false positive/negative）を避けるため、本番監査に組み込む前に必ずStep 4の単体実行で複数回の再現性を確認し、想定外のexpected不一致がないことを検証してから通常監査へ組み込む。
+- カスタムテストスクリプトはGit等でバージョン管理し、変更履歴と配布先ホストの一覧を残す。複数ホストへ配布する際は、まず1台に適用して単体実行で結果を確認した後、段階的に展開する（一括配置による全台同時不具合を避ける）。
+- `custom.prf` の変更は既存の標準監査プロファイルを上書きしないよう、追記（`tee -a`）で行い、反映後は必ず標準テスト項目の結果件数が変化していないことも合わせて確認する。

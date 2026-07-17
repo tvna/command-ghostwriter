@@ -1,0 +1,124 @@
+# KeycloakのIdentity Broker（外部IdP）連携 — {{ realm }}レルム
+
+外部OIDC IdP（{{ issuer }}）を Keycloak の Identity Provider として brokering し、`{{ idp_alias }}` エイリアス経由でフェデレーションログインを構成します。クライアントシークレットは平文で残さず Vault 経由で参照し、初回ログイン時のアカウントリンクとメール検証を徹底します。
+
+## 目的
+
+外部IdP（Google等のOIDCプロバイダ）を Keycloak にIdentity Providerとして登録し、first broker login フローによるアカウントリンク／新規ローカルアカウント生成の挙動を理解したうえで、mapperによる外部クレームのローカル属性・ロールへの変換を安全に構築・検証できるようになることを目指します。
+
+## 用語解説
+
+- **Identity Broker（IdPブローカリング）**: Keycloak自身がSPとなり、外部OIDC/SAML IdPでの認証結果を仲介してユーザーにトークンを発行する仕組み。ユーザーはKeycloakレルムに直接パスワードを持たず、外部IdPでの認証を経由する
+- **first broker login フロー**: 外部IdPでの認証が初めて成功したユーザーに対して実行される認証フロー。既存のローカルアカウントとメールアドレス等で一致した場合の「アカウントリンク」、一致しない場合の「新規ローカルアカウント自動生成」の分岐、および `{{ first_broker_login_flow }}` フロー内の確認ステップを含む
+- **アカウントリンク（Account Linking）**: 外部IdPのユーザーとKeycloakの既存ローカルユーザーを紐付けること。メールアドレス一致による自動リンクを許可すると、外部IdP側でメール検証が行われていない場合になりすまし（アカウント乗っ取り）のリスクがあるため、`Verify existing account by re-authentication` 等の確認ステップを無効化しないこと
+- **Identity Provider Mapper（属性マッパー）**: 外部IdPから返るクレーム（OIDCのIDトークンクレーム、SAMLアサーションの属性）を、Keycloakのローカルユーザー属性やロールに変換するコンポーネント。`oidc-user-attribute-idp-mapper` はクレームを属性へ、`oidc-hardcoded-role-idp-mapper` はクレーム条件に応じてロールを付与する
+- **clientSecret（IdP側クライアントシークレット）**: Keycloakが外部IdPに対してOIDCクライアントとして認証するための機微情報。平文保存を避け、Keycloak Vault参照（`${vault.{{ client_secret_vault_key }}}`）で扱う
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| レルム | {{ realm }} |
+| Keycloakサーバー | {{ kc_server_url }} |
+| IdPエイリアス | {{ idp_alias }} |
+| プロトコル | {{ protocol }} |
+| issuer | {{ issuer }} |
+| クライアントID | {{ client_id }} |
+| authorizationUrl | {{ authorization_url }} |
+| tokenUrl | {{ token_url }} |
+| first broker loginフロー | {{ first_broker_login_flow }} |
+| 検証用外部IdPユーザー | {{ test_broker_user }} |
+| 既存ローカルユーザー | {{ existing_local_user }} |
+
+## 1. kcadm.sh でログインし現状を確認する
+
+```bash
+kcadm.sh config credentials --server {{ kc_server_url }} --realm master --user admin
+kcadm.sh get identity-provider/instances -r {{ realm }} --fields alias,providerId,enabled
+```
+
+## 2. クライアントシークレット用のVaultシークレットを登録する
+
+`clientSecret` を平文でkcadmコマンド履歴やIdP設定に残さないよう、Keycloak Vaultディレクトリにシークレットファイルとして配置します（ファイル名がエイリアスになります）。
+
+```bash
+sudo install -o keycloak -g keycloak -m 600 /dev/stdin \
+  "/opt/keycloak/data/vault/{{ realm }}_{{ client_secret_vault_key }}" <<< "<外部IdPで発行されたクライアントシークレットを対話入力>"
+```
+
+## 3. Identity Providerを登録する
+
+```bash
+kcadm.sh create identity-provider/instances -r {{ realm }} \
+  -s alias={{ idp_alias }} \
+  -s providerId={{ protocol }} \
+  -s enabled=true \
+  -s firstBrokerLoginFlowAlias="{{ first_broker_login_flow }}" \
+  -s 'config.issuer={{ issuer }}' \
+  -s 'config.authorizationUrl={{ authorization_url }}' \
+  -s 'config.tokenUrl={{ token_url }}' \
+  -s 'config.clientId={{ client_id }}' \
+  -s 'config.clientSecret=${vault.{{ client_secret_vault_key }}}' \
+  -s 'config.syncMode=IMPORT' \
+  -s 'config.validateSignature=true' \
+  -s 'config.useJwksUrl=true'
+```
+
+SAMLを使用する場合は `providerId=saml` とし、`config.entityId` / `config.singleSignOnServiceUrl` / `config.signingCertificate` をIdPメタデータから設定したうえで、`config.wantAssertionsSigned=true` および `config.validateSignature=true` を必ず有効にしてください（署名検証を無効化した状態での運用は行わないこと）。
+
+## 4. first broker loginフローでのアカウントリンク確認ステップを維持する
+
+新規ユーザーの自動生成前に、メールアドレス一致による既存ローカルアカウントへの自動リンクが野放図に行われないよう、確認ステップ（Review Profile / Confirm Link Existing Account）を無効化しないまま運用します。
+
+```bash
+kcadm.sh get authentication/flows/{{ first_broker_login_flow }}/executions -r {{ realm }} \
+  --fields displayName,requirement
+```
+
+`Confirm Link Existing Account` および `Verify Existing Account by Re-authentication` の要件（requirement）が `DISABLED` になっていないことを確認してください。これらを無効化すると、外部IdP側でメール検証を経ていない攻撃者が被害者のメールアドレスを詐称し、既存ローカルアカウントへの乗っ取りログインが成立し得ます。
+
+## 5. 属性マッパーを追加する
+
+外部クレームをローカル属性・ロールへ変換するマッパーを登録します。
+
+```bash
+{% for m in attribute_mappers %}
+kcadm.sh create identity-provider/instances/{{ idp_alias }}/mappers -r {{ realm }} \
+  -s name={{ m["name"] }} \
+  -s identityProviderAlias={{ idp_alias }} \
+  -s identityProviderMapper={{ m["mapper_type"] }} \
+  -s 'config."claim"={{ m["external_claim"] }}' \
+  -s 'config."user.attribute"={{ m["target_attribute"] }}' \
+  -s 'config."syncMode"=INHERIT'
+{% endfor %}
+```
+
+## 6. 既存のローカル認証を残したまま外部IdP経由ログインを検証する
+
+既存のローカル管理者アカウントによるログインセッションを別途保持したまま、外部IdP連携が正しく機能するかを確認します。連携が失敗してもローカル管理者でログインし直せる状態を維持することが目的です。
+
+```bash
+# 別セッション（ブラウザの別ウィンドウ等）でローカル管理者セッションを維持したまま実行する
+open "{{ kc_server_url }}/realms/{{ realm }}/protocol/openid-connect/auth?client_id=account-console&response_type=code&scope=openid&kc_idp_hint={{ idp_alias }}"
+# ブラウザで {{ test_broker_user }} により {{ idp_alias }} 経由の認証を完了させる
+```
+
+## 動作確認
+
+- 手順1で `{{ idp_alias }}` が `providerId={{ protocol }}` かつ `enabled=true` として登録されていること
+- 手順4で `Confirm Link Existing Account` / `Verify Existing Account by Re-authentication` の実行要件が `DISABLED` になっていないこと
+- 手順6でブラウザから `{{ test_broker_user }}` により `{{ idp_alias }}` 経由のログインが成功し、既存ローカルユーザー `{{ existing_local_user }}` とのメールアドレス一致がある場合はアカウントリンク確認画面が表示されること、一致しない場合は新規ローカルアカウントが生成されること
+- ログイン後、次のコマンドで新規/リンクされたユーザーの属性に `attribute_mappers` の変換結果（例: `department` 属性）が反映されていることを確認する
+
+```bash
+kcadm.sh get users -r {{ realm }} -q email={{ test_broker_user }} \
+  --fields id,username,email,federatedIdentities,attributes
+```
+
+## 注意事項
+
+- `clientSecret` は平文でIdP設定・コマンド履歴・ログに残さず、Keycloak Vault（`${vault.{{ client_secret_vault_key }}}`）等の秘密情報ストアで管理する。手順2のVaultファイルはパーミッション600・所有者keycloakに限定する。
+- SAMLプロトコルを使用する場合は `validateSignature=true` および `wantAssertionsSigned=true` を必ず有効にし、IdPメタデータの署名証明書検証を無効化しないこと。署名検証を無効化した状態でのbrokering運用は行わない。
+- 手順4のとおり、メールアドレス一致による自動アカウントリンクを許可する設定（`Confirm Link Existing Account` 等の確認ステップの無効化）は、外部IdP側でメール検証未済のユーザーによるアカウント乗っ取りにつながるため、確認ステップを維持したまま運用すること。
+- 手順6のとおり、外部IdP連携を有効化した直後は既存のローカル管理者セッションを維持したまま疎通確認を行い、brokering設定に不備があってもロックアウトされないことを確認してから、ローカル認証のみに依存した運用手順を廃止すること。
+- 外部IdP側でユーザーが無効化・削除・パスワード変更（セッション失効）されても、Keycloak側の既存トークン・ブローカーセッションには即時反映されない場合がある。外部IdP側の失効を即時にKeycloak側へ反映させたい場合は、`Backchannel Logout`（OIDC）の設定、またはKeycloak側セッションの定期的な明示的無効化（`kcadm.sh delete sessions/<session-id>` 等）を運用に組み込むこと。

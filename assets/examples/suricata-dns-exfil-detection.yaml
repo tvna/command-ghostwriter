@@ -1,0 +1,10 @@
+rules_file: "/etc/suricata/rules/dns-exfil-local.rules"
+home_net_resolvers:
+  - "192.0.2.53"
+  - "192.0.2.54"
+query_len_threshold: 60
+watch_domains:
+  - "txt-tunnel-domain.example"
+rate_count: 100
+rate_seconds: 60
+test_domain: "test.example"

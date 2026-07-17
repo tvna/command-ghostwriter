@@ -1,0 +1,111 @@
+# fail2ban複数サービスjailの構成 — {{ server.host }}
+
+対象サーバ **{{ server.host }}** で、sshd以外のWeb/メール/認証サービスにもjailを拡張し、複合的にブルートフォース攻撃を防ぐ手順です。自分自身をロックアウトしないよう、ignoreipの登録とfailregexの検証を先に済ませてから有効化してください。
+
+## 目的
+
+`jail.local` でsshd以外のjail（nginx-http-auth / postfix-sasl / dovecot / recidive）を有効化し、filter（failregex）・logpath・maxretry・findtime・bantimeを適切に設定して、複数サービスへの総当たり攻撃をまとめて防御できるようになることを目指します。
+
+## 用語解説
+
+- **jail**: 特定のサービスのログを監視し、条件に一致したIPをbanする単位。`jail.local` の `[jail名]` セクションで定義する
+- **filter / failregex**: ログ行から失敗イベントを抽出する正規表現。`/etc/fail2ban/filter.d/<filter名>.conf` に定義され、jailから参照される
+- **logpath**: filterが監視する対象ログファイルのパス
+- **maxretry**: banするまでに許容する失敗回数
+- **findtime**: maxretry回の失敗を数える時間窓（秒）。この時間内にmaxretry回失敗すると条件成立
+- **bantime**: 実際にbanする時間（秒）。長すぎると正当な利用者や自分自身を長時間締め出すリスクがある
+- **recidive jail**: fail2ban自身のログ（`/var/log/fail2ban.log`）を監視し、短期間に何度もban対象になった「累犯」IPをさらに長いbantimeで隔離するjail。findtimeを長め（例: 1日）、bantimeをさらに長め（例: 1週間）に設定するのが一般的で、通常jailの再ban履歴をfindtime内でmaxretry回検知した時点で発動する
+- **ignoreip**: 一切banの対象にしないIP/CIDRのリスト。自組織の管理元・監視元は事前にここへ登録する
+- **ban_action**: 実際にbanを実施するアクション（例: `iptables-multiport`）。`jail.local` の `banaction` に対応する
+
+## シナリオ設定
+
+| jail名 | logpath | maxretry | findtime(秒) | bantime(秒) |
+|---|---|---|---|---|
+{% for j in jails %}| {{ j.name }} | {{ j.logpath }} | {{ j.maxretry }} | {{ j.findtime }} | {{ j.bantime }} |
+{% endfor %}
+
+- ignoreip: {{ server.ignoreip | join(", ") }}
+- banaction: {{ server.ban_action }}
+
+## 1. ignoreipを登録してから有効化する
+
+**ロックアウト防止の大原則として、jailを有効化する前に自組織の管理元/監視元IPをignoreipへ登録します。** この順序を逆にすると、設定反映直後に自分自身がbanされる可能性があります。
+
+```bash
+ssh {{ server.admin_user }}@{{ server.host }} "sudo tee /etc/fail2ban/jail.local >/dev/null" <<'EOF'
+[DEFAULT]
+ignoreip = {{ server.ignoreip | join(" ") }}
+banaction = {{ server.ban_action }}
+
+{% for j in jails %}[{{ j.name }}]
+enabled = true
+filter = {{ j.filter }}
+logpath = {{ j.logpath }}
+maxretry = {{ j.maxretry }}
+findtime = {{ j.findtime }}
+bantime = {{ j.bantime }}
+
+{% endfor %}EOF
+```
+
+書き込んだ時点ではfail2banデーモンにはまだ反映されません（明示的なreloadまでは現在の接続・セッションに影響しません）。
+
+## 2. filter(failregex)の一致をfail2ban-regexで検証する
+
+jailを再起動する前に、各filterのfailregexが対象ログに正しく一致するかを検証します。**一致しない場合、そのjailは何も検知できないため、有効化しても無意味です。**
+
+```bash
+{% for j in jails %}ssh {{ server.admin_user }}@{{ server.host }} "sudo fail2ban-regex {{ j.logpath }} /etc/fail2ban/filter.d/{{ j.filter }}.conf"
+{% endfor %}
+```
+
+出力の `Success` セクションにある `Nr of matches` が0でないことを確認してください。0件の場合はfilterのfailregexとログのフォーマットが一致していない可能性があるため、次の手順に進まないでください。
+
+## 3. fail2banへ設定を反映する
+
+検証が終わったら設定を反映します。
+
+```bash
+ssh {{ server.admin_user }}@{{ server.host }} "sudo fail2ban-client reload"
+```
+
+## 4. jail一覧を確認する
+
+```bash
+ssh {{ server.admin_user }}@{{ server.host }} "sudo fail2ban-client status"
+```
+
+出力に以下のjailがすべて含まれていることを確認します。
+
+{% for j in jails %}- {{ j.name }}
+{% endfor %}
+
+個別jailの詳細（現在のban数、失敗数など）は次で確認できます。
+
+```bash
+ssh {{ server.admin_user }}@{{ server.host }} "sudo fail2ban-client status nginx-http-auth"
+```
+
+## 動作確認
+
+1. `fail2ban-client status` の出力に、上記シナリオ設定の全jail名（sshd含む）が表示されていること。
+2. `fail2ban-regex` を各filterに対して実行し、`Nr of matches` が0でないこと（手順2を参照）。
+3. 演習用の模擬失敗ログを対象ログへ追記し、maxretry回を超えた時点でそのIPがbanされることを確認する。
+
+```bash
+ssh {{ server.admin_user }}@{{ server.host }} "sudo fail2ban-client status nginx-http-auth"
+```
+
+banされたIPが `Banned IP list` に現れることを確認したら、テスト用にbanを解除します。
+
+```bash
+ssh {{ server.admin_user }}@{{ server.host }} "sudo fail2ban-client set nginx-http-auth unbanip <テストIP>"
+```
+
+## 注意事項
+
+- jailを有効化する前に、必ず自組織の管理元/監視元IPをignoreipへ登録し、fail2ban-regexでfailregexの一致を確認する。この順序を守らないと自IPの誤banで管理不能に陥るおそれがある。
+- ログパスやログフォーマットを変更した場合、既存のfilterのfailregexが一致しなくなり、jailが検知不能のまま失効することがある。ログ基盤を変更したら手順2のfail2ban-regex検証をやり直す。
+- bantime、特にrecidive jailのbantimeを過長に設定すると、誤検知時に長期間の締め出しが発生する。recidiveのfindtime/bantimeは初期導入時は短めに設定し、運用実績を見てから延長することを推奨する。
+- 模擬失敗によるban試験は、演習用IPまたは別セッション経由で行い、現在の管理セッションのIPがignoreipに含まれていることを事前に必ず確認する。

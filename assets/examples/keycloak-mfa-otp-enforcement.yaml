@@ -1,0 +1,18 @@
+realm: corp
+kcadm:
+  server: "https://idp.example.com"
+  admin_realm: "master"
+  admin_user: "admin"
+source_flow: "browser"
+flow_name: "browser-mfa-otp"
+otp_required: true
+otp_policy:
+  type: "totp"
+  algorithm: "HmacSHA256"
+  digits: 6
+  period: 30
+  look_ahead_window: 1
+default_required_action: "CONFIGURE_TOTP"
+recovery_admin_user: "admin-backup"
+recovery_codes_count: 8
+test_user: "otp-test-user"

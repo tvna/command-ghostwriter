@@ -1,0 +1,20 @@
+server_config_path: /etc/velociraptor/server.config.yaml
+monitoring_artifacts:
+  - name: "Linux.Events.ProcessExecutions"
+    event_source: "eBPF (フォールバック: auditd exec イベント)"
+    purpose: "プロセス起動(exec)イベントの継続収集"
+  - name: "Linux.Events.SSHLogin"
+    event_source: "auditd (pam_unix / sshd ログ監視)"
+    purpose: "SSHログイン成功・失敗イベントの継続収集"
+  - name: "Windows.Events.ProcessCreation"
+    event_source: "ETW (Microsoft-Windows-Kernel-Process)"
+    purpose: "Windowsプロセス生成イベントの継続収集"
+target_labels:
+  - "monitored-linux-servers"
+  - "monitored-windows-endpoints"
+label_source_csv: /opt/velociraptor/data/label_targets.csv
+event_retention: "90日"
+event_retention_days: 90
+server_side_analysis: true
+notebook_id: "N.1234-5678"
+datastore_location: /opt/velociraptor/data

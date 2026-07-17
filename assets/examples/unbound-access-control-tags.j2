@@ -1,0 +1,111 @@
+# Unboundタグベースのクライアント別ポリシー
+
+CSV で棚卸しした {{ csv_rows | length }} 件のタグ割当ルールについて、`access-control-tag` でクライアント網ごとに異なる解決ポリシー（許可/遮断/リダイレクト）を適用するUnbound構成手順です。
+
+## 目的
+
+Unbound の `define-tag` / `access-control-tag` / `local-zone-tag` を組み合わせ、社内網・ゲスト網・IoT網など性質の異なるクライアント群に対して、単一のリゾルバ上で異なる名前解決ポリシーを適用できるようになることを目指します。
+
+## 用語解説
+
+- **define-tag**: `access-control-tag` 等で使用するタグ名を事前に宣言するUnboundの設定項目。宣言していないタグは使用できない
+- **access-control-tag**: クライアントのネットワーク範囲に対してタグを割り当てる設定。1つの範囲に複数タグを付けられる
+- **access-control-tag-action**: クライアント網とタグの組に対する既定の問い合わせ動作（allow/refuse/deny等）を指定する設定
+- **local-zone-tag**: 特定のローカルゾーンを、指定したタグを持つクライアントにのみ適用させる設定。同じゾーン名でもタグごとに異なる `local-zone` の型（transparent/always_refuse/redirect等）を割り当てられる
+- **タグによるクライアント差別化ポリシー**: 例えば社内網（staffタグ）は全ドメインの再帰解決を許可し、ゲスト網（guestタグ）は既定で遮断のうえ広告ドメインのみ案内ページへリダイレクト、IoT網（iotタグ）は許可したクラウドAPI以外への到達と社内ゾーンへの到達を遮断する、といった網ごとの性質に応じた解決ポリシーの使い分け
+- **unbound-checkconf**: 設定ファイルの構文を反映前に検証するコマンド
+
+## シナリオ設定
+
+| client_net | tag | zone | policy | note |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["client_net"] }} | {{ r["tag"] }} | {{ r["zone"] }} | {{ r["policy"] }} | {{ r["note"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. Unbound をインストールする
+
+```bash
+apt-get update
+apt-get install -y unbound
+```
+
+### 2. タグを宣言しクライアント網へ割り当てる
+
+`zone` 列が `.`（既定ポリシー行）の組から、宣言すべきタグとクライアント網の対応を取り出します。
+
+```bash
+cat > /etc/unbound/unbound.conf.d/access-tags.conf <<'EOF'
+server:
+{% for r in csv_rows | selectattr("zone", "equalto", ".") %}    access-control-tag: {{ r["client_net"] }} {{ r["tag"] }}
+{% endfor %}    define-tag: "{{ csv_rows | map(attribute="tag") | unique | join(" ") }}"
+EOF
+```
+
+### 3. クライアント網・タグごとの既定ポリシーを設定する
+
+`zone` が `.` の行は、そのタグを持つクライアント網に対する既定の問い合わせ動作を意味します。`access-control-tag-action` に `allow` または `refuse` を設定します。
+
+```bash
+cat >> /etc/unbound/unbound.conf.d/access-tags.conf <<'EOF'
+{% for r in csv_rows | selectattr("zone", "equalto", ".") %}    access-control-tag-action: {{ r["client_net"] }} {{ r["tag"] }} {{ r["policy"] }}
+{% endfor %}EOF
+```
+
+### 4. ゾーン別の例外ポリシーを local-zone-tag で設定する
+
+`zone` が `.` 以外の行は、既定ポリシーの例外として特定ゾーンを個別に扱うルールです。`policy` が `allow` のゾーンは `transparent`（通常どおり再帰解決させる）、`refuse` のゾーンは `always_refuse`（常にREFUSEDを返す）、`redirect` のゾーンは `redirect`（固定応答へ誘導する）を割り当てます。
+
+```bash
+cat >> /etc/unbound/unbound.conf.d/access-tags.conf <<'EOF'
+{% for r in csv_rows | rejectattr("zone", "equalto", ".") %}{% if r["policy"] == "allow" %}    local-zone: "{{ r["zone"] }}" transparent
+{% elif r["policy"] == "refuse" %}    local-zone: "{{ r["zone"] }}" always_refuse
+{% elif r["policy"] == "redirect" %}    local-zone: "{{ r["zone"] }}" redirect
+    local-zone-data: "{{ r["zone"] }} 300 IN A 10.0.10.53"
+{% endif %}    local-zone-tag: "{{ r["zone"] }}" {{ r["tag"] }}
+{% endfor %}EOF
+```
+
+上記の `10.0.10.53` は社内案内ページ（キャプティブポータル相当）を提供するホストのIPアドレスです。環境の実アドレスに置き換えてください。
+
+### 5. 構文を検証してから反映する
+
+```bash
+unbound-checkconf
+systemctl restart unbound
+systemctl status unbound --no-pager
+```
+
+### 6. 各クライアント網から dig でポリシー差異を確認する
+
+タグごとの応答差を確認するため、実際にそれぞれのクライアント網に属する端末（またはソースIPを模した経路）から同じ問い合わせを行い、応答が異なることを確認します。既存の access-control による基本許可（`access-control: 0.0.0.0/0 refuse` 等の全体既定）と矛盾していないかもあわせて確認してください。
+
+```bash
+# staffタグ（社内網）: 通常どおり解決できること
+dig @unbound-host example.com A +short
+
+# guestタグ（ゲスト網）: 既定は遮断、広告ドメインのみ案内ページへリダイレクトされること
+dig @unbound-host example.com A
+dig @unbound-host ads.example.com A +short
+
+# iotタグ（IoT網）: 許可したクラウドAPI以外は遮断、社内ゾーンも遮断されること
+dig @unbound-host iot-cloud.example.com A +short
+dig @unbound-host corp.internal A
+```
+
+## 動作確認
+
+- `unbound-checkconf` がエラーなく通ること
+- `systemctl status unbound` が `active (running)` であること
+- staffタグのクライアント網からは通常どおり名前解決できること
+- guestタグのクライアント網ではゾーン以外の問い合わせが既定ポリシーどおり遮断され、広告ドメインは案内ページのIPへリダイレクトされること
+- iotタグのクライアント網では許可したクラウドAPIドメインのみ解決でき、社内ゾーンへの問い合わせはREFUSEDになること
+- タグ設定変更後に `unbound-checkconf` と再起動を経ないと反映されないことを確認できること
+
+## 注意事項
+
+- タグの種類やゾーン例外を増やすほど `access-control-tag` / `local-zone-tag` の組み合わせが複雑化し、どのクライアントにどのポリシーが適用されているか把握しづらくなる。タグは必要最小限に留め、本手順のようなシナリオ設定表で対応関係を必ず文書化すること。
+- `access-control-tag` によるタグ付けは、既存の `access-control`（全体としての問い合わせ許可・拒否の基本設定）を置き換えるものではない。タグ付けした範囲であっても、既存の `access-control` で拒否されているクライアント網からは、そもそも問い合わせがタグ判定の前段階で拒否される点に注意する。
+- ポリシー変更（`access-control-tag-action` や `local-zone-tag` の追加・変更）は `unbound-checkconf` による構文検証と `systemctl restart unbound` を経て初めて反映される。設定ファイルを書き換えただけでは既存セッションのキャッシュや動作には反映されない。
+- 誤ったネットワーク範囲へタグを付与すると、意図しないクライアントに過度な制限（本来allowすべき網がrefuseされる等)がかかり、業務影響が発生する。適用前に、まず新しいタグ設定を一部のテスト用クライアント網（または並行して用意した検証用セグメント）に対して適用し、意図通りの応答になることを dig で確認してから、既存の全クライアントへ展開すること。既存の解決経路を止める前に新しいタグポリシーが正しく機能することを必ず確認する。

@@ -1,0 +1,112 @@
+# Suricata threshold.config によるアラート調整手順
+
+CSV で定義した {{ csv_rows | length }} 件の抑制/閾値エントリを threshold.config に
+書き起こし、誤検知の抑制と過剰アラートの制御を構造的に行います。
+
+## 目的
+
+既知の誤検知シグネチャと、頻発するアラートを threshold.config の
+suppress / threshold エントリで構造的に調整し、変更内容を CSV で棚卸しできる
+状態にすることを目指します。ルール本体は変更しません。
+
+## 用語解説
+
+- **threshold.config**: ルールファイルとは別に、gen_id/sig_id 単位でアラートの
+  出力可否・頻度を制御する Suricata の設定ファイル
+- **suppress**: 指定した sid（かつ track/ip 条件に合致する場合）のアラートを
+  完全に非表示にする。ルール自体は有効なまま、通知だけを止める
+- **threshold (type limit)**: 指定した sid のアラートを、track・count・seconds
+  で決めた頻度に制限して間引く。アラート自体は消えず回数が抑制される
+- **track by_src / by_dst**: 抑制・閾値の集計単位を送信元/宛先 IP で区切る指定
+- **ルール内 threshold / detection_filter**: `.rules` ファイル内でシグネチャの
+  `threshold:` や `detection_filter:` キーワードとして書く方式。ルール定義と
+  一体化しており、ルールを書き換えないと調整できない。これに対し
+  threshold.config は運用側が別ファイルで後付けに調整できる点が異なる
+- **suricatasc**: Suricata の Unix ソケット経由で稼働中インスタンスに
+  コマンドを送るコントロールツール（ルール再読込などに使う）
+
+## シナリオ設定
+
+| sid | mode | track | ip_or_count | seconds | 理由 | 次回棚卸し日 |
+|-----|------|-------|-------------|---------|------|--------------|
+{% for r in csv_rows %}| {{ r["sid"] }} | {{ r["mode"] }} | {{ r["track"] }} | {{ r["ip_or_count"] }} | {{ r["seconds"] }} | {{ r["reason"] }} | {{ r["review_date"] }} |
+{% endfor %}
+
+## 1. threshold.config にエントリを追記する
+
+`/etc/suricata/threshold.config` を編集し、CSV の各行を以下の構文で追記します。
+suppress は「非表示」、threshold(type limit) は「頻度制限」であり効果が異なる
+ため、混同しないよう mode 列で明示しています。
+
+```
+{% for r in csv_rows %}{% if r["mode"] == "suppress" %}suppress gen_id 1, sig_id {{ r["sid"] }}, track {{ r["track"] }}, ip {{ r["ip_or_count"] }}
+{% else %}threshold gen_id 1, sig_id {{ r["sid"] }}, type limit, track {{ r["track"] }}, count {{ r["ip_or_count"] }}, seconds {{ r["seconds"] }}
+{% endif %}{% endfor %}```
+
+上記は具体的には次の2行になります。
+
+- 1行目: sid 2100498 を、送信元が 10.0.0.0/8 の場合に限り検知そのものを抑制
+  （社内 NAT レンジからの既知誤検知）
+- 2行目: sid 9100101 を、送信元ごとに 3600 秒あたり最大 1 件までアラートを
+  間引く（自作ルールの過剰アラート対策）
+
+## 2. 設定ファイルの構文を検証する
+
+反映前に、必ず構文チェックを通してから次に進みます。
+
+```bash
+suricata -T -c /etc/suricata/suricata.yaml -v
+```
+
+## 3. 稼働中インスタンスへルールを再読込する
+
+```bash
+suricatasc -c "reload-rules"
+```
+
+ルールプロセス自体は再起動せず、threshold.config を含むルール関連設定のみ
+再読込されます。
+
+## 動作確認
+
+1. 適用前のアラート件数を eve.json から sid 別に集計しておきます。
+
+   ```bash
+   jq -r 'select(.event_type=="alert") | .alert.signature_id' \
+     /var/log/suricata/eve.json | sort | uniq -c | sort -rn > /tmp/alerts_before.txt
+   ```
+
+2. `suricatasc -c "reload-rules"` を実行し、`suricatasc -c "ruleset-reload-time"`
+   で再読込時刻が更新されていることを確認します。
+
+   ```bash
+   suricatasc -c "ruleset-reload-time"
+   ```
+
+3. 一定時間経過後、再度同じ集計を行い、対象 sid の傾向を比較します。
+
+   ```bash
+   jq -r 'select(.event_type=="alert") | .alert.signature_id' \
+     /var/log/suricata/eve.json | sort | uniq -c | sort -rn > /tmp/alerts_after.txt
+   diff /tmp/alerts_before.txt /tmp/alerts_after.txt
+   ```
+
+4. sid 2100498 は suppress 対象の送信元条件（10.0.0.0/8）からのアラートが
+   before/after 比較で 0 件になっていること、sid 9100101 は
+   1時間あたりのアラート件数が track by_src 単位で 1 件以下に収まっていること
+   を確認します。
+
+## 注意事項
+
+- suppress は検知そのものを非表示にするため、恒久的な抑制として放置すると
+  本来検知すべき攻撃も見逃す状態が固定化します。CSV の review_date（四半期
+  ごとを目安）を棚卸しの起点とし、条件（ip/sid）が引き続き妥当かを定期的に
+  再確認してください。
+- threshold(type limit) はアラート自体を止めるものではなく間引くだけです。
+  抑制したいのか頻度を落としたいのかで mode を必ず使い分けてください。
+- suricatasc での reload-rules 適用前に、必ず `suricata -T` で構文検証を
+  行ってください。構文エラーがあるまま再読込すると、ルールセット全体が
+  読み込まれず検知が丸ごと止まるおそれがあります。
+- 適用直後は動作確認の手順で before/after のアラート件数を必ず比較し、
+  意図した sid 以外のアラートまで減っていないかを確認してから恒久運用に
+  移行してください。

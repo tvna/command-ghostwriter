@@ -4,7 +4,7 @@ input_schema:
   method: "GET"
   path: "/api/orders"
   user_role: "viewer"
-  mfa_verified: true
+  mfa_verified: "true"
 test_cases:
   - name: "viewerはGET許可"
     input_method: "GET"

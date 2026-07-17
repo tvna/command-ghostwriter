@@ -1,0 +1,101 @@
+# OPNsenseステートテーブル枯渇の調査と対処
+
+ステートテーブル使用率の急騰時に原因ホストを特定し、上限調整とルール単位のステート制限で再発を防ぐための調査手順です。
+
+## 目的
+
+Firewall > Diagnostics > pfInfoでステートテーブル使用率が上限に近づいている(または到達した)事象について、`pfctl -s states` の送信元別集計から大量ステート生成ホストを特定し、全体上限の引き上げとルール単位のMax states設定によって再発を防止できるようになることを目指します。
+
+## 用語解説
+
+- **ステートテーブル(state table)**: pfが許可した通信ごとに保持する接続状態の管理テーブル。上限に達すると新規通信がブロックされる
+- **pfInfo**: Firewall > Diagnostics > pfInfoで確認できる、States(current entries)・Counters・Limitsなどpfの統計情報画面
+- **Max states**: ファイアウォールルール単位で設定できる、そのルールが同時に保持できるステート数の上限
+- **Max source states**: 送信元IPアドレス1つが同時に保持できるステート数の上限。1ホストによるステート占有を防ぐ
+- **pfctl -k**: 指定した送信元・宛先条件に一致するステートを強制的に破棄(kill)するコマンド
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 現在のステート上限(current_limit) | {{ current_limit }} |
+| 使用率アラート閾値(usage_threshold) | {{ usage_threshold }}% |
+| 送信元別集計で確認する上位件数(top_talker_count) | {{ top_talker_count }} |
+| 引き上げ後の新しい上限(new_limit) | {{ new_limit }} |
+| ルール単位のMax states設定値(per_rule_max_states) | {{ per_rule_max_states }} |
+
+## 手順
+
+### 1. pfInfoで使用率と上限到達を確認する
+
+Web UIで Firewall > Diagnostics > pfInfo を開き、`State Table` セクションの `current entries` と `limit` を確認します。CLIで同等の情報を確認する場合は次を実行します。
+
+```bash
+pfctl -s info | grep -A3 "^State Table"
+```
+
+→ `current entries` が上限(`{{ current_limit }}`)の{{ usage_threshold }}%を超えている場合、以降の手順で送信元の特定と対処を行います。
+
+### 2. 送信元別のステート生成数を集計する
+
+```bash
+pfctl -s states | awk '{ split($3, a, ":"); print a[1] }' | sort | uniq -c | sort -rn | head -n {{ top_talker_count }}
+```
+
+→ 出力の左列がステート保持数、右列が送信元IPアドレスです。上位{{ top_talker_count }}件の中に突出して多いホストがいないか確認します。UDPスキャンやP2Pアプリケーション、監視ポーリングの間隔設定ミスが典型的な原因です。
+
+宛先ポート別に見たい場合は次のように集計します。
+
+```bash
+pfctl -s states | awk '{ split($3, s, ":"); split($5, d, ":"); print s[1], d[2] }' | sort | uniq -c | sort -rn | head -n {{ top_talker_count }}
+```
+
+### 3. 原因ホストの通信内容を特定する
+
+```bash
+pfctl -s states | grep "{{ current_limit }}" 2>/dev/null
+pfctl -s states -v | grep -B1 -A1 -w "ESTABLISHED:ESTABLISHED"
+```
+
+→ 手順2で特定したIPアドレスを対象に、宛先ポートやプロトコルの内訳を確認し、正規の業務通信か異常なスキャン・過剰ポーリングかを切り分けます。異常と断定できる場合のみ次の手順に進みます。
+
+### 4. 全体のステート上限を引き上げる(応急処置)
+
+Web UIで System > Settings > Tunables、または Firewall > Settings > Advanced を開き、`Firewall Maximum States` の値を `{{ current_limit }}` から `{{ new_limit }}` に変更して保存・適用します。CLIで即時反映する場合は次を実行します。
+
+```bash
+pfctl -o "state_limit={{ new_limit }}" 2>/dev/null || sysctl net.pf.states_hashsize
+```
+
+→ 上限を引き上げるとカーネルメモリ使用量が増加します。1ステートあたり概ね数百バイトを消費するため、引き上げ幅とホストの空きメモリを事前に確認してから適用します。
+
+### 5. 該当ルールにMax states / Max source statesを設定する
+
+Web UIで対象のFirewallルールを開き、Advanced Options内の `State type` 欄付近にある `Max states` に `{{ per_rule_max_states }}`、`Max source states` に妥当な値を設定し、保存・適用(Apply changes)します。これにより1ルール・1送信元ホストが無制限にステートを消費することを防ぎます。
+
+適用後、まず既存の通信を止めずに別ルール(または同一ルールのステージング版)で新しい上限が機能することを確認してから、旧来の無制限設定のルールを無効化してください。同時に別セッション(SSHまたは別ブラウザタブでのWeb UIログイン)を維持したまま適用し、意図せず自分自身の通信が遮断されないことを確認します。
+
+### 6. 異常ホストの既存ステートを強制破棄する
+
+原因が明確な異常トラフィックの場合のみ、対象ホストのステートを個別に破棄します。
+
+```bash
+pfctl -k <原因ホストのIPアドレス>
+pfctl -s info | grep -A3 "^State Table"
+```
+
+→ 実行前に手順3で特定した送信元IPアドレスを再確認し、正規の通信を巻き込まないことを確認してから実行します。
+
+## 動作確認
+
+- `pfctl -s info` の `current entries` が新しい上限(`{{ new_limit }}`)に対して余裕のある水準に収まっていること
+- 対象ルールに `Max states = {{ per_rule_max_states }}` が設定され、Apply changes後もFirewall > Rulesの表示に反映されていること
+- 別セッションからのSSHまたはWeb UIアクセスが引き続き正常に行えること(自分自身の通信を遮断していないこと)
+- `pfctl -s states | awk` の送信元別集計で、手順3の異常ホストのステート数が正常な水準まで減少していること
+
+## 注意事項
+
+- ステート上限(`{{ new_limit }}`)の引き上げのみでは根本対処にならない。UDPスキャンやP2Pトラフィック、監視ポーリング間隔の設定ミスなど、大量ステートを生成している原因側の是正を必ず追跡すること。
+- 全体上限の引き上げはカーネルメモリ使用量の増加を伴うため、ホストの空きメモリと相談して段階的に引き上げる。
+- ルール変更(Max states / Max source states)やpfctl -kによる強制破棄を行う際は、必ず別セッション(SSHや別ブラウザタブ)で管理アクセスを維持した状態で適用し、変更後にそのセッションから疎通確認を行ってから、影響が想定外でないことを確認すること。
+- pfctl -kによるステート破棄は該当ホストの通信を即座に切断する。正規の通信を誤って対象にしないよう、手順3での特定結果を再確認してから実行する。

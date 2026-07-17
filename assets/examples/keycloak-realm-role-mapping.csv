@@ -1,0 +1,6 @@
+role_name,role_type,group,mapped_scope,claim_name
+app-viewer,realm,app-viewers,app-backend-roles,roles
+app-editor,realm,app-editors,app-backend-roles,roles
+app-admin,realm,app-admins,app-backend-roles,roles
+report-download,client,app-editors,app-backend-roles,roles
+tenant-member,realm,app-viewers,app-backend-roles,groups

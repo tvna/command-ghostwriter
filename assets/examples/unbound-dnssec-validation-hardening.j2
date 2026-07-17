@@ -1,0 +1,103 @@
+# UnboundのDNSSEC検証強化と信頼アンカー管理
+
+Unbound の DNSSEC バリデーションを強化し、信頼アンカーの自動更新(RFC5011)を構成して、応答の改ざん検知を確実にします。
+
+## 目的
+
+`auto-trust-anchor-file` による信頼アンカーの自動更新を構成したうえで、`val-permissive-mode: no` および `harden-dnssec-stripped: yes` を設定し、DNSSEC 検証を「ログのみ」から「拒否」へ確実に強化します。切替の過程では新設定(検証強制)が正しく機能することを確認してから、既存の緩い設定を無効化します。
+
+## 用語解説
+
+- **DNSSEC検証(バリデーション)**: 応答に付与された署名(RRSIG)を信頼アンカーの公開鍵で検証し、応答が改ざん・偽造されていないことを確認する仕組み
+- **信頼アンカー(trust anchor)**: ルートゾーンの公開鍵情報。検証の起点となるため、鍵のロールオーバーに追従して更新し続ける必要がある
+- **RFC5011自動更新**: 信頼アンカーの鍵ロールオーバーを、手動介入なしに安全に追従・更新する標準化された手順。`unbound-anchor` コマンドが実装する
+- **val-permissive-mode**: 検証に失敗しても応答を破棄せずクライアントへ通してしまう緩和モード。障害切り分け中の一時利用に限るべき設定
+- **harden-dnssec-stripped**: 署名が付与されているべき応答から署名が意図的に取り除かれた(ストリップされた)場合に、その応答を拒否する堅牢化設定
+- **SERVFAIL**: DNS応答コードの一つで、DNSSEC検証失敗時に権威側の異常としてクライアントへ返される
+
+## シナリオ設定
+
+| 設定項目 | 値 |
+| --- | --- |
+| 信頼アンカーファイル (trust_anchor_file) | `{{ trust_anchor_file }}` |
+| 緩和モード (permissive_mode) | `{{ permissive_mode }}` |
+| ストリップ応答の拒否 (harden_dnssec_stripped) | `{{ harden_dnssec_stripped }}` |
+| 信頼アンカー更新スケジュール (anchor_update_schedule) | `{{ anchor_update_schedule }}` |
+
+## 手順
+
+### 1. 信頼アンカーを初期取得する
+
+`auto-trust-anchor-file` が参照するファイルを、`unbound-anchor` で安全に初期取得します。
+
+```bash
+mkdir -p /var/lib/unbound
+unbound-anchor -a "{{ trust_anchor_file }}"
+chown unbound:unbound "{{ trust_anchor_file }}"
+```
+
+### 2. まず緩和モードでDNSSEC検証を有効化する(検証結果を観測するため)
+
+いきなり拒否モードにすると、既存の名前解決経路が予期せず止まる可能性があるため、最初は `val-permissive-mode: yes` で検証だけを有効化し、ログで検証状況を観測します。
+
+```bash
+cat > /etc/unbound/unbound.conf.d/dnssec.conf <<'EOF'
+server:
+    auto-trust-anchor-file: "{{ trust_anchor_file }}"
+    val-permissive-mode: yes
+    harden-dnssec-stripped: {{ harden_dnssec_stripped }}
+    val-log-level: 2
+EOF
+unbound-checkconf
+systemctl restart unbound
+```
+
+### 3. 緩和モードのまま検証結果を確認する
+
+```bash
+# 正常ドメイン: ad フラグが付与されることを確認する(検証成功)
+dig @127.0.0.1 example.com A +dnssec
+
+# 検証失敗を意図的に起こすテストドメインで、緩和モードでは応答が通ることを確認する
+dig @127.0.0.1 dnssec-failed.org A +dnssec
+```
+
+### 4. 新しい検証強制設定へ切り替える
+
+緩和モードでの観測により正当な問い合わせがすべて `ad` フラグ付きで解決できることを確認できたら、`val-permissive-mode: no` に切り替えて検証失敗時に確実に拒否させます。
+
+```bash
+cat > /etc/unbound/unbound.conf.d/dnssec.conf <<'EOF'
+server:
+    auto-trust-anchor-file: "{{ trust_anchor_file }}"
+    val-permissive-mode: {{ "yes" if permissive_mode else "no" }}
+    harden-dnssec-stripped: {{ harden_dnssec_stripped }}
+EOF
+unbound-checkconf
+systemctl restart unbound
+```
+
+### 5. 信頼アンカーのRFC5011自動更新をcron化する
+
+信頼アンカーを更新し続けないと、ルートゾーンの鍵ロールオーバー発生時に全ドメインの検証が失敗し全断に至るため、`unbound-anchor` を定期実行するcronジョブを登録します。
+
+```bash
+cat > /etc/cron.d/unbound-anchor <<EOF
+{{ anchor_update_schedule }} root unbound-anchor -a "{{ trust_anchor_file }}" && systemctl reload unbound
+EOF
+```
+
+## 動作確認
+
+1. `unbound-checkconf` がエラーなく通ること
+2. `dig @127.0.0.1 example.com A +dnssec` の応答フラグに `ad` (Authentic Data) が付与されること(正常ドメインの検証成功)
+3. `dig @127.0.0.1 dnssec-failed.org A +dnssec` が `SERVFAIL` を返すこと(検証失敗ドメインが確実に拒否されること)
+4. `/etc/cron.d/unbound-anchor` が登録され、次回実行予定が `{{ anchor_update_schedule }}` と一致すること
+5. `unbound-anchor -a "{{ trust_anchor_file }}"` を手動実行し、信頼アンカーファイルの更新日時が変化すること
+
+## 注意事項
+
+- 信頼アンカーの自動更新(手順5の cron化)を怠ると、ルートゾーンの鍵ロールオーバー発生時に古い鍵のまま検証を続けてしまい、すべてのDNSSEC署名ドメインで検証失敗(SERVFAIL)となり全断する。`val-permissive-mode: no` を導入する前に、必ずcronジョブの登録まで完了させること。
+- `val-permissive-mode: yes` は手順2・3のような一時的な観測・切り分け目的でのみ使用し、恒常的な運用設定として残さないこと。常用すると改ざんされた応答をそのままクライアントへ通してしまい、DNSSEC導入の意味がなくなる。
+- 拒否モード(`val-permissive-mode: no`)への切替(手順4)は、必ず手順2・3で緩和モードによる検証結果を確認し、正当なドメインが軒並み `ad` フラグ付きで解決できることを確かめてから行うこと。確認前に切り替えると、既存の名前解決が広範囲に停止するリスクがある。
+- 特定ドメインだけが `SERVFAIL` になる場合は、まず `dnssec-failed.org` など既知の検証失敗テストドメインで同様の挙動が再現するかを確認し、Unbound側の設定不備なのか、当該ドメインの署名不備なのかを切り分けること。

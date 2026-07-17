@@ -1,0 +1,41 @@
+[scenario]
+hostname = "app-prod-07"
+audit_date_prev = "2026-06-20"
+audit_date_current = "2026-07-17"
+index_prev = 78
+index_current = 71
+index_drop = 7
+prev_report = "/var/log/lynis-report.dat.20260620"
+current_report = "/var/log/lynis-report.dat"
+change_log_source = "変更管理台帳 (CHANGE-xxxx, Redmineチケット一覧)"
+
+[[new_warnings]]
+test_id = "SSH-7408"
+category = "SSH"
+message = "AllowTcpForwarding is enabled (default: yes) in sshd_config"
+suggestion = "Disable AllowTcpForwarding unless a documented business need exists"
+change_ticket = "unmanaged"
+
+[[new_warnings]]
+test_id = "KRNL-6000"
+category = "sysctl"
+message = "net.ipv4.conf.all.accept_redirects is enabled (kernel parameter)"
+suggestion = "Set net.ipv4.conf.all.accept_redirects=0 in /etc/sysctl.d/99-hardening.conf"
+change_ticket = "CHANGE-2031"
+
+[[new_warnings]]
+test_id = "FILE-6310"
+category = "権限"
+message = "/etc/shadow permissions changed to 644 (expected 640 or 000)"
+suggestion = "Restore /etc/shadow permissions to 640, owner root:shadow"
+change_ticket = "unmanaged"
+
+[[new_warnings]]
+test_id = "PKGS-7392"
+category = "パッケージ"
+message = "Deprecated package 'telnet-server' found installed"
+suggestion = "Remove telnet-server package (apt purge telnet-server)"
+change_ticket = "unmanaged"
+
+[remediation]
+followup_template = "lynis-hardening-remediation"

@@ -1,0 +1,93 @@
+# KeycloakへのOIDCクライアント登録
+
+台帳（CSV）に基づき、アプリケーションを Keycloak の OIDC クライアントとして登録し、redirect URI・スコープ・シークレットを設定します。対象レルムは `zt-realm` とします。
+
+## 目的
+
+台帳で定義したクライアントごとの `access_type`（confidential/public）と `flow`（standardFlow/standardFlow+pkce/serviceAccount）に応じて、`kcadm.sh` でクライアントを作成し、redirect URI の厳密一致とシークレットの安全な受け渡しを守りながら OIDC 連携を有効化できるようになることを目指します。
+
+## 用語解説
+
+- **confidential client と public client**: confidential はクライアントシークレットで自身を認証できるサーバサイドアプリ向け。public はシークレットを安全に保持できない SPA・モバイルアプリ向けで、シークレットの代わりに PKCE で保護する
+- **redirect URI の厳密一致**: Keycloak は登録済み redirect URI と完全一致した URI にのみ認可コードを返す。前方一致やワイルドカード（`*`）を許すと、攻撃者が用意した外部ドメインへ認可コードやトークンを転送されるオープンリダイレクトの温床になるため、本番では厳密一致のみを登録する
+- **standardFlow（authorization code flow）**: ブラウザ経由で認可コードを取得し、バックエンドでトークンに交換する最も一般的なフロー
+- **serviceAccount（client credentials flow）**: 対話的ログインを伴わない、サービス間通信専用のフロー。redirect URI を必要としない
+- **PKCE (Proof Key for Code Exchange)**: 認可コード横取り攻撃を防ぐための拡張。public client では認可コードだけでは第三者がトークンに交換できてしまうため、public client には PKCE (S256) を必須にする
+- **client secret のライフサイクル**: 発行 → 保管（シークレットマネージャ等）→ 利用権限の限定 → 定期ローテーション、という一連の管理が必要
+
+## シナリオ設定
+
+| client_id | protocol | access_type | redirect_uris | default_scopes | flow |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["client_id"] }} | {{ r["protocol"] }} | {{ r["access_type"] }} | {{ r["redirect_uris"] }} | {{ r["default_scopes"] }} | {{ r["flow"] }} |
+{% endfor %}
+
+## 1. レルムへの接続を確立する
+
+```bash
+kcadm.sh config credentials --server https://idp.example.com --realm master --user admin --config ~/.keycloak/kcadm.config
+```
+
+## 2. OIDCクライアントを作成する
+
+`access_type` が confidential のクライアントは `publicClient=false` としてシークレット認証を使い、public のクライアントは `publicClient=true` かつ PKCE (S256) を必須化します。`flow` が serviceAccount のクライアントは redirect URI を持たず、`serviceAccountsEnabled=true` のみ有効化します。
+
+```bash
+{% for r in csv_rows %}kcadm.sh create clients -r zt-realm \
+  -s clientId={{ r["client_id"] }} \
+  -s protocol={{ r["protocol"] }} \
+  -s enabled=true \
+{% if r["redirect_uris"] != "-" %}  -s 'redirectUris=["{{ r["redirect_uris"] }}"]' \
+{% else %}  -s 'redirectUris=[]' \
+{% endif %}{% if r["access_type"] == "confidential" %}  -s publicClient=false \
+{% else %}  -s publicClient=true \
+{% endif %}{% if r["flow"] == "serviceAccount" %}  -s standardFlowEnabled=false \
+  -s serviceAccountsEnabled=true
+{% else %}  -s standardFlowEnabled=true \
+  -s serviceAccountsEnabled=false{% if r["flow"] == "standardFlow+pkce" %} \
+  -s 'attributes."pkce.code.challenge.method"=S256'
+{% else %}
+{% endif %}{% endif %}
+{% endfor %}```
+
+## 3. クライアントシークレットを取得する（confidential client のみ）
+
+シークレットは標準出力にそのまま表示されるため、端末ログを残さずシークレットマネージャへ直接保管し、Slack や平文メールでの送付は行いません。
+
+```bash
+{% for r in csv_rows %}{% if r["access_type"] == "confidential" %}CLIENT_UUID=$(kcadm.sh get clients -r zt-realm -q clientId={{ r["client_id"] }} --fields id --format csv | tail -n1)
+kcadm.sh get clients/$CLIENT_UUID/client-secret -r zt-realm
+{% endif %}{% endfor %}```
+
+## 4. デフォルトスコープを割り当てる
+
+`default_scopes` はスペース区切りの一覧なので、シェル側の単語分割で JSON 配列に変換してから割り当てます（テンプレート内で分割メソッドは呼び出しません）。
+
+```bash
+{% for r in csv_rows %}CLIENT_UUID=$(kcadm.sh get clients -r zt-realm -q clientId={{ r["client_id"] }} --fields id --format csv | tail -n1)
+SCOPES_JSON=$(printf '%s\n' {{ r["default_scopes"] }} | jq -R . | jq -s .)
+kcadm.sh update clients/$CLIENT_UUID -r zt-realm -s "defaultClientScopes=$SCOPES_JSON"
+{% endfor %}```
+
+## 動作確認
+
+authorization code flow（`flow` が standardFlow または standardFlow+pkce のクライアント）について、以下を確認します。serviceAccount のクライアントは対話的ログインを持たないため対象外です。
+
+1. ブラウザで認可エンドポイントへアクセスし、Keycloak のログイン画面が表示されること
+   ```bash
+   {% for r in csv_rows %}{% if r["flow"] != "serviceAccount" %}echo "https://idp.example.com/realms/zt-realm/protocol/openid-connect/auth?client_id={{ r["client_id"] }}&response_type=code&redirect_uri={{ r["redirect_uris"] }}&scope=openid"
+   {% endif %}{% endfor %}```
+2. ログイン後、登録済み redirect URI にのみ認可コード（`code=`）付きでリダイレクトされ、未登録の URI では `invalid redirect_uri` エラーになること
+3. 取得した認可コードをトークンエンドポイントに渡し、正しくアクセストークン・IDトークンが発行されること（confidential client はシークレット、public client は PKCE の `code_verifier` を添える）
+   ```bash
+   {% for r in csv_rows %}{% if r["access_type"] == "confidential" and r["flow"] != "serviceAccount" %}curl -s -X POST https://idp.example.com/realms/zt-realm/protocol/openid-connect/token \
+     -d grant_type=authorization_code -d client_id={{ r["client_id"] }} -d client_secret=$CLIENT_SECRET \
+     -d redirect_uri={{ r["redirect_uris"] }} -d code=$AUTH_CODE
+   {% endif %}{% endfor %}```
+
+## 注意事項
+
+- redirect URI は完全一致のみを登録し、前方一致やワイルドカード（`*`）は登録しない。オープンリダイレクトによる認可コード・トークンの窃取につながる。
+- public client（`access_type=public`）には PKCE (S256) を必須とし、`attributes."pkce.code.challenge.method"=S256` を必ず設定する。PKCE なしの public client は認可コード横取り攻撃に対して脆弱になる。
+- client secret は発行直後にシークレットマネージャへ保管し、閲覧・利用できる担当者を最小限に限定したうえで、定期的にローテーションする。端末ログ・チャット・平文メールでの受け渡しは行わない。
+- 既存クライアントの redirect URI や flow を変更する場合は、旧クライアント設定を無効化する前に、新しい設定で「動作確認」節のログイン・トークン取得が成功することを別セッションで確認してから切り替える。

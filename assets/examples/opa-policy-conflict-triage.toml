@@ -1,0 +1,4 @@
+input_sample = "{\"user\": {\"name\": \"tanaka\", \"roles\": [\"developer\"]}, \"action\": \"deploy\", \"resource\": {\"env\": \"production\"}}"
+expected_decision = "allow"
+explain_mode = "full"
+bundle_version_check = true

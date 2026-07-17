@@ -1,0 +1,6 @@
+wan_ip = "203.0.113.10"
+ext_port = 8443
+int_host = "10.0.10.20"
+int_port = 443
+proto = "tcp"
+test_source = "198.51.100.5"

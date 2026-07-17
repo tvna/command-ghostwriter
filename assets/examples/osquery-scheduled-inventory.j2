@@ -1,0 +1,107 @@
+# osqueryによる資産インベントリ収集
+
+osqueryのスケジュールクエリで、パッケージ・ユーザー・リスニングポート・カーネル・システム基本情報・ネットワークインタフェースを定期収集し、資産台帳（インベントリ）として維持します。
+
+## 目的
+
+osqueryの仮想テーブル（virtual table）を使い、OSの内部状態をSQLクエリで取得できることを理解し、`osqueryd` のスケジュールクエリとして定期収集する設定を作成できるようになることを目指します。あわせて、収集結果をCIS/コンプライアンス台帳や変化検知（差分収集）に活用する視点を身につけます。
+
+## 用語解説
+
+- **osqueryi**: 対話的にosqueryのSQLクエリを実行できるシェル。設定投入前の動作確認に使う。
+- **osqueryd**: バックグラウンドで常駐し、スケジュールクエリを定期実行してログに出力するデーモン。
+- **仮想テーブル(virtual table)**: `deb_packages` や `users` のように、OSの内部状態をSQLのテーブルとして参照できるosqueryの抽象化機構。
+- **deb_packages / rpm_packages**: それぞれDebian/Ubuntu系、RHEL/CentOS系のパッケージ管理情報を返す仮想テーブル。ディストリビューションに応じてどちらか一方を使う。
+- **スケジュールクエリ(schedule query pack)**: `osquery.conf` の `schedule` セクションに、クエリ名・SQL・実行間隔(`interval`、秒単位)を定義したもの。
+- **JOINによる相関**: `listening_ports` はプロセスIDのみを持つため、`processes` テーブルと `pid` でJOINすることで「どのプロセスがどのポートで待ち受けているか」を相関できる。
+- **differential(差分)ログ**: 前回収集結果との差分（`added`/`removed`）のみを出力するosqueryのログ形式。新規パッケージや新規ユーザー、新規リスニングポートの変化検知に使う。
+
+## シナリオ設定
+
+| inventory_item | osquery_table | query | interval(秒) | consumer |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["inventory_item"] }} | {{ r["osquery_table"] }} | `{{ r["query"] }}` | {{ r["interval"] }} | {{ r["consumer"] }} |
+{% endfor %}
+
+## 1. osqueryiで各テーブルを対話的に確認する
+
+スケジュール投入前に、`osqueryi` で各テーブルが期待通りに値を返すか確認します。
+
+```bash
+{% for r in csv_rows %}osqueryi "{{ r["query"] }};"
+{% endfor %}```
+
+## 2. スケジュールクエリをosquery.confに定義する
+
+`/etc/osquery/osquery.conf` の `schedule` セクションに、シナリオ設定の各行を反映します。
+
+```json
+{
+  "schedule": {
+{% for r in csv_rows %}    "{{ r["inventory_item"] }}": {
+      "query": "{{ r["query"] }};",
+      "interval": {{ r["interval"] }}
+    }{% if not loop.last %},
+{% endif %}
+
+{% endfor %}  }
+}
+```
+
+設定を反映し、構文を検証してからデーモンを再起動します。
+
+```bash
+sudo osqueryctl config-check
+sudo systemctl restart osqueryd
+sudo systemctl status osqueryd --no-pager
+```
+
+## 3. process×listening_portsのJOINでプロセスとポートを相関させる
+
+`listening_ports` 単体ではPIDしか分からないため、`processes` とJOINしてプロセス名・実行ファイルパスまで特定します。
+
+```sql
+SELECT
+  p.name,
+  p.path,
+  p.pid,
+  lp.port,
+  lp.protocol,
+  lp.address
+FROM listening_ports lp
+JOIN processes p ON lp.pid = p.pid
+ORDER BY lp.port;
+```
+
+```bash
+osqueryi "SELECT p.name, p.path, p.pid, lp.port, lp.protocol, lp.address FROM listening_ports lp JOIN processes p ON lp.pid = p.pid ORDER BY lp.port;"
+```
+
+## 4. 差分収集で変化を検知する
+
+収集ログ（既定では `/var/log/osquery/osqueryd.results.log`）をconsumer別に確認し、`added`/`removed` の行から新規パッケージ・新規ユーザー・新規リスニングポートを検知します。
+
+```bash
+{% for r in csv_rows %}grep '"name":"{{ r["consumer"] }}"' /var/log/osquery/osqueryd.results.log | jq -c 'select(.action=="added")'
+{% endfor %}```
+
+新規追加（`added`）の中でも、以下は特に優先度が高い変化として扱います。
+
+- `inventory_packages`: 承認外パッケージの新規インストール
+- `inventory_users`: 想定外の新規ユーザー作成、UID 0 の重複
+- `inventory_ports`: 想定外のリスニングポート出現（外部公開面の増加）
+
+## 動作確認
+
+1. Step 1のosqueryi実行結果に、各テーブルの列（シナリオ設定の`query`に列挙した項目）が値付きで表示されること。
+2. Step 2の `osqueryctl config-check` が構文エラーなく完了し、`systemctl status osqueryd` が `active (running)` を示すこと。
+3. Step 3のJOINクエリで、既知の待受プロセス（例: sshd、nginx等）が正しいポート番号と対で表示されること。
+4. Step 4のログ抽出で、各consumer名の収集結果が確認でき、意図的にテスト用パッケージを追加した場合に `inventory_packages` の `added` として検知されること。
+
+## 注意事項
+
+- 資産インベントリにはインストール済みソフトウェアの脆弱性面やユーザー一覧など機微な情報が含まれるため、収集ログ（`/var/log/osquery/`）とconfig(`osquery.conf`)はroot以外の一般ユーザーから読み取れないようパーミッションを制限する。
+- 収集間隔(`interval`)は鮮度と負荷のトレードオフになる。リスニングポートやネットワークインタフェースのように変化が早い項目は短め（本手順では3600秒）、パッケージやカーネル情報のように変化が遅い項目は長め（本手順では86400秒）に設定し、間隔を過度に短くしてホストやログ収集基盤に負荷をかけない。
+- `deb_packages` と `rpm_packages` はディストリビューションによって片方しか存在しない。存在しないテーブルへの参照は空集合を返す実装だが、環境差異で誤って両方を必須と誤解しないよう、対象OSに応じたテーブルのみをスケジュールに含める。
+- Step 2で `osqueryctl config-check` に失敗した場合、または `systemctl restart` 後に `status` が `failed` になった場合は、直前の `osquery.conf` を復元して再起動し、既存の収集を止めないことを優先する。
+- 収集したインベントリをCIS/コンプライアンス台帳に転記する際は、収集時刻（`interval`が示す鮮度）を台帳側にも記録し、台帳の値が古い収集結果に基づく可能性を利用者が判断できるようにする。

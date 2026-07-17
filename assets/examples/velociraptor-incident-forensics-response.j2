@@ -1,0 +1,139 @@
+# Velociraptorによるインシデントフォレンジック対応 — {{ target_host }}
+
+{{ target_host }} を侵害疑いホストとして、揮発情報を優先しつつtriageアーティファクトとトリアージパッケージを収集し、証跡保全と隔離判断を行うための初動対応手順です。
+
+## 目的
+
+侵害疑いホストに対し、揮発性情報を失わずにtriage収集・証跡保全・タイムライン解析・隔離判断までを一連の流れとして実施できるようになることを目指します。
+
+## 用語解説
+
+- **triageアーティファクト**: Velociraptorが定義する収集定義(Artifact)のうち、プロセス・ネットワーク・タイムライン・MFTなど初動調査に必要な情報を対象にしたもの
+- **オフラインコレクター(Offline Collector)**: サーバに接続せず単体で動作する自己完結型のバイナリで、Velociraptorサーバに接続できないホストからも同一のArtifact定義で収集できるもの
+- **Notebook**: VQL(Velociraptor Query Language)を実行し、収集済みデータをタイムライン等の形で解析するVelociraptorのGUI機能
+- **quarantine(隔離)**: `Windows.Remediation.Quarantine` アーティファクトにより、Velociraptorサーバとの通信のみを許可し他の通信を遮断するネットワーク隔離
+- **chain of custody(証跡管理の連鎖)**: 証跡がいつ・誰によって取得され、取得後に改変されていないかをハッシュ値と記録で追跡できる状態
+- **揮発情報(Volatile Data)**: プロセス一覧やネットワーク接続など、電源断や時間経過で失われる情報
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 対象ホスト | {{ target_host }} |
+| 証跡保全先ディレクトリ | {{ evidence_dir }} |
+| オフラインコレクター使用 | {{ offline_collector }} |
+| 隔離(quarantine)実施 | {{ quarantine }} |
+
+収集対象のtriageアーティファクトは次のとおりです。
+
+{% for a in triage_artifacts %}
+- {{ a }}
+{% endfor %}
+
+## 手順
+
+### 1. クライアントIDを解決する
+
+```bash
+mkdir -p "{{ evidence_dir }}"
+CLIENT_ID=$(velociraptor --config server.config.yaml query \
+  "SELECT client_id FROM clients() WHERE os_info.fqdn =~ '{{ target_host }}'" \
+  --format csv | tail -n 1)
+echo "target={{ target_host }} client_id=${CLIENT_ID}" | tee -a "{{ evidence_dir }}/manifest.log"
+```
+
+以降の収集はホスト名ではなく `${CLIENT_ID}` を用いて実施します。電源断は行わず、稼働させたまま揮発情報を優先して収集します。
+
+### 2. triageアーティファクトをライブ収集する
+
+```bash
+velociraptor --config server.config.yaml artifacts collect \
+{% for a in triage_artifacts %}
+  {{ a }}{{ " \\" if not loop.last else "" }}
+{% endfor %}
+  --client_id "${CLIENT_ID}" \
+  --output "{{ evidence_dir }}/triage_{{ target_host }}.zip"
+```
+
+プロセス・ネットワーク接続・タイムライン・MFTなど、時間経過で失われる情報を優先してtriageパッケージにまとめます。
+
+### 3. ハッシュを固定し取得記録を残す（chain of custody）
+
+```bash
+sha256sum "{{ evidence_dir }}/triage_{{ target_host }}.zip" \
+  | tee -a "{{ evidence_dir }}/triage_{{ target_host }}.sha256"
+echo "取得時刻(UTC)=$(date -u '+%Y-%m-%dT%H:%M:%SZ') 取得者=$(whoami)" \
+  | tee -a "{{ evidence_dir }}/manifest.log"
+```
+
+ハッシュ値・取得時刻・取得者を記録し、収集後の改変がないことを後から検証できるようにします。
+
+{% if offline_collector %}
+### 4. オフラインコレクターで補完収集する
+
+ネットワーク隔離後や、サーバへの常時接続が失われた場合に備え、`Server.Utils.CreateCollector` アーティファクトから生成した自己完結型バイナリを事前に用意し、対象ホスト上でオフライン実行します。
+
+```bash
+scp velociraptor_offline_collector "{{ target_host }}:/tmp/"
+ssh "{{ target_host }}" '/tmp/velociraptor_offline_collector --config offline_collector.config.yaml'
+scp "{{ target_host }}:/tmp/Collection-*.zip" "{{ evidence_dir }}/offline_{{ target_host }}.zip"
+sha256sum "{{ evidence_dir }}/offline_{{ target_host }}.zip" \
+  | tee -a "{{ evidence_dir }}/offline_{{ target_host }}.sha256"
+```
+
+オフラインコレクターはサーバ接続が確立できないホストでも同一のArtifact定義で収集できるため、隔離後の追加証跡取得やネットワーク不安定時の予備手段として使用します。
+{% endif %}
+
+### 5. サーバ側で証跡を保全する
+
+```bash
+chmod 440 "{{ evidence_dir }}"/*.zip "{{ evidence_dir }}"/*.sha256
+chown root:incident-response "{{ evidence_dir }}"/*.zip "{{ evidence_dir }}"/*.sha256
+```
+
+収集物は改変不可・アクセス制御された状態でサーバ側に保全し、以降はNotebookからの読み取り専用解析のみを行います。
+
+### 6. Notebookでタイムラインを解析する
+
+VelociraptorのNotebookで次のVQLセルを実行し、triage収集済みのタイムラインアーティファクトから時系列を再構成します。
+
+```sql
+SELECT Timestamp, Message, source
+FROM source(artifact="Windows.Forensics.Timeline", client_id=ClientId)
+WHERE ClientId = "${CLIENT_ID}"
+ORDER BY Timestamp
+```
+
+不審な初期侵入時刻・プロセス生成・ネットワーク接続の前後関係を確認し、影響範囲の仮説を記録します。
+
+{% if quarantine %}
+### 7. ネットワーク隔離(quarantine)を適用する
+
+証跡保全が完了したことを確認したうえで、隔離を適用します。隔離はVelociraptorサーバとの通信のみを許可する構成のため、隔離後もサーバからの到達性(チェックイン)が維持されることを確認してから完了とします。
+
+```bash
+velociraptor --config server.config.yaml artifacts collect \
+  Windows.Remediation.Quarantine \
+  --client_id "${CLIENT_ID}"
+
+# 隔離後もサーバとの通信のみ生存していることを確認する(新しい経路が機能することの確認)
+velociraptor --config server.config.yaml query \
+  "SELECT client_id, last_seen_at FROM clients() WHERE client_id = '${CLIENT_ID}'"
+```
+
+サーバとの疎通が失われた状態で隔離を確定しないでください。疎通確認が取れるまでは隔離を解除できる体制を維持します。
+{% endif %}
+
+## 動作確認
+
+1. `{{ evidence_dir }}/triage_{{ target_host }}.zip` と対応する `.sha256` が存在し、Step 3 の記録と一致すること
+2. Step 6 のNotebook VQLセルが正常に実行され、タイムラインが時系列順に再構成されていること
+3. `{{ quarantine }}` が真の場合、隔離適用後もVelociraptorサーバへのチェックインが継続していること(新しい経路が機能することを確認してから旧来の全面到達性を諦めること)
+
+## 注意事項
+
+- 揮発情報(プロセス・ネットワーク接続など)を最優先で収集し、電源断やホストの再起動は証跡保全が完了するまで行わないでください。
+- 収集は最小侵襲を原則とし、不要なエージェント再インストールや書き込みを伴う操作は避けてください。
+- 収集物には取得時刻・取得者・ハッシュ値(chain of custody)を必ず記録し、事後の改変有無を検証できる状態を維持してください。
+- 収集物・タイムラインには機微情報が含まれるため、`{{ evidence_dir }}` はアクセス制御された領域に限定し、外部への持ち出しやアップロードを行わないでください。
+- 隔離(quarantine)はサーバとの疎通確認ができてから確定してください。疎通確認前に旧来のネットワーク経路を完全に遮断すると、正当な調査経路まで失われる可能性があります。

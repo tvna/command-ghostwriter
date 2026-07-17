@@ -1,0 +1,6 @@
+metric,query_pattern,threshold,investigation_note
+nxdomain_by_source,rcode_name == NXDOMAIN を id.orig_h 別に集計,同一送信元から5分間に20件以上,DGA(Domain Generation Algorithm)によるドメイン総当たりの兆候。感染端末の可能性が高い
+long_query_length,query の文字列長(FQDN全体),50文字以上,DNSトンネリング用にエンコードされたペイロードが埋め込まれている可能性
+first_seen_rare_domain,直近30日の集計に対して初出のドメイン,同一ドメインの出現が1回のみ,C2ドメインの新規利用や使い捨てドメインの可能性。ただしCDN/計測ドメインの誤検知に注意
+qtype_txt_null_ratio,qtype_name が TXT または NULL の比率,送信元ごとの全クエリの5%超,iodineやdnscat2等DNSトンネリングツールが好んで使うレコードタイプの偏り
+nxdomain_ratio_per_source,送信元ごとの NXDOMAIN 件数 / 総クエリ件数,50%超,大半のクエリが失敗している = DGAで生成した未登録ドメインを次々試行している兆候

@@ -1,0 +1,135 @@
+# osqueryによる侵害ホストの生存時調査 — {{ target_host }}
+
+侵害が疑われるホスト `{{ target_host }}` に対し、電源を落とさず（生存時＝ライブ）osquery で揮発情報と永続化・接続の痕跡を横断収集し、証跡化した上で隔離・フォレンジック移行の判断につなげる初動対応手順です。
+
+## 目的
+
+侵害調査における「揮発性の高い情報から先に集める」原則を理解し、osquery（osqueryi）で C2接続・不審プロセス・ログインセッション・永続化設定を一括収集して証跡化し、収集結果から隔離/フォレンジック移行を判断できるようになることを目指します。
+
+## 用語解説
+
+- **揮発情報(Volatile Data)**: 電源断やプロセス終了で失われる情報。ネットワーク接続・実行中プロセス・ログインセッションなど。
+- **永続化(Persistence)**: 再起動後も攻撃者がアクセスを維持できる仕組み。SSH公開鍵登録（`authorized_keys`）、`crontab` 登録済みジョブなど。
+- **収集順序の原則(揮発性の高い順)**: (1) ネットワーク接続（`process_open_sockets`）と実行中プロセス（`processes`, `logged_in_users`）→ (2) 永続化設定と操作履歴（`authorized_keys`, `crontab`, `shell_history`）の順で収集します。永続化情報はディスク上に残るため後回しにしてもよい一方、ネットワーク接続・プロセスは再起動やプロセス終了、あるいは攻撃者自身のログ消去・回線切断で即座に失われるため最優先で保全します。
+- **osqueryi**: osquery をインタラクティブ/ワンショットで実行するCLI。`--json` で結果をJSON出力できます。
+- **証跡のハッシュ固定**: 収集結果ファイルの sha256 をその場で記録し、後日の提出・報告時に改変されていないことを証明する手続き。
+- **封じ込め(Containment)**: 被害拡大を防ぐため、ネットワーク遮断・アカウント無効化・プロセス停止などを行う対応段階。本手順の収集結果はこの判断の一次材料になります。
+
+## シナリオ設定
+
+| 項目 | 値 |
+|---|---|
+| 調査対象ホスト | {{ target_host }} |
+| 収集テーブル | {{ collect_tables | join(", ") }} |
+| 出力先ディレクトリ | {{ output_dir }} |
+| 揮発情報を優先保全するか | {{ preserve_volatile }} |
+| エスカレーション先 | {{ escalation }} |
+
+## 1. 収集先ディレクトリを準備し、収集順序を確認する
+
+収集結果は改変・追記を避けるため、専用ディレクトリに集約します。
+
+```bash
+sudo mkdir -p {{ output_dir }}
+sudo chmod 700 {{ output_dir }}
+{% for t in collect_tables %}echo "収集予定: {{ t }}"
+{% endfor %}```
+
+{% if preserve_volatile %}
+`preserve_volatile: true` のため、次のステップ（揮発情報）から着手し、永続化設定の収集より先に完了させます。電源断やホストの再起動を、この手順が完了するまで行わないでください。
+{% endif %}
+
+## 2. 揮発性の高い情報（ネットワーク接続・不審プロセス・ログインセッション）を最優先で収集する
+
+{% if "process_open_sockets" in collect_tables %}
+### C2接続の疑いがあるソケットを収集する（process_open_sockets）
+
+```bash
+osqueryi --json \
+  "SELECT pid, family, protocol, local_address, local_port, remote_address, remote_port, state FROM process_open_sockets WHERE remote_address != '' AND remote_address != '0.0.0.0';" \
+  > {{ output_dir }}/process_open_sockets.json
+```
+{% endif %}
+{% if "processes" in collect_tables %}
+### 不審プロセスとその親子関係を収集する（processes）
+
+```bash
+osqueryi --json \
+  "SELECT pid, name, path, cmdline, parent, uid, on_disk, start_time FROM processes ORDER BY start_time DESC;" \
+  > {{ output_dir }}/processes.json
+```
+{% endif %}
+{% if "logged_in_users" in collect_tables %}
+### ログイン中セッションを収集する（logged_in_users）
+
+```bash
+osqueryi --json \
+  "SELECT type, user, tty, host, time, pid FROM logged_in_users;" \
+  > {{ output_dir }}/logged_in_users.json
+```
+{% endif %}
+
+## 3. 永続化設定と操作履歴を収集する
+
+{% if "authorized_keys" in collect_tables %}
+### SSH公開鍵による永続化を収集する（authorized_keys）
+
+```bash
+osqueryi --json \
+  "SELECT uid, key, key_file FROM authorized_keys;" \
+  > {{ output_dir }}/authorized_keys.json
+```
+{% endif %}
+{% if "crontab" in collect_tables %}
+### cron登録ジョブによる永続化を収集する（crontab）
+
+```bash
+osqueryi --json \
+  "SELECT command, path, minute, hour, day_of_month, month, day_of_week FROM crontab;" \
+  > {{ output_dir }}/crontab.json
+```
+{% endif %}
+{% if "shell_history" in collect_tables %}
+### シェル操作履歴を収集する（shell_history）
+
+```bash
+osqueryi --json \
+  "SELECT uid, time, command, history_file FROM shell_history ORDER BY time DESC;" \
+  > {{ output_dir }}/shell_history.json
+```
+
+`shell_history` はディスク上のヒストリファイルを読むだけであり、収集自体が対象ファイルの内容や更新時刻を変更しないことを確認してください（`cat`/`tail` などで直接ファイルを開くと `atime` が更新され、他の痕跡調査に影響する場合があります）。
+{% endif %}
+
+## 4. 収集結果をハッシュで固定し、改変不可にする
+
+```bash
+cd {{ output_dir }}
+sha256sum {% for t in collect_tables %}{{ t }}.json {% endfor %}> sha256sum.txt
+sudo chmod 400 {% for t in collect_tables %}{{ t }}.json {% endfor %}sha256sum.txt
+```
+
+## 5. 収集結果を一次判断材料としてエスカレーションする
+
+```bash
+echo "調査対象: {{ target_host }}" | tee -a {{ output_dir }}/summary.txt
+echo "出力先: {{ output_dir }} (sha256: {{ output_dir }}/sha256sum.txt)" | tee -a {{ output_dir }}/summary.txt
+echo "エスカレーション先: {{ escalation }}" | tee -a {{ output_dir }}/summary.txt
+```
+
+`process_open_sockets.json` に外部の不審な `remote_address` が含まれる場合は、このホスト単体でファイアウォールルールを変更する前に、必ずネットワーク側（境界ファイアウォール/EDR）の担当チームと連携して遮断してください。ホスト側だけで通信を止めると、攻撃者が遮断に気づいて証跡を消去する、あるいは別経路へ移動する（横展開）リスクがあります。
+
+## 動作確認
+
+1. Step 2・Step 3 で収集対象とした全テーブル（`{{ collect_tables | join(", ") }}`）について、`{{ output_dir }}/<テーブル名>.json` が生成され、`jq . {{ output_dir }}/<テーブル名>.json` が構文エラーなく読めること
+2. `{{ output_dir }}/sha256sum.txt` に全収集ファイルのハッシュが記録されており、`sha256sum -c {{ output_dir }}/sha256sum.txt` が実行時点で全件 `OK` になること（以後の改変検知に使う基準値として固定）
+3. `{{ output_dir }}` 以下の収集済みファイルが `chmod 400` になっており、収集担当者以外に書き込み権限がないこと
+4. `summary.txt` にエスカレーション先（`{{ escalation }}`）と出力先パスが記録されていること
+
+## 注意事項
+
+- 揮発情報（`process_open_sockets`, `processes`, `logged_in_users`）は電源断やホストの再起動で失われます。本手順が完了する前に、シャットダウン・再起動・対象プロセスの強制終了を行わないでください。
+- 収集コマンド自体が調査対象システムに変更を加えないよう、読み取り専用のクエリのみを実行します（ファイルの直接オープンや不要なコマンド実行は `atime` 等の痕跡を上書きする可能性があるため避けてください）。
+- 収集結果（`{{ output_dir }}` 配下のJSON・sha256sum.txt・summary.txt）には資格情報の痕跡や内部ネットワーク構成などの機微情報が含まれ得ます。アクセス権限を収集担当者・エスカレーション先（`{{ escalation }}`）に限定し、社外・チャット等への安易な貼り付けを避けてください。
+- `process_open_sockets` の結果から外部C2との通信が疑われる場合でも、対象ホスト単体の判断で通信を遮断せず、必ずネットワーク側の担当チームと連携し、境界（ファイアウォール/EDR）側の遮断ルールを先に用意・検証してから、対象ホストの隔離（NIC無効化等）に進んでください。
+- 本手順は初動の証跡収集であり、隔離・フォレンジックイメージ取得・アカウント無効化などの本格対応そのものは含みません。収集結果は Step 5 のエスカレーションを経て、対応チームの判断のもとで次段階に進めてください。

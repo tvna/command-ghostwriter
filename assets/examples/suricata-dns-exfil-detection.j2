@@ -1,0 +1,127 @@
+# Suricata による DNS トンネリング・exfil 検知
+
+異常に長いクエリ名や特定ドメインへの高頻度TXT問い合わせなど、DNSトンネリング
+の兆候を検知するローカルルールを `{{ rules_file }}` に整備します。
+
+## 目的
+
+DNSを使った情報持ち出し（exfiltration）やC2通信の代表的な兆候である
+「長大なクエリ名」「既知トンネリングドメインへの問い合わせ」「同一送信元
+からの高頻度な問い合わせ」の3種類を、Suricataのローカルルールで検知できる
+ようにすることを目指します。あわせて、正規のDNSリゾルバ経由の通信を
+誤検知から除外できる状態にします。
+
+## 用語解説
+
+- **dns.query**: SuricataのDNSクエリ名（QNAME）を対象とするstickyバッファ
+- **bsize**: stickyバッファの長さ（バイト数）を条件にするキーワード
+- **endswith**: content一致がバッファ末尾で終わることを要求する修飾子
+- **threshold**: 一定時間内の一致回数に基づいて検知頻度を制御するキーワード
+- **track by_src**: 送信元IPアドレスごとにthresholdのカウントを行う指定
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| ルールファイル | `{{ rules_file }}` |
+| 長大クエリ閾値 (query_len_threshold) | {{ query_len_threshold }} バイト超 |
+| 監視対象ドメイン (watch_domains) | {% for d in watch_domains %}`{{ d }}`{% if not loop.last %}, {% endif %}{% endfor %} |
+| 高頻度検知の閾値 (rate_count / rate_seconds) | {{ rate_count }} 回 / {{ rate_seconds }} 秒 |
+| 除外する正規リゾルバ (home_net_resolvers) | {% for r in home_net_resolvers %}`{{ r }}`{% if not loop.last %}, {% endif %}{% endfor %} |
+| 検知確認用テストドメイン | `{{ test_domain }}` |
+
+## 手順
+
+### 1. 正規リゾルバを除外する pass ルールを先頭に配置する
+
+CDNやDNSSEC由来の応答は正規のリゾルバ経由でも長いクエリ名を持つことがあり、
+そのまま検知ルールにかけると誤検知源になります。社内の正規リゾルバから
+発せられたクエリはこのpassルールで先に処理を打ち切り、後続の検知ルールに
+かけないようにします。ルールは番号の小さい順（上から）に評価されるため、
+この行は必ずファイルの先頭に置いてください。
+
+```bash
+cat <<'EOF' > {{ rules_file }}
+{% for r in home_net_resolvers %}pass dns {{ r }} any -> any any (msg:"PASS - trusted internal resolver DNS query"; sid:910020{{ loop.index }}; rev:1;)
+{% endfor %}EOF
+```
+
+### 2. 異常に長いDNSクエリ名を検知するルールを追加する
+
+`dns.query` stickyバッファに対して `bsize` で長さ条件を課します。閾値は
+`{{ query_len_threshold }}` バイト超です。
+
+```bash
+cat <<'EOF' >> {{ rules_file }}
+alert dns any any -> any any (msg:"DNS TUNNELING - excessively long query name"; dns.query; bsize:>{{ query_len_threshold }}; classtype:bad-unknown; sid:9100301; rev:1;)
+EOF
+```
+
+### 3. 既知のトンネリングドメインへの問い合わせを検知するルールを追加する
+
+`content` と `endswith` でクエリ名の末尾一致（サフィックス一致）を取ります。
+サブドメインを可変にしたトンネリングでも、末尾のドメイン部分は固定される
+ことを利用します。
+
+```bash
+cat <<'EOF' >> {{ rules_file }}
+{% for d in watch_domains %}alert dns any any -> any any (msg:"DNS TUNNELING - query to known tunneling domain {{ d }}"; dns.query; content:"{{ d }}"; nocase; endswith; classtype:bad-unknown; sid:9100302; rev:1;)
+{% endfor %}EOF
+```
+
+### 4. 高頻度なTXT問い合わせを検知するルールを追加する
+
+`dns.query.type` は存在しないため、DNS応答側の `dns.rcode` ではなく要求側の
+反復回数を `threshold` で制限します。同一送信元から一定時間内に規定回数を
+超えるクエリが発生した場合に1回だけアラートを上げます。
+
+```bash
+cat <<'EOF' >> {{ rules_file }}
+alert dns any any -> any any (msg:"DNS TUNNELING - high frequency DNS queries from single source"; dns.query; threshold: type both, track by_src, count {{ rate_count }}, seconds {{ rate_seconds }}; classtype:bad-unknown; sid:9100303; rev:1;)
+EOF
+```
+
+### 5. ルールを読み込んで文法チェックする
+
+```bash
+suricata -T -c /etc/suricata/suricata.yaml -S {{ rules_file }}
+suricatasc -c reload-rules
+```
+
+## 動作確認
+
+1. 模擬的な長大クエリ・トンネリング疑いクエリを発生させます。
+
+```bash
+dig $(head -c 50 /dev/urandom | base32).{{ test_domain }} TXT
+dig $(head -c 20 /dev/urandom | base32).txt-tunnel-domain.example TXT
+```
+
+2. `fast.log` または `eve.json` に sid:9100301〜9100303 のアラートが記録されることを確認します。
+
+```bash
+tail -n 50 /var/log/suricata/fast.log | grep -E "sid:910030[1-3]"
+```
+
+3. `home_net_resolvers` に列挙したIPから同様に長いクエリを送出し、passルール
+   （sid:9100301〜9100303ではなく除外側）が先に評価されアラートが発生しない
+   ことを確認します。これにより、検知ルールを本番投入する前に正規リゾルバ
+   経由の通信が誤検知しない新しい経路が機能していることを検証できます。
+
+```bash
+dig @{{ home_net_resolvers[0] }} $(head -c 50 /dev/urandom | base32).{{ test_domain }} TXT
+tail -n 20 /var/log/suricata/fast.log | grep "trusted internal resolver"
+```
+
+## 注意事項
+
+- passルールは必ず検知ルールより前（ファイル上部）に配置すること。順序を
+  誤ると正規リゾルバの通信も検知対象になり、誤検知が大量発生する。
+- 本ルールを本番のSuricata検知パイプラインに組み込む前に、手順5の文法
+  チェックと動作確認の手順1〜3を必ず実施し、新しい検知ルール・除外ルール
+  の双方が意図通り動作することを確認してから、既存の監視体制（旧ルール
+  セットや他の監視手段）を無効化・置き換えること。
+- `count` / `seconds` の値は環境のDNSトラフィック量に応じて調整する。閾値
+  が低すぎると正常な再帰的問い合わせでも誤検知する。
+- ルール変更後は必ず `suricata -T` で文法検証してから `reload-rules` を実行し、
+  検証に失敗した設定を無効化せずに本番へ反映しないこと。

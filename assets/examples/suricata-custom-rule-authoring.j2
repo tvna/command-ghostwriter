@@ -1,0 +1,148 @@
+# Suricataカスタム検知ルールの作成と管理
+
+自組織の CSV ルール台帳（{{ csv_rows | length }} 件）から `local.rules` を生成し、
+sid/rev/classtype/msg の命名規約に沿って検証・反映する手順書です。
+
+## 目的
+
+自組織で採番したカスタム検知ルールを `local.rules` として作成し、構文検証と
+段階的な反映（reload）を安全に行えるようになることを目指します。既存の
+商用ルールセットや Emerging Threats (ET) ルールと sid が衝突しない運用を
+定着させます。
+
+## 用語解説
+
+- **sid (Signature ID)**: ルールを一意に識別する数値。ローカルルールは
+  9000000-9999999 番台を自組織専用として予約し、商用/ET ルール（通常
+  100万番台以下や ET の 200万番台）と衝突させません。
+- **rev (Revision)**: 同一 sid のルール内容を更新するたびに 1 ずつ増分する
+  改訂番号。sid はそのまま、rev のみ上げるのが規約です。
+- **classtype**: 攻撃分類（`attempted-recon` = 偵察試行、`attempted-admin`
+  = 管理者権限奪取試行 など）。`classification.config` に定義済みの値を使います。
+- **local.rules**: Suricata がロードするローカル追加ルールファイル。
+  `suricata.yaml` の `rule-files` に登録して読み込ませます。
+- **suricatasc**: Suricata のユニックスソケット経由で、プロセス無停止のまま
+  ルール再読込 (`reload-rules`) 等を行う制御用 CLI です。
+
+## シナリオ設定
+
+以下の CSV 行から `local.rules` の各行を生成します。
+
+| sid | action | proto | dst_port | msg | classtype | 検知内容 | rev |
+|-----|--------|-------|----------|-----|-----------|----------|-----|
+{% for r in csv_rows %}| {{ r["sid"] }} | {{ r["action"] }} | {{ r["proto"] }} | {{ r["dst_port"] }} | {{ r["msg"] }} | {{ r["classtype"] }} | {{ r["content_summary"] }} | {{ r["rev"] }} |
+{% endfor %}
+
+## 1. ルール構文の解説
+
+Suricata ルールは「ヘッダ」+「オプション（丸カッコ内、セミコロン区切り）」で
+構成されます。例として sid 9100001 の完全なルールを示します。
+
+```
+alert tcp $EXTERNAL_NET any -> $HOME_NET 22 (msg:"LOCAL SSH banner grab"; flow:to_server,established; content:"SSH-"; startswith; sid:9100001; rev:1; classtype:attempted-recon; metadata:created_at 2026_07_17;)
+```
+
+- **ヘッダ**: `action proto src_ip src_port -> dst_ip dst_port`
+  - `action`（例: alert）: マッチ時の動作。alert は検知のみで通信を止めません。
+  - `proto`（例: tcp）: 対象プロトコル。
+  - `$EXTERNAL_NET any -> $HOME_NET 22`: 送信元は外部ネットワーク・任意ポート、
+    宛先は自組織ネットワークの 22 番ポート、という向き（direction）を表します。
+- **オプション**（丸カッコ内）:
+  - `msg`: アラート表示に使う説明文字列。
+  - `flow:to_server,established`: 確立済みセッションでクライアント→サーバ方向
+    のパケットのみを対象にする条件。
+  - `content:"SSH-"; startswith`: ペイロード先頭が `SSH-` から始まることを
+    照合する条件（`pcre` を使えば正規表現でも同様に照合可能です）。
+  - `sid` / `rev`: 前述のとおり一意な識別番号と改訂番号。
+  - `classtype`: 攻撃分類。
+  - `reference`: 参照 URL や CVE 番号を付与する場合に使用（今回は省略）。
+  - `metadata`: 任意のキー・バリュー情報（作成日時など）を付与できます。
+
+## 2. sid 採番帯とrev更新規約
+
+- ローカルルールの sid は **9000000-9999999** の範囲でのみ採番します。
+- 新規ルールを追加する際は、台帳（本 CSV）の既存 sid の最大値を確認し、
+  重複しない値を採番してください。
+- 同一 sid のルール条件を変更した場合は、sid を変えずに `rev` を 1 増やします。
+- sid を変更してしまうと Suricata 側では別ルール扱いになり、過去の
+  アラート履歴との連続性が失われるため、内容変更時は必ず rev のみ更新します。
+
+## 3. local.rules を生成する
+
+CSV 台帳から `/etc/suricata/rules/local.rules` を生成します（実際の生成は
+CI/CD や台帳管理スクリプトで自動化することを推奨しますが、ここでは
+生成されるルール本体を示します）。
+
+```
+{% for r in csv_rows %}alert {{ r["proto"] }} $EXTERNAL_NET any -> $HOME_NET {{ r["dst_port"] }} (msg:"{{ r["msg"] }}"; flow:to_server,established; sid:{{ r["sid"] }}; rev:{{ r["rev"] }}; classtype:{{ r["classtype"] }}; metadata:created_at 2026_07_17;)
+{% endfor %}```
+
+生成した内容を確認したうえで、以下のコマンドで配置します。
+
+```bash
+sudo tee /etc/suricata/rules/local.rules >/dev/null <<'EOF'
+{% for r in csv_rows %}alert {{ r["proto"] }} $EXTERNAL_NET any -> $HOME_NET {{ r["dst_port"] }} (msg:"{{ r["msg"] }}"; flow:to_server,established; sid:{{ r["sid"] }}; rev:{{ r["rev"] }}; classtype:{{ r["classtype"] }}; metadata:created_at 2026_07_17;)
+{% endfor %}EOF
+```
+
+`suricata.yaml` の `rule-files:` セクションに `local.rules` を登録します
+（未登録の場合のみ追記してください）。
+
+```yaml
+rule-files:
+  - local.rules
+```
+
+## 4. suricata -T で構文検証する
+
+ルールを本番プロセスに反映する前に、必ず構文チェック専用モードで検証します。
+
+```bash
+sudo suricata -T -c /etc/suricata/suricata.yaml -v
+```
+
+`Configuration provided was successfully loaded. Exiting.` と表示されれば
+構文エラーはありません。エラーがある場合は sid・カッコの対応・セミコロン
+区切りを確認し、再度検証してください。
+
+## 5. suricatasc でルールを無停止反映する
+
+構文検証に問題がなければ、Suricata プロセスを停止せずにルールのみを
+再読込します。
+
+```bash
+sudo suricatasc -c reload-rules
+```
+
+`{"message": "done", "return": "OK"}` のような応答が返れば反映成功です。
+反映直後は `eve.json` を tail してアラートが期待どおり出力されるか確認します。
+
+```bash
+sudo tail -f /var/log/suricata/eve.json | grep -E "SSH-|RDP|SMB"
+```
+
+## 動作確認
+
+- `suricata -T` の実行結果が成功メッセージであること（構文エラーがないこと）。
+- `suricatasc -c reload-rules` の応答が `"return": "OK"` であること。
+- `suricatasc -c ruleset-stats` 等でロード済みルール数が台帳の行数
+  （{{ csv_rows | length }} 件）分増加していること。
+- 台帳に登録した各 sid（{% for r in csv_rows %}{{ r["sid"] }}{% if not loop.last %}, {% endif %}{% endfor %}）が
+  `eve.json` の `alert.signature_id` として実際に出力されること。
+
+## 注意事項
+
+- **sid 衝突禁止**: 商用ルールセットや ET (Emerging Threats) ルールが
+  使用する sid 帯とは絶対に重複させないこと。ローカル帯は必ず
+  9000000-9999999 の範囲のみを使用し、割り当て前に台帳の既存値を確認する。
+- 本手順のルールはすべて `action: alert` であり、通信を遮断（drop/reject）
+  するものではありません。検知のみを行うため、既存の疎通には影響しません。
+  もし将来的に drop アクションへ変更する場合は、まず alert のまま
+  一定期間運用してアラート内容を確認し、誤検知がないことを検証してから
+  段階的に drop へ切り替えてください。
+- `local.rules` を配置・変更した際は、必ず `suricata -T` による構文検証を
+  行ってから `suricatasc -c reload-rules` を実行すること。検証を飛ばして
+  reload すると、構文エラー時にルール全体がロードされず検知が無効化される
+  おそれがある。
+- rev を上げる際は sid を変更しないこと。sid を変えると過去のアラート
+  履歴との対応が失われる。

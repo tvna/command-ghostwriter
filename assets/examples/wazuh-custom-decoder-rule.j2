@@ -1,0 +1,114 @@
+# Wazuhカスタムデコーダとルール作成
+
+自社アプリのログを対象に、`local_decoder.xml` でフィールド抽出を定義し、`local_rules.xml` にローカルID帯（100000番台）のルールを追加してアラートレベルを設計します。
+
+## 目的
+
+未対応フォーマットのログを decoder でフィールド抽出できる形に変換し、そのフィールドを rule で評価してアラートレベルを設計できるようになることを目指します。あわせて `wazuh-logtest` による事前検証を必須の手順として身につけます。
+
+## 用語解説
+
+- **decoder**: ログ本文から `program_name` や正規表現でフィールド（`srcip`, `user` など）を抽出する定義
+- **prematch / regex(offset="after_parent")**: 親decoderで前方一致した残り部分に対して正規表現を適用する仕組み
+- **order**: `regex` のキャプチャグループを、抽出済みフィールド名の並びに対応させる指定
+- **decoded_as**: ruleがどのdecoder名の出力を評価対象にするかの指定
+- **ローカルルールID帯**: Wazuh標準ルール(1〜99999)と衝突しないよう、ローカル定義は100000番以降を使う規約
+- **level(アラートレベル)**: 0〜15の重大度。3以下は通知目的でアラート扱いしない設計が一般的
+- **wazuh-logtest**: decoder/ruleを実サービス再起動なしに検証できるCLIツール
+
+## シナリオ設定
+
+| rule_id | level | decoded_as | field_match | description | mitre_id |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["rule_id"] }} | {{ r["level"] }} | {{ r["decoded_as"] }} | {{ r["field_match"] }} | {{ r["description"] }} | {{ r["mitre_id"] }} |
+{% endfor %}
+
+## 1. 対象ログの形式を確認する
+
+自社アプリは以下の形式で `/var/log/custom-app/app.log` に出力しているものとします。
+
+```text
+2026-07-17T10:22:31+09:00 host app: action=auth_fail user=alice srcip=203.0.113.5 result=denied
+```
+
+## 2. local_decoder.xmlにフィールド抽出decoderを定義する
+
+```xml
+<!-- /var/ossec/etc/decoders/local_decoder.xml -->
+<decoder name="custom-app">
+  <program_name>^app</program_name>
+</decoder>
+
+<decoder name="custom-app-fields">
+  <parent>custom-app</parent>
+  <prematch>^action=</prematch>
+  <regex offset="after_parent">^action=(\S+) user=(\S+) srcip=(\S+) result=(\S+)$</regex>
+  <order>action, user, srcip, status</order>
+</decoder>
+```
+
+## 3. local_rules.xmlにローカルID帯(100000+)でルールを追加する
+
+台帳（Step シナリオ設定の表）の各行を、`decoded_as` と `field_match` に対応する `<field name="...">` を持つルールとして定義します。level 3以下は非アラート運用とするため、通常ルールとは別の位置づけで記載します。
+
+```xml
+<!-- /var/ossec/etc/rules/local_rules.xml -->
+<group name="local,custom_app,">
+
+{% for r in csv_rows %}  <rule id="{{ r["rule_id"] }}" level="{{ r["level"] }}">
+    <decoded_as>{{ r["decoded_as"] }}</decoded_as>
+    <field name="{{ r["field_match"] }}">\.+</field>
+    <description>{{ r["description"] }}</description>
+{% if r["mitre_id"] != "-" %}    <mitre>
+      <id>{{ r["mitre_id"] }}</id>
+    </mitre>
+{% endif %}  </rule>
+
+{% endfor %}</group>
+```
+
+`<field name="...">\.+</field>` は仮の一致条件です。実運用では自社ログの実際の値（例: `auth_fail`, `privilege_escalation` など）に置き換え、ルールごとに一意な条件になるよう調整してください。
+
+## 4. 設定を配置し構文チェックの上で反映する
+
+```bash
+sudo cp local_decoder.xml /var/ossec/etc/decoders/local_decoder.xml
+sudo cp local_rules.xml /var/ossec/etc/rules/local_rules.xml
+sudo /var/ossec/bin/wazuh-control configtest
+sudo systemctl restart wazuh-manager
+```
+
+`configtest` が失敗した場合は反映せず、エラー内容を修正してから再実行します。
+
+## 5. wazuh-logtestでdecoder/ruleを検証する
+
+サービス再起動を伴わずに、サンプルログが期待した `rule_id` と `level` でマッチするかを確認します。
+
+```bash
+sudo /var/ossec/bin/wazuh-logtest
+```
+
+```text
+2026-07-17T10:22:31+09:00 host app: action=auth_fail user=alice srcip=203.0.113.5 result=denied
+```
+
+台帳の各ルールについて、対応するサンプルログを1件ずつ投入して確認します。
+
+```bash
+{% for r in csv_rows %}echo "rule_id={{ r["rule_id"] }} level={{ r["level"] }} decoded_as={{ r["decoded_as"] }} field_match={{ r["field_match"] }} の検証ログを投入"
+{% endfor %}```
+
+## 動作確認
+
+- `wazuh-logtest` の出力で、シナリオ設定の表と同じ `rule_id` と `level` がサンプルログごとに表示されること
+- `decoded_as` に指定したdecoder名でフィールド（`action`, `user`, `srcip`, `status`）が正しく抽出されていること
+- level 3以下（台帳の `mitre_id` が `-` の行）が通常のアラート一覧に出力されず、非アラート扱いになっていること
+- `sudo /var/ossec/bin/wazuh-control configtest` が `OK` を返すこと
+
+## 注意事項
+
+- ルールIDは必ずローカル帯（100000〜120000程度）を使用し、Wazuh標準ルール(1〜99999)や既存のローカルルールとID衝突が無いことを事前に `local_rules.xml` 内で確認する。
+- 新しいdecoder/ruleは、既存の decoder/rule を無効化・削除する前に `wazuh-logtest` で正常にマッチすることを確認してから、旧来の検知経路を止める。
+- level 3以下は非アラート（通知目的）として設計し、アラート運用に混在させない。重大度の閾値は組織のインシデント対応方針に合わせて再検討する。
+- `configtest` が通らない設定を `systemctl restart` しない。失敗した場合はロールバックし、直前に正常動作していた `local_decoder.xml` / `local_rules.xml` を復元する。
+- 本手順のフィールド一致条件（`\.+`）はプレースホルダーであり、実運用の前に自社ログの実際の値へ置き換えて誤検知・過検知が無いことを確認する。

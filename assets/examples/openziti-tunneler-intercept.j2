@@ -1,0 +1,101 @@
+# OpenZitiトンネラーによる透過アクセス構成 — {{ service_name }}
+
+サービス **{{ service_name }}** を、既存クライアント／サーバを一切改修せずに OpenZiti オーバーレイ経由へ移行します。`ziti-edge-tunnel` の intercept 機能がローカルDNSとルーティングを乗っ取ることで、アプリケーションからは従来どおりの宛先に見えたまま、実際の通信はゼロトラストオーバーレイを経由します。
+
+## 目的
+
+`intercept.v1` 型のサービス設定で宛先（DNS名/CIDR）とポート範囲を定義し、`ziti-edge-tunnel run -i {{ identity_file }}` を起動するだけで、既存クライアントを無改修のままオーバーレイ経由のアクセスへ切り替えられるようになることを目指します。
+
+## 用語解説
+
+- **intercept.v1**: OpenZitiのサービス設定タイプの一つ。`addresses`（宛先DNS名/CIDR）と`portRanges`（対象ポート）を宣言し、ziti-edge-tunnelにどの宛先宛の通信を横取りするかを教える
+- **ziti-edge-tunnel**: エッジ識別情報（identity）を使ってオーバーレイに接続するクライアント常駐プロセス。tunモード(`run`)ではローカルDNSリゾルバとルーティングテーブルの両方を書き換える
+- **透過アクセス (clientless/transparent)**: アプリケーション側のコード変更やSDK組み込みが不要な方式。DNS解決とTCP/IP経路の乗っ取りだけでオーバーレイへ迂回させる
+- **identity.json**: `ziti-edge-tunnel`がコントローラへ認証するための秘密鍵・証明書・enrollment情報を含むファイル。第三者に渡ると当該サービスへのアクセス権を奪われる
+- **circuit**: intercept経由の通信がオーバーレイ内部で実際にたどる終端間の経路。`ziti edge list circuits`で現在確立中の回線を確認できる
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| サービス名 | {{ service_name }} |
+| intercept対象アドレス | {{ intercept_addresses | join(", ") }} |
+| 対象ポート範囲 | {% for p in port_ranges %}{{ p.low }}-{{ p.high }}{% if not loop.last %}, {% endif %}{% endfor %} |
+| identityファイル | {{ identity_file }} |
+
+## 手順
+
+### 1. intercept.v1 サービス設定を作成する
+
+コントローラ側に、宛先とポート範囲を宣言した `intercept.v1` config を作成します。
+
+```bash
+ziti edge login localhost:1280 -u admin -p ${ZITI_ADMIN_PASSWORD}
+
+ziti edge create config {{ service_name }}-intercept intercept.v1 '{
+  "protocols": ["tcp"],
+  "addresses": [
+{% for a in intercept_addresses %}    "{{ a }}"{% if not loop.last %},{% endif %}
+{% endfor %}  ],
+  "portRanges": [
+{% for p in port_ranges %}    { "low": {{ p.low }}, "high": {{ p.high }} }{% if not loop.last %},{% endif %}
+{% endfor %}  ]
+}'
+```
+
+### 2. host.v1 サービス設定とサービス本体を作成する
+
+実際にトラフィックを転送する終端（サーバ側エッジルータ経由でのバインド先）と、サービスを結び付けます。
+
+```bash
+ziti edge create config {{ service_name }}-host host.v1 '{
+  "address": "{{ intercept_addresses[0] }}",
+  "port": {{ port_ranges[0].low }},
+  "protocol": "tcp"
+}'
+
+ziti edge create service {{ service_name }} --configs {{ service_name }}-intercept,{{ service_name }}-host
+
+ziti edge create service-policy {{ service_name }}-bind-policy Bind \
+  --service-roles "@{{ service_name }}" --identity-roles "#hosting-routers"
+ziti edge create service-policy {{ service_name }}-dial-policy Dial \
+  --service-roles "@{{ service_name }}" --identity-roles "#tunneler-clients"
+```
+
+### 3. クライアント端末に identity を配置し tunneler を起動する
+
+クライアント側では identity ファイルを配置し、`ziti-edge-tunnel run` を実行するだけで、対象アプリの改修なしにintercept対象アドレスへのアクセスがオーバーレイ経由になります。
+
+```bash
+sudo mkdir -p $(dirname {{ identity_file }})
+sudo cp ./{{ service_name }}.jwt {{ identity_file }}.enrolling
+sudo ziti-edge-tunnel enroll -j {{ identity_file }}.enrolling -i {{ identity_file }}
+
+sudo ziti-edge-tunnel run -i {{ identity_file }}
+```
+
+`run` を実行すると、ローカルのDNSリゾルバに `{{ intercept_addresses | join(", ") }}` の解決エントリが追加され、対応するポート（{% for p in port_ranges %}{{ p.low }}-{{ p.high }}{% if not loop.last %}, {% endif %}{% endfor %}）宛のルートがトンネルインターフェース経由に書き換えられます。既存クライアントの設定ファイルやアプリコードは一切変更しません。
+
+## 動作確認
+
+1. トンネラーが起動している端末で、intercept対象アドレスへの名前解決結果がオーバーレイ用の仮想IPになっていることを確認します。
+
+   ```bash
+   resolvectl query {{ intercept_addresses[0] }}
+   ```
+
+2. 実際にアプリ相当の通信を発生させ、オーバーレイ経由の回線（circuit）が確立されていることをコントローラ側で確認します。
+
+   ```bash
+   curl -sS https://{{ intercept_addresses[0] }}:{{ port_ranges[0].low }}/ -o /dev/null -w "%{http_code}\n"
+   ziti edge list circuits
+   ```
+
+   一覧に `{{ service_name }}` を経由する行が表示され、クライアント/サーバ双方のエッジルータが記録されていれば、通信がオーバーレイを経由していると判断できます。
+
+## 注意事項
+
+- `ziti-edge-tunnel run` はローカルDNSリゾルバとルーティングテーブルを書き換えるため、`systemd-resolved` など既存のDNS管理サービスと競合する場合がある。導入前に `resolvectl status` で既存の設定を確認し、intercept対象アドレスが他の権威DNSと衝突しないことを確かめる。
+- ルーティングテーブルの操作にはroot権限および `CAP_NET_ADMIN` が必要。最小権限運用が必要な環境では、tunnelerを実行する専用ユーザーに当該capabilityのみを付与する構成を検討する。
+- 本手順は既存クライアントのDNS解決先・経路を書き換える変更であるため、`ziti-edge-tunnel run` を有効化した直後は旧来の直接アクセス経路を無効化・撤去せず、上記「動作確認」の `ziti edge list circuits` でオーバーレイ経由の通信が確立できていることを確認してから、旧経路（既存VPNやファイアウォール許可ルールなど）を段階的に廃止すること。
+- `{{ identity_file }}` は当該サービスへの認証情報そのものであり、漏えいすると同一権限でオーバーレイへアクセスされる。ファイルパーミッションを `600` に限定し、不要になったidentityは `ziti edge delete identity` でコントローラ側からも失効させる。

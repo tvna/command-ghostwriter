@@ -1,0 +1,127 @@
+# Lynis所見に基づくハードニング是正
+
+Lynisが出力した `lynis-report.dat` の `suggestion[]` / `warning[]` を優先度付けし、カーネル・SSH/認証・ファイル権限・パッケージの是正を安全な順序で適用し、再auditでhardening indexの改善を確認する変更手順書です。
+
+## 目的
+
+Lynisの所見（suggestion/warning）を鵜呑みに一括適用せず、影響範囲とリスクで優先度を判定したうえで、ロックアウトを起こさない順序で是正を反映し、再auditで改善を客観的に確認できるようになることを目指します。
+
+## 用語解説
+
+- **lynis-report.dat**: `lynis audit system` 実行後にLynisが出力する監査結果のキー・バリュー形式ファイル
+- **suggestion / warning**: Lynisが検出した改善提案(suggestion)と重大な指摘(warning)
+- **hardening index**: Lynisが算出する0〜100のハードニングスコア。是正後の再auditで上昇を確認する
+- **suggestion_id**: `KRNL-5820` のようなLynisのテストID。同一IDは再監査時にも同じ表記で現れるため追跡に使う
+- **誤検知(false positive) suggestion**: 環境固有の事情で対応不要と判断し、明示的に除外登録するsuggestion
+- **ロックアウト防止順序**: SSH/認証系の是正では、新設定が機能することを別経路で確認してから旧設定を無効化する順序
+
+## シナリオ設定
+
+| suggestion_id | category | current | target | risk |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["suggestion_id"] }} | {{ r["category"] }} | {{ r["current"] }} | {{ r["target"] }} | {{ r["risk"] }} |
+{% endfor %}
+
+## 1. lynis-report.datから該当所見を抽出し現状を確認する
+
+```bash
+sudo lynis audit system --quiet
+grep -E "^suggestion\[\]|^warning\[\]" /var/log/lynis-report.dat
+```
+
+是正対象のsuggestion_idが実際に報告されていることを、上記の出力と本手順のシナリオ設定表を突き合わせて確認します。表にあってレポートに無いIDは環境差分か誤検知の可能性があるため、注意事項の「誤検知suggestionの除外」を参照してください。
+
+## 2. カーネルパラメータ(sysctl)を是正する
+
+```bash
+{% for r in csv_rows %}{% if r["category"] == "kernel" %}# {{ r["suggestion_id"] }}: {{ r["change_action"] }}
+echo "{{ r["target"] }}" | sudo tee -a /etc/sysctl.d/90-lynis-hardening.conf
+{% endif %}{% endfor %}sudo sysctl --system
+```
+
+適用後、現在値がtargetと一致するか確認します。
+
+```bash
+sysctl net.ipv4.conf.all.accept_redirects net.ipv4.conf.all.send_redirects
+```
+
+## 3. SSH/認証設定を是正する(ロックアウト防止順序を厳守)
+
+まず現行の `sshd_config` をバックアップし、変更予定行をコメントで記録します。
+
+```bash
+sudo cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak.$(date +%Y%m%d)
+{% for r in csv_rows %}{% if r["category"] == "ssh" %}# {{ r["suggestion_id"] }}: current -> "{{ r["current"] }}", target -> "{{ r["target"] }}"
+{% endif %}{% endfor %}```
+
+次に、まだ既存セッションを切断せずに設定を書き換え、構文検証だけを行います(この時点ではsshdをreloadしません)。
+
+```bash
+{% for r in csv_rows %}{% if r["category"] == "ssh" %}sudo sed -i "s/^{{ r["current"] }}$/{{ r["target"] }}/" /etc/ssh/sshd_config
+sudo sed -i "s/^#{{ r["current"] }}$/{{ r["target"] }}/" /etc/ssh/sshd_config
+{% endif %}{% endfor %}sudo sshd -t
+```
+
+`sshd -t` が無エラーであることを確認したら反映します。
+
+```bash
+sudo systemctl reload sshd
+```
+
+**現在の接続を切らずに、新しいターミナルから別セッションで鍵認証ログインを確立します。**
+
+```bash
+ssh -F /dev/null -o PreferredAuthentications=publickey -o PasswordAuthentication=no target-host echo lynis-hardening-ok
+```
+
+このコマンドが `lynis-hardening-ok` を返し、別セッションでの鍵ログインが成功することを確認するまでは、既存の一次セッションを切断しないでください。確認できた後にのみ、元セッションを閉じて是正完了とします。
+
+## 4. ファイル権限を是正する
+
+```bash
+{% for r in csv_rows %}{% if r["category"] == "permissions" %}# {{ r["suggestion_id"] }}: {{ r["change_action"] }}
+{% endif %}{% endfor %}sudo chmod 640 /etc/shadow
+sudo chown root:shadow /etc/shadow
+sudo chmod 750 /var/log
+```
+
+```bash
+stat -c "%a %U:%G %n" /etc/shadow /var/log
+```
+
+出力のmodeが `640 root:shadow /etc/shadow` および `750 ... /var/log` になっていることを確認します。
+
+## 5. パッケージを是正する
+
+```bash
+{% for r in csv_rows %}{% if r["category"] == "packages" and r["change_action"] == "不要な平文プロトコルのパッケージを削除" %}sudo dnf remove -y telnet-server
+{% elif r["category"] == "packages" %}sudo dnf update --security -y openssl
+{% endif %}{% endfor %}```
+
+```bash
+rpm -q telnet-server || echo "telnet-server削除済み"
+rpm -q openssl
+```
+
+## 6. 再auditでhardening indexと警告数を確認する
+
+```bash
+sudo lynis audit system --quiet
+grep -E "^warning\[\]" /var/log/lynis-report.dat | wc -l
+grep -E "^hardening_index=" /var/log/lynis-report.dat
+```
+
+## 動作確認
+
+1. 手順3の別セッション鍵ログインが `lynis-hardening-ok` を返して成功していること(旧設定を無効化する前提条件)
+2. 再auditの `warning[]` 件数が是正前より減少していること
+3. 再auditの `hardening_index` が是正前より上昇していること
+4. 対象サービス(SSH、業務アプリケーション)への疎通・ログインが是正後も継続して行えており、業務影響が無いこと
+
+## 注意事項
+
+- **段階適用**: 本手順のsuggestionを一括で流し込まず、カテゴリ単位(kernel→ssh/auth→permissions→packages)で1つずつ適用し、都度再auditまたは個別確認を行う。特にSSH/認証系は手順3の順序(新設定を別セッションで検証してから旧設定を無効化)を必ず守り、確認前にsshdのreloadだけで作業を終えない。
+- **切り戻し**: 各行のシナリオ設定表にある `rollback` 手順に従う。SSH/認証系は `sshd_config.bak.*` への復元とreload、sysctlはドロップインファイル削除後の `sysctl --system` 再実行、パーミッションは変更記録に残した旧modeへのchmod、パッケージは記載のコマンドで復元する。
+- **誤検知suggestionの除外**: 環境固有の事情(コンテナ基盤、社内合意済みの例外など)で対応不要と判断したsuggestion_idは、`/etc/lynis/custom.prf` に `skip-test=<suggestion_id>` として明示的に登録し、シナリオ設定表にも除外理由を追記して次回監査時に再検討漏れがないようにする。
+- **変更記録**: 適用したsuggestion_id・変更前後の値・適用日時・適用者をシナリオ設定表を元にした変更記録(CHANGELOG等)に残し、再現性と監査証跡を確保する。
+- 手順3の別セッション確認が失敗した場合は、reloadした設定を直ちに `sshd_config.bak.*` へ戻し、既存セッションを閉じる前に再度 `sshd -t` と reload で復旧を確認する。

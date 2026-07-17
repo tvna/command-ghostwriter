@@ -1,0 +1,6 @@
+identity_name: svc-erp-frontend-01
+role_attributes:
+  - erp-frontend
+  - jp-tokyo-office
+enrollment_ttl: 259200
+tunneler_type: ziti-edge-tunnel

@@ -1,0 +1,102 @@
+# Squid透過型プロキシの構築手順
+
+クライアント側の設定変更なしに、HTTPアクセスをゲートウェイでSquidへ転送する透過型（インターセプト）プロキシを構築します。ゲートウェイ機器とSquidホストへのroot権限が必要です。
+
+## 目的
+
+WPAD配布や各端末へのプロキシ設定なしに、ゲートウェイでのパケットリダイレクトによってHTTPアクセスをSquidへ強制的に通し、経路の可視化・フィルタリングを行えるようにすることを目指します。
+
+## 用語解説
+
+- **透過型プロキシ（intercept）**: クライアントにプロキシの存在を意識させず、ゲートウェイがパケットを横取りしてプロキシへ転送する方式。`http_port` に `intercept` を付けることでSquidが宛先IP:80宛のパケットを受け取れるようになる
+- **明示的プロキシ（explicit proxy）/ WPAD**: クライアント側の設定（手動またはWPADによる自動検出）でプロキシサーバを明示的に指定する方式。透過型と異なりBasic認証などクライアント認証が利用できる
+- **REDIRECT（NAT）**: nftables/iptablesでパケットの宛先ポートを書き換え、同一ホスト内の別ポートで待ち受けるプロセスへ転送するNATの一種
+- **SNI（Server Name Indication）**: TLSハンドシェイクの開始時に平文で送信される接続先ホスト名。透過型プロキシがHTTPSを復号せずに宛先ドメインだけ判定する際の手がかりになる
+- **splice / bump**: Squidの`ssl_bump`動作。spliceはTLSを復号せずSNIのみで許可/拒否し中身は素通しする方式、bumpは中間者（MITM）的に証明書を発行し直しペイロードまで検査する方式
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| Squidインターセプトポート | {{ squid.intercept_port }} |
+| Squidキャッシュディレクトリ | {{ squid.cache_dir }} |
+| HTTPS処理方式 | {{ squid.https_handling }} |
+| LAN側インターフェース | {{ gateway.lan_interface }} |
+| WAN側インターフェース | {{ gateway.wan_interface }} |
+| リダイレクト対象ネットワーク | {{ gateway.redirect_source_net }} |
+| Squidホスト自身のIP | {{ gateway.squid_host_ip }} |
+| 先行検証用クライアントIP | {{ gateway.pilot_client_ip }} |
+
+## 1. Squidをintercept待受で構成する
+
+`/etc/squid/squid.conf` にintercept用のポートとACLを追加します。
+
+```bash
+cat <<'EOF' >> /etc/squid/squid.conf
+http_port {{ squid.intercept_port }} intercept
+cache_dir ufs {{ squid.cache_dir }} 100 16 256
+acl lan_src src {{ gateway.redirect_source_net }}
+http_access allow lan_src
+http_access deny all
+EOF
+squid -k parse
+systemctl reload squid
+```
+
+{% if squid.https_handling == "bump" %}
+HTTPSも復号して検査するため、`ssl_bump`とCA証明書配布が必要です。
+```bash
+ssl_bump bump all
+```
+{% else %}
+HTTPSはSNIのみで判定するspliceとします（復号は行いません）。
+```bash
+acl allowed_sni ssl::server_name_regex -i example\.com
+ssl_bump splice allowed_sni
+ssl_bump terminate all
+```
+{% endif %}
+
+## 2. まず1台のクライアントだけをリダイレクトして検証する
+
+いきなり対象ネットワーク全体をリダイレクトすると、Squid側の設定ミスがあった場合に業務端末全体のHTTP通信が止まります。先に先行検証用クライアントIPだけを対象にした限定ルールを投入し、動作を確認してから範囲を広げます。
+
+```bash
+nft add table {{ verification.nft_table }}
+nft add chain {{ verification.nft_table }} {{ verification.nft_chain }} { type nat hook prerouting priority -100 \; }
+nft add rule {{ verification.nft_table }} {{ verification.nft_chain }} ip saddr {{ gateway.pilot_client_ip }} ip daddr != {{ gateway.squid_host_ip }} tcp dport 80 counter redirect to :{{ squid.intercept_port }}
+```
+
+先行検証用クライアントから無設定のままHTTPアクセスを行い、下記の「動作確認」の手順で反映を確認してください。確認できるまで、次の全体展開の手順には進まないでください。
+
+## 3. 検証後にネットワーク全体へリダイレクトを展開する
+
+先行検証で問題がないことを確認できたら、対象ネットワーク全体を対象とするルールへ切り替えます。Squidホスト自身が発信するトラフィックは除外し、リダイレクトループを防ぎます。
+
+```bash
+nft delete rule {{ verification.nft_table }} {{ verification.nft_chain }} ip saddr {{ gateway.pilot_client_ip }} ip daddr != {{ gateway.squid_host_ip }} tcp dport 80 counter redirect to :{{ squid.intercept_port }}
+nft add rule {{ verification.nft_table }} {{ verification.nft_chain }} ip saddr {{ gateway.redirect_source_net }} ip daddr != {{ gateway.squid_host_ip }} tcp dport 80 counter redirect to :{{ squid.intercept_port }}
+```
+
+## 4. 既存のWPAD配布・明示プロキシ設定を無効化する
+
+透過リダイレクトが機能していることを確認できてから、既存のWPAD配布や端末へ配布していた明示プロキシ設定を停止します。先に無効化すると、透過リダイレクトに不備があった場合にクライアントが完全にインターネットへ到達できなくなります。
+
+```bash
+systemctl disable --now wpad-server.service
+```
+
+## 動作確認
+
+1. 先行検証用クライアントからブラウザ設定を変更せずHTTPサイトへアクセスする。
+2. Squidホストで `tail -n 50 {{ verification.access_log_path }}` を実行し、先行検証用クライアントIPからのアクセスが記録されていることを確認する。
+3. `nft list chain {{ verification.nft_table }} {{ verification.nft_chain }}` を実行し、追加したリダイレクトルールの `counter` のパケット数・バイト数が0から増加していることを確認する。
+4. 全体展開後は対象ネットワーク内の複数端末で同様にアクセス・ログ・カウンタを確認する。
+
+## 注意事項
+
+- 透過型（intercept）では、Basic認証などクライアントに資格情報を要求する認証方式は利用できません。認証が必要な場合は明示プロキシ方式を検討してください。
+- HTTPSは`bump`を使わない限り復号できず、SNIに基づくドメイン単位の許可/拒否しかできません。URLパスやコンテンツ本文での制御はできない点を利用者へ周知してください。
+- リダイレクトルールにSquidホスト自身のIPからの通信を除外する条件を必ず入れてください。除外しない場合、SquidがWebへ取得しに行く通信自体がリダイレクトされループし、応答が返らなくなります。
+- 手順2の先行検証用クライアントでの動作確認が完了するまでは、手順3のネットワーク全体展開や手順4の既存プロキシ設定の無効化に進まないでください。問題が発生した場合は`nft delete rule`でリダイレクトルールを削除すれば旧来の経路にすぐ戻せます。
+- WPADや明示プロキシ設定を無効化する前に、必ず透過リダイレクトが機能していることを動作確認で確認してください。先に無効化すると復旧までクライアントがインターネットに到達できなくなります。

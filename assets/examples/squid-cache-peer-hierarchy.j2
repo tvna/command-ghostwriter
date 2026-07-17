@@ -1,0 +1,125 @@
+# Squid 上位プロキシ連携(cache_peer)構成手順 — {{ branch.hostname }}
+
+拠点プロキシ **{{ branch.hostname }}** から本社(上位)プロキシへ全通信を転送する、階層プロキシ構成を行います。
+
+## 目的
+
+拠点の Squid から本社の親プロキシへ `cache_peer` で強制転送し、特定ドメインのみ直接通信を許可する構成を、フェイルオーバー用の第二親プロキシも含めて安全に投入できるようになることを目指します。
+
+## 用語解説
+
+- **cache_peer**: Squid に隣接プロキシ(親/兄弟)を登録するディレクティブ。`parent` 種別は「必ず経由させる上位プロキシ」を意味する
+- **never_direct**: 該当リクエストを cache_peer 経由に強制し、オリジンサーバへの直接接続を禁止するアクセスリスト制御
+- **always_direct**: never_direct より優先的に評価され、該当リクエストを親プロキシを経由せず直接送信させる制御
+- **cache_peer_access**: どのリクエストをどの cache_peer へ振り分けるかを ACL 単位で制御するディレクティブ
+- **no-query**: ICP/HTCP による ping 問い合わせを無効化するオプション。上位プロキシが ICP に対応していない場合や、TCP到達性のみで死活判定させたい場合に指定する
+- **login=user:pass**: 親プロキシ側でプロキシ認証(Basic認証)が必須な場合に、cache_peer 接続時に送出する資格情報
+- **拠点階層プロキシ**: 拠点のプロキシが自ら外部と通信せず、本社の親プロキシを経由してインターネットへ抜ける構成。帯域集約・出口IP統制・ログ集約を目的とする
+- **フェイルオーバー(複数parent)**: 親プロキシを複数登録し、既定の親が到達不能になった場合に次の親へ自動的に切り替える構成。Squid は転送失敗を `dead_peer_timeout` 秒数え、一定回数失敗した peer を一時的に「死んでいる」とマークして除外する
+- **ループ検出**: Squid はデフォルトで `via on` により `Via` ヘッダを付与し、自プロキシ経由のリクエストが再度自分に戻ってきた場合に検出してブロックする。親子関係を誤って循環させるとループになるため注意する
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 拠点ホスト名 | {{ branch.hostname }} |
+| 拠点リスンポート | {{ branch.listen_port }} |
+| 第一親プロキシ | {{ parent_primary.host }}:{{ parent_primary.port }} |
+| 第二親プロキシ(フェイルオーバー用) | {{ parent_secondary.host }}:{{ parent_secondary.port }} |
+| never_direct(親経由強制) | {{ routing.never_direct }} |
+| 直接通信許可ドメイン数 | {{ routing.direct_domains | length }} |
+| access.log パス | {{ verification.access_log_path }} |
+| キャッシュマネージャURL | {{ verification.cache_manager_url }} |
+
+直接通信を許可するドメインは以下の {{ routing.direct_domains | length }} 件です。
+
+{% for d in routing.direct_domains %}- {{ d }}
+{% endfor %}
+
+## 1. cache_peer で親プロキシを登録する
+
+第一親プロキシと、フェイルオーバー用の第二親プロキシを登録します。認証が必要な親プロキシには `login=` を付与します。
+
+```bash
+sudo tee -a /etc/squid/squid.conf <<'EOF'
+# --- upstream parent proxies (branch -> HQ hierarchy) ---
+cache_peer {{ parent_primary.host }} parent {{ parent_primary.port }} 0 no-query default login={{ parent_primary.login_credentials }} name=parentPrimary
+cache_peer {{ parent_secondary.host }} parent {{ parent_secondary.port }} 0 no-query login={{ parent_secondary.login_credentials }} name=parentSecondary
+
+# dead peer detection: this many seconds of failed forwarding marks a peer dead
+dead_peer_timeout 30 seconds
+EOF
+```
+
+## 2. 直接通信を許可するドメインの ACL を定義する
+
+親プロキシを経由させたくない宛先(社内システムや帯域を圧迫する更新系サービスなど)を ACL にまとめます。
+
+```bash
+sudo tee -a /etc/squid/squid.conf <<'EOF'
+acl direct_domains dstdomain {% for d in routing.direct_domains %}{{ d }} {% endfor %}
+
+EOF
+```
+
+## 3. never_direct と always_direct で転送方針を確定する
+
+`always_direct` を先に評価させ、それ以外の全通信を `never_direct` で親プロキシ経由に強制します。
+
+```bash
+sudo tee -a /etc/squid/squid.conf <<'EOF'
+always_direct allow direct_domains
+{% if routing.never_direct %}
+never_direct allow all
+{% endif %}
+EOF
+```
+
+## 4. cache_peer_access で振り分けを設定する
+
+`direct_domains` 宛は親プロキシへ送らず、それ以外は第一親プロキシ・第二親プロキシの順に転送されるよう明示します。
+
+```bash
+sudo tee -a /etc/squid/squid.conf <<'EOF'
+cache_peer_access parentPrimary deny direct_domains
+cache_peer_access parentPrimary allow all
+
+cache_peer_access parentSecondary deny direct_domains
+cache_peer_access parentSecondary allow all
+EOF
+```
+
+## 5. 設定を検証してから反映する
+
+必ず構文チェックとリロードのみで反映し、いきなり再起動しないことでサービス断のリスクを抑えます。
+
+```bash
+sudo squid -k parse
+sudo squid -k reconfigure
+```
+
+## 動作確認
+
+1. `squid -k parse` が構文エラーなく完了すること
+2. 通常サイトへアクセスし、{{ verification.access_log_path }} の hierarchy フィールドが `FIRST_UP_PARENT/{{ parent_primary.host }}` になっていること
+
+```bash
+tail -f {{ verification.access_log_path }} | grep -E 'FIRST_UP_PARENT|DIRECT'
+```
+
+3. 第一親プロキシを意図的に停止(メンテナンス等)した状態で通信し、`dead_peer_timeout` 経過後に hierarchy フィールドが `FIRST_UP_PARENT/{{ parent_secondary.host }}` へ切り替わること(フェイルオーバー確認)
+4. `direct_domains` に含めたドメインへのアクセスで hierarchy フィールドが `DIRECT` になっていること
+5. 第二親プロキシまで全断させた検証用の別セッションで `never_direct` の全断影響範囲を確認し、業務影響が許容範囲であることを確認してから本切替に進むこと
+6. `{{ verification.cache_manager_url }}` (cache manager) で `cache_peer` の状態(`UP`/`DOWN`)を確認する
+
+```bash
+curl -s "{{ verification.cache_manager_url }}"
+```
+
+## 注意事項
+
+- `login=user:pass` の資格情報は `squid.conf` に平文で残るため、ファイルパーミッションを `640` 以下に制限し、Git 等のバージョン管理に生の値をコミットしないこと。ローテーション時は親プロキシ側とタイミングを揃えて更新する。
+- `never_direct allow all` を投入すると、以後は親プロキシ2台が両方とも到達不能になった場合、拠点から一切のWeb通信ができなくなる。本手順の「動作確認」5番のとおり、必ず旧経路(直接通信)を無効化する前に、新経路(親プロキシ経由)での疎通と、両親プロキシ断時の影響範囲を検証用の別セッションで確認してから本番反映すること。
+- 変更は `squid -k reconfigure` によるホットリロードで行い、`squid -k parse` による構文検証を先に必ず実行する。誤って `systemctl restart squid` を行うと、既存コネクションが切断され業務影響が出る。
+- 親子関係を誤って循環させる(親プロキシが逆に拠点プロキシを親として参照する等)とループになる。Squid は既定で `via on` によりループを検出してリクエストを拒否するため、`via` を無効化しない。
+- `direct_domains` の追加・削除は、社内トラフィックの帯域統制方針(全通信を本社経由でログ集約する方針)と矛盾しないか、事前に運用担当へ確認すること。

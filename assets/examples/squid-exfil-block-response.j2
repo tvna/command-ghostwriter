@@ -1,0 +1,117 @@
+# Squidによる不正通信先の緊急遮断対応
+
+C2/exfil 宛先が判明した際に、プロキシ集約点である Squid の ACL へ即時追記し、
+`squid -k reconfigure` で反映後、access.log から社内の感染疑いホストを特定する
+初動対応手順です。CSV に記載された {{ csv_rows | length }} 件の不正宛先を対象に、
+上から順に実施してください。
+
+## 目的
+
+不正宛先(C2/exfil先)が判明してから、Squid の ACL 遮断を即時反映し、
+access.log でアクセス元(感染疑いホスト)を特定してエスカレーションするまでの
+初動対応を、抜け漏れなく実施できるようになることを目指します。
+
+## 用語解説
+
+- **Squid**: 組織内クライアントの通信を中継するフォワードプロキシ。全クライアントの通信が
+  ここを経由するため、プロキシ集約点で遮断ルールを1本追加するだけで、個別端末に手を入れずに
+  全クライアントへ即座に遮断効果が及ぶ利点がある。
+- **dstdomain ACL**: 宛先ドメイン名(FQDN)で一致判定する ACL タイプ。`.example.com`
+  のようにドット始まりで書くとサブドメインを含めて一致する。
+- **dst ACL**: 宛先IPアドレス(またはCIDR)で一致判定する ACL タイプ。ドメインが
+  存在しない/DNSに依存しないC2通信の遮断に使う。
+- **TCP_DENIED**: access.log に記録される結果コードの一つで、ACL によって
+  リクエストが拒否されたことを示す。遮断が効いているかの確認に使う。
+- **SNI (Server Name Indication)**: TLSハンドシェイクで平文送出されるアクセス先ホスト名。
+  SSL Bump(復号)を行っていないSquidでは、HTTPSの中身は見えずSNI/ドメイン単位でしか
+  遮断判定できない。
+
+## シナリオ設定
+
+| indicator | type | source(判明経緯) | added_at | hitting_clients(遮断前アクセス元) | followup |
+|-----------|------|-------------------|----------|-----------------------------------|----------|
+{% for r in csv_rows %}| {{ r["indicator"] }} | {{ r["type"] }} | {{ r["source"] }} | {{ r["added_at"] }} | {{ r["hitting_clients"] }} | {{ r["followup"] }} |
+{% endfor %}
+
+## 1. 遮断ACLファイルへ追記する
+
+`dstdomain` 判定の宛先は `/etc/squid/blocked_emergency.txt` へ、`dst` 判定の
+宛先(IPアドレス)は `/etc/squid/blocked_emergency_dst.txt` へ、それぞれ追記します。
+squid.conf 側は事前に以下の ACL/http_access を定義済みである前提です。
+
+```
+acl blocked_domains dstdomain "/etc/squid/blocked_emergency.txt"
+acl blocked_dst dst "/etc/squid/blocked_emergency_dst.txt"
+http_access deny blocked_domains
+http_access deny blocked_dst
+```
+
+判明した宛先を、種別に応じて対象ファイルへ1行ずつ追記してください。
+
+```bash
+{% for r in csv_rows %}{% if r["type"] == "dstdomain" %}echo "{{ r["indicator"] }}" >> /etc/squid/blocked_emergency.txt
+{% else %}echo "{{ r["indicator"] }}" >> /etc/squid/blocked_emergency_dst.txt
+{% endif %}{% endfor %}```
+
+## 2. 設定を即時反映する
+
+Squid はプロセス再起動なしで ACL ファイルの変更を反映できます。既存セッションを
+切断しないよう、必ず `reconfigure` を使用してください(`restart` は使わない)。
+
+```bash
+squid -k parse   # 文法チェック(反映前に必ず実行)
+squid -k reconfigure
+```
+
+## 3. 遮断が効いているか、別セッションで確認する
+
+既存の管理接続を切る前に、遮断対象への新規アクセスが実際に拒否されることを
+別ターミナル(または別クライアント)から確認します。旧経路(未遮断状態)を
+前提にした作業を続けている端末が万一残っていても、ここで新しい遮断ACLが
+機能していることを確認してから次の手順に進んでください。
+
+```bash
+{% for r in csv_rows %}curl -x http://squid.internal.example:3128 -m 5 -o /dev/null -s -w "%{http_code}\n" http://{{ r["indicator"] }}/
+{% endfor %}```
+
+上記が接続失敗(またはSquidからの拒否応答)になっていれば、ACLが有効に反映されています。
+
+## 4. access.logで社内のアクセス元(感染疑いホスト)を特定する
+
+遮断が効いていることを確認した上で、遮断前にその宛先へアクセスしていた
+社内端末を洗い出します。
+
+```bash
+{% for r in csv_rows %}grep "{{ r["indicator"] }}" /var/log/squid/access.log | awk '{print $1, $3, $4, $7}'
+{% endfor %}```
+
+`TCP_DENIED` 以外(例: `TCP_TUNNELED`, `TCP_MISS` など)で当該宛先にヒットしている
+送信元IPは、遮断前に通信が成立していた=感染疑いホストです。
+
+## 5. シナリオ設定の遮断前アクセス元と突き合わせる
+
+{% for r in csv_rows %}{% if r["hitting_clients"] != "-" %}- `{{ r["indicator"] }}` への遮断前アクセス元: {{ r["hitting_clients"] }} -- {{ r["followup"] }}
+{% else %}- `{{ r["indicator"] }}` への遮断前アクセス元: 確認時点でヒットなし -- {{ r["followup"] }}
+{% endif %}{% endfor %}
+
+## 動作確認
+
+- `squid -k reconfigure` 実行後、Squidプロセスが継続稼働していること(`systemctl status squid`)
+- 手順3のcurl確認で、遮断対象宛先への新規アクセスが全てTCP_DENIED相当(拒否)になっていること
+- `grep -c TCP_DENIED /var/log/squid/access.log` で、遮断対象宛先に対する拒否ログが
+  増加していること(遮断発動の裏取り)
+- 手順4のaccess.log確認で洗い出した送信元IPが、シナリオ設定のhitting_clients列と
+  整合していること
+
+## 注意事項
+
+- ACL追記は `squid -k reconfigure` まで実施して初めて有効になる。ファイル追記だけで
+  安心せず、必ず手順3で新しい遮断が実際に機能していることを別セッションから確認してから、
+  対応完了の報告や後続作業(端末隔離など)に進むこと。
+- SSL Bump(TLS復号)を行っていない構成では、HTTPS通信はSNI/ドメイン単位でしか遮断できず、
+  同一IP上の別ドメインや、SNI暗号化(ECH)を使う通信までは遮断できない場合がある。
+  IPアドレス自体の遮断(dst ACL)と併用し、実効性を過信しないこと。
+- 遮断前にその宛先へアクセスしていた社内端末(hitting_clients)は感染疑いとして、
+  本手順の範囲を超えてネットワーク隔離手順へ速やかにエスカレーションすること。
+- 追記したACLの内容・実施時刻・実施者・access.logの抜粋は、インシデント対応の証跡として
+  別途保管し、後日の是正・報告に使えるようにすること。

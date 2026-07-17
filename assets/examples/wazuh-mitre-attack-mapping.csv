@@ -1,0 +1,7 @@
+rule_id,description,tactic,technique_id,coverage_note
+100002,SSHブルートフォース試行の検知,Credential Access,T1110,-
+100010,sudoによる特権昇格の試行,Privilege Escalation,T1548,-
+100020,不審なPowerShell実行,Execution,T1059.001,難読化コマンドは別途強化を検討
+100030,Webシェル設置の検知,Persistence,T1505.003,-
+100040,クラウドAPIキーの異常利用,Credential Access,T1552.005,-
+100050,WMI経由の内部移動,Lateral Movement,T1021.006,未検知ギャップ(ダッシュボードで0件を確認)

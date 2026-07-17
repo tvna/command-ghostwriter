@@ -1,0 +1,4 @@
+schedule = "0 3 * * *"
+report_archive_dir = "/var/backups/lynis-reports"
+index_history_file = "/var/backups/lynis-reports/hardening-index.csv"
+alert_on_new_warning = true

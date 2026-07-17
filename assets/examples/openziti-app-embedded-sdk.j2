@@ -1,0 +1,169 @@
+# OpenZiti SDK組み込みによるアプリ直接接続 構築手順 — {{ service_name }}
+
+アプリケーションに Ziti SDK を組み込み、サーバアプリが OS の TCP リスナーを一切開かずに、OpenZiti オーバーレイ経由でのみ着信を受け付ける ZTNA 構成の構築手順です。まず `ziti-edge-tunnel` のプロキシモードで動作を検証し、問題なければ SDK 組み込みへ段階的に移行します。
+
+## 目的
+
+`{{ service_name }}` サービスについて、host.v1 config とサービスポリシー（Bind/Dial）でオーバーレイ上の提供・利用関係を定義し、サーバアプリを Ziti 経由でのみ待ち受けさせることで、ポートスキャンや直接到達が不可能な状態（攻撃面ゼロ）を実現します。
+
+## 用語解説
+
+- **OpenZiti**: ゼロトラストなアプリケーション接続を実現する OSS オーバーレイネットワーク（Apache-2.0）
+- **Controller / Edge Router**: OpenZiti オーバーレイの制御プレーンと、暗号化トンネルを中継するデータプレーン
+- **Identity（アイデンティティ）**: オーバーレイに参加する各主体（サーバ・クライアント）を表す証明書ベースの認証単位
+- **host.v1 config**: サービスの実体（宛先アドレス・ポート・プロトコル）を Bind 側に教える config タイプ
+- **intercept.v1 config**: クライアントがどのアドレス/ポートへの接続を横取り（インターセプト）してオーバーレイへ転送するかを Dial 側に教える config タイプ
+- **Bind ポリシー**: どの identity がサービスを「提供（listen）」してよいかを許可するサービスポリシー
+- **Dial ポリシー**: どの identity がサービスに「接続（dial）」してよいかを許可するサービスポリシー
+- **ziti-edge-tunnel**: SDK を組み込まずに既存アプリを Ziti オーバーレイへ橋渡しするトンネラー（proxy/tproxy モード）
+- **攻撃面ゼロ（Zero Attack Surface）**: サーバアプリが OS 上に `LISTEN` 状態の TCP ソケットを一切開かず、オーバーレイからの outbound 接続（dial）だけでサービス提供側に到達する構成。ポートスキャンで存在自体を検知できない
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| サービス名 | {{ service_name }} |
+| サーバ実体アドレス | {{ host_address }} |
+| サーバ実体ポート | {{ host_port }} |
+| Bind 側アイデンティティ（サーバ） | {{ bind_identity }} |
+| Dial 側アイデンティティ（クライアント） | {{ dial_identity }} |
+
+## 1. アイデンティティを作成し、登録用 JWT を発行する
+
+Controller 管理端末で、サーバ側（Bind）とクライアント側（Dial）のアイデンティティをそれぞれ作成します。
+
+```bash
+ziti edge login localhost:1280 -u admin -p '<controllerの管理者パスワード>' -y
+
+ziti edge create identity service "{{ bind_identity }}" -o {{ bind_identity }}.jwt
+ziti edge create identity service "{{ dial_identity }}" -o {{ dial_identity }}.jwt
+```
+
+> 発行した `.jwt` ファイルはワンタイムの登録トークンです。安全な経路（scp 等）でのみ各ホストへ配布し、登録後は削除してください。
+
+## 2. config と service、Bind/Dial ポリシーを作成する
+
+サーバ実体（`{{ host_address }}:{{ host_port }}`）を指す host.v1 config と、クライアントが横取りする intercept.v1 config を作成し、両者を束ねる service を作成します。
+
+```bash
+ziti edge create config "{{ service_name }}-host-cfg" host.v1 \
+  '{"protocol":"tcp","address":"{{ host_address }}","port":{{ host_port }}}'
+
+ziti edge create config "{{ service_name }}-intercept-cfg" intercept.v1 \
+  '{"protocols":["tcp"],"addresses":["{{ service_name }}.ziti"],"portRanges":[{"low":{{ host_port }},"high":{{ host_port }}}]}'
+
+ziti edge create service "{{ service_name }}" \
+  --configs "{{ service_name }}-host-cfg,{{ service_name }}-intercept-cfg"
+```
+
+Bind（提供側）と Dial（利用側）を、それぞれのアイデンティティのみに限定して許可します。
+
+```bash
+ziti edge create service-policy "{{ service_name }}-bind-policy" Bind \
+  --identity-roles "@{{ bind_identity }}" --service-roles "@{{ service_name }}"
+
+ziti edge create service-policy "{{ service_name }}-dial-policy" Dial \
+  --identity-roles "@{{ dial_identity }}" --service-roles "@{{ service_name }}"
+```
+
+## 3. ziti-edge-tunnel でまず動作検証する（段階採用の第一段階）
+
+SDK をアプリに組み込む前に、`ziti-edge-tunnel` のプロキシモードで構成が正しいかを検証します。サーバホストで JWT を登録し、プロキシモードで起動します。
+
+```bash
+ziti-edge-tunnel enroll -j {{ bind_identity }}.jwt -i {{ bind_identity }}.json
+sudo ziti-edge-tunnel run -i {{ bind_identity }}.json &
+```
+
+クライアントホストでも JWT を登録し、トンネラーを常駐させます（tproxy モードで `{{ service_name }}.ziti` 宛の通信を自動横取り）。
+
+```bash
+ziti-edge-tunnel enroll -j {{ dial_identity }}.jwt -i {{ dial_identity }}.json
+sudo ziti-edge-tunnel run -i {{ dial_identity }}.json &
+```
+
+この段階ではサーバアプリ自体は `{{ host_address }}:{{ host_port }}` で通常どおり `LISTEN` していて構いません。トンネラーが host.v1 config の宛先へ dial-out することで到達できることを確認するための中間段階です。
+
+## 4. サーバアプリへ Ziti SDK を組み込む（本採用）
+
+トンネラー経由での動作確認が取れたら、サーバアプリ自体を Ziti SDK で待ち受けに切り替え、OS の TCP リスナーを廃止します。Go の場合の組み込み例です。
+
+```go
+package main
+
+import (
+	"net"
+
+	"github.com/openziti/sdk-golang/ziti"
+)
+
+func main() {
+	cfg, err := ziti.NewConfigFromFile("{{ bind_identity }}.json")
+	if err != nil {
+		panic(err)
+	}
+	ctx, err := ziti.NewContext(cfg)
+	if err != nil {
+		panic(err)
+	}
+
+	// OS の net.Listen ではなく、Ziti オーバーレイ上でのみ着信を受け付ける
+	listener, err := ctx.Listen("{{ service_name }}")
+	if err != nil {
+		panic(err)
+	}
+	defer listener.Close()
+
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			continue
+		}
+		go handle(conn)
+	}
+}
+
+func handle(conn net.Conn) {
+	defer conn.Close()
+	// 既存のアプリケーションロジックをここに接続する
+}
+```
+
+SDK 化した新しいバイナリをサーバホストへデプロイし、旧来の `net.Listen("tcp", ":{{ host_port }}")` によるプレーンリスナーは完全に停止・削除します。
+
+```bash
+sudo systemctl stop {{ service_name }}-plaintext.service 2>/dev/null || true
+sudo systemctl disable {{ service_name }}-plaintext.service 2>/dev/null || true
+```
+
+> SDK 版アプリを起動し、下記「動作確認」でオーバーレイ経由の到達性を確認してから、旧プレーンリスナーのサービスを止めてください。順序を逆にすると、確認手段を失った状態でサービス断だけが発生します。
+
+## 動作確認
+
+サーバホストで、`{{ host_port }}` が OS レベルの `LISTEN` ソケットとして一切現れないことを確認します。
+
+```bash
+ss -tlnp | grep ':{{ host_port }} '   # 何も出力されないこと（SDK/トンネラー経由以外に待受が無い）
+```
+
+クライアントホストから、オーバーレイ経由（`{{ service_name }}.ziti` 宛のインターセプト）でのみ接続が成立することを確認します。
+
+```bash
+curl --max-time 3 http://{{ service_name }}.ziti:{{ host_port }}/   # 成功すること（トンネラー/SDK 経由）
+curl --max-time 3 http://{{ host_address }}:{{ host_port }}/        # 失敗すること（オーバーレイ外からは到達不可）
+```
+
+Controller 側からも、意図した Bind/Dial 関係だけが成立していることを確認します。
+
+```bash
+ziti edge list identities 'name="{{ bind_identity }}"' -j
+ziti edge list identities 'name="{{ dial_identity }}"' -j
+ziti edge list service-policies 'service.name="{{ service_name }}"'
+```
+
+## 注意事項
+
+- SDK 組み込みは既存アプリのコード改修とビルドパイプラインへの依存追加を伴うため開発コストが高い。まず `ziti-edge-tunnel` のプロキシ/tproxy モードで構成（config・service・Bind/Dial ポリシー）の正しさを検証し、問題がないことを確認してから SDK 化するという段階採用を推奨する。
+- サーバアプリの待ち受けを SDK 化してオーバーレイ専用に切り替える前に、必ずトンネラー経由（または並行稼働させた SDK 版）でオーバーレイ経由の到達性を確認すること。確認前に旧来のプレーンリスナーを停止・削除すると、切り戻し手段を失ったままサービス断になる。
+- Bind/Dial のアイデンティティ登録用 JWT はワンタイムトークンであり、平文で長期保存・共有しないこと。登録完了後は速やかに削除する。
+- `ss -tlnp` に該当ポートが一切現れないことは、OS レベルの直接到達経路が無いことの確認であり、Controller/Edge Router 自体の可用性やアイデンティティの誤ロールアサインまでは保証しない。Bind/Dial ポリシーのロール条件は定期的に棚卸しする。

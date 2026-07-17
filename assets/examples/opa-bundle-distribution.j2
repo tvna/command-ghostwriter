@@ -1,0 +1,170 @@
+# OPA Bundleによるポリシー配布運用 — {{ bundle_name }}
+
+bundleサービスで署名付きポリシー「{{ bundle_name }}」を集中配布し、全{{ opa_node_count }}台のOPAへ一貫して適用する運用手順を実施します。
+
+## 目的
+
+bundleサーバから署名付きポリシーbundleを配布し、各OPAが署名検証を通過したbundleのみを取り込んで一貫したポリシーを適用できる状態を作れるようになることを目指します。あわせて、canaryノードでの反映確認を経てから全台展開する安全な運用手順を身につけます。
+
+## 用語解説
+
+- **bundle**: Rego ポリシーとデータをまとめて配布可能にしたtar.gz(または OCI イメージ)アーカイブ
+- **bundle service**: bundleを配信するHTTPまたはOCIレジストリサービス。OPAはこれをpollingして更新を取得する
+- **polling(min_delay_seconds/max_delay_seconds)**: OPAがbundle serviceへ更新有無を問い合わせる間隔。ジッタで負荷を分散する
+- **bundle signing(署名検証)**: bundle作成時に秘密鍵で署名し、OPA側は公開鍵(keyid)で検証することで、配布経路上の改ざんを検知・拒否する仕組み
+- **decision log**: OPAが下した認可判断(input/result)の記録。リモートのdecision log serviceへ送信して監査に用いる
+- **status API**: OPAの `/v1/status` エンドポイント。直近のbundle活性化結果(成功/失敗、リビジョン)を返す
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| bundle名 | {{ bundle_name }} |
+| bundleサービスURL | {{ bundle_service_url }} |
+| bundleリソースパス | {{ bundle_resource_path }} |
+| polling間隔 | {{ polling_interval_min }}〜{{ polling_interval_max }} 秒 |
+| 署名keyid | {{ signing_keyid }} |
+| 署名公開鍵パス | {{ signing_public_key_path }} |
+| decision logエンドポイント | {{ decision_log_endpoint }} |
+| OPAノード数 | {{ opa_node_count }} |
+| canaryノード | {{ canary_node }} |
+| OCIレジストリ参照 | {{ oci_registry_ref }} |
+
+## 手順
+
+### 1. bundleを作成し署名する
+
+ポリシー配布用のbundleを作成し、秘密鍵で署名します。署名がないbundleはOPA側で拒否される設定にするため、必ずこの手順を経由します。
+
+```bash
+opa build \
+  -b policies/{{ bundle_name }}/ \
+  -o {{ bundle_name }}-bundle.tar.gz \
+  --signing-key {{ signing_private_key_path }} \
+  --signing-alg RS256 \
+  --claims-file policies/{{ bundle_name }}/claims.json
+```
+
+作成直後にローカルで署名検証を行い、壊れた署名のまま配布しないことを確認します。
+
+```bash
+opa run --server \
+  --verification-key {{ signing_public_key_path }} \
+  --set "bundles.{{ bundle_name }}.resource=/local/{{ bundle_name }}-bundle.tar.gz" \
+  --addr localhost:18181 &
+sleep 2
+curl -s http://localhost:18181/health?bundles=true
+kill %1
+```
+
+### 2. bundleサーバへ配布する(HTTP/OCI)
+
+HTTP配布の場合はbundleサービスの資源パスへ設置します。
+
+```bash
+curl -sS -X PUT \
+  "{{ bundle_service_url }}/{{ bundle_resource_path }}" \
+  --data-binary @{{ bundle_name }}-bundle.tar.gz \
+  -H "Content-Type: application/gzip"
+```
+
+OCIレジストリ配布の場合はOCIアーティファクトとしてpushします。
+
+```bash
+opa build \
+  -b policies/{{ bundle_name }}/ \
+  --signing-key {{ signing_private_key_path }} \
+  --signing-alg RS256 \
+  -o {{ bundle_name }}-bundle.tar.gz
+
+oras push {{ oci_registry_ref }} \
+  {{ bundle_name }}-bundle.tar.gz:application/vnd.oci.image.layer.v1.tar+gzip
+```
+
+### 3. OPA設定(services/bundles/keys/decision_logs)をcanaryノードへ適用する
+
+まず{{ canary_node }} 1台にのみ、以下の設定を反映します。全台一斉反映はしません。
+
+```yaml
+services:
+  authz_bundle_service:
+    url: {{ bundle_service_url }}
+    credentials:
+      bearer:
+        token: "${BUNDLE_SERVICE_TOKEN}"
+
+bundles:
+  {{ bundle_name }}:
+    service: authz_bundle_service
+    resource: {{ bundle_resource_path }}
+    polling:
+      min_delay_seconds: {{ polling_interval_min }}
+      max_delay_seconds: {{ polling_interval_max }}
+    signing:
+      keyid: {{ signing_keyid }}
+      scope: write
+
+keys:
+  {{ signing_keyid }}:
+    algorithm: RS256
+    key: {{ signing_public_key_path }}
+
+decision_logs:
+  service: authz_bundle_service
+  reporting:
+    min_delay_seconds: 5
+    max_delay_seconds: 10
+
+status:
+  service: authz_bundle_service
+```
+
+```bash
+scp opa-config.yaml {{ canary_node }}:/etc/opa/config.yaml
+ssh {{ canary_node }} "systemctl restart opa && sleep {{ polling_interval_max }}"
+```
+
+### 4. canaryノードでbundle反映と署名検証を確認する
+
+```bash
+ssh {{ canary_node }} "curl -s http://localhost:8181/v1/status | jq '.bundles[\"{{ bundle_name }}\"]'"
+```
+
+`active_revision` が新しいリビジョンになっており、`code` フィールドにエラーが出ていないことを確認します。エラーコード `bundle_signature_verification_failed` が出ていないことも確認します。
+
+### 5. 全OPAノードへ展開する
+
+canaryでの反映・署名検証・動作に問題がないことを確認した後にのみ、残り{{ opa_node_count }}台へ同一設定を展開します。
+
+```bash
+for host in $(cat opa-fleet-hosts.txt); do
+  scp opa-config.yaml "${host}:/etc/opa/config.yaml"
+  ssh "${host}" "systemctl restart opa"
+done
+```
+
+## 動作確認
+
+1. 全{{ opa_node_count }}台のOPAで `/v1/status` の `active_revision` が同一の最新リビジョンになっていること(ポリシー一貫性)
+2. 各ノードのstatusに署名検証エラー(`bundle_signature_verification_failed` 等)が出ていないこと
+3. 署名を外した(または改ざんした)bundleを一時的にbundleサービスへ配置し、OPAが activation を拒否して既存の有効なpolicyを維持することを確認する(未署名bundleの拒否確認)
+
+```bash
+cp {{ bundle_name }}-bundle.tar.gz {{ bundle_name }}-unsigned.tar.gz
+opa build -b policies/{{ bundle_name }}/ -o {{ bundle_name }}-unsigned.tar.gz
+curl -sS -X PUT \
+  "{{ bundle_service_url }}/{{ bundle_resource_path }}" \
+  --data-binary @{{ bundle_name }}-unsigned.tar.gz
+ssh {{ canary_node }} "sleep {{ polling_interval_max }} && curl -s http://localhost:8181/v1/status | jq '.bundles[\"{{ bundle_name }}\"].code'"
+```
+
+4. {{ decision_log_endpoint }} 側でdecision logの受信が継続していること(タイムスタンプが直近であること)
+
+## 注意事項
+
+- 署名鍵({{ signing_private_key_path }})はbundle作成を行うCI/CDまたはビルドホストのみに配置し、OPA稼働ノードには公開鍵({{ signing_public_key_path }})のみを配布する。秘密鍵をノードへコピーしない。
+- bundleサーバ({{ bundle_service_url }})が単一障害点にならないよう、可用性(冗長化・ヘルスチェック)を事前に確認する。bundleサーバ停止時もOPAは直近取得済みのbundleで動作を継続するが、更新は止まる。
+- polling間隔({{ polling_interval_min }}〜{{ polling_interval_max }}秒)を広げるほど反映遅延が増える。緊急のポリシー修正時は遅延を許容できるか事前に確認する。
+- decision logは認可判断の入出力を含み機微な情報(ユーザー識別子・リクエスト内容)を含み得るため、{{ decision_log_endpoint }} への送信経路はTLSで保護し、保管先のアクセス制御・保持期間を別途定める。
+- 未署名または署名検証に失敗したbundleは必ず拒否する設定(`signing.keyid` 指定)を維持し、検証をスキップする設定変更を行わない。
+- 新しいbundle設定・署名鍵の切り替えは、必ず{{ canary_node }} 1台での反映確認(動作確認1〜3)を経てから全{{ opa_node_count }}台へ展開する。canary確認前に旧設定・旧鍵を無効化しない。

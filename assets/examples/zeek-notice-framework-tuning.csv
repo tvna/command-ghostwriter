@@ -1,0 +1,6 @@
+notice_type,current_action,new_action,suppress_interval,reason
+SSL::Invalid_Server_Cert,ACTION_ALARM,ACTION_EMAIL,3600,自己署名証明書の内部サーバが多く警報が飽和するためメール通知に格下げ
+Scan::Address_Scan,ACTION_LOG,ACTION_ALARM,900,外部からのアドレススキャンは初動対応が必要なため警報に格上げ
+SSH::Password_Guessing,ACTION_ALARM,ACTION_ALARM,1800,重要度は変えず抑制間隔のみ延長して同一送信元からの重複警報を削減
+HTTP::SQL_Injection_Attacker,ACTION_LOG,ACTION_EMAIL,600,Web侵害の予兆のため即時メール通知に変更
+Weird::Activity,ACTION_ALARM,ACTION_LOG,300,誤検知が多いプロトコル異常のため記録のみに格下げ

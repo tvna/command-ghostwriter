@@ -1,0 +1,109 @@
+# Zeek ssl.log/x509.logによる証明書監視
+
+Zeekが出力する`ssl.log`と`x509.log`から`zeek-cut`でフィールドを抽出し、JA3・SNI・自己署名証明書・期限切れ間近の証明書・古いTLSバージョンの残存を洗い出す手順です。
+
+## 目的
+
+`{{ log_dir }}`配下のZeekログを定期的に点検し、TLS通信の異常(検証失敗・自己署名・期限切れ間近・非推奨バージョン)を早期に発見できるようになることを目指します。
+
+## 用語解説
+
+- **ssl.log**: Zeekが記録するTLS/SSLハンドシェイクのログ。SNI(`server_name`)・JA3フィンガープリント(`ja3`)・証明書検証結果(`validation_status`)・TLSバージョン(`version`)などを含む
+- **x509.log**: ハンドシェイク中に交換されたX.509証明書の詳細ログ。`certificate.subject`・`certificate.issuer`・有効期限(`certificate.not_valid_after`)などを含む
+- **JA3**: TLS ClientHelloの構成(暗号スイート・拡張の順序など)から生成されるフィンガープリント。クライアントの実装や挙動を識別する手掛かりになる
+- **zeek-cut**: Zeekのタブ区切りログから指定フィールドだけを抽出するコマンドラインツール
+- **validation_status**: OpenSSLによる証明書チェーン検証の結果。`ok`以外は検証エラー(自己署名・期限切れ・CN不一致など)を意味する
+- **自己署名証明書**: 発行者(issuer)と主体者(subject)が同一の証明書。正規のCAチェーンを持たないため内部システム以外での使用は注意が必要
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| ログ格納ディレクトリ | `{{ log_dir }}` |
+| 監視対象SNIパターン | {% for p in watch_sni_patterns %}`{{ p }}`{% if not loop.last %}, {% endif %}{% endfor %} |
+| 自己署名証明書を検知時にアラートするか | `{{ alert_on_self_signed }}` |
+| 証明書期限切れ警告のしきい値(日数) | `{{ cert_expiry_days }}` |
+
+## 手順
+
+### 1. ssl.logから検証ステータス・JA3・SNI・バージョンを抽出する
+
+```bash
+cd {{ log_dir }}
+zeek-cut ts uid server_name ja3 validation_status version < ssl.log > /tmp/ssl_summary.tsv
+column -t -s $'\t' /tmp/ssl_summary.tsv | head -n 20
+```
+
+抽出した`/tmp/ssl_summary.tsv`は以降の手順で繰り返し参照します。
+
+### 2. 証明書検証に失敗した通信を洗い出す
+
+```bash
+awk -F'\t' '$5 != "ok" { print }' /tmp/ssl_summary.tsv
+```
+
+5列目(`validation_status`)が`ok`以外の行が、検証エラーの発生した通信です。件数が多い場合は4列目(`ja3`)でグルーピングして偏りを確認します。
+
+```bash
+awk -F'\t' '$5 != "ok" { print $4 }' /tmp/ssl_summary.tsv | sort | uniq -c | sort -rn | head
+```
+
+### 3. 監視対象SNIパターンに一致する通信を抽出する
+
+```bash
+{% for p in watch_sni_patterns %}
+grep -E "{{ p }}" /tmp/ssl_summary.tsv
+{% endfor %}
+```
+
+一致した行のうち`validation_status`が`ok`以外のものは、内部向けサービスへの疑わしいアクセスとして優先的に確認します。
+
+### 4. x509.logからsubject/issuer/有効期限を抽出し自己署名証明書を洗い出す
+
+```bash
+zeek-cut ts uid certificate.subject certificate.issuer certificate.not_valid_after < x509.log > /tmp/x509_summary.tsv
+awk -F'\t' '$3 == $4 { print }' /tmp/x509_summary.tsv
+```
+
+3列目(`certificate.subject`)と4列目(`certificate.issuer`)が一致する行が自己署名証明書です。`alert_on_self_signed`が`{{ alert_on_self_signed }}`の場合、この結果を監視アラートの対象にします。
+
+### 5. 有効期限が近い証明書を洗い出す
+
+```bash
+threshold_epoch=$(date -d "+{{ cert_expiry_days }} days" +%s)
+awk -F'\t' -v th="$threshold_epoch" '$5 < th { print }' /tmp/x509_summary.tsv
+```
+
+5列目(`certificate.not_valid_after`)がZeekのepoch秒表記のため、しきい値エポック秒と直接比較できます。`{{ cert_expiry_days }}`日以内に期限切れとなる証明書が対象です。
+
+### 6. TLSバージョン別に集計し古いバージョンの残存を可視化する
+
+```bash
+zeek-cut version < ssl.log | sort | uniq -c | sort -rn
+```
+
+`TLSv10`・`TLSv11`が含まれている場合は、当該通信のuidを`awk -F'\t' '$6 == "TLSv10" || $6 == "TLSv11" { print $2 }' /tmp/ssl_summary.tsv`で特定し、対象ホストへの是正対応(TLS1.2以上への引き上げ)を計画します。
+
+## 動作確認
+
+1. 自己署名証明書を提供するテストサーバへアクセスします。
+
+```bash
+openssl s_client -connect test-selfsigned.internal:443 -servername test-selfsigned.internal </dev/null
+```
+
+2. Zeekのログがローテーションまたはフラッシュされた後、対象通信が`ssl.log`と`x509.log`の両方に記録されていることを確認します。
+
+```bash
+zeek-cut server_name validation_status < {{ log_dir }}/ssl.log | grep test-selfsigned.internal
+zeek-cut certificate.subject certificate.issuer < {{ log_dir }}/x509.log | awk -F'\t' '$1 == $2'
+```
+
+3. 上記アクセスの`validation_status`が`ok`以外(自己署名エラー)として記録され、手順4の自己署名抽出結果にも同一のuidが現れることを確認します。
+
+## 注意事項
+
+- SNIやJA3フィンガープリントは正規サービス側でも構成変更やライブラリ更新によって多様に変化するため、単独のSNI一致・JA3一致だけで悪性判定を行わない。平常時のベースライン(通常観測されるJA3・SNIの組み合わせ)からの差分があるかどうかで評価すること。
+- 本手順はログの参照のみで、ファイアウォールルールやアクセス制御を変更しない。検証失敗通信の遮断など能動的な対応を行う場合は、既存の許可経路を維持したまま新しい制御を並行稼働させ、正規通信が誤って遮断されないことを確認してから旧経路を外すこと。
+- `certificate.not_valid_after`はZeekのバージョンやログフォーマット(JSON/TSV)によってフィールド名や表現形式が異なる場合があるため、実際の環境の`zeek-cut -h`や`ssl.log`のヘッダ(`#fields`行)で列構成を事前に確認してから本手順のコマンドを適用すること。
+- ログのローテーション設定によっては`ssl.log`/`x509.log`が直近の通信を含んでいない場合があるため、動作確認の際はZeekのログフラッシュ間隔(既定では1時間ごとのローテーション)を考慮して十分な待機時間を置くこと。

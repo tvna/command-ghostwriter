@@ -1,0 +1,5 @@
+service,config_type,intercept_address,identity_roles,service_roles,policy_type
+crm-api,host.v1+intercept.v1,crm-api.ziti:8443,@crm-web-frontend,#crm-services,Dial
+crm-api,host.v1+intercept.v1,crm-api.ziti:8443,@crm-api-backend-01,#crm-services,Bind
+file-backup,host.v1+intercept.v1,file-backup.ziti:2049,#backup-operators,#backup-services,Dial
+file-backup,host.v1+intercept.v1,file-backup.ziti:2049,@file-backup-host-01,#backup-services,Bind

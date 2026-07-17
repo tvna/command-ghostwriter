@@ -1,0 +1,156 @@
+# Lynisによるコンテナ・イメージの監査手順 — {{ container_name }}
+
+ベースイメージ **{{ base_image }}** から起動したコンテナ **{{ container_name }}** の内部で Lynis 監査を実行し、コンテナ特有のハードニング不備（不要パッケージ・root実行・SUID/SGIDバイナリなど）を洗い出します。ホスト前提のテスト（ブート・カーネル関連）はコンテナ向けプロファイルで除外し、CI へ監査を組み込むところまでを一巡します。
+
+## 目的
+
+コンテナ内部で `lynis audit system` を実行できる状態を整え、コンテナでは意味を持たないテストを `skip-test` で除外したうえで、コンテナ特有の観点（不要パッケージ・root実行・SUIDバイナリ）に基づく警告を抽出できるようになることを目指します。あわせて、イメージビルド時に監査を組み込み CI のゲートとする方法を確認します。
+
+## 用語解説
+
+- **lynis audit system**: Lynis がホストまたはコンテナ内部を走査し、ハードニング項目ごとの合否と警告・提案を出力するメインコマンド
+- **profile (`.prf`)**: 監査対象・除外テスト・しきい値などを定義する設定ファイル。`--profile` オプションで指定する
+- **skip-test**: プロファイル内で `skip-test=<TEST-ID>` の形式で記述し、該当テストIDの実行を除外する指定
+- **ブート・カーネル関連テスト (BOOT-5122, KRNL-5677 など)**: GRUB・カーネルモジュール・initramfs のようにホストのブート過程を前提とするテスト。コンテナには init/ブートローダーが存在しないため実行しても無意味であり、除外対象になる
+- **hardening index**: Lynis が算出する 0〜100 のスコアで、実施済み対策の割合を示す。イメージ間の比較や CI のゲート判定に使う
+- **不要パッケージ (PKGS 系)**: デバッグツールやコンパイラなど、稼働に不要でありながら攻撃面を広げるパッケージ群。イメージ最小化の観点で重要
+- **root実行 (CONT-8104 系)**: コンテナのメインプロセスが UID 0（root）で動作している状態。権限昇格やコンテナエスケープの被害を拡大させる要因になる
+- **SUID/SGIDバイナリ (FILE-6362)**: 実行者の権限に関わらず所有者/所有グループの権限で実行されるビットが立ったファイル。不要な SUID は権限昇格の足がかりになるため洗い出しが必要
+- **`--dockerfile` オプション**: Lynis がイメージビルド時（Dockerfile 経由）にも監査を組み込めるようにする実行モード
+
+## シナリオ設定
+
+| 項目 | 値 |
+|---|---|
+| 監査対象 (target) | {{ target }} |
+| コンテナ名 | {{ container_name }} |
+| ベースイメージ | {{ base_image }} |
+| プロファイルパス | {{ profile_path }} |
+| レポート出力先 | {{ report_path }} |
+| ログ出力先 | {{ log_path }} |
+| CI組み込み | {{ ci_integration }} |
+| CIゲートの最低hardening index | {{ ci_hardening_index_min }} |
+| 除外テストID数 | {{ skip_tests | length }} 件 |
+
+## 1. コンテナランタイムと稼働環境を検出する
+
+まずホスト側で docker/podman のどちらが使われているかを確認し、対象コンテナが起動していることを確かめます。
+
+```bash
+command -v docker && docker version --format '{{ '{{' }}.Server.Version{{ '}}' }}' || true
+command -v podman && podman version || true
+
+docker ps --filter "name={{ container_name }}" --format '{{ '{{' }}.Names{{ '}}' }}\t{{ '{{' }}.Image{{ '}}' }}\t{{ '{{' }}.Status{{ '}}' }}'
+```
+
+コンテナ内部からも、自分がコンテナ上で動作していることを確認しておきます（`/.dockerenv` の有無、cgroup の内容）。
+
+```bash
+docker exec {{ container_name }} sh -c 'test -f /.dockerenv && echo "docker container detected"'
+docker exec {{ container_name }} sh -c 'cat /proc/1/cgroup | head -n 5'
+```
+
+## 2. コンテナ内に Lynis を導入する
+
+対象コンテナ内で Lynis をインストールします（Debian/Ubuntu系ベースイメージの例）。
+
+```bash
+docker exec {{ container_name }} sh -c 'apt-get update && apt-get install -y lynis'
+docker exec {{ container_name }} lynis show version
+```
+
+## 3. コンテナ向けプロファイルを作成する
+
+ホストのブート・カーネル前提のテストを除外したプロファイルを配置します。プロファイルの `skip-test` にテストIDを1行ずつ記述します。
+
+```bash
+docker exec {{ container_name }} sh -c 'mkdir -p "$(dirname {{ profile_path }})"'
+docker exec -i {{ container_name }} sh -c "cat > {{ profile_path }}" <<'EOF'
+# コンテナ内では意味を持たない項目を除外する
+{% for test_id in skip_tests %}
+skip-test={{ test_id }}
+{% endfor %}
+EOF
+
+docker exec {{ container_name }} cat {{ profile_path }}
+```
+
+## 4. コンテナ内で監査を実行する
+
+作成したプロファイルを指定して `lynis audit system` を実行します。対話プロンプトを避けるため `--quick`、レポートを永続化するため `--no-colors` と出力先を指定します。
+
+```bash
+docker exec {{ container_name }} lynis audit system \
+  --profile {{ profile_path }} \
+  --quick \
+  --no-colors \
+  --logfile {{ log_path }} \
+  --report-file {{ report_path }}
+```
+
+## 5. コンテナ特有の警告を抽出する
+
+不要パッケージ・root実行・SUID/SGIDバイナリに関する警告を、レポートおよびログから絞り込みます。
+
+```bash
+# root権限でのプロセス実行に関する警告
+docker exec {{ container_name }} grep -E '^warning\[\]=CONT-' {{ report_path }}
+
+# SUID/SGIDバイナリに関する警告
+docker exec {{ container_name }} grep -E '^warning\[\]=FILE-6362' {{ report_path }}
+
+# 不要パッケージ・稼働不要ツールに関する提案
+docker exec {{ container_name }} grep -E '^suggestion\[\]=PKGS-' {{ report_path }}
+
+# hardening index の取得（イメージ間比較に使う）
+docker exec {{ container_name }} grep '^hardening_index=' {{ report_path }}
+```
+
+## 6. イメージビルド時に監査を組み込む
+
+Dockerfile のビルドステージに Lynis 監査を差し込み、hardening index がしきい値未満ならビルドを失敗させます。まずビルド専用の Dockerfile 断片を用意します。
+
+```dockerfile
+FROM {{ base_image }} AS audit
+COPY {{ profile_path }} /tmp/container.prf
+RUN apt-get update && apt-get install -y lynis \
+ && lynis audit system --profile /tmp/container.prf --quick --no-colors \
+    --report-file /tmp/lynis-report.dat \
+ && HARDENING_INDEX=$(grep '^hardening_index=' /tmp/lynis-report.dat | cut -d= -f2) \
+ && echo "hardening_index=${HARDENING_INDEX}" \
+ && test "${HARDENING_INDEX}" -ge {{ ci_hardening_index_min }}
+```
+
+CI パイプライン側では、このステージのビルドを実行し、失敗（非ゼロ終了）をそのままゲートとして扱います。
+
+```bash
+docker build --target audit -t {{ container_name }}:audit-stage .
+echo "exit code: $?"
+```
+
+## 7. イメージ間で hardening index を比較する
+
+新旧イメージそれぞれで監査を実行し、レポートを保管したうえで hardening index を突き合わせます。
+
+```bash
+mkdir -p ./lynis-reports
+docker exec {{ container_name }} cat {{ report_path }} > ./lynis-reports/{{ container_name }}-$(date +%Y%m%d).dat
+
+grep '^hardening_index=' ./lynis-reports/*.dat
+```
+
+## 動作確認
+
+- 手順1でコンテナ内 `/.dockerenv` の検出、または `/proc/1/cgroup` にコンテナ実行環境の痕跡が確認できること
+- 手順4の `lynis audit system` がコンテナ内でエラー終了せず完了し、{{ report_path }} と {{ log_path }} が生成されていること
+- 手順5で `CONT-` (root実行) および `FILE-6362` (SUID/SGID) の警告有無が抽出でき、`PKGS-` の提案からベースイメージ {{ base_image }} 内の不要パッケージが把握できること
+- 手順6で hardening index がしきい値 {{ ci_hardening_index_min }} を下回るビルドが実際に非ゼロ終了で失敗すること（意図的にしきい値を高く設定した試行で確認）
+- 手順7で複数回分のレポートが ./lynis-reports に保管され、hardening_index の値をイメージ間・実行間で比較できること
+
+## 注意事項
+
+- {{ skip_tests | length }} 件の `skip-test` はブート・カーネル・initramfs などコンテナには存在しない前提のテスト向けであり、CONT-系・FILE-系・PKGS-系などコンテナ本来の監査対象までは除外しないこと。除外リストを広げすぎると不要パッケージやSUIDの見落としにつながる。
+- イメージ最小化（不要パッケージの削除）を進めた後は、監査で使った Lynis 自体も最終イメージには含めない（マルチステージビルドの `audit` ステージを最終イメージにコピーしない）ことを確認する。
+- CI へのゲート組み込み（手順6）は、まず既存のビルドパイプラインと並行してリポートのみ収集する期間を設け、hardening index の実測分布を見てからしきい値 {{ ci_hardening_index_min }} を確定し、その後にビルド失敗（ゲート化）を有効にする。いきなり本番パイプラインをブロックしない。
+- 監査結果（{{ report_path }} / {{ log_path }}）はコンテナ破棄で消えるため、手順7のように毎回ホスト側や成果物ストレージへコピーして保管し、後から比較・監査証跡として参照できるようにする。
+- 本手順はコンテナ内部からの内部監査であり、イメージのレイヤー構成やビルド履歴に起因する脆弱性（例: 秘密情報の埋め込み）までは検出できない点に留意し、必要に応じてイメージスキャナ等の別ツールと併用する。

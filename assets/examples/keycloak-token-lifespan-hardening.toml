@@ -1,0 +1,24 @@
+[realm]
+name = "corp-partners"
+
+[kcadm]
+server_url = "https://iam.example.internal"
+admin_realm = "master"
+admin_user = "kcadm-svc"
+test_realm = "corp-partners-test"
+
+[lifespan]
+change_id = "CHG-2026-0717-token-lifespan"
+access_token_seconds = 300
+sso_idle_seconds = 1800
+sso_max_seconds = 36000
+revoke_refresh_token = true
+
+[rollback]
+access_token_seconds = 900
+sso_idle_seconds = 3600
+sso_max_seconds = 43200
+revoke_refresh_token = false
+
+[test_user]
+username = "svc-token-check"

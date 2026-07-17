@@ -1,0 +1,17 @@
+decision_log_target: "console"
+mask_fields:
+  - "/input/user/id"
+  - "/input/user/email"
+  - "/input/resource/attributes/ssn"
+ship_to: "loki:3100"
+alert_rules:
+  - name: "deny_spike"
+    result_value: "false"
+    path_filter: "-"
+    threshold: "50"
+    window: "5m"
+  - name: "unexpected_allow"
+    result_value: "true"
+    path_filter: "/admin.*"
+    threshold: "5"
+    window: "5m"

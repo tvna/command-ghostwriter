@@ -1,0 +1,125 @@
+# Keycloakブルートフォース保護の設定
+
+realm `{{ kc.realm }}` に brute force detection を有効化し、ログイン失敗の累進的な待機とロックを構成します。**恒久ロック(permanentLockout)は正規ユーザーの締め出しリスクがあるため、まず一時ロックで運用を確認してから検討します。**
+
+## 目的
+
+realmのbrute force detectionを`kcadm.sh`で構成し、連続したログイン失敗に対して累進的な待機とロックを課せるようになることを目指します。恒久ロックと一時ロックの違いを理解し、正規ユーザーを締め出さない運用判断ができるようになることもゴールです。
+
+## 用語解説
+
+- **brute force detection**: 短時間の連続ログイン失敗を検知し、待機やロックを課すrealm単位の保護機能
+- **failureFactor**: ロック(待機)を課すまでに許容する連続ログイン失敗回数の基準値
+- **waitIncrementSeconds**: 待機ロック(temporary lockout)の増分秒数。失敗が重なるたびにこの値ずつ待機時間が伸びる(累進的待機)
+- **maxFailureWaitSeconds**: 待機時間の上限秒数。累進的待機が際限なく伸びないようにする天井値
+- **maxDeltaTimeSeconds**: 失敗回数の集計をリセットするまでの秒数(この期間中に失敗が発生しなければカウンタがクリアされる)
+- **permanentLockout**: trueにすると、一時ロックの上限を超えた失敗で恒久的にアカウントを無効化する設定。falseなら常に一時ロックに留まる
+- **ユーザー列挙対策**: 存在しないユーザー名でのログイン試行と実在ユーザーの失敗ログインを外部から区別できないようにする対策。brute force detectionのエラーメッセージ・応答時間の均一化と密接に関わる
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| Keycloakサーバー | {{ kc.server_url }} |
+| 対象realm | {{ kc.realm }} |
+| admin-cli接続ユーザー | {{ kc.admin_user }} |
+| bruteForceProtected | {{ 'true' if security.brute_force_enabled else 'false' }} |
+| failureFactor | {{ security.failure_factor }} |
+| waitIncrementSeconds | {{ security.wait_increment_seconds }} |
+| maxFailureWaitSeconds | {{ security.max_failure_wait_seconds }} |
+| maxDeltaTimeSeconds | {{ security.max_delta_time_seconds }} |
+| permanentLockout | {{ 'true' if security.permanent_lockout else 'false' }} |
+| 検証用ユーザー | {{ test.username }} |
+| 検証用クライアント | {{ test.client_id }} |
+| 緊急時復旧アカウント | {{ admin_account.username }} |
+
+## 1. admin-cliでログインし、現在のrealm設定を確認する
+
+```bash
+/opt/keycloak/bin/kcadm.sh config credentials \
+  --server {{ kc.server_url }} \
+  --realm master \
+  --user {{ kc.admin_user }}
+
+/opt/keycloak/bin/kcadm.sh get realms/{{ kc.realm }} \
+  --fields bruteForceProtected,failureFactor,waitIncrementSeconds,maxFailureWaitSeconds,maxDeltaTimeSeconds,permanentLockout
+```
+
+現状値を控えておき、変更後に差分を確認できるようにします。
+
+## 2. brute force protectionを有効化する
+
+```bash
+/opt/keycloak/bin/kcadm.sh update realms/{{ kc.realm }} \
+  -s bruteForceProtected={{ 'true' if security.brute_force_enabled else 'false' }} \
+  -s failureFactor={{ security.failure_factor }} \
+  -s waitIncrementSeconds={{ security.wait_increment_seconds }} \
+  -s maxFailureWaitSeconds={{ security.max_failure_wait_seconds }} \
+  -s maxDeltaTimeSeconds={{ security.max_delta_time_seconds }} \
+  -s quickLoginCheckMilliSeconds={{ security.quick_login_check_milli_seconds }} \
+  -s minimumQuickLoginWaitSeconds={{ security.minimum_quick_login_wait_seconds }} \
+  -s permanentLockout={{ 'true' if security.permanent_lockout else 'false' }}
+```
+
+**まずは `permanentLockout=false`(一時ロックのみ)で反映し、累進的待機の動作を確認してから恒久ロックの要否を検討します。**恒久ロックを有効化する前に、緊急時復旧アカウント（{{ admin_account.username }}）が brute force detection の対象から実務上どう扱われるか(専用の緩い閾値のrealm分離、または物理的なコンソールアクセス経路の確保)を運用として決めておきます。
+
+## 3. 設定が反映されたことを確認する
+
+```bash
+/opt/keycloak/bin/kcadm.sh get realms/{{ kc.realm }} \
+  --fields bruteForceProtected,failureFactor,waitIncrementSeconds,maxFailureWaitSeconds,maxDeltaTimeSeconds,permanentLockout
+```
+
+Step 1で控えた値と比較し、意図した設定に変わっていることを確認します。
+
+## 動作確認
+
+1. 検証用ユーザー `{{ test.username }}` に対して、意図的に誤ったパスワードで `{{ security.failure_factor }}` 回連続してトークン要求を送り、累進的待機とロックの発生を観察します。
+
+```bash
+for i in $(seq 1 {{ security.failure_factor }}); do
+  curl -s -o /dev/null -w "%{http_code}\n" -X POST \
+    "{{ kc.server_url }}/realms/{{ kc.realm }}/protocol/openid-connect/token" \
+    -d "client_id={{ test.client_id }}" \
+    -d "grant_type=password" \
+    -d "username={{ test.username }}" \
+    -d "password=wrong-password-$i"
+done
+```
+
+2. attack-detection APIで対象ユーザーのロック状態を確認します。`numFailures` が閾値に達し `disabled=true`(一時ロック中)になっていることを確認します。
+
+```bash
+/opt/keycloak/bin/kcadm.sh get attack-detection/brute-force/users/{{ test.username }} -r {{ kc.realm }}
+```
+
+3. ロック中に正しいパスワードで再度ログインを試み、`waitIncrementSeconds` に応じた待機時間が経過するまで拒否され続けること(累進的待機)を確認します。
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" -X POST \
+  "{{ kc.server_url }}/realms/{{ kc.realm }}/protocol/openid-connect/token" \
+  -d "client_id={{ test.client_id }}" \
+  -d "grant_type=password" \
+  -d "username={{ test.username }}" \
+  -d "password=<正しいパスワード>"
+```
+
+4. `maxDeltaTimeSeconds` 経過後(または待機時間経過後)に正しいパスワードでログインが成功し、正規ユーザーが自然に回復することを確認します。
+
+```bash
+/opt/keycloak/bin/kcadm.sh get attack-detection/brute-force/users/{{ test.username }} -r {{ kc.realm }}
+```
+
+`numFailures` が0にリセットされ、`disabled=false`であることを確認します。回復を待てない検証環境では、次のコマンドで手動解除して確認を進めます。
+
+```bash
+/opt/keycloak/bin/kcadm.sh delete attack-detection/brute-force/users/{{ test.username }} -r {{ kc.realm }}
+```
+
+## 注意事項
+
+- **恒久ロック(permanentLockout=true)は正規ユーザーの締め出しリスクを伴う。** まず一時ロックのみで運用し、累進的待機とロック解除が期待通り動くことを実環境相当の検証(上記「動作確認」)で確かめてから、恒久ロックへの切り替えを判断する。切り替え後も新しい設定での正規ログイン回復を再度確認するまでは、古い(一時ロックのみの)設定に戻せる状態を保つ。
+- 管理者アカウント・緊急時復旧アカウント（{{ admin_account.username }}）は brute force detection の対象から誤って締め出されないよう、別経路(コンソール直接アクセス、または別realm)での復旧手段を事前に用意しておく。
+- IPを分散させた分散攻撃(クレデンシャルスタッフィング等)には、アカウント単位のbrute force detectionだけでは効果が限定的。WAFやリバースプロキシ側のレート制限・IP評価と併用する。
+- ロックされたユーザーの解除は `kcadm.sh delete attack-detection/brute-force/users/<username>` で行える。解除操作はヘルプデスク等の運用手順に明文化し、誰でも無条件に解除できないようにする。
+- brute force detectionのイベントは管理コンソールの「イベント」または `events-listener` (SIEM連携)で追跡できるようにし、異常な集中攻撃をアラートとして検知できる状態にしておく。

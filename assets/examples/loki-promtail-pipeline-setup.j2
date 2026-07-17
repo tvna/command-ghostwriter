@@ -1,0 +1,211 @@
+# Loki + Promtailログ集約パイプライン構築
+
+## 目的
+
+Grafana Lokiとpromtailを用いてログ集約基盤を構築し、ラベル設計を行った上でLogQLによる検索とGrafana表示までを行える状態にすることを目指します。
+
+## 用語解説
+
+- **Loki**: ログの本文を全文インデックスせず、ラベル（メタデータ）のみをインデックスする軽量なログ集約システム
+- **Promtail**: 各ホストのログを収集し、ラベルを付与してLokiへ送信するエージェント
+- **ラベルインデックス**: Lokiはラベルの組み合わせ（ストリーム）単位でインデックスを作るため、値の種類が非常に多いラベル（高カーディナリティ）を付けるとインデックスが肥大化し検索性能が劣化する
+- **高カーディナリティラベル**: user_idやrequest_idのように取りうる値が事実上無限に近いラベル。job/host/env/levelのような値の種類が少ないものだけをラベルにし、可変値はログ本文側に残す
+- **LogQL**: Lokiのクエリ言語。`{job="nginx-access"}` のようにラベルでストリームを絞り込み、`|=` 等のフィルタ演算子で本文を検索する
+- **schema_config / storage_config**: Lokiがインデックスとチャンク（ログ本体）をどの形式・どこに保存するかを定義する設定
+- **auth_enabled**: Loki自体のマルチテナント認証機能。単体では認証を行わないため、外部からの直接アクセスを遮断する構成が前提となる
+
+## シナリオ設定
+
+以下の構成でログ集約パイプラインを構築します。
+
+| 項目 | 値 |
+| --- | --- |
+| Loki URL | {{ loki_url }} |
+| ストレージ種別 | {{ storage_type }} |
+| ログ保持期間 | {{ retention_period }} |
+
+収集対象ジョブ:
+
+| job | 収集方式 | パス | 主なラベル |
+| --- | --- | --- | --- |
+{% for j in scrape_jobs %}| {{ j.job }} | {{ j.source_type }} | {{ j.path }} | {% for l in j.labels %}{{ l.key }}={{ l.value }}{% if not loop.last %}, {% endif %}{% endfor %} |
+{% endfor %}
+ラベルとして採用するキー一覧（低カーディナリティのみ）: {% for k in label_keys %}{{ k }}{% if not loop.last %}, {% endif %}{% endfor %}
+
+## 手順1: Loki本体の設定と起動
+
+### 1. loki-config.yml を作成する
+
+```yaml
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+
+common:
+  path_prefix: /loki
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: {{ storage_type }}
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+storage_config:
+{% if storage_type == "filesystem" %}
+  filesystem:
+    directory: /loki/chunks
+{% else %}
+  {{ storage_type }}:
+    bucketnames: loki-chunks
+    endpoint: s3.internal:9000
+    access_key_id: ${AWS_ACCESS_KEY_ID}
+    secret_access_key: ${AWS_SECRET_ACCESS_KEY}
+    insecure: false
+{% endif %}
+
+limits_config:
+  retention_period: {{ retention_period }}
+  reject_old_samples: true
+  reject_old_samples_max_age: 168h
+  max_label_names_per_series: 15
+  max_label_value_length: 2048
+```
+
+### 2. Lokiをコンテナで起動する
+
+```bash
+docker run -d --name loki \
+  -p 3100:3100 \
+  -v "$(pwd)/loki-config.yml:/etc/loki/loki-config.yml" \
+  -v loki-data:/loki \
+  grafana/loki:2.9.6 \
+  -config.file=/etc/loki/loki-config.yml
+```
+
+### 3. Lokiの死活を確認する
+
+```bash
+curl -s {{ loki_url }}/ready
+curl -s {{ loki_url }}/metrics | head -n 5
+```
+
+## 手順2: Promtailの設定と起動
+
+### 1. promtail-config.yml を作成する
+
+```yaml
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /var/lib/promtail/positions.yaml
+
+clients:
+  - url: {{ loki_url }}/loki/api/v1/push
+
+scrape_configs:
+{% for j in scrape_jobs %}
+{% if j.source_type == "journal" %}
+  - job_name: {{ j.job }}
+    journal:
+      max_age: 12h
+      labels:
+{% for l in j.labels %}
+        {{ l.key }}: {{ l.value }}
+{% endfor %}
+    relabel_configs:
+      - source_labels: ["__journal__systemd_unit"]
+        target_label: unit
+{% else %}
+  - job_name: {{ j.job }}
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+{% for l in j.labels %}
+          {{ l.key }}: {{ l.value }}
+{% endfor %}
+          __path__: {{ j.path }}
+{% endif %}
+{% endfor %}
+```
+
+### 2. Promtailをコンテナで起動する
+
+```bash
+docker run -d --name promtail \
+  -v "$(pwd)/promtail-config.yml:/etc/promtail/promtail-config.yml" \
+  -v /var/log:/var/log:ro \
+  -v /var/log/journal:/var/log/journal:ro \
+  -v /run/log/journal:/run/log/journal:ro \
+  grafana/promtail:2.9.6 \
+  -config.file=/etc/promtail/promtail-config.yml
+```
+
+### 3. Promtailの送信状況を確認する
+
+```bash
+curl -s http://localhost:9080/targets
+curl -s http://localhost:9080/metrics | grep promtail_sent_entries_total
+```
+
+## 手順3: リバースプロキシ経由の認証を有効化する
+
+Loki自体のauth_enabledは単純なマルチテナント分離であり、外部からの不正アクセスを防ぐ認証機構ではありません。既存の無認証経路を止める前に、認証付きの新経路が機能することを必ず確認します。
+
+### 1. Basic認証付きリバースプロキシを既存経路と並行して立てる
+
+```bash
+htpasswd -c /etc/nginx/loki.htpasswd loki-writer
+nginx -t
+systemctl reload nginx
+```
+
+### 2. 新しい認証経路で疎通確認してから旧経路を塞ぐ
+
+```bash
+curl -s -u loki-writer https://loki-proxy.internal/ready
+```
+
+上記が200系で応答することを確認できてから、Loki直接ポート(3100)への外部からのアクセスをファイアウォールで遮断します。
+
+## 動作確認
+
+1. promtailからのログ送信を確認する
+   ```bash
+   logger -t nginx-test "sample log line via journal"
+   curl -s -G {{ loki_url }}/loki/api/v1/query_range \
+     --data-urlencode 'query={job="system-journal"}' \
+     --data-urlencode 'limit=5'
+   ```
+2. LogQLでエラーログを検索する
+   ```bash
+   curl -s -G {{ loki_url }}/loki/api/v1/query_range \
+     --data-urlencode 'query={job="nginx-access"} |= "error"' \
+     --data-urlencode 'limit=20'
+   ```
+3. Grafanaでの表示を確認する
+   - Grafanaの Data sources から Loki を追加し、URLに {{ loki_url }} を設定
+   - Explore画面で `{job="app-server"} |= "error"` を実行し、時系列にログが表示されることを確認
+4. 認証付き新経路が機能してから旧経路を遮断したことを確認する
+   ```bash
+   curl -s -u loki-writer https://loki-proxy.internal/loki/api/v1/push -o /dev/null -w "%{http_code}\n"
+   ```
+
+## 注意事項
+
+- ラベルには job/host/env/level/unit のような値の種類が少ないものだけを使用し、user_idやrequest_idなど高カーディナリティな値をラベルに含めない（LogQLでのフィルタが必要な可変値は本文検索(`|=` / `|~`)側で扱う）。
+- retention_period（保持期間: {{ retention_period }}）とストレージ種別（{{ storage_type }}）の組み合わせで必要なディスク容量を事前に見積もる。filesystemストレージの場合はディスク枯渇によるログ欠損に注意する。
+- auth_enabledはLoki自体の認証機能ではないため、必ずリバースプロキシ側でBasic認証等を設定し、Loki直接ポートを外部に公開しない。
+- リバースプロキシの認証経路を有効化する際は、新しい認証付き経路が疎通することを確認してから、旧来の無認証経路への外部アクセスを遮断すること。順序を逆にすると切替中にログ収集が途絶える。
+- ログ本文にPII（個人情報、パスワード、トークン等）が含まれないよう、送信元アプリケーション側でのマスキングを事前に確認する。含まれる場合はpromtailのpipeline_stagesでreplaceステージを追加して除去する。

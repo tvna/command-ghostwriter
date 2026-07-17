@@ -1,0 +1,4 @@
+peer_name,pubkey,reason,revoked_at,evidence,followup
+laptop-nagano-01,LapNaganoPubKeyAAAAAAAAAAAAAAAAAAAAAAAAAA=,device_lost,2026-07-17T10:15:00+09:00,transfer_2.1GiB_since_2026-07-16,新規端末へ再発行し利用者へ連絡
+phone-suzuki-02,PhoneSuzukiPubKeyBBBBBBBBBBBBBBBBBBBBBBBBB=,key_leak_suspected,2026-07-17T10:20:00+09:00,latest_handshake_5min_before_revoke,-
+branch-osaka-gw,BranchOsakaPubKeyCCCCCCCCCCCCCCCCCCCCCCCCC=,key_leak_suspected,2026-07-17T10:25:00+09:00,unexpected_traffic_to_10.20.30.0/24,現地拠点へ物理確認を依頼

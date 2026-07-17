@@ -1,0 +1,152 @@
+# WireGuardクライアント キルスイッチ設定手順 — {{ wireguard.interface }}
+
+クライアント側の WireGuard インターフェース **{{ wireguard.interface }}** に、トンネル切断時の平文通信を遮断するキルスイッチを構成します。`wg-quick` の `PostUp` / `PostDown` フックから `nftables` ルールを操作する方式で実装します。
+
+## 目的
+
+WireGuard クライアントは、トンネルが確立している間は `AllowedIPs = 0.0.0.0/0` の設定によりすべての通信が `{{ wireguard.interface }}` 経由で暗号化されます。しかし何らかの理由（サーバー再起動、回線障害、`wg-quick down` の実行など）でトンネルが切断されると、OS は自動的に既存の物理インターフェース経由の平文通信にフォールバックしてしまいます。これは社内向けの機密通信が意図せずインターネットへ平文で漏えいするリスクを意味します。
+
+このシナリオでは、トンネル切断時に `{{ wireguard.interface }}` 以外の出口通信を `nftables` の `drop` ポリシーで遮断する「キルスイッチ」を構成し、LAN 内の必要最小限の宛先（デフォルトゲートウェイやプリンタなど）だけを例外として許可します。
+
+## 用語解説
+
+- **キルスイッチ (kill switch)**: VPN トンネルが切断された際に、トンネルを経由しない通信を強制的に遮断する仕組み。トンネル未確立時の平文漏えいを防ぐ。
+- **wg-quick**: WireGuard の設定ファイル (`.conf`) からインターフェースの起動・停止・ルーティング設定を一括して行うラッパースクリプト。
+- **PostUp / PostDown**: `wg-quick up` / `wg-quick down` の直後に実行されるフックコマンド。ここにファイアウォールルールの追加・削除を仕込む。
+- **nftables**: Linux カーネルのパケットフィルタリングフレームワーク（`iptables` の後継）。`table` / `chain` / `rule` の階層でルールを構成する。
+- **output チェーン**: ホスト自身が送信するパケットを検査するフックポイント。ここに `policy drop` を設定することでキルスイッチの土台となる。
+- **fwmark + ip rule 方式**: nftables/iptables の代わりに、パケットにマーク (fwmark) を付与しポリシールーティングでトンネル未確立時の経路を意図的に unreachable にする代替実装。本手順では nftables 方式を採用するが、ルーティングテーブル制御が主目的の環境では fwmark 方式も選択肢になる。
+- **block_on_down**: `wg-quick down` 実行後もキルスイッチの遮断状態を維持するかどうかのフラグ。`true` の場合、トンネル再確立まで LAN 例外以外への通信を遮断し続ける。
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| インターフェース名 | {{ wireguard.interface }} |
+| クライアントアドレス | {{ wireguard.client_address }} |
+| 秘密鍵ファイル | {{ wireguard.private_key_file }} |
+| サーバー公開鍵 | {{ wireguard.server_public_key }} |
+| エンドポイント | {{ wireguard.endpoint }} |
+| PersistentKeepalive | {{ wireguard.persistent_keepalive }} 秒 |
+| DNS | {{ wireguard.dns_server }} |
+| block_on_down | {{ wireguard.block_on_down }} |
+
+許可する LAN 例外（トンネル切断時も到達可能にする宛先）:
+
+| 名称 | CIDR |
+| --- | --- |
+{% for lan in allowed_lan %}
+| {{ lan.name }} | {{ lan.cidr }} |
+{% endfor %}
+
+## 1. 事前準備
+
+WireGuard と nftables がインストール済みであること、サーバー側 (`{{ wireguard.endpoint }}`) の Peer 登録が完了していることを前提とします。作業前に、現在使っている管理用 SSH セッションとは **別に、もう一つ SSH セッションを開いたままにしてください**。キルスイッチ導入で誤って自分自身の管理経路を遮断した場合に、既存セッションから復旧できるようにするためです。
+
+```bash
+sudo apt install -y wireguard nftables
+sudo install -d -m 700 /etc/wireguard
+```
+
+秘密鍵を生成し、パーミッションを制限します（未生成の場合）。
+
+```bash
+wg genkey | sudo tee {{ wireguard.private_key_file }} > /dev/null
+sudo chmod 600 {{ wireguard.private_key_file }}
+```
+
+## 2. wg0.conf の作成（PostUp/PostDownにキルスイッチを組み込む）
+
+`/etc/wireguard/{{ wireguard.interface }}.conf` を作成します。`PostUp` でキルスイッチ用の nftables テーブルを構築し、`PostDown` では `block_on_down` の値に応じて遮断状態を維持するかどうかを切り替えます。
+
+```bash
+sudo tee /etc/wireguard/{{ wireguard.interface }}.conf > /dev/null <<'EOF'
+[Interface]
+Address = {{ wireguard.client_address }}
+PrivateKey = FILE:{{ wireguard.private_key_file }}
+DNS = {{ wireguard.dns_server }}
+PostUp = nft add table inet killswitch; nft 'add chain inet killswitch output { type filter hook output priority 0; policy drop; }'; nft add rule inet killswitch output oif lo accept; nft add rule inet killswitch output ct state established,related accept; nft add rule inet killswitch output oifname "{{ wireguard.interface }}" accept
+{% for lan in allowed_lan %}
+PostUp = nft add rule inet killswitch output ip daddr {{ lan.cidr }} accept
+{% endfor %}
+PostDown = nft delete table inet killswitch
+{% if wireguard.block_on_down %}
+PostDown = nft add table inet killswitch; nft 'add chain inet killswitch output { type filter hook output priority 0; policy drop; }'; nft add rule inet killswitch output oif lo accept
+{% for lan in allowed_lan %}
+PostDown = nft add rule inet killswitch output ip daddr {{ lan.cidr }} accept
+{% endfor %}
+{% endif %}
+
+[Peer]
+PublicKey = {{ wireguard.server_public_key }}
+Endpoint = {{ wireguard.endpoint }}
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = {{ wireguard.persistent_keepalive }}
+EOF
+sudo chmod 600 /etc/wireguard/{{ wireguard.interface }}.conf
+```
+
+補足: `PrivateKey = FILE:...` 構文に対応しない古い `wg-quick` を使う場合は、鍵の内容を直接 `PrivateKey =` に埋め込む必要があります。その場合は設定ファイルのパーミッションが `600` であることを必ず確認してください。
+
+上記の `PostUp` は「デフォルトで output を drop → LAN 例外を許可 → `{{ wireguard.interface }}` 経由の通信を許可」という順序でルールを積み上げます。`PostDown` は、`block_on_down = {{ wireguard.block_on_down }}` の場合、`{{ wireguard.interface }}` 向け許可ルールを含まないテーブルを再構築するため、トンネルが切断された瞬間から LAN 例外以外の通信が遮断された状態になります。
+
+## 3. トンネルの起動と初回検証
+
+まず **既存のSSHセッションを維持したまま**、別ターミナルから起動します。
+
+```bash
+sudo wg-quick up {{ wireguard.interface }}
+```
+
+トンネル確立後、ハンドシェイクとルールを確認します。
+
+```bash
+sudo wg show {{ wireguard.interface }}
+sudo nft list table inet killswitch
+```
+
+## 動作確認
+
+1. トンネル起動中に外部疎通を確認する。
+
+```bash
+curl -sS -m 5 https://example.com -o /dev/null -w '%{http_code}\n'
+```
+
+`200` 系のレスポンスが返ること。
+
+2. **維持しておいた別セッションから**、意図的にトンネルを落として遮断を確認する。
+
+```bash
+sudo wg-quick down {{ wireguard.interface }}
+curl -sS -m 5 https://example.com -o /dev/null -w '%{http_code}\n'
+```
+
+コマンドがタイムアウトまたは接続不能となり、平文での外部通信が遮断されることを確認する。
+
+3. LAN 例外が生きていることを確認する。
+
+```bash
+{% for lan in allowed_lan %}
+ping -c 2 {{ lan.cidr }}
+{% endfor %}
+```
+
+（CIDR は `/32` のため、コマンド実行時は末尾の `/32` を除いたアドレスを指定する。）ゲートウェイ・プリンタ宛の疎通のみ成功すること。
+
+4. トンネルを再度起動し、復帰を確認する。
+
+```bash
+sudo wg-quick up {{ wireguard.interface }}
+curl -sS -m 5 https://example.com -o /dev/null -w '%{http_code}\n'
+```
+
+再び `200` 系のレスポンスが返り、全体の疎通が復帰すること。
+
+## 注意事項
+
+- **必ず現在の管理セッションとは別のセッション（別のSSH接続やコンソール）を確保した状態で作業してください。** `output` チェーンに `policy drop` を適用するため、`allowed_lan` にリモート管理元のアドレスを含めていない場合、自分自身の SSH セッションごと遮断されるおそれがあります。新しいルールが期待通りに動くことを別セッションで確認してから、既存の運用に組み込んでください。
+- `allowed_lan`（デフォルトゲートウェイ・プリンタなど）への例外を正しく登録しないと、DHCP 更新や社内共有機器へのアクセスができず管理不能になります。追加のLAN機器（NTP、社内DNS等）が必要な場合は `allowed_lan` にエントリを追加してください。
+- `block_on_down = true` の環境では、`wg-quick down` 実行後も LAN 例外以外の通信が遮断され続けます。通常のインターネット接続に戻したい場合は、`sudo nft delete table inet killswitch` を手動実行してキルスイッチ自体を解除してください。
+- トラブルシュート時は `sudo nft list ruleset` で現在有効なルールを確認し、`sudo nft delete table inet killswitch` で即座にキルスイッチを解除できることを覚えておいてください（ロックアウト時の最終手段）。
+- 恒久導入前に、`{{ wireguard.interface }}` のPersistentKeepaliveやサーバー側の設定が正しいことを確認し、意図しないネットワーク断が発生しないことをテスト環境で確認してください。

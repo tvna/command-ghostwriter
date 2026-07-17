@@ -1,0 +1,104 @@
+# Lynisによるインシデント後の設定監査 — {{ target_host }}
+
+インシデント（{{ incident_ticket }}）の復旧作業が完了したホスト **{{ target_host }}** に対し、Lynisで設定監査を実施し、攻撃者による設定劣化・裏口・是正漏れがないかを洗い出します。
+
+## 目的
+
+インシデント対応（隔離・封じ込め・復旧）が完了した後も、攻撃者が仕込んだ設定変更や永続化の痕跡が残っていないかをLynisで体系的に検査し、復旧完了を宣言する前に是正すべき項目を漏れなく抽出できるようになることを目指します。
+
+## 用語解説
+
+- **Lynis**: Linux/Unix向けのセキュリティ監査ツール。認証設定・SSH・ファイル権限・ネットワーク設定などを網羅的にチェックし、warning/suggestion/hardening indexを出力する
+- **post-incident設定変更検知**: インシデント対応中または対応後に、攻撃者が仕込んだバックドアアカウント・SSH公開鍵・SUIDバイナリ・cronジョブ・ファイアウォールルールの緩和などが残存していないかを検知する行為。復旧作業そのものが攻撃者の変更を上書きして証跡を消してしまうことがあるため、封じ込め直後・復旧直後の2時点で監査するのが望ましい
+- **hardening index**: Lynisが算出する0-100のスコアで、実施済みの強化策の割合を示す
+- **warning / suggestion**: Lynisの検出結果の重大度。warningは明確なリスク、suggestionは改善余地
+- **baseline比較**: インシデント発生前に取得していたLynisレポート（ベースライン）と、復旧後のレポートを比較し、インシデントに起因する差分（劣化・改変）を特定すること
+- **FIM (File Integrity Monitoring)**: ファイルのハッシュ値や属性の変化を監視する仕組み。osqueryやWazuhのFIMモジュールがこれに当たり、Lynisの単発監査を補完する継続監視を担う
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 対象ホスト | {{ target_host }} |
+| インシデントチケット | {{ incident_ticket }} |
+| 監査対象カテゴリ | {% for c in focus_categories %}{{ c }}{% if not loop.last %}, {% endif %}{% endfor %} |
+| 監査レポート出力先 | {{ report_path }} |
+| ベースライン比較 | {{ baseline_compare }} |
+| ベースラインレポート | {{ baseline_report_path }} |
+
+## 1. Lynisの現在バージョンとテストグループを確認する
+
+監査対象カテゴリが実際にLynisのテストグループとして存在することを確認します。
+
+```bash
+lynis show version
+lynis show groups
+```
+
+## 2. 対象カテゴリに絞ってaudit systemを実行する
+
+```bash
+sudo lynis audit system \
+  --tests-from-group "{% for c in focus_categories %}{{ c }}{% if not loop.last %},{% endif %}{% endfor %}" \
+  --report-file {{ report_path }} \
+  --no-colors --quiet
+```
+
+`--tests-from-group` を付けない全項目監査も別途 `sudo lynis audit system --report-file {{ report_path }}.full` として取得しておくと、今回の重点カテゴリ以外の劣化も見逃しません。
+
+## 3. 認証・SSH関連のwarning/suggestionを抽出する
+
+```bash
+grep -E '^(warning|suggestion)' {{ report_path }} | grep -iE 'auth|ssh|password|pam'
+```
+
+想定される検出例: rootでの直接SSHログイン許可（`PermitRootLogin`）、パスワード認証の有効化、`/etc/shadow` のパーミッション逸脱など。
+
+## 4. 不審なユーザー・cron・SUIDバイナリを手動で洗い出す
+
+Lynisの検出項目に加え、攻撃者が仕込みやすい永続化手口を直接確認します。
+
+```bash
+awk -F: '$3 == 0 {print}' /etc/passwd
+for u in $(cut -d: -f1 /etc/passwd); do
+  echo "== $u =="
+  sudo crontab -u "$u" -l 2>/dev/null
+done
+sudo find / -xdev -type f -perm -4000 -newer /var/log/lastlog 2>/dev/null
+```
+
+`UID 0` が複数存在する、見覚えのないcronエントリがある、`-newer` オプションで洗い出したSUIDバイナリがインシデント発生後に作成・変更されている場合は、攻撃者による永続化を強く疑ってください。
+
+## 5. ネットワーク設定の劣化を確認する
+
+```bash
+grep -E '^(warning|suggestion)' {{ report_path }} | grep -iE 'firewall|network|port'
+sudo ss -tulpn
+sudo iptables -S 2>/dev/null || sudo nft list ruleset 2>/dev/null
+```
+
+意図せず開放されたリスニングポートや、緩和されたファイアウォールルールがないかを確認します。
+
+## 6. ベースラインと比較し、是正項目を確定する
+
+```bash
+diff <(grep -E '^(warning|suggestion)' {{ baseline_report_path }} | sort) \
+     <(grep -E '^(warning|suggestion)' {{ report_path }} | sort) \
+  | tee /tmp/lynis-post-incident-diff.txt
+```
+
+`+` で始まる行がインシデント後にのみ現れたwarning/suggestionであり、攻撃者の設定改変または復旧作業の副作用を示す候補です。1件ずつ原因を特定してから是正してください。
+
+## 動作確認
+
+- 手順2の `lynis audit system` がエラーなく完了し、{{ report_path }} が生成されていること
+- 手順6の差分に、インシデント前ベースライン（{{ baseline_report_path }}）に存在しなかったwarning/suggestionが列挙され、各項目について「是正済み」「調査中」のいずれかに分類できていること
+- 手順4のUID 0アカウント一覧・cron一覧・SUIDバイナリ一覧が、事前に把握している正規のものと一致していること（不一致があれば是正項目として手順6のリストに追加する）
+
+## 注意事項
+
+- Lynisは単発スキャンであり、監査完了時点のスナップショットに過ぎない。継続的な検知にはosqueryやWazuhのFIM（File Integrity Monitoring）を併用し、監査後も同種の改変が再発しないか監視すること。
+- 是正（remediate）で十分か、クリーン再構築（clean rebuild）が必要かを判断すること。rootkitの痕跡、UID 0の不審アカウント、カーネルモジュールの改変など「侵害範囲が特定しきれない」兆候がある場合は、個別ファイルの是正ではなく、信頼できるイメージからのクリーン再構築を優先する。
+- 手順6でSSHやファイアウォール設定を是正する場合は、既存の管理者セッションを維持したまま別セッションで新設定を試験し、接続断・ロックアウトが発生しないことを確認してから旧設定を無効化・削除すること。
+- 監査レポート（{{ report_path }}、{{ baseline_report_path }}、差分ファイル）はインシデント対応の証跡として、改ざん防止のためチェックサムを取得し、対応チーム外の書き込み権限がない領域へ保全すること。
+- `sudo find / -xdev -type f -perm -4000 -newer ...` はファイルシステム全体を走査するため実行に時間がかかる。本番環境で負荷が問題になる場合は対象ディレクトリを絞り込むこと。

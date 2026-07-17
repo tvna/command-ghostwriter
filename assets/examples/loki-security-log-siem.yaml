@@ -1,0 +1,52 @@
+retention_days: 90
+security_sources:
+  - name: "auth_log"
+    label: "認証ログ (auth.log)"
+    job_name: "security_auth"
+    path: "/var/log/auth.log"
+    format: "syslog"
+  - name: "audit_log"
+    label: "監査ログ (auditd)"
+    job_name: "security_audit"
+    path: "/var/log/audit/audit.log"
+    format: "audit"
+  - name: "suricata_eve"
+    label: "Suricata eve.json (IDS/IPS)"
+    job_name: "security_suricata"
+    path: "/var/log/suricata/eve.json"
+    format: "json"
+  - name: "opnsense_filterlog"
+    label: "OPNsenseフィルタログ (FW)"
+    job_name: "security_opnsense"
+    path: "/var/log/opnsense/filter.log"
+    format: "csv"
+parse_stages:
+  - job_name: "security_auth"
+    stage_type: "regex"
+    description: "sshd/sudoの認証失敗行からユーザー名と送信元IPをラベル抽出"
+    snippet: 'expression: ''^(?P<ts>\S+ \S+ \S+) \S+ (?P<process>sshd|sudo)\[\d+\]: (?P<message>.*Failed password.*from (?P<src_ip>[0-9.]+).*)'''
+  - job_name: "security_audit"
+    stage_type: "regex"
+    description: "auditdのtype=USER_AUTHレコードからresult(success/fail)を抽出"
+    snippet: 'expression: ''type=(?P<audit_type>\S+).*res=(?P<result>success|failed)'''
+  - job_name: "security_suricata"
+    stage_type: "json"
+    description: "eve.jsonのalertイベントからsrc_ip/dest_ip/signatureをラベル抽出"
+    snippet: 'expressions: { event_type: event_type, src_ip: src_ip, dest_ip: dest_ip, signature: alert.signature }'
+  - job_name: "security_opnsense"
+    stage_type: "regex"
+    description: "filterlog(CSV形式)からaction(pass/block)とsrc/dstを抽出"
+    snippet: 'expression: ''^\S+,\S+,\S+,\S+,(?P<action>pass|block),.*,(?P<src_ip>[0-9.]+),(?P<dst_ip>[0-9.]+),'''
+dashboards:
+  - title: "認証失敗の相関ビュー"
+    panel_type: "time_series"
+    logql_query: 'sum by (src_ip) (count_over_time({job="security_auth"} |= "Failed password" [5m]))'
+    description: "5分間隔で送信元IPごとの認証失敗回数を集計し、ブルートフォース傾向を確認"
+  - title: "IPソース横断追跡"
+    panel_type: "table"
+    logql_query: '{job=~"security_auth|security_suricata|security_opnsense"} |= "203.0.113.10"'
+    description: "特定の送信元IPを認証・IDS・FWの3系統ログで横断検索し、侵入経路を追跡"
+  - title: "IDSアラート発生数"
+    panel_type: "time_series"
+    logql_query: 'sum by (signature) (count_over_time({job="security_suricata"} | json | event_type="alert" [15m]))'
+    description: "Suricataシグネチャ別のアラート発生数を15分間隔で表示"

@@ -1,0 +1,4 @@
+indicator,type,source,added_at,hitting_clients,followup
+c2.malicious-exfil.example,dstdomain,IDS/Suricata アラート ET MALWARE C2,2026-07-17 09:12,10.0.30.41,隔離対応チームへエスカレーション済み
+198.51.100.77,dst,SOC 分析による通信先精査,2026-07-17 09:20,10.0.30.41; 10.0.30.58,隔離対応チームへエスカレーション済み
+drop.exfil-stage.example,dstdomain,EDRアラート 不審な外向き通信,2026-07-17 09:25,-,追加ヒットなし・監視継続

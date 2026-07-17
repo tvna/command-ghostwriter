@@ -1,0 +1,154 @@
+# OPNsenseルール変更の段階適用と切り戻し管理 — {{ change_id }}
+
+ルール変更を「ログのみ観察 → 有効化 → 事後確認」の3段階で適用し、切り戻し条件を事前定義したうえで実施する変更管理手順書です。
+
+## 目的
+
+変更管理番号 `{{ change_id }}` に基づき、OPNsenseのフィルタルールを一度に有効化するのではなく、baseline観察・disabled登録・メンテナンス窓での有効化・事後確認という段階を踏んで適用します。想定外の遮断・想定外の許可(副作用)を早期に検知し、承認者 `{{ approver }}` の判断で切り戻せる状態を常に維持することを目指します。
+
+## 用語解説
+
+- **段階適用(staged rollout)**: ルールを`disabled`状態で登録してから、観察期間を経て本番反映する適用方式。一括反映による意図しない通信断・通信許可を防ぐ
+- **first match(最初にマッチしたルールが評価される)**: OPNsenseのフィルタは上から順にルールを評価し、`quick`な最初のマッチで処理を確定する。挿入位置によって結果が変わる
+- **pflog0**: pf(パケットフィルタ)がログ対象ルールにマッチしたパケットを書き出す仮想インターフェース。`log`を有効にしたルールの通過状況をリアルタイムに確認できる
+- **observation_period(観察期間)**: 有効化後、副作用の有無を監視し続ける期間。この期間内に`rollback_trigger`に該当する事象が無いことを確認してから変更を確定する
+- **rollback_trigger(切り戻し判断基準)**: 観察期間中にこの条件へ該当した場合、無条件でルールを無効化しバックアップ復元へ進む、事前に定義した閾値
+
+## シナリオ設定
+
+| 項目 | 内容 |
+| --- | --- |
+| 変更管理番号 | {{ change_id }} |
+| 観察期間 | {{ observation_period }} |
+| 切り戻し判断基準 | {{ rollback_trigger }} |
+| 承認者 | {{ approver }} |
+| 対象ルール件数 | {{ target_rules | length }} |
+
+対象ルール一覧:
+
+| interface | action | src | dst | port |
+| --- | --- | --- | --- | --- |
+{% for rule in target_rules %}| {{ rule.interface }} | {{ rule.action }} | {{ rule.src }} | {{ rule.dst }} | {{ rule.port }} |
+{% endfor %}
+
+## 手順
+
+### 1. 変更前バックアップと現行ルール記録の取得
+
+config.xmlのフルバックアップと、現行ルールセットのCSV記録を取得します(APIキー/シークレットは環境変数 `OPN_KEY` / `OPN_SECRET` に設定済みとします)。
+
+```bash
+curl -s -u "$OPN_KEY:$OPN_SECRET" \
+  https://opnsense.example.jp/api/core/backup/download/this \
+  -o /root/config-backup-{{ change_id }}.xml
+
+curl -s -u "$OPN_KEY:$OPN_SECRET" \
+  https://opnsense.example.jp/api/firewall/filter/searchRule | \
+  jq -r '.rows[] | [.interface,.action,.source_net,.destination_net,.destination_port,.descr] | @csv' \
+  > /root/fw-rules-before-{{ change_id }}.csv
+```
+
+→ `config-backup-{{ change_id }}.xml` は切り戻し時の復元用、CSVは変更前状態の証跡として保全します。あわせてFirewall > Rulesの画面キャプチャも取得し、変更記録に添付してください。
+
+### 2. ログのみ観察(baseline取得)
+
+新ルールをまだ登録・有効化する前に、対象の送信元・宛先・ポートの通信が現状どう扱われているかをインターフェース上で直接観察します。
+
+```bash
+{% for rule in target_rules %}
+tcpdump -ni {{ rule.interface }} host {{ rule.src }} and host {{ rule.dst }} and port {{ rule.port }} -e -ttt
+{% endfor %}
+```
+
+→ ここではルールはまだ存在しないため、現状の通信有無・頻度をbaselineとして記録します。想定と異なる通信(想定していないポートへの到達など)が既に発生していないかをこの時点で確認します。
+
+### 3. 新ルールをdisabled状態で登録する
+
+変更番号を説明欄に含めた状態で、`disabled=1` かつ `log=1` で新ルールを登録します。この時点では通信への影響はありません。
+
+```bash
+{% for rule in target_rules %}
+curl -s -u "$OPN_KEY:$OPN_SECRET" -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"rule": {"interface": "{{ rule.interface }}", "action": "{{ rule.action }}", "source_net": "{{ rule.src }}", "destination_net": "{{ rule.dst }}", "destination_port": "{{ rule.port }}", "disabled": "1", "log": "1", "descr": "[{{ change_id }}] staged rule {{ rule.action }} {{ rule.dst }}:{{ rule.port }}"}}' \
+  https://opnsense.example.jp/api/firewall/filter/addRule
+{% endfor %}
+
+curl -s -u "$OPN_KEY:$OPN_SECRET" -X POST \
+  https://opnsense.example.jp/api/firewall/filter/apply
+```
+
+→ 各 `addRule` のレスポンスに含まれる `uuid` を変更記録に控えておきます(手順5・6の有効化・無効化操作で使用します)。挿入位置は既存ルールとの評価順序に影響するため、意図した位置(通常は同一interfaceの関連ルール群の直前)に入っているかをFirewall > Rulesの画面で必ず確認します。
+
+### 4. メンテナンス窓でルールを有効化する
+
+承認者 `{{ approver }}` の承認を得たメンテナンス窓の中で、控えておいた `uuid` を使って各ルールを有効化します。
+
+```bash
+curl -s -u "$OPN_KEY:$OPN_SECRET" -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"rule": {"disabled": "0"}}' \
+  https://opnsense.example.jp/api/firewall/filter/setRule/<rule-uuid>
+
+curl -s -u "$OPN_KEY:$OPN_SECRET" -X POST \
+  https://opnsense.example.jp/api/firewall/filter/apply
+```
+
+→ `<rule-uuid>` は手順3で控えたルールごとのIDに置き換えて、対象ルール件数分({{ target_rules | length }}件)繰り返します。有効化直後は次の手順のライブログ確認と同時に行い、単独で放置しないでください。
+
+### 5. ライブログで即時の副作用を確認する
+
+```bash
+{% for rule in target_rules %}
+tcpdump -ni pflog0 host {{ rule.src }} and host {{ rule.dst }} and port {{ rule.port }} -e -ttt
+{% endfor %}
+```
+
+→ 各ルールについて、意図した action(`{{ target_rules[0].action }}` 等)どおりにpass/blockされているかをpflog0のログで確認します。意図と異なる挙動が1件でも確認された場合は、`{{ rollback_trigger }}` に該当するとみなし直ちに手順7へ進みます。
+
+### 6. 観察期間中の事後確認
+
+有効化から{{ observation_period }}の間、対象通信の疎通状況と関連ホストからの申告有無を継続的に確認します。
+
+```bash
+grep -E "{{ target_rules[0].dst }}" /var/log/filter/latest.log | tail -n 100
+```
+
+→ 観察期間内に `{{ rollback_trigger }}` へ該当する事象が発生しないことを確認できた時点で、この変更を本番適用として確定し、変更管理チケット `{{ change_id }}` をクローズします。
+
+### 7. 切り戻し(2段階)
+
+観察期間中または有効化直後に問題が確認された場合、以下の2段階で切り戻します。
+
+```bash
+# 第1段階: 対象ルールの無効化(即時)
+curl -s -u "$OPN_KEY:$OPN_SECRET" -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"rule": {"disabled": "1"}}' \
+  https://opnsense.example.jp/api/firewall/filter/setRule/<rule-uuid>
+
+curl -s -u "$OPN_KEY:$OPN_SECRET" -X POST \
+  https://opnsense.example.jp/api/firewall/filter/apply
+
+# 第2段階: 無効化だけでは解消しない場合、変更前バックアップから復元
+curl -s -u "$OPN_KEY:$OPN_SECRET" -X POST \
+  -F "conffile=@/root/config-backup-{{ change_id }}.xml" \
+  https://opnsense.example.jp/api/core/backup/restore
+```
+
+→ 第1段階のルール無効化のみで通信状況が変更前と同等に戻ることを確認できれば、第2段階(config.xml復元)は不要です。第1段階で解消しない場合のみ、手順1で取得したバックアップから復元します。
+
+## 動作確認
+
+- 手順2のbaseline観察と手順6の事後確認を比較し、対象通信(`{{ target_rules[0].src }}` → `{{ target_rules[0].dst }}:{{ target_rules[0].port }}` など)が意図どおりに許可/遮断されていること
+- 手順5・6のライブログにおいて、対象ルール以外の通信に対する意図しないpass/dropが発生していないこと
+- {{ observation_period }}の観察期間内に `{{ rollback_trigger }}` に該当する事象が発生していないこと
+- 変更完了後、`config-backup-{{ change_id }}.xml` と `fw-rules-before-{{ change_id }}.csv` が変更記録として保管されていること
+
+## 注意事項
+
+- OPNsenseのフィルタはfirst match(最初にマッチしたルール)で処理が確定するため、手順3での挿入位置が結果を左右します。既存ルールより後ろに入ると評価されずに素通り・遮断されないまま残ることがあるため、必ず適用後にFirewall > Rulesの並び順を目視確認してください。
+- 手順4(有効化)は必ず承認者 `{{ approver }}` の承認を得たメンテナンス窓内で実施し、単独作業では行わないこと。
+- 有効化は手順5のライブログ確認とセットで行い、旧経路(既存ルール)を無効化・削除するのは、新ルールで意図どおりの通信が確認できてから(手順5・6完了後)にすること。新旧を同時に切り替えない。
+- 切り戻しは手順7の2段階(ルール無効化 → 復旧しない場合のみconfig.xml復元)の順で行い、いきなり全体復元から始めないこと。復元は既存の他の変更も巻き戻す副作用があるため最終手段とする。
+- APIキー・シークレット(`OPN_KEY` / `OPN_SECRET`)は環境変数として扱い、コマンド履歴やログ、変更記録に平文で残さないこと。

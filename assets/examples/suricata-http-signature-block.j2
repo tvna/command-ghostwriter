@@ -1,0 +1,121 @@
+# Suricata による HTTP 攻撃シグネチャの遮断手順
+
+CSV で定義した {{ csv_rows | length }} 件の HTTP 攻撃シグネチャを Suricata のカスタムルールとして
+整備し、SQLi・パストラバーサル・スキャナ UA 等の攻撃パターンを検知・遮断できるようにします。
+
+## 目的
+
+http キーワード（sticky buffer）を用いた Suricata ルールを整備し、HTTP 攻撃シグネチャの
+検知（IDS モード）から遮断（IPS モード）へ安全に移行できるようになることを目指します。
+
+## 用語解説
+
+- **sticky buffer**: `http.uri` のようにルール中でそれ以降の `content` の照合対象を切り替えるキーワード
+- **http.uri**: リクエストラインの URI 部分（クエリ文字列を含む）を照合対象にする
+- **http.request_body**: POST 等のリクエストボディを照合対象にする
+- **http.user_agent**: `User-Agent` ヘッダの値のみを照合対象にする
+- **http.host**: `Host` ヘッダの値のみを照合対象にする
+- **IDS モード（alert のみ）**: パケットを検知してログに残すが、通信は遮断しない観察用モード
+- **IPS モード（drop 有効）**: `drop` アクションのルールが実際に通信を破棄するモード
+- **fast.log / eve.json**: Suricata が生成するアラートログ（テキスト形式 / JSON 形式）
+
+## シナリオ設定
+
+| sid | 攻撃種別 | sticky buffer | 検知パターン | action | msg |
+|-----|----------|---------------|--------------|--------|-----|
+{% for r in csv_rows %}| {{ r["sid"] }} | {{ r["attack_type"] }} | {{ r["http_buffer"] }} | {{ r["pattern"] }} | {{ r["action"] }} | {{ r["msg"] }} |
+{% endfor %}
+
+## 1. Suricata の稼働状態を確認する
+
+```bash
+systemctl status suricata
+suricata -V
+suricata -T -c /etc/suricata/suricata.yaml -v
+```
+
+`-T`（テストモード）でルール構文エラーがないことを確認してから、次の手順に進んでください。
+
+## 2. ルールをローカルルールファイルへ追加する
+
+各 CSV 行を 1 本の Suricata ルールに対応させ、`/etc/suricata/rules/local.rules` に追記します。
+`http_buffer` 列の sticky buffer を用いることで、URI・POST ボディ・User-Agent・Host ヘッダの
+どこに攻撃パターンが含まれるかで検知対象を使い分けています。
+
+```bash
+cat <<'EOF' >> /etc/suricata/rules/local.rules
+{% for r in csv_rows %}alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"{{ r["msg"] }}"; flow:established,to_server; {{ r["http_buffer"] }}; content:"{{ r["pattern"] }}"; nocase; classtype:web-application-attack; sid:{{ r["sid"] }}; rev:1;)
+{% endfor %}EOF
+```
+
+> ここでは全行を必ず `alert`（検知のみ）として投入します。CSV の `action` 列が `drop` の行を
+> そのまま `drop` として投入するのは手順 4 の確認が終わったあとにしてください（手順 3 参照）。
+
+`suricata.yaml` の `default-rule-path` 配下に `local.rules` が include されていることを確認します。
+
+```bash
+grep -n "local.rules" /etc/suricata/suricata.yaml
+suricata -T -c /etc/suricata/suricata.yaml -v
+systemctl reload suricata
+```
+
+## 3. IDS モードでの観察を先行させる
+
+正規アプリの検索フォームや管理画面 UA 等が誤検知（フォールスポジティブ）を起こす可能性があるため、
+すべてのルールを `alert` のまま一定期間（最低 1 営業日以上）運用し、`fast.log` に想定外の
+ヒットが出ていないかを確認します。
+
+```bash
+tail -f /var/log/suricata/fast.log
+jq 'select(.event_type=="alert")' /var/log/suricata/eve.json | tail -n 50
+```
+
+誤検知が見当たらないことを確認できた行だけ、`local.rules` 内の該当ルールを次のように
+`action` 列の値へ書き換えて `drop` へ昇格させます（この時点で初めて実際の遮断が有効になります）。
+
+```bash
+{% for r in csv_rows %}sed -i 's/^alert http \(.*sid:{{ r["sid"] }};.*\)$/{{ r["action"] }} http \1/' /etc/suricata/rules/local.rules
+{% endfor %}suricata -T -c /etc/suricata/suricata.yaml -v
+systemctl reload suricata
+```
+
+## 4. curl で攻撃パターンを模擬して検知・遮断を確認する
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' 'http://target/?q=union+select'
+curl -s -o /dev/null -w '%{http_code}\n' 'http://target/../../etc/passwd'
+curl -s -o /dev/null -w '%{http_code}\n' -A 'sqlmap/1.6' 'http://target/'
+curl -s -o /dev/null -w '%{http_code}\n' -A 'nikto' 'http://target/'
+curl -s -o /dev/null -w '%{http_code}\n' -X POST --data 'q=union select' 'http://target/search'
+curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: internal-admin.local' 'http://target/'
+```
+
+```bash
+tail -n 100 /var/log/suricata/fast.log
+jq 'select(.event_type=="alert") | {sid: .alert.signature_id, action: .alert.action, msg: .alert.signature}' /var/log/suricata/eve.json
+```
+
+## 動作確認
+
+- `suricata -T -c /etc/suricata/suricata.yaml -v` がエラーなく完了すること
+- 手順 3 の IDS モード観察期間中、`fast.log` / `eve.json` に想定外（正規利用）のアラートが
+  出ていないこと
+- 手順 4 の curl 実行後、`eve.json` の `alert.signature_id` が対応する sid と一致してログに
+  記録されていること
+- `action` を `drop` へ昇格したルールについては、同じ curl 実行時に接続がタイムアウトまたは
+  切断され、通信が実際に遮断されていること
+- `drop` へ昇格していない（`alert` のままの）ルールでは通信自体は成功し、ログにのみ記録される
+  こと（意図した挙動と一致しているか要確認）
+
+## 注意事項
+
+- `drop` ルールは通信そのものを破棄するため、必ず手順 3 の IDS モード（`alert` のみ）での
+  観察を先行させ、正規アプリの検索文字列やヘッダが誤検知していないことを確認してから
+  `drop` へ昇格させること。確認前に一括で `drop` を投入しない。
+- `drop` へ昇格したルールが誤検知だった場合に備え、切り戻し用として `local.rules` のバックアップ
+  （`cp /etc/suricata/rules/local.rules /etc/suricata/rules/local.rules.bak`）を昇格前に必ず取得する。
+- ルール変更後は必ず `suricata -T` で構文検証してから `systemctl reload suricata` を実行する。
+  構文エラーのまま reload すると、直前のルールセットのまま稼働し続け、変更が反映されていないことに
+  気づけない場合がある。
+- `$EXTERNAL_NET` / `$HOME_NET` の変数定義が環境の実態（社内セグメント等）と一致しているか、
+  投入前に `suricata.yaml` の `vars.address-groups` を確認する。

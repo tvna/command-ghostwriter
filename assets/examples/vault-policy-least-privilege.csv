@@ -1,0 +1,8 @@
+policy_name,path,capabilities,consumer,justification
+app-readonly,secret/data/app/*,read,app-role,アプリがKV v2の実データを読み取るためcreate/updateは付与しない
+app-readonly,secret/metadata/app/*,list,app-role,バージョン一覧確認のためmetadataはlistのみ許可しdata操作は与えない
+app-deploy,secret/data/app/deploy/*,create,ci-role,CIがデプロイ時に新規作成と上書きのみ行うためdeleteは付与しない
+app-deploy,secret/data/app/deploy/*,update,ci-role,CIがデプロイ時に新規作成と上書きのみ行うためdeleteは付与しない
+app-deploy,secret/data/app/prod/*,deny,ci-role,本番配下は対象外としてdenyで明示的に閉じ誤って波及しないようにする
+db-rotator,database/creds/app-role,read,rotator-role,DB動的シークレットの払い出し読み取りのみ許可
+db-rotator,sys/leases/revoke,update,rotator-role,ローテーション時に古いリースを失効させるため

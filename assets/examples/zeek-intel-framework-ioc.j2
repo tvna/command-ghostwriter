@@ -1,0 +1,107 @@
+# Zeek IntelフレームワークによるIoC照合
+
+Zeekの`Intel`フレームワークに脅威IoC(indicator)を取り込み、通信・DNS・証明書のログと突合して一致を`intel.log`に記録する運用手順です。
+
+## 目的
+
+外部フィードおよび内部で確認したIoCをZeekのIntelフレームワークに取り込み、`conn.log`/`dns.log`/`http.log`/`x509.log`に現れる観測値との一致を`intel.log`で自動検知できるようにすることを目指します。
+
+## 用語解説
+
+- **Intel::ADDR**: IPアドレス型のIoC。`conn.log`の`id.orig_h`/`id.resp_h`との一致を検知する
+- **Intel::DOMAIN**: ドメイン名型のIoC。`dns.log`の`query`(問い合わせ先ドメイン)との一致を検知する
+- **Intel::URL**: URL型のIoC(スキームを除いた`host+uri`表記)。`http.log`の`host`+`uri`との一致を検知する
+- **Intel::CERT_HASH**: 証明書フィンガープリント型のIoC。`x509.log`の`certificate.fingerprint`(SHA-1)との一致を検知する
+- **Intel::read_files**: Zeek起動時にタブ区切りのIoCファイルを読み込むための設定変数
+- **intel.log**: 一致が発生した際に出力されるログ。`seen.indicator`(一致したIoC文字列)と`seen.indicator_type`、および`matched`(一致したカテゴリ集合)が記録される
+- **TLP(Traffic Light Protocol)**: 情報共有範囲の区分(RED/AMBER/GREEN/CLEAR)。取り込んだIoCの取り扱い・共有範囲を制限する
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 件のIoCをIntelフレームワークに取り込みます。最終行`zt-intel-selftest.internal.example.org`は動作確認専用の自組織内テストドメインです。
+
+| indicator | indicator_type | source | tlp | added_at |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["indicator"] }} | Intel::{{ r["indicator_type"] }} | {{ r["source"] }} | {{ r["tlp"] }} | {{ r["added_at"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. IoCインジケータファイル(iocs.dat)を作成する
+
+`Intel::read_files`はタブ区切りで`#fields`行にカラム名を宣言したファイルを読み込みます。フィールドは`indicator`・`indicator_type`・`meta.source`の3列です。
+
+```bash
+mkdir -p /opt/zeek/intel
+cat > /opt/zeek/intel/iocs.dat <<'EOF'
+#fields\tindicator\tindicator_type\tmeta.source
+{% for r in csv_rows %}{{ r["indicator"] }}\tIntel::{{ r["indicator_type"] }}\t{{ r["source"] }}
+{% endfor %}EOF
+```
+
+生成後、タブ区切りになっていることを確認します。
+
+```bash
+cat -A /opt/zeek/intel/iocs.dat | head -n 3
+```
+
+### 2. Intelフレームワークを読み込むZeekスクリプトを設定する
+
+`/opt/zeek/share/zeek/site/local.zeek`に以下を追記し、IoCファイルの読み込みと、DNS/HTTP/証明書それぞれの一致検知ポリシースクリプトを有効化します。
+
+```zeek
+@load base/frameworks/intel
+@load policy/frameworks/intel/seen
+@load policy/frameworks/intel/seen/conn-established
+@load policy/frameworks/intel/seen/dns
+@load policy/frameworks/intel/seen/http-url
+@load policy/frameworks/intel/seen/x509
+@load policy/frameworks/intel/seen/where-locations
+
+redef Intel::read_files += {
+    "/opt/zeek/intel/iocs.dat"
+};
+```
+
+### 3. 設定を検証してから反映する
+
+```bash
+zeekctl check
+```
+
+`check`が正常であることを確認してから反映します。
+
+```bash
+zeekctl deploy
+```
+
+### 4. IoCファイルが読み込まれたことを確認する
+
+```bash
+zeekctl status
+grep -i "intel" /opt/zeek/spool/manager/stderr.log
+```
+
+## 動作確認
+
+1. 自組織内のテスト用IoC(`zt-intel-selftest.internal.example.org`, TLP:CLEAR)に対してのみDNS問い合わせを発生させます。攻撃者由来のIoC(`malicious-c2.example.net`等)へは絶対に到達させないでください。
+
+```bash
+dig zt-intel-selftest.internal.example.org @127.0.0.1
+```
+
+2. `intel.log`にDNSクエリ由来の一致が記録されたことを確認します。
+
+```bash
+zeek-cut -d ts indicator indicator_type seen.where matched < /opt/zeek/logs/current/intel.log | grep zt-intel-selftest.internal.example.org
+```
+
+3. 一致行に`seen.indicator`が`zt-intel-selftest.internal.example.org`、`seen.indicator_type`が`Intel::DOMAIN`、`matched`に`Intel::DNS`系のカテゴリが含まれることを確認します。一致が確認できない場合は手順1のタブ区切りファイルと手順2の`@load`設定を再確認してください。
+
+## 注意事項
+
+- IoCの型と観測データの対応を誤らないこと。`Intel::DOMAIN`は`dns.log`の`query`(問い合わせドメイン)としか一致しない。IPアドレスをIntel::DOMAINとして登録する、あるいはURLをIntel::ADDRとして登録するなど型を誤ると一致検知が発生しないため、取り込み前に型とIoCの実体を必ず突き合わせる。
+- フィード鮮度を管理すること。`added_at`が古いIoC(特に`Intel::ADDR`のような再割当されやすい型)は誤検知・見逃しの原因になる。取り込み元フィードごとに再取得・失効の周期を定め、失効したIoCは`iocs.dat`から除去してから`zeekctl deploy`で反映する。
+- TLPを遵守すること。TLP:RED/AMBERのIoCを`intel.log`経由で許可されていない範囲(共有SIEM、外部委託先など)に転送・共有しない。`source`と`tlp`列を基準に、ログの転送先・保持期間・アクセス権限を配布制限に合わせて設定する。
+- `zeekctl deploy`は稼働中のZeekワーカーを再起動するため、実運用環境では夜間などトラフィックへの影響が小さい時間帯に実施するか、Intelファイルの追記のみで足りる場合は影響範囲を確認したうえで実施する。
+- 本手順のIoCインジケータ自体は攻撃者に関する共有情報であり、動作確認は自組織が管理するテストドメイン(`zt-intel-selftest.internal.example.org`など、実在の攻撃者インフラではないもの)に限定して行い、実在のC2ドメインやIPへ意図的に通信しない。

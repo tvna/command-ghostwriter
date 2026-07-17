@@ -1,0 +1,11 @@
+config_path: "/etc/suricata/suricata.yaml"
+eve_log_path: "/var/log/suricata/eve.json"
+eve_types:
+  - "alert"
+  - "dns"
+  - "tls"
+  - "http"
+community_id: "yes"
+rotate_size: "200mb"
+forwarder: "promtail"
+siem_endpoint: "https://siem.internal.example.jp:9200/suricata-eve"

@@ -1,0 +1,9 @@
+sid,attack_type,http_buffer,pattern,action,msg
+9100101,SQLi,http.uri,union select,drop,SQLi attempt - UNION SELECT in URI
+9100102,SQLi,http.uri,waitfor delay,drop,SQLi attempt - time-based blind SQLi in URI
+9100103,Path Traversal,http.uri,../,drop,Path traversal attempt in URI
+9100104,Path Traversal,http.uri,etc/passwd,drop,Path traversal - etc-passwd access attempt in URI
+9100105,Scanner,http.user_agent,sqlmap,drop,sqlmap scanner user-agent detected
+9100106,Scanner,http.user_agent,nikto,drop,nikto scanner user-agent detected
+9100107,SQLi,http.request_body,union select,drop,SQLi attempt - UNION SELECT in POST body
+9100108,Recon,http.host,internal-admin.local,alert,Suspicious Host header targeting internal admin vhost

@@ -1,0 +1,14 @@
+cluster_name: "wazuh-alerts-cluster"
+cluster_nodes:
+  - name: "wazuh-idx-01"
+    roles: "cluster_manager"
+    host: "10.0.1.11"
+  - name: "wazuh-idx-02"
+    roles: "cluster_manager"
+    host: "10.0.1.12"
+  - name: "wazuh-idx-03"
+    roles: "data"
+    host: "10.0.1.13"
+shard_count: 3
+replica_count: 1
+retention_days: 90

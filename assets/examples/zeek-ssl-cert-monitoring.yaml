@@ -1,0 +1,6 @@
+log_dir: /opt/zeek/logs/current
+watch_sni_patterns:
+  - "*.internal-api.example.com"
+  - "*.corp-vpn.example.com"
+alert_on_self_signed: true
+cert_expiry_days: 14

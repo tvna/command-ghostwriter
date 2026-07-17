@@ -1,0 +1,15 @@
+promtail_metrics_check = false
+rate_limit_429 = true
+ingester_check = false
+timestamp_skew = "8m"
+promtail_positions_file = "/var/lib/promtail/positions.yaml"
+promtail_metrics_url = "http://localhost:9080/metrics"
+loki_metrics_url = "http://localhost:3100/metrics"
+loki_query_url = "http://localhost:3100/loki/api/v1/query_range"
+stream_selector = "{job=\"app-logs\", environment=\"production\"}"
+tenant_id = "app-logs"
+limits_config_path = "/etc/loki/config.yaml"
+per_stream_rate_limit_mb = 4
+per_stream_rate_limit_burst_mb = 6
+storage_backend = "s3"
+storage_bucket = "loki-prod-logs"

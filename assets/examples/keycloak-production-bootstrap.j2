@@ -1,0 +1,123 @@
+# Keycloak本番インスタンスの初期構築 — {{ server.host }}
+
+対象ホスト **{{ server.host }}** に、DB接続・TLS終端・hostname設定を含めて Keycloak を本番構成でビルド・起動し、初期管理者で CLI (`kcadm.sh`) 接続できるところまでの手順です。
+
+## 目的
+
+`kc.sh build` によるビルド済み配布物の作成と `kc.sh start --optimized` による本番起動を分離して理解し、`conf/keycloak.conf` の DB・hostname・TLS・proxy-headers 設定を安全に反映したうえで、初期管理者アカウントでの疎通確認と `kcadm.sh` からの CLI 接続までを一巡できるようになることを目指します。
+
+## 用語解説
+
+- **build / start の分離**: `kc.sh build` は `conf/keycloak.conf` のビルド時オプション（`db`, `features` など）を焼き込んだ最適化済み配布物を作る工程で、`kc.sh start --optimized` はそのビルド済み配布物をそのまま起動する工程です。ビルド時オプションを変更した場合は再度 `build` が必要で、`--optimized` を付けずに `start` すると毎回ビルド相当の処理が走り起動が遅くなります。
+- **hostname 設定とトークン issuer**: `conf/keycloak.conf` の `hostname` は単なる表示用の値ではなく、発行される ID トークン/アクセストークンの `iss` (issuer) クレームと、各種リダイレクト URI の生成に直接使われます。ここを本番の公開 URL と一致させないと、クライアント側のトークン検証や OIDC ディスカバリが失敗し SSO が機能しなくなります。
+- **proxy-headers**: リバースプロキシ配下で `X-Forwarded-*` ヘッダーを信頼するかどうかの設定です。`xforwarded` を指定すると `X-Forwarded-Proto`/`X-Forwarded-Host` を信頼して外部からの実際のスキーム・ホストを復元します。プロキシを経由しない構成でこれを有効にすると、ヘッダー偽装によるなりすましのリスクがあります。
+- **KEYCLOAK_ADMIN / KEYCLOAK_ADMIN_PASSWORD**: 初回起動時のみ有効なブートストラップ用の環境変数で、マスターレルムの初期管理者アカウントを作成します。2回目以降の起動では既にアカウントが存在するため無視されます。
+- **kcadm.sh config credentials**: `kcadm.sh` が後続コマンドで使う認証トークンをローカルの設定ファイルにキャッシュする操作です。以後のコマンドはこのキャッシュを使って `admin-cli` クライアント経由で REST API を呼び出します。
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 対象ホスト | {{ server.host }} |
+| Keycloakホームディレクトリ | {{ server.kc_home }} |
+| DBベンダー | {{ db_vendor }} |
+| DB接続URL | {{ db_url }} |
+| DBユーザー | {{ db_username }} |
+| hostname (公開URL) | {{ hostname }} |
+| TLS証明書パス | {{ tls_cert_path }} |
+| TLS秘密鍵パス | {{ tls_key_path }} |
+| proxy-headers | {{ proxy_headers }} |
+| 初期管理者ブートストラップ | {{ admin_bootstrap }} |
+| 初期管理者ユーザー名 | {{ admin_username }} |
+| kcadm接続先(server-url) | {{ kcadm.server_url }} |
+| kcadmレルム | {{ kcadm.realm }} |
+| kcadmクライアントID | {{ kcadm.client_id }} |
+
+## 1. conf/keycloak.conf を設定する
+
+`{{ server.kc_home }}/conf/keycloak.conf` にビルド時・実行時オプションを設定します。DBパスワードは平文で書き込まず、`kc.sh` が読める環境変数経由で渡します。
+
+```bash
+cat <<'CONF' | sudo tee -a {{ server.kc_home }}/conf/keycloak.conf
+db={{ db_vendor }}
+db-url={{ db_url }}
+db-username={{ db_username }}
+hostname={{ hostname }}
+https-certificate-file={{ tls_cert_path }}
+https-certificate-key-file={{ tls_key_path }}
+proxy-headers={{ proxy_headers }}
+CONF
+```
+
+DBパスワードは対話式に渡し、ヒストリーやログに残さないようにします。
+
+```bash
+read -s -p "DB password: " KC_DB_PASSWORD
+export KC_DB_PASSWORD
+```
+
+## 2. ビルドする (kc.sh build)
+
+`db` などビルド時オプションを焼き込んだ最適化済み配布物を作成します。この段階ではまだサーバは起動しません。
+
+```bash
+sudo -E {{ server.kc_home }}/bin/kc.sh build
+```
+
+出力に `db={{ db_vendor }}` を含むビルドサマリが表示されることを確認します。
+
+## 3. 初期管理者をブートストラップして起動する (kc.sh start --optimized)
+
+{% if admin_bootstrap %}
+初回起動のみ `KEYCLOAK_ADMIN` / `KEYCLOAK_ADMIN_PASSWORD` を指定してマスターレルムの初期管理者を作成します。パスワードは使い捨ての強力な値にし、コマンド履歴に残さないため環境変数経由で渡します。
+
+```bash
+read -s -p "Initial admin password: " KEYCLOAK_ADMIN_PASSWORD
+export KEYCLOAK_ADMIN={{ admin_username }}
+export KEYCLOAK_ADMIN_PASSWORD
+sudo -E systemctl start keycloak
+```
+
+`keycloak.service` は `{{ server.kc_home }}/bin/kc.sh start --optimized` を実行するように構成済みとします。ビルド済み配布物をそのまま使うため、毎回のビルド処理を省略して高速に起動します。
+{% endif %}
+
+## 4. マスター管理コンソールへの初回ログインを確認する
+
+**次の手順に進む前に、必ずブラウザから初期管理者でログインできることを確認してください。** ここで疎通が取れないまま `kcadm.sh` の自動化を組むと、hostname 誤設定に気づかず自動化スクリプトごとロックアウトされる危険があります。
+
+1. `{{ hostname }}/admin/master/console/` にブラウザでアクセスする。
+2. `{{ admin_username }}` と設定したパスワードでログインできることを確認する。
+3. ログイン後、画面右上の言語/セッション表示から issuer が `{{ hostname }}` になっていることを確認する。
+
+## 5. kcadm.sh で CLI 接続を設定する
+
+マスター管理コンソールでのログインを確認できたら、`admin-cli` クライアント経由の認証トークンをキャッシュします。
+
+```bash
+{{ server.kc_home }}/bin/kcadm.sh config credentials \
+  --server {{ kcadm.server_url }} \
+  --realm {{ kcadm.realm }} \
+  --client {{ kcadm.client_id }} \
+  --user {{ admin_username }}
+```
+
+パスワード入力を求められるので、手順3で設定した初期管理者パスワードを入力します。
+
+## 動作確認
+
+- 手順4のとおり `{{ hostname }}/admin/master/console/` にブラウザでアクセスし、`{{ admin_username }}` でログインできること。
+- 以下のコマンドでレルム一覧が取得でき、`{{ kcadm.realm }}` が含まれること。
+
+```bash
+{{ server.kc_home }}/bin/kcadm.sh get realms
+```
+
+- 取得結果に含まれる各レルムの `realm` フィールドを確認し、想定外のレルムが混入していないこと。
+
+## 注意事項
+
+- **ロックアウト防止順序**: 初期管理者アカウントでマスター管理コンソールにログインできることを手順4で確認してから、手順5の `kcadm.sh` 自動化に進んでください。順序を逆にすると、hostname 誤設定やTLS証明書不備に気づかないまま自動化を組んでしまい、復旧に管理コンソールへの直接アクセス（別経路でのDB操作など）が必要になります。
+- **hostname誤設定によるSSO破綻**: `hostname` はトークンの `iss` クレームとリダイレクトURIの生成に使われるため、実際に公開するURLと一致しない値を設定すると、既存クライアントのトークン検証やOIDCディスカバリが失敗し、SSO全体が機能しなくなります。変更する場合は必ずステージング環境で疎通確認してから本番に反映してください。
+- **初期管理者パスワードの取り扱い**: `KEYCLOAK_ADMIN_PASSWORD` はブートストラップ専用の使い捨て値とし、手順4での初回ログイン確認後は速やかにマスター管理コンソールからパスワードを変更してください。コマンド履歴・ログ・CI変数に平文で残さないこと。
+- **DB資格情報の管理**: `db-username`/DBパスワードは `conf/keycloak.conf` に平文で書き込まず、`KC_DB_PASSWORD` などの環境変数やシークレットマネージャー経由で渡し、アクセス権を管理者アカウントに限定してください。
+- `kc.sh build` 後に `conf/keycloak.conf` のビルド時オプション（`db` など）を変更した場合は、再度 `kc.sh build` を実行してから起動してください。実行し忘れると古い設定のまま起動し、意図しないDBに接続する恐れがあります。

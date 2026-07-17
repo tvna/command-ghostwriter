@@ -1,0 +1,143 @@
+# Keycloakロールとグループのマッピング設計
+
+realm/clientロールとグループでRBAC（ロールベースアクセス制御）を設計し、client scopeのprotocol mapperでトークンクレームへ反映する手順です。
+
+## 目的
+
+realmロールとclientロールの違い、グループを介したロールの一括付与、compositeロールによるロール継承の設計方法を理解し、client scopeのprotocol mapperを使ってアクセストークンの `roles` / `groups` クレームへ正しく反映できるようになることを目指します。
+
+## 用語解説
+
+- **realmロール**: realm全体で共有される権限単位。特定のクライアント（アプリ）に紐づかない。
+- **clientロール**: 特定のクライアント（アプリ）に固有の権限単位。同名のロールが別クライアントに存在しても衝突しない。
+- **グループ**: ユーザーの集合。グループにロールを割り当てると、所属ユーザー全員がそのロールを継承する（グループ経由のロール継承）。
+- **compositeロール**: 他のロールを内包するロール。例えば `app-admin` に `app-editor` を内包させると、`app-admin` 保有者は `app-editor` の権限も自動的に得る。過剰な内包は最小権限の原則に反するため設計時に範囲を明記する。
+- **client scope / protocol mapper**: client scopeはトークンに含める内容の集合。protocol mapperはロールやグループ所属をトークンのクレーム（JSON項目）に変換する仕組み。
+- **クレーム(claim)**: JWT（JSON Web Token）に含まれるキーと値のペア。本手順では `roles` と `groups` クレームを付与する。
+
+## シナリオ設定
+
+対象realmは `myrealm`、対象clientは `app-backend` とします。
+
+| role_name | role_type | group | mapped_scope | claim_name |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["role_name"] }} | {{ r["role_type"] }} | {{ r["group"] }} | {{ r["mapped_scope"] }} | {{ r["claim_name"] }} |
+{% endfor %}
+
+## 1. kcadm.shでログインする
+
+```bash
+export KC_URL="https://keycloak.example.internal"
+export KC_ADMIN_PASSWORD_FILE="/run/secrets/kc_admin_password"
+/opt/keycloak/bin/kcadm.sh config credentials \
+  --server "$KC_URL" --realm master --user admin \
+  --password "$(cat "$KC_ADMIN_PASSWORD_FILE")"
+```
+
+## 2. realmロールとclientロールを作成する
+
+```bash
+{% for r in csv_rows %}{% if r["role_type"] == "realm" %}/opt/keycloak/bin/kcadm.sh create roles -r myrealm -s name={{ r["role_name"] }} --output 2>/dev/null || echo "既存: {{ r["role_name"] }}"
+{% endif %}{% endfor %}
+CID=$(/opt/keycloak/bin/kcadm.sh get clients -r myrealm -q clientId=app-backend --fields id --format csv --noquotes)
+{% for r in csv_rows %}{% if r["role_type"] == "client" %}/opt/keycloak/bin/kcadm.sh create "clients/$CID/roles" -r myrealm -s name={{ r["role_name"] }} --output 2>/dev/null || echo "既存: {{ r["role_name"] }}"
+{% endif %}{% endfor %}```
+
+## 3. グループを作成しロールを割り当てる(add-roles)
+
+グループ経由のロール継承を使い、ユーザー個々ではなくグループへロールを紐づけます。
+
+```bash
+{% for r in csv_rows %}/opt/keycloak/bin/kcadm.sh create groups -r myrealm -s name={{ r["group"] }} --output 2>/dev/null || echo "既存: {{ r["group"] }}"
+{% endfor %}
+{% for r in csv_rows %}{% if r["role_type"] == "realm" %}/opt/keycloak/bin/kcadm.sh add-roles -r myrealm --gname {{ r["group"] }} --rolename {{ r["role_name"] }}
+{% else %}/opt/keycloak/bin/kcadm.sh add-roles -r myrealm --gname {{ r["group"] }} --cclientid app-backend --rolename {{ r["role_name"] }}
+{% endif %}{% endfor %}```
+
+## 4. compositeロールを設計する
+
+`app-admin` に `app-editor` を内包させ、管理者は編集者の権限も自動的に持つようにします。最小権限の原則を守るため、内包先はここで宣言した1ロールに限定します。
+
+```bash
+/opt/keycloak/bin/kcadm.sh add-roles -r myrealm --rname app-admin --rolename app-editor
+```
+
+## 5. ユーザーをグループへ所属させる
+
+```bash
+USER_ID=$(/opt/keycloak/bin/kcadm.sh get users -r myrealm -q username=taro.yamada --fields id --format csv --noquotes)
+GROUP_ID=$(/opt/keycloak/bin/kcadm.sh get groups -r myrealm -q search=app-editors --fields id --format csv --noquotes)
+/opt/keycloak/bin/kcadm.sh update "users/$USER_ID/groups/$GROUP_ID" -r myrealm
+```
+
+## 6. client scopeにprotocol mapperを追加しトークンへクレームを反映する
+
+```bash
+/opt/keycloak/bin/kcadm.sh create client-scopes -r myrealm -s name=app-backend-roles -s protocol=openid-connect --output
+
+SCOPE_ID=$(/opt/keycloak/bin/kcadm.sh get client-scopes -r myrealm --fields id,name --format csv --noquotes | grep app-backend-roles | cut -d, -f1)
+
+/opt/keycloak/bin/kcadm.sh create "client-scopes/$SCOPE_ID/protocol-mappers/models" -r myrealm \
+  -s name=realm-roles-mapper \
+  -s protocol=openid-connect \
+  -s protocolMapper=oidc-usermodel-realm-role-mapper \
+  -s 'config."claim.name"=roles' \
+  -s 'config."jsonType.label"=String' \
+  -s 'config."multivalued"=true' \
+  -s 'config."access.token.claim"=true'
+
+/opt/keycloak/bin/kcadm.sh create "client-scopes/$SCOPE_ID/protocol-mappers/models" -r myrealm \
+  -s name=client-roles-mapper \
+  -s protocol=openid-connect \
+  -s protocolMapper=oidc-usermodel-client-role-mapper \
+  -s 'config."usermodel.clientRoleMapping.clientId"=app-backend' \
+  -s 'config."claim.name"=roles' \
+  -s 'config."jsonType.label"=String' \
+  -s 'config."multivalued"=true' \
+  -s 'config."access.token.claim"=true'
+
+/opt/keycloak/bin/kcadm.sh create "client-scopes/$SCOPE_ID/protocol-mappers/models" -r myrealm \
+  -s name=groups-mapper \
+  -s protocol=openid-connect \
+  -s protocolMapper=oidc-group-membership-mapper \
+  -s 'config."claim.name"=groups' \
+  -s 'config."full.path"=false' \
+  -s 'config."access.token.claim"=true'
+
+/opt/keycloak/bin/kcadm.sh update "clients/$CID" -r myrealm -s 'defaultClientScopes=["app-backend-roles"]'
+```
+
+## 動作確認
+
+新しいロール・グループ設計を、既存のクライアント設定を変更・削除する前に、まずこの手順で新設したclient scope経由のトークンで検証します。
+
+1. パスワードグラントで確認用トークンを取得する。
+
+   ```bash
+   curl -s -X POST "$KC_URL/realms/myrealm/protocol/openid-connect/token" \
+     -d "client_id=app-backend" \
+     -d "client_secret=$(cat /run/secrets/app_backend_secret)" \
+     -d "grant_type=password" \
+     -d "username=taro.yamada" \
+     -d "password=$(cat /run/secrets/taro_password)" \
+     -d "scope=openid app-backend-roles" \
+   | jq -r .access_token > /tmp/token.txt
+   ```
+
+2. 取得したトークンをデコードし、`roles` クレームに期待ロールが載ることを確認する。
+
+   ```bash
+   jwt decode "$(cat /tmp/token.txt)" | jq '.payload.roles, .payload.groups'
+   ```
+
+3. `roles` に `app-editor` や `app-viewer` などシナリオ設定の値が含まれ、`groups` に所属グループ名が含まれることを目視確認する。
+4. アプリ側（app-backend）で、`roles` クレームを見た認可判定が期待どおり通過・拒否されることを確認する（例: `app-viewer` のみのユーザーで編集APIが403になること）。
+5. 検証が通ったことを確認してから、旧来の個別ユーザーへの直接ロール割り当てが残っていればそれを削除する。
+
+## 注意事項
+
+- ロールはグループ・compositeロールともに **最小権限** で設計する。`app-admin` へ内包するロールは業務上必要な範囲に限定し、安易に上位ロールへ全権限を集約しない。
+- compositeロールの内包関係は連鎖しうるため、新規ロールを追加する際は内包先を棚卸しし、意図しない過剰な権限付与（権限のなだれ現象）が起きていないか確認する。
+- グループを削除すると、そのグループ経由でロールを継承していた全ユーザーが即座に権限を失う。削除前に所属ユーザー一覧と影響範囲を必ず確認する。
+- client scopeの変更（protocol mapperの追加・削除、defaultClientScopesの変更）は、既存クライアントの認可経路に影響する。動作確認で新しいクレーム反映を確認できるまで、既存の認可設定やユーザーへの直接ロール割り当てを削除・無効化しない。
+- 管理者パスワードやclient secretは平文でコマンド履歴に残さず、ファイル経由（`--password "$(cat ...)"`）で渡す。

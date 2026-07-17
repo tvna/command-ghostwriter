@@ -1,0 +1,14 @@
+auth_enabled: true
+tenants:
+  - org_id: "team-payments"
+    proxy_user: "payments-svc"
+  - org_id: "team-analytics"
+    proxy_user: "analytics-svc"
+proxy_auth_method: "basic"
+per_tenant_limits:
+  team-payments:
+    ingestion_rate_mb: 8
+    max_query_series: 5000
+  team-analytics:
+    ingestion_rate_mb: 4
+    max_query_series: 2000

@@ -1,0 +1,138 @@
+# OPA Regoポリシーの作成と評価
+
+Regoでallow/denyポリシーを作成し、`opa eval`で入力JSONに対する判定を検証し、`opa test`で単体テストを行う手順です。ゼロトラストのポリシー統制基盤として、認可判断をコード化・テスト可能にします。
+
+## 目的
+
+`default allow = false`を徹底したRegoポリシーを作成し、入力ドキュメント(`input`)に対する評価結果を`opa eval`で確認したうえで、`opa test`によるユニットテストで網羅性を担保できるようになることを目指します。
+
+## 用語解説
+
+- **default deny**: ルールがどの条件にも合致しない場合の既定判断を`false`（拒否）にしておく設計原則。明示的に許可条件を満たした場合のみ`allow`が`true`になる
+- **ルール評価**: Regoの`allow if { ... }`のように、複数の条件（ボディ）がすべて真の場合にルールが成立する評価モデル
+- **inputドキュメント**: `opa eval`実行時に`-i`で渡すJSONデータで、ポリシー内から`input.xxx`として参照される評価対象の入力
+- **deny[msg]**: 拒否理由をメッセージとして集合で返すルールパターン。許可判定とは別に、なぜ拒否されたかを人間が追跡できるようにする
+- **部分評価/未定義**: 条件に合致するルールが一つも無い場合、Regoの変数は`undefined`となり、`false`とは異なる状態として扱われる点に注意が必要
+
+## シナリオ設定
+
+パッケージ名は `{{ package_name }}`、既定判断（default decision）は `{{ default_decision }}` です。評価対象のinputスキーマは次のとおりです。
+
+| キー | サンプル値 |
+| --- | --- |
+{% for key, value in input_schema.items() %}| {{ key }} | {{ value }} |
+{% endfor %}
+単体テストケースは {{ test_cases | length }} 件用意します。
+
+| ケース名 | method | role | mfa | 期待結果 |
+| --- | --- | --- | --- | --- |
+{% for tc in test_cases %}| {{ tc.name }} | {{ tc.input_method }} | {{ tc.input_role }} | {{ tc.input_mfa }} | {{ tc.expect }} |
+{% endfor %}
+
+## 手順
+
+### 1. 作業ディレクトリとポリシーファイルを用意する
+
+```bash
+mkdir -p ./policy
+cat <<'EOF' > ./policy/authz.rego
+package {{ package_name }}
+
+import future.keywords.if
+import future.keywords.in
+
+default allow = {{ default_decision }}
+
+allow if {
+	input.method == "GET"
+	input.user_role in {"viewer", "editor", "admin"}
+	input.mfa_verified == true
+}
+
+allow if {
+	input.method in {"POST", "PUT", "DELETE"}
+	input.user_role == "admin"
+	input.mfa_verified == true
+}
+
+deny[msg] {
+	input.mfa_verified == false
+	msg := "MFA未検証のため拒否"
+}
+
+deny[msg] {
+	input.method in {"POST", "PUT", "DELETE"}
+	input.user_role != "admin"
+	msg := "書き込み系操作はadminロールのみ許可"
+}
+EOF
+```
+
+このポリシーは`default allow = {{ default_decision }}`から始まり、`allow if`ブロックの条件をすべて満たした場合のみ許可に倒れます。
+
+### 2. サンプルinputを用意し、opa evalで単発評価する
+
+```bash
+mkdir -p ./input
+cat <<'EOF' > ./input/sample.json
+{
+  "method": "{{ input_schema.method }}",
+  "path": "{{ input_schema.path }}",
+  "user_role": "{{ input_schema.user_role }}",
+  "mfa_verified": {{ input_schema.mfa_verified }}
+}
+EOF
+
+opa eval -i ./input/sample.json -d ./policy/authz.rego "data.{{ package_name }}.allow"
+opa eval -i ./input/sample.json -d ./policy/authz.rego "data.{{ package_name }}.deny"
+```
+
+`allow`が`true`、`deny`が空集合であることを確認します。想定外の入力では、`deny`にメッセージが入ることを確認してください。
+
+### 3. opa testで単体テストを作成し実行する
+
+```bash
+cat <<'EOF' > ./policy/authz_test.rego
+package {{ package_name }}
+
+import future.keywords.if
+
+{% for tc in test_cases %}test_{{ loop.index }}_{{ tc.input_role }}_{{ tc.input_method | lower }} if {
+	result := allow with input as {
+		"method": "{{ tc.input_method }}",
+		"path": "{{ input_schema.path }}",
+		"user_role": "{{ tc.input_role }}",
+		"mfa_verified": {{ tc.input_mfa }}
+	}
+	result == {{ tc.expect }}
+}
+
+{% endfor %}EOF
+
+opa test ./policy -v
+```
+
+各テストケースは「{{ test_cases | map(attribute='name') | join('」「') }}」を検証します。`opa test`の出力で全テストが`PASS`になることを確認します。
+
+### 4. ポリシーをレビューし、バージョン管理に登録する
+
+```bash
+git add ./policy/authz.rego ./policy/authz_test.rego
+git commit -m "policy: {{ package_name }} の認可ポリシーを追加"
+```
+
+レビュー担当者は`default allow`が`{{ default_decision }}`のままであること、新しい`allow`条件が意図せず許可範囲を広げていないことを確認したうえで承認します。
+
+## 動作確認
+
+1. `opa eval -i ./input/sample.json -d ./policy/authz.rego "data.{{ package_name }}.allow"`の結果が期待通りの許可/拒否判定（`true`/`false`）であること
+2. `opa test ./policy -v`の出力で、{{ test_cases | length }}件すべてのテストが`PASS`と表示されること
+3. `data.{{ package_name }}.deny`が拒否理由を含む集合として返り、空でないケースで意図したメッセージが含まれること
+
+## 注意事項
+
+- `default allow = {{ default_decision }}`を必ず維持する。個別の`allow if`ルールを追加する際も、既定は拒否のままにし、明示的な許可条件だけを積み増す設計を崩さない。
+- Regoでは条件に一致するルールが無い場合、値は`undefined`になり`false`とは区別される。`opa eval`の出力で`undefined`が返った場合は、想定した条件分岐にそもそも到達していない可能性があるため、ルール本体を再確認する。
+- 本手順は認可（authorization）ポリシーそのものを差し替える変更であるため、新しいポリシーを本番の判断経路に組み込む前に、既存の許可経路と並行して`opa eval`によるドライラン評価を行い、想定した利用者が拒否されないことを確認してから、旧ポリシー（または既定の全許可設定）を無効化すること。
+- ポリシー変更はコードレビューを経てからマージする。`opa test`のテスト網羅（許可・拒否・境界値）が不十分なままレビューを通さない。
+- ポリシーファイルと単体テストは同一コミットでバージョン管理し、変更履歴から「いつ・誰が・なぜ」許可条件を変えたか追跡できる状態を保つ。

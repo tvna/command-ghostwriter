@@ -1,0 +1,14 @@
+unbound_host: dns01.internal.example
+log_queries: true
+dnstap_enabled: false
+log_path: /var/log/unbound/query.log
+shipper: Filebeat
+siem_host: siem.internal.example
+siem_port: 6514
+retention_days: 14
+nxdomain_threshold_percent: 10
+metrics:
+  - nxdomain_rate
+  - top_queried_domains
+  - rare_domains
+test_domain: dns-analytics-check.internal.example
