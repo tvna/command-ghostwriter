@@ -1,0 +1,134 @@
+# OPNsense REST APIによる設定自動化の基盤整備 — {{ fw_host }}
+
+`{{ fw_host }}` に対して、最小権限の専用ユーザーとAPIキーを発行し、curlでのエイリアス照会・追加・適用をcurlから自動化できる状態を整えます。ここで作る鍵は今後のAPI自動化すべての土台になるため、権限を絞った状態で確実に疎通させてから運用に載せます。
+
+## 目的
+
+`System > Access > Users` で自動化専用のAPIユーザーを作成し、必要なページ権限のみを付与した状態でAPIキー/シークレットを発行します。そのキーで `core/firmware/status` への疎通確認から、`firewall/alias` 系エンドポイントの `searchItem` / `addItem` / `setItem` / `reconfigure` の呼び出しまでを一通り実行できるようになることを目指します。
+
+## 用語解説
+
+- **APIキー/シークレット**: OPNsenseのユーザー編集画面の「API keys」タブで発行する認証情報。HTTP Basic認証の `user:password` の代わりに `key:secret` を使う。発行直後の一度しか平文で表示されず、`.txt` としてダウンロードされる
+- **ページ権限 (Privilege)**: `System > Access > Users` の「Effective Privileges」で個々のユーザーに割り当てる、WebGUIページ単位のACL。APIエンドポイントもこのACLで保護されており、対応するページ権限がないと403になる
+- **searchItem / addItem / setItem / delItem**: OPNsenseのMVCコントローラ共通のCRUD系APIアクション名。一覧取得・新規追加・既存項目の更新・削除にそれぞれ対応する
+- **reconfigure**: `addItem` / `setItem` はデータモデルへの変更を保存するだけで、実際のサービス(この場合はフィルタ/エイリアステーブル)への反映には別途 `reconfigure` エンドポイントの呼び出しが必要
+- **エイリアス (Alias)**: IPアドレスやネットワーク、ポートをまとめて1つの名前で参照できるOPNsenseのオブジェクト。ファイアウォールルールから名前で参照する
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 対象ファイアウォール | `{{ fw_host }}` |
+| 自動化用ユーザー | `{{ api_user }}` |
+| 付与するページ権限 | {% for p in privileges %}`{{ p }}`{% if not loop.last %}, {% endif %}{% endfor %} |
+| 操作対象エイリアス | `{{ alias_name }}` |
+| 追加する疎通テスト用エントリ | `{{ test_entry }}` |
+
+## 手順
+
+### 1. 自動化専用ユーザーを作成し、権限をページ単位に限定する
+
+WebGUIの管理セッションは開いたまま、別タブでユーザー作成を行います(途中で操作を誤っても管理アクセスを失わないため)。
+
+`System > Access > Users` で `+` をクリックし、以下の内容でユーザーを作成します。
+
+- Username: `{{ api_user }}`
+- Full name: 自動化バッチ用アカウントである旨を記載
+- Group memberships: 使わない(個別のページ権限のみで最小化する)
+
+保存後、同じユーザーの編集画面の「Effective Privileges」欄で、検索ボックスに権限名を入力しながら以下を1件ずつ追加します。
+
+{% for p in privileges %}- `{{ p }}`
+{% endfor %}
+検索結果に表示される正式名称は稼働中バージョンの表記に従ってください(マイナーバージョンで表記が変わることがあります)。
+
+### 2. APIキー/シークレットを発行し、安全な受け渡し手順で保管する
+
+同じユーザー編集画面の「API keys」タブで `+` をクリックしてキーを発行します。
+
+```
+発行者(操作した管理者) → その場でダウンロードされる .txt を暗号化チャネル(社内Vault等)経由で保管先へ転送
+      → 自動化ホスト上の秘匿ファイルに書き込み → chmod 600 を即座に適用 → 平文の .txt は削除
+```
+
+自動化ホスト側では、コマンドラインへ直書きせず環境変数または600権限のファイルから読み込みます。
+
+```bash
+sudo install -m 600 /dev/null /etc/opnsense-api/{{ api_user }}.env
+sudo tee /etc/opnsense-api/{{ api_user }}.env >/dev/null <<'EOF'
+OPNSENSE_API_KEY=<発行されたkey>
+OPNSENSE_API_SECRET=<発行されたsecret>
+EOF
+sudo chmod 600 /etc/opnsense-api/{{ api_user }}.env
+
+set -a
+source /etc/opnsense-api/{{ api_user }}.env
+set +a
+```
+
+### 3. 新しいAPIキーで疎通確認する(旧来の管理者資格情報はまだ無効化しない)
+
+管理者のWebGUIセッションを開いたまま、別ターミナルで新しいキーだけを使って疎通確認します。ここで失敗しても管理者アクセスは失っていない状態を維持します。
+
+```bash
+curl -k -u "${OPNSENSE_API_KEY}:${OPNSENSE_API_SECRET}" \
+  "https://{{ fw_host }}/api/core/firmware/status"
+```
+
+`status` フィールドを含むJSONが返り、401/403にならないことを確認します。403が返る場合は手順1の権限付与を見直します。
+
+### 4. searchItemでエイリアス一覧を照会する
+
+```bash
+curl -k -u "${OPNSENSE_API_KEY}:${OPNSENSE_API_SECRET}" \
+  "https://{{ fw_host }}/api/firewall/alias/searchItem"
+```
+
+レスポンスJSON中に `{{ alias_name }}` が存在するか(初回はまだ存在しない想定)を確認します。存在しない場合は次の手順で新規作成します。
+
+### 5. addItemでエイリアスを新規作成する
+
+```bash
+curl -k -u "${OPNSENSE_API_KEY}:${OPNSENSE_API_SECRET}" \
+  -X POST -H "Content-Type: application/json" \
+  -d '{"alias":{"name":"{{ alias_name }}","type":"host","content":"{{ test_entry }}","enabled":"1","description":"API automation smoke test"}}' \
+  "https://{{ fw_host }}/api/firewall/alias/addItem"
+```
+
+レスポンスの `result` が `saved` であることと、返却された `uuid` を控えます。
+
+### 6. reconfigureで変更を反映する
+
+`addItem` はデータモデルへの保存のみで、実際のフィルタには反映されません。反映には `reconfigure` の呼び出しが必要です。
+
+```bash
+curl -k -u "${OPNSENSE_API_KEY}:${OPNSENSE_API_SECRET}" \
+  -X POST "https://{{ fw_host }}/api/firewall/alias/reconfigure"
+```
+
+### 7. setItemで既存エントリを更新する場合の呼び出し例
+
+手順5で控えた `uuid` を使い、内容(ここではテスト用エントリ)を更新する場合は以下のように呼び出し、更新後は同様に手順6の `reconfigure` を実行します。
+
+```bash
+curl -k -u "${OPNSENSE_API_KEY}:${OPNSENSE_API_SECRET}" \
+  -X POST -H "Content-Type: application/json" \
+  -d '{"alias":{"name":"{{ alias_name }}","type":"host","content":"{{ test_entry }}","enabled":"1","description":"API automation smoke test (updated)"}}' \
+  "https://{{ fw_host }}/api/firewall/alias/setItem/<uuid>"
+```
+
+## 動作確認
+
+- 手順3の `core/firmware/status` 呼び出しが401/403にならず、JSONレスポンスを返すこと
+- 手順4の `searchItem` レスポンスに `{{ alias_name }}` が含まれ、`content` に `{{ test_entry }}` が入っていること
+- WebGUIの `Firewall > Aliases` 画面で `{{ alias_name }}` が表示され、内容が一致していること(reconfigure漏れがないこと)
+- `{{ api_user }}` の資格情報で、割り当てた {{ privileges | length }} 件のページ権限に無関係なAPI(例: ユーザー管理系エンドポイント)を叩くと403になること(権限が過剰でないことの確認)
+
+## 注意事項
+
+- APIキー/シークレットは発行直後のダウンロード画面でしか平文表示されない。手順2の受け渡し経路(発行者→暗号化チャネル→保管先→権限設定)を必ず踏み、平文の `.txt` はコピー後に削除する。
+- キーをシェル履歴やコマンドライン引数へ直書きしない。環境変数または `chmod 600` のファイルから読み込み、CIやcronで使う場合もシークレットストア経由で注入する。
+- 新しい `{{ api_user }}` の資格情報で手順3・4の疎通確認が成功するまで、既存の管理者アカウントやセッションを無効化・削除しない。確認が取れて初めて、テスト用に一時的に広げた権限があればそれを剥がし、最小権限の状態を最終形とする。
+- キーのローテーションは定期(最低でも年1回、または担当者離任時)に実施し、旧キーは新キーでの疎通確認が取れてから無効化する。無効化はWebGUIの「API keys」タブから該当キーを削除するだけで即時に効く。
+- 本手順のエイリアス操作はテスト用エントリ(`{{ test_entry }}`、ドキュメント用のTEST-NET-3アドレス)で疎通確認する例であり、本番のアドレス/ネットワークをそのまま追加する前に、変更管理の承認を得ること。
+- `-k` は自己署名証明書を許容するオプション。社内CA署名済み証明書を使える環境では `-k` を外し、CA証明書を検証させる運用に切り替えることが望ましい。

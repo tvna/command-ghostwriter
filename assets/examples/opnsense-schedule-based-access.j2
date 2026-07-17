@@ -1,0 +1,172 @@
+# OPNsenseスケジュールルールによる時間帯アクセス制御
+
+CSV で定義した {{ csv_rows | length }} 件のスケジュール定義に基づき、Firewall > Settings >
+Schedules に時間帯オブジェクトを作成し、社内ユーザーVLANから外部HTTPSへの通信を営業時間内
+のみ許可、営業時間外は明示拒否とするルールを構成します。あわせて、スケジュール切替の瞬間に
+既存の通信ステートが残存する挙動と、それを強制的に破棄する設定についても確認します。
+
+## 目的
+
+CSV のスケジュール定義から Firewall > Settings > Schedules の時間帯オブジェクトを作成し、
+営業時間内は許可・営業時間外は明示拒否となるルールをファイアウォールルールに割り当てて
+安全に反映できるようになることを目指します。あわせて、スケジュール切替時にステートが
+即座には破棄されない既定動作を理解し、必要に応じて強制破棄を有効化できるようになることも
+目的とします。
+
+## 用語解説
+
+- **Schedule(スケジュールオブジェクト)**: Firewall > Settings > Schedules で作成する、曜日と
+  時刻の組み合わせからなる時間帯定義。1つのスケジュールに複数の時間帯(曜日・開始時刻・
+  終了時刻の組)を登録できる
+- **sched フィールド**: ファイアウォールルールに割り当てるスケジュール名を保持するフィールド。
+  現在時刻がスケジュールの範囲外になると、そのルールは無効化されたのと同じ扱いになり、以降の
+  ルール評価では読み飛ばされる
+- **ステート(state)の残存**: スケジュールが範囲外に切り替わっても、その直前に確立済みの
+  コネクション追跡エントリ(ステート)は既定では即座に削除されない。既存の通信はタイムアウト
+  するまでそのまま継続してしまう
+- **Schedule States(Firewall > Settings > Advanced)**: スケジュールが無効側へ切り替わった瞬間
+  に、そのルールに紐づく既存ステートを強制的に破棄するオプション。有効にすると、営業時間
+  終了と同時に該当する通信が即座に切断される
+- **明示拒否ルール**: 既定拒否だけに任せず、監査ログに理由を残すために意図的に投入する
+  `block` ルール
+
+## シナリオ設定
+
+今回作成するスケジュール定義は次の {{ csv_rows | length }} 件です。
+
+| schedule_name | days | time_range | target_rule | action |
+|---------------|------|------------|-------------|--------|
+{% for r in csv_rows %}| {{ r["schedule_name"] }} | {{ r["days"] }} | {{ r["time_range"] }} | {{ r["target_rule"] }} | {{ r["action"] }} |
+{% endfor %}
+
+上記から `business-hours` と `after-hours` の2つのスケジュールオブジェクトを作成し、
+それぞれ `lan-to-wan-https`(営業時間内の許可ルール)、`lan-to-wan-https-afterhours-deny`
+(営業時間外の明示拒否ルール)に割り当てます。対象は社内ユーザーVLAN(`vlan_user`、
+`10.0.30.0/24`)から外部(WAN)へのHTTPS(tcp/443)アクセスとします。
+
+## 1. 現状設定をバックアップする
+
+新しいスケジュールとルールを投入する前に、現行の config.xml をバックアップします。
+
+```bash
+export FW_HOST="10.0.0.1"
+export API_KEY="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+export API_SECRET="yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+
+curl -ks -u "${API_KEY}:${API_SECRET}" \
+  "https://${FW_HOST}/api/core/backup/download/this" \
+  -o "opnsense-config-backup-$(date +%Y%m%d%H%M).xml"
+```
+
+## 2. Schedule オブジェクトを Firewall > Settings > Schedules で作成する
+
+GUIの Firewall > Settings > Schedules で「+ Add」から新規スケジュールを作成します。CSVの
+内容に従い、次の時間帯を登録してください。対象曜日をクリックして選択し、開始・終了時刻を
+入力してから「Add Time」で1件ずつ時間帯を追加し、すべて追加し終えたらスケジュール名
+(Name)を入力して保存します。
+
+**business-hours**
+
+{% for r in csv_rows if r["schedule_name"] == "business-hours" %}- 曜日: {{ r["days"] }} / 時刻: {{ r["time_range"] }}(対象ルール: {{ r["target_rule"] }})
+{% endfor %}
+**after-hours**
+
+{% for r in csv_rows if r["schedule_name"] == "after-hours" %}- 曜日: {{ r["days"] }} / 時刻: {{ r["time_range"] }}(対象ルール: {{ r["target_rule"] }})
+{% endfor %}
+## 3. 営業時間内の許可ルールにスケジュールを割り当てて投入する
+
+`business-hours` スケジュールを `sched` フィールドで参照させ、許可ルールとして投入します。
+
+```bash
+{% for r in csv_rows if r["schedule_name"] == "business-hours" and r["days"] == "Mon-Fri" %}curl -ks -u "${API_KEY}:${API_SECRET}" -X POST \
+  "https://${FW_HOST}/api/firewall/filter/addRule" \
+  -H "Content-Type: application/json" \
+  -d '{"rule":{"action":"{{ r["action"] }}","quick":"1","interface":"vlan_user","direction":"in","ipprotocol":"inet","protocol":"tcp","source_net":"10.0.30.0/24","destination_net":"any","destination_port":"443","sched":"{{ r["schedule_name"] }}","description":"{{ r["target_rule"] }}: 営業時間内のみ外部HTTPSを許可","log":"1"}}'
+{% endfor %}curl -ks -u "${API_KEY}:${API_SECRET}" -X POST "https://${FW_HOST}/api/firewall/filter/apply"
+```
+
+## 4. 営業時間外の明示拒否ルールにスケジュールを割り当てて投入する
+
+既定拒否だけに任せず、`after-hours` スケジュールが有効な間だけ動作する明示拒否ルールを
+投入し、監査ログに理由を残します。
+
+```bash
+{% for r in csv_rows if r["schedule_name"] == "after-hours" and r["days"] == "Mon-Fri" %}curl -ks -u "${API_KEY}:${API_SECRET}" -X POST \
+  "https://${FW_HOST}/api/firewall/filter/addRule" \
+  -H "Content-Type: application/json" \
+  -d '{"rule":{"action":"{{ r["action"] }}","quick":"1","interface":"vlan_user","direction":"in","ipprotocol":"inet","protocol":"tcp","source_net":"10.0.30.0/24","destination_net":"any","destination_port":"443","sched":"{{ r["schedule_name"] }}","description":"{{ r["target_rule"] }}: 営業時間外の外部HTTPSを明示拒否","log":"1"}}'
+{% endfor %}curl -ks -u "${API_KEY}:${API_SECRET}" -X POST "https://${FW_HOST}/api/firewall/filter/apply"
+```
+
+## 5. 新しいスケジュール付きルールの動作を確認してから、既存の常時許可ルールを無効化する
+
+営業時間内に、社内ユーザーVLANの端末から外部HTTPSへの通信が実際に許可されることを、
+今まさに依存している既存の常時許可ルール(`lan-to-wan-https-legacy-allow`、無条件許可)
+とは別セッション・別クライアントで確認します。
+
+```bash
+curl -s --connect-timeout 5 -o /dev/null -w "%{http_code}\n" https://example.com/
+```
+
+新しいルールが期待通りに動作することを確認できてから、初めて既存の常時許可ルールを
+無効化(削除ではなく disable)します。
+
+```bash
+LEGACY_UUID=$(curl -ks -u "${API_KEY}:${API_SECRET}" -X POST \
+  "https://${FW_HOST}/api/firewall/filter/searchRule" \
+  -H "Content-Type: application/json" \
+  -d '{"searchPhrase":"lan-to-wan-https-legacy-allow"}' | python3 -c "import sys,json; print(json.load(sys.stdin)['rows'][0]['uuid'])")
+
+curl -ks -u "${API_KEY}:${API_SECRET}" -X POST \
+  "https://${FW_HOST}/api/firewall/filter/setRule/${LEGACY_UUID}" \
+  -H "Content-Type: application/json" \
+  -d '{"rule":{"enabled":"0"}}'
+curl -ks -u "${API_KEY}:${API_SECRET}" -X POST "https://${FW_HOST}/api/firewall/filter/apply"
+```
+
+## 6. スケジュール切替時のステート残存を確認し、Schedule States を有効化する
+
+営業時間終了の境界(19:00)をまたいで、確立済みのステートが残存するかを確認します。
+
+```bash
+pfctl -s states | grep "10.0.30.0/24"
+```
+
+境界時刻を過ぎても該当ステートが残っている場合、既存の通信は自動では切断されません。
+即座に切断したい場合は、Firewall > Settings > Advanced の「Schedule States」設定
+(スケジュール切替時のステート強制破棄)を有効にして保存・適用します。
+
+```bash
+curl -ks -u "${API_KEY}:${API_SECRET}" -X POST "https://${FW_HOST}/api/firewall/filter/apply"
+```
+
+有効化後、再度 19:00 の境界をまたいで `pfctl -s states` を確認し、該当ステートが
+切替と同時に消えることを確認してください。
+
+## 動作確認
+
+- 手順3・4の投入後、`https://${FW_HOST}/api/firewall/filter/searchRule` で
+  `lan-to-wan-https`・`lan-to-wan-https-afterhours-deny` の両ルールが登録され、
+  それぞれ `sched` に `business-hours`・`after-hours` が設定されていること
+- 手順5で、新しいルールが業務時間内に機能することを別セッションで確認できてから
+  既存の常時許可ルールを無効化していること
+- 境界時刻(08:00・19:00)の前後で `pfctl -s states` を確認し、Schedule States
+  無効時は既存ステートが残存し、有効化後は切替と同時に破棄されること
+- 境界時刻前後で実際にHTTPS通信を試行し、営業時間内は成功、営業時間外は失敗すること
+
+## 注意事項
+
+- 認証・ファイアウォール経路に関わる変更のため、手順5で新しいスケジュール付きルールが
+  業務時間内に機能することを別セッションで確認してから、既存の常時許可ルールを無効化する
+  こと。確認が取れるまで既存ルールを無効化・削除しない。
+- SSH・GUI管理アクセス等のメンテナンス用管理通信は、本手順のスケジュールルールの対象外
+  とし、常時許可(スケジュール未割り当て)のまま維持すること。管理経路をスケジュール制御
+  の対象に含めると、営業時間外に運用担当者自身がアクセスできなくなるおそれがある。
+- スケジュールは firewall のシステム時刻を基準に評価されるため、NTP等でシステム時刻が
+  正しく同期されていることを事前に確認すること。時刻がずれていると意図した時間帯と異なる
+  タイミングで切替が発生する。
+- Schedule States を有効にすると、対象ルールに紐づくすべての既存ステートが切替時に
+  一括で破棄される。長時間接続を維持する必要がある正常な通信も切断されるため、影響範囲を
+  事前に確認してから有効化すること。
+- 本手順の API エンドポイント・フィールド名は OPNsense のバージョンにより変わることが
+  あるため、投入前に自環境の `/api/firewall/filter/addRule` のスキーマで確認すること。

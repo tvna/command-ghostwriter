@@ -1,0 +1,169 @@
+# OPNsenseアウトバウンドNATのハイブリッド運用設計
+
+Firewall > NAT > Outbound を「{{ previous_mode|capitalize }} outbound NAT」から
+「{{ mode|capitalize }} outbound NAT」へ切り替え、拠点間VPN向けのNAPT除外ルールと、
+メールサーバ向けの送信元IP固定ルールを追加します。既存の自動生成ルールは
+{{ mode|capitalize }}モードでも維持されるため、追加ルールが既存通信を壊していないかを
+切替直後に必ず確認してください。
+
+## 目的
+
+自動アウトバウンドNAT(Automatic)のままでは個別セグメントに例外を設けられない
+ため、Hybrid outbound NATへ移行し、手動マッピングを既存の自動ルールと共存させる
+方法を理解した上で、VPN向けNAPT除外・送信元IP固定ルールを安全に追加し、切替直後の
+影響有無を判断できるようになることを目指します。
+
+## 用語解説
+
+- **Outbound NAT(送信元NAT/NAPT)**: LAN側の内部アドレスをWAN側のアドレスへ
+  変換し、複数の内部ホストが1つ(または少数)のグローバルIPを共有してインター
+  ネットへ出て行けるようにする仕組み。ポート番号も併せて書き換えるためNAPT
+  (Network Address and Port Translation)とも呼ばれる
+- **Hybrid outbound NAT**: 自動生成ルール(Automatic相当)を維持したまま、手動
+  マッピングを追加できるモード。手動マッピングは自動生成ルールより先に評価
+  されるため、特定セグメントだけ挙動を変えたい場合に安全に使える
+- **Do not NAT(NAPT除外)**: マッピングの変換先を「NATしない」に設定するルール。
+  拠点間IPsec VPN宛の通信は、NATされずに元の送信元IPのままトンネルへ入る
+  必要があるため、この除外設定が必須になる
+- **Static NAT / 送信元IP固定**: 特定セグメントからの通信を、共有プールでは
+  なく専用の1つのグローバルIPへ変換するマッピング。送信元IPをSPFレコードや
+  受信側のIP許可リストと一致させたいメールサーバ等で使う
+- **ステート表(State Table)**: `Firewall > Diagnostics > States`で確認できる、
+  現在確立中の通信セッションと、その送信元/宛先アドレス・変換後アドレスの
+  一覧。NATモード切替の影響を受けたセッションを特定する際に参照する
+
+## シナリオ設定
+
+| 種別 | 送信元セグメント | 宛先/変換先 | 用途 |
+|---|---|---|---|
+{% for m in static_source_maps %}| 送信元IP固定 | {{ m["src_net"] }} | {{ m["nat_ip"] }}(固定WAN側IP) | {{ m["purpose"] }} |
+{% endfor %}{% for n in no_nat_networks %}| NAPT除外(Do not NAT) | {{ n["src_net"] }} | {{ n["dst_net"] }}({{ vpn_descr }}) | {{ n["purpose"] }} |
+{% endfor %}
+上記に加え、既存の自動生成ルール({{ lan_network }} 全体を{{ wan_interface|upper }}の
+インターフェースアドレスへ変換する標準の設定)は、{{ mode }}モードへの切替後も
+そのまま残ります。
+
+## 手順
+
+### 1. 切替前の状態とモードを確認する
+
+*Firewall > NAT > Outbound* を開き、現在のモードが `{{ previous_mode|capitalize }}
+outbound NAT` になっていることを確認します。あわせて現行のNAT変換テーブルと
+主要なセッションの変換状況を記録し、切替後の比較に使います。
+
+```bash
+# OPNsense本体で、現行の自動アウトバウンドNAT設定を記録しておく
+pfctl -s nat
+```
+
+*System > Configuration > Backups* から現行config.xmlのバックアップを取得し、
+名称を分かるようにしておきます(例: `pre-hybrid-nat-backup`)。
+
+### 2. Hybrid outbound NATへ切り替える
+
+*Firewall > NAT > Outbound* の上部にあるモード選択で
+**{{ mode|capitalize }} outbound NAT rule generation** を選択し、**Save** を
+押します。この時点では手動マッピングをまだ追加していないため、自動生成ルール
+のみが有効な状態です。
+
+続けて画面上部の **Apply changes** を押して反映します。反映直後、既存の通信が
+継続しているかを簡単に確認します。
+
+```bash
+# 既存セッションの継続を粗く確認する(LAN内の適当な端末から)
+ping -c 3 8.8.8.8
+```
+
+もし既存通信が明らかに切断された場合は、直ちに手順5の切り戻しを実施してください。
+
+### 3. VPN向けNAPT除外ルールを追加する
+
+{% for n in no_nat_networks %}*Firewall > NAT > Outbound* で **Add** を押し、以下の内容で
+`{{ n["src_net"] }}` から `{{ n["dst_net"] }}`({{ vpn_descr }})宛のNAPT除外マッピングを
+作成します。
+
+- Interface: `{{ wan_interface|upper }}`
+- Source: network `{{ n["src_net"] }}`
+- Destination: network `{{ n["dst_net"] }}`
+- Do not NAT: チェックする(変換先アドレス欄は空欄のまま)
+- Description: `{{ n["purpose"] }}`
+
+{% endfor %}このマッピングはHybridモードで自動生成ルールより先に評価されるため、
+{{ vpn_descr }}宛の通信は自動アウトバウンドNATの対象から外れ、送信元IPを保持した
+ままIPsecトンネルへ入ります。保存後、**Apply changes** を押して反映します。
+
+### 4. メールサーバ向け送信元IP固定ルールを追加する
+
+{% for m in static_source_maps %}まず `{{ m["nat_ip"] }}` を固定の変換先として使うため、
+*Interfaces > Virtual IPs* で `{{ m["nat_ip"] }}` を `{{ wan_interface|upper }}` の
+IP Alias として登録します(Description: `{{ alias_descr }}`)。登録後、
+*Firewall > NAT > Outbound* で **Add** を押し、以下の内容でマッピングを作成します。
+
+- Interface: `{{ wan_interface|upper }}`
+- Source: network `{{ m["src_net"] }}`
+- Translation / target: Single host `{{ m["nat_ip"] }}`
+- Static-port: 無効(送信元ポートは通常どおり変換する)
+- Description: `{{ m["purpose"] }}`
+
+{% endfor %}保存後、**Apply changes** を押して反映します。
+
+### 5. 切替後の変換とステート表で既存セッションを確認する
+
+追加した2つのマッピングが意図どおりに動作しているかを、変換テーブルと
+ステート表の両方で確認します。
+
+```bash
+# OPNsense本体で、追加したマッピングが反映されていることを確認する
+pfctl -s nat
+```
+
+`pfctl -s nat`の出力に、`{{ static_source_maps[0]["src_net"] }}` から
+`{{ static_source_maps[0]["nat_ip"] }}` への変換エントリと、
+`{{ no_nat_networks[0]["src_net"] }}` から `{{ no_nat_networks[0]["dst_net"] }}` 宛の
+`no nat` エントリが表示されていることを確認します。
+
+続けて *Firewall > Diagnostics > States* を開き、以下の観点で既存セッションの
+変換状況を確認します。
+
+- `{{ no_nat_networks[0]["src_net"] }}` から `{{ no_nat_networks[0]["dst_net"] }}` 宛の
+  ステートで、送信元アドレスが変換されずに元のセグメントのまま表示されていること
+- `{{ static_source_maps[0]["src_net"] }}` から外部宛のステートで、送信元アドレスが
+  `{{ static_source_maps[0]["nat_ip"] }}` に変換されていること
+- それ以外の既存セグメントのステートが、切替前と変わらず自動生成ルールの
+  変換(`{{ wan_interface|upper }}`インターフェースアドレスへの変換)のままで
+  あること
+
+既存のリモート管理セッション(SSH/GUI)がある場合は、そのセッションを維持
+したまま、別の端末やタブから新規に管理アクセスできることも確認してください。
+
+## 動作確認
+
+- 手順5で `pfctl -s nat` に、送信元IP固定マッピングと NAPT除外(`no nat`)
+  マッピングの両方が表示されること
+- 手順5のステート表確認で、{{ vpn_descr }}宛の通信が変換されずにトンネルへ
+  入っていること、およびメールサーバセグメントの送信元が
+  `{{ static_source_maps[0]["nat_ip"] }}` に固定されていることの両方を
+  実セッションで確認できていること
+- それ以外の既存セグメントの通信(LAN全体のインターネット向け通信等)が、
+  切替前と同じ変換結果のまま継続していること
+- 既存のリモート管理セッションを維持したまま、別セッションから新規に
+  管理アクセスできること
+
+## 注意事項
+
+- {{ vpn_descr }}のようなサイト間VPN宛の通信は、NAT適用漏れ(除外を忘れて
+  変換されてしまう)・NAT適用しすぎ(除外範囲が狭すぎて一部セグメントが
+  変換対象に残る)のどちらも、IPsecのセレクタ不一致によるトンネル内通信断の
+  典型的な原因になる。手順3の除外ルールの送信元・宛先ネットワークは、
+  IPsecフェーズ2のセレクタと完全に一致させること。
+- Hybridモードへの切替やマッピング追加によって既存通信への影響が確認された
+  場合は、原因を追う前にまず *Firewall > NAT > Outbound* のモードを
+  `{{ previous_mode|capitalize }} outbound NAT rule generation` へ戻し、
+  **Save** と **Apply changes** を押して直ちに切り戻すこと。原因調査は
+  Automaticへ戻して通信を復旧させてから行う。
+- 送信元IP固定に使う `{{ static_source_maps[0]["nat_ip"] }}` は、事前に
+  Virtual IP(IP Alias)として登録されていないとマッピングの保存時にエラーに
+  なる。手順4の順序(Virtual IP登録が先、マッピング作成が後)を守ること。
+- 変更前に取得したconfig.xmlバックアップの場所を記録しておき、GUIからの
+  切り戻し操作自体が行えない状況(誤って管理アクセス経路を塞いだ場合等)に
+  備えて、コンソール/シリアルアクセスでの復旧手段も事前に確認しておく。

@@ -1,0 +1,8 @@
+rule_id,interface,description,hit_count,last_review,disposition
+OPN-101,wan,リバースプロキシへのHTTPS着信を許可,15234,2026-06-20,keep
+OPN-115,lan,-,0,2024-02-10,disable
+OPN-122,lan,2019年移行時のany-any暫定許可,4,2022-05-01,disable
+OPN-140,dmz,外部メールゲートウェイへのSMTPリレーを許可,842,2026-07-01,keep
+OPN-152,opt1,OPN-140と重複するSMTPリレー許可,0,2025-03-10,delete
+OPN-005,lan,OPNsense管理画面へのGUIアクセスを許可,55210,2026-07-16,keep
+OPN-006,sync,CARP/pfsyncによるfw01-fw02間の状態同期を許可,982340,2026-07-16,keep

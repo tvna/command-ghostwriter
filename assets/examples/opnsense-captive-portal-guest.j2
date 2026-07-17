@@ -1,0 +1,259 @@
+# OPNsense キャプティブポータルでのゲストWi-Fi分離手順 — {{ portal.zone_name }}
+
+ゲスト用 VLAN {{ portal.guest_vlan }} にキャプティブポータルとバウチャー認証を導入し、
+認証前は社内ネットワークへ一切到達できないゲスト専用の来訪者網を構築します。作業は
+OPNsense の Web GUI と REST API の両方を示すので、GUI 操作の代わりに API 呼び出しで
+自動化する場合はそちらを参照してください。`$API_KEY` / `$API_SECRET` は
+System > Access > Users で発行した API キーに読み替えてください。
+
+## 目的
+
+ゲストセグメントにキャプティブポータル認証・帯域制限・許可先(Allowed Addresses)を構成し、
+ゲストVLANから社内セグメントへの通信を遮断したうえで、認証フロー・遮断ルールの双方が
+意図どおり動作することを確認できるようになることを目指します。
+
+## 用語解説
+
+- **ゾーン (zone)**: キャプティブポータルの設定単位。対象インターフェース・タイムアウト・
+  許可先などをひとまとめに管理する（`OPNsense.captiveportal.zones.zone`）
+- **バウチャー認証**: ユーザー名/パスワードの代わりに使い捨てコードでゲストを認証する方式
+- **Allowed Addresses（許可アドレス）**: 認証前でも到達を許可する宛先ネットワークのリスト
+  （ポータル自身や決済ページなど、いわゆる walled garden）
+- **`__captiveportal_zone_<zoneid>`**: 認証済みクライアントの IP を保持する pf テーブル。
+  OPNsense はこのテーブルへの登録可否で通過許可を判定する
+- **dnctl pipe**: FreeBSD dummynet の帯域制御単位。OPNsense のトラフィックシェーパー
+  （Firewall > Shaper）はこの pipe 経由で上り/下り帯域を制限する
+- **`configctl`**: OPNsense のサービス制御・状態確認 CLI（`/usr/local/sbin/configctl`）
+
+## シナリオ設定
+
+| 項目 | 値 |
+|------|-----|
+| ゾーン名 (description) | {{ portal.zone_name }} |
+| ゲストVLAN | {{ portal.guest_vlan }} |
+| ダウンロード帯域制限 | {{ portal.bandwidth_down_kbps }} Kbit/s |
+| アップロード帯域制限 | {{ portal.bandwidth_up_kbps }} Kbit/s |
+| 発行バウチャー数 | {{ portal.voucher_count }} 枚 |
+| 認証前許可先 (Allowed Addresses) | {{ portal.allowed_destinations | join(', ') }} |
+
+## 1. ゲストVLANとキャプティブポータルゾーンを作成する
+
+Interfaces > Assignments でゲストVLAN {{ portal.guest_vlan }} を割り当てたインターフェース
+（以下 `opt2` とする）を作成済みであることを前提とします。続けて Services > Captive Portal >
+Administration で「+」からゾーンを新規追加します。
+
+- Enabled: チェックする
+- Zone description: `{{ portal.zone_name }}`
+- Interfaces: `opt2`（ゲストVLAN {{ portal.guest_vlan }}）
+- Idle timeout: `30`（分。無通信30分で自動ログオフ）
+- Hard timeout: `480`（分。8時間で強制ログオフ）
+- Allowed Addresses: {{ portal.allowed_destinations | join(', ') }}
+
+API で同じ設定を投入する場合:
+
+```bash
+curl -ks -u "$API_KEY:$API_SECRET" \
+  -X POST https://opnsense.local/api/captiveportal/settings/addZone \
+  -H "Content-Type: application/json" \
+  -d '{"zone":{"enabled":"1","description":"{{ portal.zone_name }}","interfaces":"opt2","idletimeout":"30","hardtimeout":"480"}}'
+
+curl -ks -u "$API_KEY:$API_SECRET" \
+  -X POST https://opnsense.local/api/captiveportal/service/reconfigure
+```
+
+反映後、`config.xml` には次のようなゾーン定義が保存されます（`zoneid` は自動採番。以下では
+`1` とします）。
+
+```xml
+<OPNsense>
+  <captiveportal version="1.0.6">
+    <zones>
+      <zone uuid="11111111-2222-3333-4444-555555555555">
+        <enabled>1</enabled>
+        <zoneid>1</zoneid>
+        <description>{{ portal.zone_name }}</description>
+        <interfaces>opt2</interfaces>
+        <idletimeout>30</idletimeout>
+        <hardtimeout>480</hardtimeout>
+      </zone>
+    </zones>
+  </captiveportal>
+</OPNsense>
+```
+
+## 2. バウチャー認証を有効化しバウチャーを発行する
+
+System > Access > Servers で認証サーバーを追加し、Type に `Voucher` を選び、対象ゾーンとして
+`{{ portal.zone_name }}` を紐付けます。保存すると、キャプティブポータルAPI からは
+`voucher_1`（`voucher_<zoneid>`）というプロバイダ名で参照できるようになります。
+
+Services > Captive Portal > Voucher でグループ名 `{{ portal.zone_name }}` を指定し、
+{{ portal.voucher_count }} 枚のバウチャーを一括生成します。API で行う場合:
+
+```bash
+curl -ks -u "$API_KEY:$API_SECRET" \
+  -X POST "https://opnsense.local/api/captiveportal/voucher/generateVouchers/voucher_1" \
+  -d "count={{ portal.voucher_count }}" \
+  -d "validity=480" \
+  -d "expirytime=0" \
+  -d "vouchergroup={{ portal.zone_name }}"
+```
+
+応答 JSON にはバウチャーコード一覧が含まれます。生成された {{ portal.voucher_count }} 枚は
+CSV としてエクスポートし、受付での配布用に保管してください。
+
+## 3. ゲスト回線の帯域制限（トラフィックシェーパー）を設定する
+
+Firewall > Shaper > Pipes で下り用・上り用の pipe を1本ずつ作成します。
+
+```bash
+curl -ks -u "$API_KEY:$API_SECRET" -X POST https://opnsense.local/api/trafficshaper/settings/addPipe \
+  -d "pipe[description]=guest-download" \
+  -d "pipe[bandwidth]={{ portal.bandwidth_down_kbps }}" \
+  -d "pipe[bandwidthMetric]=Kbit"
+
+curl -ks -u "$API_KEY:$API_SECRET" -X POST https://opnsense.local/api/trafficshaper/settings/addPipe \
+  -d "pipe[description]=guest-upload" \
+  -d "pipe[bandwidth]={{ portal.bandwidth_up_kbps }}" \
+  -d "pipe[bandwidthMetric]=Kbit"
+
+curl -ks -u "$API_KEY:$API_SECRET" -X POST https://opnsense.local/api/trafficshaper/service/reconfigure
+```
+
+反映されると `dnctl`（dummynet 制御）には次のような pipe が構成されます。
+
+```
+pipe 1 config bw {{ portal.bandwidth_down_kbps }}Kbit/s
+pipe 2 config bw {{ portal.bandwidth_up_kbps }}Kbit/s
+```
+
+続けて Firewall > Shaper > Rules で、interface `opt2`（ゲストVLAN {{ portal.guest_vlan }}）を
+送信元とするルールを作成し、方向ごとに pipe 1（ダウンロード）・pipe 2（アップロード）を
+割り当てます。
+
+## 4. Allowed Addresses と DNS 事前許可を設定する
+
+ゾーンの Allowed Addresses に、認証前でも到達させたい宛先を登録します。
+
+```
+{{ portal.allowed_destinations | join(', ') }}
+```
+
+これらはポータル自身の証明書配布元や決済ゲートウェイなど、認証ページ表示前に必要な
+最小限の宛先に留めてください。
+
+DNS については、Allowed Addresses に外部の公開DNS（8.8.8.8等）を追加する運用は避けてください。
+そのかわり、ゲストVLAN宛ての UDP/53 を OPNsense 自身のリゾルバへ強制NATし、認証前でも
+名前解決だけは常に成立させます。
+
+```xml
+<nat>
+  <rule>
+    <interface>opt2</interface>
+    <protocol>udp</protocol>
+    <source>
+      <network>opt2</network>
+    </source>
+    <destination>
+      <any>1</any>
+      <port>53</port>
+    </destination>
+    <target>127.0.0.1</target>
+    <local-port>53</local-port>
+    <descr>ゲストVLANのDNSをローカルリゾルバへ強制</descr>
+  </rule>
+</nat>
+```
+
+## 5. ゲストVLANから社内セグメントへの遮断ルールを追加する
+
+Firewall > Rules > `opt2` で、上から次の順に並ぶようルールを作成します。上位のブロック
+ルールが先に評価されるよう、必ずこの順序を守ってください。
+
+```xml
+<filter>
+  <rule>
+    <type>block</type>
+    <interface>opt2</interface>
+    <ipprotocol>inet</ipprotocol>
+    <source>
+      <network>opt2</network>
+    </source>
+    <destination>
+      <network>lan</network>
+    </destination>
+    <descr>ゲストVLANから社内LANへの通信を遮断</descr>
+  </rule>
+  <rule>
+    <type>pass</type>
+    <interface>opt2</interface>
+    <ipprotocol>inet</ipprotocol>
+    <source>
+      <network>opt2</network>
+    </source>
+    <destination>
+      <any>1</any>
+    </destination>
+    <descr>ゲストVLANからインターネットへの通信を許可</descr>
+  </rule>
+</filter>
+```
+
+既存の環境にオープンなゲストWi-Fi（無認証・無遮断）がすでに稼働している場合は、この
+ブロックルールと後述のキャプティブポータルを **enabled のまま旧ルールと並行稼働させ**、
+次節の動作確認で新しい経路（認証・遮断とも）が正しく機能することを確認してから、
+旧来のオープンな許可ルールを無効化してください。
+
+## 6. 動作確認
+
+1. ゲスト端末をVLAN {{ portal.guest_vlan }} に接続し、任意のHTTPサイトへアクセスして
+   キャプティブポータルの認証ページへリダイレクトされることを確認する。
+2. 認証前の状態で社内セグメント（LAN側ホスト）への疎通を試み、到達できない
+   （タイムアウトまたは拒否される）ことを確認する。
+3. 発行したバウチャーコードでログインする。API を直接叩いて確認する場合:
+
+   ```bash
+   curl -k -X POST "https://opnsense.local:8003/api/captiveportal/access/logon/" \
+     -H "zoneid: 1" \
+     -d "user=<配布したバウチャーコード>" \
+     -d "password="
+   ```
+
+   応答 JSON の `clientState` が `AUTHORIZED` になっていることを確認する。
+4. 認証済みクライアントの IP が pf テーブルへ登録されたことを確認する。
+
+   ```bash
+   pfctl -t __captiveportal_zone_1 -T show
+   ```
+
+5. 認証後もゲスト端末から社内セグメントへの通信は引き続き遮断され、インターネット宛て
+   通信のみ許可されることを確認する（手順5のルール順序が効いていることの確認）。
+6. シェーパーが適用されていることを確認する。
+
+   ```bash
+   dnctl pipe show
+   ```
+
+7. 接続中クライアントの一覧・切断確認を行う。
+
+   ```bash
+   configctl captiveportal list_clients 1
+   ```
+
+## 注意事項
+
+- 本手順は認証（バウチャー）・ファイアウォールルール・DNS既定動作のすべてに関わる。
+  必ず動作確認の全項目（リダイレクト表示・バウチャーログイン・社内宛て遮断・pfテーブル
+  登録）を新しい経路で確認してから、既存のオープンなゲスト許可ルールなど旧来の経路を
+  無効化・削除すること。二重に稼働させたまま検証し、問題が出たら新ルールのみを無効化して
+  切り戻せる状態を保つ。
+- ポータルの既定証明書は自己署名であり、ゲスト端末のブラウザに証明書警告が表示される。
+  来訪者向けに提供する場合は System > Trust > Certificates で ACME（Let's Encrypt等）
+  証明書を取得し、ポータルのSSL証明書に割り当てることを推奨する。
+- DNS は認証前でも解決できる必要がある。Allowed Addresses に外部の公開DNSサーバーを
+  加える方式は、DNS over HTTPS 等でポータルを迂回されるおそれがあるため避け、
+  手順4のように UDP/53 をローカルリゾルバへ強制NATする方式を用いること。
+- 手順5のブロックルールとパスルールは順序が意味を持つ。ブロックルールを後ろに置くと
+  社内セグメントへの通信が素通りしてしまうため、必ずブロックルールを上位に置くこと。
+- API 呼び出しに使う `$API_KEY` / `$API_SECRET` はシークレットである。手順書やログ、
+  チケットに平文で残さないこと。

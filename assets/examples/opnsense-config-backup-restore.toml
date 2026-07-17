@@ -1,0 +1,4 @@
+fw_host = "fw01.example.internal"
+backup_dir = "/srv/opnsense-backup/fw01"
+retention_generations = 30
+encrypt_password_set = true

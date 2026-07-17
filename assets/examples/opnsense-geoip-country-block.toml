@@ -1,0 +1,6 @@
+alias_name = "GeoIP_Blocked_Countries"
+maxmind_license_key = "0123456789ABCDEF"
+blocked_countries = ["CN", "RU", "KP"]
+apply_interface = "wan"
+log_enabled = true
+allow_exception_alias = "GeoIP_Allow_Exceptions"

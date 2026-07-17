@@ -1,0 +1,154 @@
+# OPNsenseエイリアスによるルール集約管理
+
+CSV で定義した {{ csv_rows | length }} 件のエイリアス（host / network / port /
+urltable の4種）を OPNsense に登録し、これまで宛先IP・ポートを直接指定して
+いたファイアウォールルールを、すべてエイリアス参照に置き換えます。変更点を
+アドレス帳（エイリアス）側の1箇所に閉じることで、以後のIP・ポート変更が
+ルール本体の編集を伴わなくなります。既存ルールは、エイリアス参照ルールの
+疎通を確認するまで無効化・削除しません。
+
+## 目的
+
+host/network/port/urltable の4種のエイリアスを定義し、GUI・API の両方から
+同じ内容を登録できるようになることを目指します。あわせて、既存の直接指定
+ルールをエイリアス参照ルールに安全に置き換える手順と、`pfctl` によるエイリ
+アス展開結果の確認方法を身につけます。
+
+## 用語解説
+
+- **エイリアス (Alias)**: `Firewall > Aliases` で定義する、IP・ネットワーク・
+  ポート等の集合に名前を付けたもの。ルールからは実体ではなく名前で参照する
+- **host型**: 単一または複数のホストIPをまとめるエイリアス型
+- **network型**: CIDR表記のネットワークをまとめるエイリアス型
+- **port型**: ポート番号（範囲・複数指定可）をまとめるエイリアス型
+- **urltable型**: 外部URLが返すIPリストを定期ダウンロードして取り込むエイリ
+  アス型。取り込み間隔は `Refresh Frequency`（API上は `updatefreq`、単位は日）
+  で指定する
+- **reconfigure**: エイリアスの追加・変更をpfの実テーブルに反映させるAPI
+  呼び出し。`addItem` だけでは保留状態のままで、実際のフィルタには反映され
+  ない
+- **pfテーブル**: OPNsense（FreeBSD pf ベース）がエイリアスをOS側に展開した
+  実体。エイリアス名がそのままテーブル名になり、`pfctl -t <alias> -T show`
+  で中身を確認できる
+
+## シナリオ設定
+
+今回登録するエイリアスは、次の {{ csv_rows | length }} 件です。
+
+| alias_name | alias_type | content | description |
+|------------|------------|---------|--------------|
+{% for r in csv_rows %}| {{ r["alias_name"] }} | {{ r["alias_type"] }} | {{ r["content"] }} | {{ r["description"] }} |
+{% endfor %}
+
+## 1. 既存ルール(直接指定)の現状を確認する（変更前の基準を取る）
+
+エイリアス化の対象は、次の3本の既存ルール（すべて宛先IP・ポートを直接
+指定）を想定します。
+
+- LAN → WAN: `destination_net=10.0.10.11 / destination_port=443` （Webサーバ公開）
+- APP_TIER(10.0.30.0/24) → LAN: `destination_net=10.0.20.0/24 / destination_port=3306` （DBアクセス）
+- 保守セグメント(198.51.100.0/28) → LAN: `destination_port=22` （SSH管理アクセス）
+
+`Firewall > Log Files > Live View` を開き、上記3本の通信が現在すべて
+許可（Pass）として表示されることを確認し、メモまたはスクリーンショットと
+して記録します。この基準がないと、エイリアス化後に何かが壊れたのか判断
+できません。
+
+## 2. エイリアスをGUIで登録する
+
+`Firewall > Aliases > Add` から、シナリオ設定の各行を上から順に登録します。
+Type にはシナリオ設定の `alias_type` をそのまま選択します。
+
+{% for r in csv_rows %}- {{ r["alias_name"] }}: Type=`{{ r["alias_type"] }}` / Content=`{{ r["content"] }}` / Description=`{{ r["description"] }}`{% if r["alias_type"] == "urltable" %} 、加えて `Refresh Frequency` に `1 Days` を明示的に設定する{% endif %}
+{% endfor %}
+入力後は `Save` のみを行います。この時点ではpfの実テーブルにはまだ反映
+されていません（reconfigure待ちの保留状態）。
+
+## 3. 同じエイリアスをAPI(curl)の2段階呼び出しで登録する
+
+GUI と同じ内容を、`/api/firewall/alias/addItem` へのPOSTで登録できます。
+`key:secret` は `System > Access > Users` で発行したAPIキー/シークレット
+に置き換えてください。urltable型のみ、取り込み間隔 `updatefreq`（単位:日）
+を明示的に指定します。
+
+```bash
+{% for r in csv_rows %}curl -k -u key:secret https://fw.example.internal/api/firewall/alias/addItem \
+  -H "Content-Type: application/json" \
+  -d '{"alias":{"enabled":"1","name":"{{ r["alias_name"] }}","type":"{{ r["alias_type"] }}","content":"{{ r["content"] }}","description":"{{ r["description"] }}"{% if r["alias_type"] == "urltable" %},"updatefreq":"1"{% endif %}}}'
+{% endfor %}```
+
+`addItem` はどれだけ呼んでも保留変更が積み上がるだけで、pfの実テーブルに
+は反映されません。全件の登録が終わったら、`reconfigure` を1回だけ呼んで
+まとめて反映します。
+
+```bash
+curl -k -u key:secret -X POST https://fw.example.internal/api/firewall/alias/reconfigure
+```
+
+## 4. pfctlでエイリアス展開結果を確認する
+
+`reconfigure` の完了後、OPNsenseのシェル（Console/SSH）から各エイリアス
+が想定通りのテーブルに展開されているかを確認します。urltable型は、外部
+URLからのダウンロードが完了するまで一時的に空、または前回取得分のまま
+になることがあるため、直後に空でも数分待って再確認してください。
+
+```bash
+{% for r in csv_rows %}pfctl -t {{ r["alias_name"] }} -T show
+{% endfor %}```
+
+`LAN_WEB_SERVER` は `{{ csv_rows[0]["content"] }}` の1件、`LAN_DB_SUBNET`
+は `{{ csv_rows[1]["content"] }}` の範囲、`THREAT_FEED_IPS` はフィード
+提供元のIP群が、それぞれ一覧表示されれば展開は成功です。`MGMT_SSH_PORT`
+はポートエイリアスのためpfテーブルには現れません（ルール側で
+`destination_port` として直接参照されます）。
+
+## 5. 既存ルールをエイリアス参照ルールに置き換える（新ルールを並行稼働させる）
+
+既存の直接指定ルールは残したまま、同じ許可内容をエイリアス参照で複製した
+新ルールを追加します。新ルールの疎通を確認できるまで、既存ルールは
+無効化・削除しません。
+
+```bash
+{% for r in csv_rows %}{% if r["alias_type"] == "host" %}curl -k -u key:secret https://fw.example.internal/api/firewall/filter/addRule \
+  -H "Content-Type: application/json" \
+  -d '{"rule":{"interface":"wan","action":"pass","direction":"in","ipprotocol":"inet","protocol":"TCP","source_net":"any","destination_net":"{{ r["alias_name"] }}","destination_port":"443","description":"{{ r["description"] }}(alias参照化・並行稼働用)","log":"1"}}'
+{% elif r["alias_type"] == "network" %}curl -k -u key:secret https://fw.example.internal/api/firewall/filter/addRule \
+  -H "Content-Type: application/json" \
+  -d '{"rule":{"interface":"lan","action":"pass","direction":"in","ipprotocol":"inet","protocol":"TCP","source_net":"10.0.30.0/24","destination_net":"{{ r["alias_name"] }}","destination_port":"3306","description":"{{ r["description"] }}(alias参照化・並行稼働用)","log":"1"}}'
+{% elif r["alias_type"] == "port" %}curl -k -u key:secret https://fw.example.internal/api/firewall/filter/addRule \
+  -H "Content-Type: application/json" \
+  -d '{"rule":{"interface":"lan","action":"pass","direction":"in","ipprotocol":"inet","protocol":"TCP","source_net":"198.51.100.0/28","destination_net":"lannet","destination_port":"{{ r["alias_name"] }}","description":"{{ r["description"] }}(alias参照化・並行稼働用)","log":"1"}}'
+{% elif r["alias_type"] == "urltable" %}curl -k -u key:secret https://fw.example.internal/api/firewall/filter/addRule \
+  -H "Content-Type: application/json" \
+  -d '{"rule":{"interface":"wan","action":"block","direction":"in","ipprotocol":"inet","protocol":"any","source_net":"{{ r["alias_name"] }}","destination_net":"any","description":"{{ r["description"] }}(alias参照ブロックルール)","log":"1"}}'
+{% endif -%}
+{% endfor %}```
+
+登録後、`Apply Changes`（GUI）または `/api/firewall/filter/apply`（API）
+で反映します。
+
+```bash
+curl -k -u key:secret -X POST https://fw.example.internal/api/firewall/filter/apply
+```
+
+反映後、`Firewall > Log Files > Live View` で、手順1の3本の通信が新ルール
+（エイリアス参照）側でも許可され続けることを確認します。この確認が終わる
+まで、手順1で確認した既存の直接指定ルールは無効化しません。3本すべての
+疎通が新ルールで確認できて初めて、既存ルールを `Firewall > Rules` から
+無効化（Disable）し、問題がないことを一定期間確認した上で削除します。
+
+## 動作確認
+
+- 手順2・3で登録した{{ csv_rows | length }}件のエイリアスが `Firewall > Aliases` に表示されていること
+- 手順4の `pfctl -t <alias> -T show` で、host/network/urltable各エイリアスが想定通りの内容に展開されていること
+- 手順1で記録した3本の通信が、手順5の新ルール（エイリアス参照）適用後も引き続き許可されること
+- 既存の直接指定ルールを無効化する前に、上記の新ルールでの疎通確認が完了していること
+- `THREAT_FEED_IPS` を参照するblockルールが `Firewall > Rules > WAN` 上でpassルールより後ろ（評価順で後）に置かれていること
+
+## 注意事項
+
+- **urltable型は `Refresh Frequency`（API上は `updatefreq`）の設定漏れに注意すること。** 設定を省略またはデフォルトのまま放置すると、フィード元が更新されてもテーブル内容が更新されず、古いIPリストがブロックルールに残り続ける（新しい脅威IPが漏れる、あるいは復旧済みIPが誤ってブロックされ続ける）おそれがあります。登録時に明示的な値（本手順では1日）を設定し、`Firewall > Diagnostics > Firewall Aliases` で最終更新日時を定期的に確認してください。
+- **既存ルールは新ルールの疎通確認が終わるまで無効化・削除しないこと。** 手順5の3点確認を飛ばして既存ルールを先に削除すると、エイリアス参照ルールの設定ミス（typo等）に気づかないまま通信断を引き起こすおそれがあります。
+- `addItem` は呼び出すだけでは反映されません。全件登録後に必ず `reconfigure` を呼び出してください（同様にルール側は `filter/apply` が必要です）。
+- API key/secret は平文でリポジトリやログに残さず、環境変数や秘密管理ツール経由で扱ってください。
+- 本手順のIP・CIDR・URLはすべて例です。自環境の値に置き換えてから投入してください。

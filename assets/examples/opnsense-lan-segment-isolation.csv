@@ -1,0 +1,11 @@
+segment,src_net,dst_net,proto,port,purpose,action
+mgmt-to-fw,10.0.0.0/25,10.0.0.1/32,tcp,443,管理VLANからfirewall管理画面(HTTPS)への必須アクセス,pass
+mgmt-to-fw,10.0.0.0/25,10.0.0.1/32,tcp,22,管理VLANからfirewallへのSSH保守アクセス,pass
+app-to-db,10.0.10.0/24,10.0.20.0/24,tcp,3306,業務アプリVLANからDB VLANへのMySQL接続,pass
+app-to-db,10.0.10.0/24,10.0.20.0/24,tcp,5432,業務アプリVLANからDB VLANへのPostgreSQL接続,pass
+user-to-app,10.0.30.0/24,10.0.10.0/24,tcp,443,社内ユーザVLANから業務アプリVLANへのHTTPSアクセス,pass
+mon-to-all,10.0.60.0/24,10.0.0.0/16,icmp,-,監視VLANから全セグメントへの死活監視(ICMP),pass
+mon-to-all,10.0.60.0/24,10.0.0.0/16,udp,161,監視VLANから全セグメントへのSNMPポーリング,pass
+user-to-db,10.0.30.0/24,10.0.20.0/24,tcp,-,社内ユーザVLANからDB VLANへの直接アクセス(業務要件なし),block
+iot-to-mgmt,10.0.40.0/24,10.0.0.0/25,tcp,-,IoTVLANから管理VLANへのアクセス(禁止),block
+guest-to-internal,10.0.50.0/24,10.0.0.0/16,tcp,-,ゲストVLANから社内全VLANへのアクセス(禁止),block

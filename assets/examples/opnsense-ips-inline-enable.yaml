@@ -1,0 +1,15 @@
+monitor_interfaces:
+  - wan
+  - lan
+rulesets:
+  - emerging-attack_response.rules
+  - emerging-exploit.rules
+  - emerging-malware.rules
+  - emerging-scan.rules
+  - emerging-trojan.rules
+ips_mode: inline
+policy_action: alert
+suppress_sids:
+  - 2100498
+  - 2010935
+  - 2013504

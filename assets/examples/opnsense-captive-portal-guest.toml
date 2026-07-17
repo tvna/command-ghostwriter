@@ -1,0 +1,7 @@
+[portal]
+zone_name = "GUEST_PORTAL"
+guest_vlan = 40
+bandwidth_down_kbps = 5000
+bandwidth_up_kbps = 1000
+voucher_count = 50
+allowed_destinations = ["203.0.113.10/32", "203.0.113.11/32"]

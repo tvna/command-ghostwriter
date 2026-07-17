@@ -1,0 +1,189 @@
+# OPNsense上のWireGuardインスタンス構築
+
+OPNsense標準のWireGuardプラグインで拠点接続用のローカルインスタンスと
+{{ peers | length }} 件のピアを構成し、WireGuardグループインターフェース
+への許可ルール・WAN側UDPポート許可を追加したうえで、Diagnosticsの
+ハンドシェイクとpingにより疎通を検証します。既存の通信経路には影響しない
+純増構成ですが、ファイアウォールルールを扱うため、新ルール投入後は必ず
+Diagnostics/pingで疎通を確認してから次の作業に進んでください。
+
+## 目的
+
+VPN > WireGuard > Instances でローカル側の鍵ペア・ListenPort・
+Tunnel Addressを設定し、Peersで対向のPublicKey/AllowedIPs/Endpointを
+登録したうえで、WireGuardグループインターフェースとWAN側の両方に
+必要最小限の許可ルールを追加し、ハンドシェイクとpingの両面から
+疎通を検証できるようになることを目指します。
+
+## 用語解説
+
+- **Instance(インスタンス)**: OPNsense自身が持つWireGuardのローカル
+  設定単位。秘密鍵/公開鍵ペア、ListenPort(UDP待受ポート)、
+  Tunnel Address(このインスタンスに割り当てる仮想IPアドレス)を持つ
+- **Peer(ピア)**: 対向(拠点ルータやリモート端末)ごとの設定単位。
+  対向のPublicKey、AllowedIPs、Endpoint(対向の実到達先)を登録する
+- **AllowedIPs**: そのピアとの間で送受信を許可するIPレンジ。WireGuardは
+  これを暗号鍵ルーティング(cryptokey routing)表としても使うため、
+  複数ピア間でAllowedIPsが重複すると経路が一意に定まらずルーティング
+  競合を起こす
+- **WireGuardグループインターフェース**: 有効なInstanceが1つ以上あると
+  OPNsenseが自動生成する集約インターフェース(`Interfaces > Assignments`
+  上の識別名は既定で`wireguard`)。ファイアウォールルールはこの
+  インターフェース、またはInstanceごとに割り当てた個別インターフェース
+  に対して設定する
+- **Diagnostics**: `VPN > WireGuard > Diagnostics` で確認できる、
+  インスタンス/ピアごとの`Latest handshake`(最終ハンドシェイク時刻)や
+  送受信バイト数の一覧画面
+
+## シナリオ設定
+
+今回作成するローカルインスタンスの設定は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| インスタンス名(instance_name) | {{ instance_name }} |
+| ListenPort(listen_port) | {{ listen_port }} |
+| Tunnel Address(tunnel_address) | {{ tunnel_address }} |
+
+登録するピア一覧({{ peers | length }} 件)。`endpoint`列の`-`は
+「Endpoint省略(対向がロードウォリア型でグローバル固定IPを持たない)」
+を表します。
+
+| # | name | allowed_ips | endpoint |
+|---|------|-------------|----------|
+{% for p in peers %}| {{ loop.index }} | {{ p.name }} | {{ p.allowed_ips }} | {{ p.endpoint }} |
+{% endfor %}
+
+## 1. WireGuardサービスを有効化する
+
+`VPN > WireGuard > Settings` を開き、`Enable WireGuard` にチェックを
+入れて `Save` を押します。この時点ではまだインスタンス/ピアは作成しません。
+
+## 2. ローカルインスタンスを作成する(鍵ペア生成・ListenPort・Tunnel Address)
+
+`VPN > WireGuard > Instances > +Add` から次のとおり入力します。
+
+- `Name`: `{{ instance_name }}`
+- `Public/Private Key`: 空欄のまま画面の `Generate` ボタンを押し、
+  鍵ペアを自動生成する(手入力しない)
+- `Listen Port`: `{{ listen_port }}`
+- `Tunnel Address`: `{{ tunnel_address }}`
+- `Enabled`: チェックする
+
+**秘密鍵はこの生成直後にのみ画面に表示され、`Save` 後は再表示できません。**
+生成された公開鍵は手順3で対向へ共有するため、まず控えてください。秘密鍵は
+バックアップ以外の用途で書き写す必要はありませんが、万一の復旧に備えて
+`System > Configuration > Backups` から `config.xml` を暗号化した状態で
+別途保管しておいてください(生成後にしか取得できないため、`Save` 直後に
+実施すること)。
+
+`Save` を押して確定します。
+
+## 3. ピアを登録する
+
+`VPN > WireGuard > Peers > +Add` から、{{ peers | length }} 件のピアを
+それぞれ登録します。`Allowed IPs` は各ピアとの通信で許可する範囲、
+`Endpoint` は対向の実到達先(`IP:Port`)です。
+
+{% for p in peers %}- ピア{{ loop.index }}(`{{ p.name }}`)
+  - `Name`: `{{ p.name }}`
+  - `Public Key`: `{{ p.public_key }}`(対向側で生成した公開鍵に置き換える)
+  - `Allowed IPs`: `{{ p.allowed_ips }}`
+  {% if p.endpoint != "-" %}- `Endpoint`: `{{ p.endpoint }}`
+  {% else %}- `Endpoint`: 空欄のまま(ロードウォリア型のため対向からの接続を待ち受ける)
+  {% endif %}- `Instances`: 手順2で作成した `{{ instance_name }}` を選択する
+{% endfor %}
+すべて入力後、`Save` を押して確定します。
+
+## 4. WireGuardインターフェースを割り当てる
+
+`Interfaces > Assignments` を開き、`New interface` のドロップダウンから
+`WireGuard (Group)` を選択して `+` で割り当てます。割り当て後に生成された
+インターフェース(例: `OPT8`)を開き、`Enable interface` にチェックを
+入れて `Save` します。この段階ではまだファイアウォールルールを追加して
+いないため、ピアからの通信はまだ通過しません。
+
+## 5. WireGuardグループインターフェースへの許可ルールを追加する
+
+各ピアの `Allowed IPs` を送信元とした許可ルールを、WireGuardグループ
+インターフェース(既定の識別名 `wireguard`)に追加します。`key:secret` は
+`System > Access > Users` で発行したAPIキー/シークレットに置き換えて
+ください。
+
+```bash
+export FW_HOST="10.0.0.1"
+{% for p in peers %}curl -ks -u key:secret -X POST \
+  "https://${FW_HOST}/api/firewall/filter/addRule" \
+  -H "Content-Type: application/json" \
+  -d '{"rule":{"action":"pass","quick":"1","interface":"wireguard","direction":"in","ipprotocol":"inet","protocol":"any","source_net":"{{ p.allowed_ips }}","destination_net":"any","description":"{{ instance_name }}: allow {{ p.name }}","log":"1"}}'
+{% endfor %}curl -ks -u key:secret -X POST "https://${FW_HOST}/api/firewall/filter/apply"
+```
+
+GUIから同じ内容を投入する場合は `Firewall > Rules > wireguard > Add` から、
+`Source` に各ピアの `Allowed IPs`、`Destination` に `any` を指定して
+登録してください。
+
+## 6. WAN側にUDPポート許可ルールを追加する
+
+対向からのWireGuardハンドシェイクを受け付けられるよう、WAN側にも
+`{{ listen_port }}`/UDPの許可ルールを追加します。ここまでの手順で
+既存のWANルールを変更・削除していないため、既存の通信には影響しません。
+
+```bash
+curl -ks -u key:secret -X POST \
+  "https://${FW_HOST}/api/firewall/filter/addRule" \
+  -H "Content-Type: application/json" \
+  -d '{"rule":{"action":"pass","quick":"1","interface":"wan","direction":"in","ipprotocol":"inet","protocol":"UDP","source_net":"any","destination_net":"(self)","destination_port":"{{ listen_port }}","description":"{{ instance_name }}: allow WireGuard UDP inbound","log":"1"}}'
+curl -ks -u key:secret -X POST "https://${FW_HOST}/api/firewall/filter/apply"
+```
+
+## 7. Diagnosticsのハンドシェイクとpingで疎通を検証する
+
+`VPN > WireGuard > Diagnostics` を開き、`{{ instance_name }}` の
+各ピア行の `Latest handshake` が直近の時刻に更新されていることを
+確認します。対向機器で正しく鍵・Endpointを設定していれば、数十秒以内に
+最初のハンドシェイクが成立します。
+
+続けて、OPNsense本体のシェル(`Diagnostics > Command Prompt` またはSSH)
+から、各ピアのトンネルアドレスへpingを実行し経路面でも疎通を確認します。
+
+```bash
+{% for p in peers %}ping -c 3 {{ p.allowed_ips.split("/")[0] }}
+{% endfor %}```
+
+ハンドシェイクとping、両方が成功して初めてこのインスタンスの構成が
+完了したとみなしてください。
+
+## 動作確認
+
+- `VPN > WireGuard > Diagnostics` で {{ peers | length }} 件のピアすべての
+  `Latest handshake` が直近の時刻で更新されていること
+{% for p in peers %}- `{{ p.name }}`({{ p.allowed_ips }})宛のpingが成功すること
+{% endfor %}- `Firewall > Rules > wireguard` に手順5の許可ルールが、
+  `Firewall > Rules > WAN` に手順6のUDP/{{ listen_port }}許可ルールが
+  それぞれ登録されていること
+- 既存のWANルール・LAN側ルールが手順1〜6の前後で変更されていないこと
+  (今回の構成が既存経路に影響していないことの確認)
+
+## 注意事項
+
+- **秘密鍵は画面から再表示できません。** 手順2で `Generate` した直後に
+  しか表示されないため、`Save` を押す前に公開鍵を控え、必要であれば
+  `config.xml` のバックアップも同じタイミングで取得してください。
+  再生成すると対向側のPeer登録もすべてやり直しになります。
+- **AllowedIPsの重複はルーティング競合を生みます。** WireGuardは
+  AllowedIPsを暗号鍵ルーティング表として使うため、複数ピア(または
+  他のVPN/インターフェース)で同じ、または包含関係にあるレンジを
+  重複登録すると、意図しないピアへ経路が向く、あるいは通信が failしうる
+  状態になります。ピア追加時は既存ピアのAllowedIPsと重複していないか
+  必ず確認してください。
+- 本手順は新規インスタンス・新規ルールの追加のみで構成されており、
+  既存のWAN/LANルールや他のVPN設定を変更・削除するものではありません。
+  そのため旧経路の無効化は不要ですが、手順7のハンドシェイク・ping
+  両方の成功を確認するまでは、他の変更(グループインターフェースの
+  ルール修正やWANルールの絞り込みなど)を追加で行わないでください。
+- APIキー/シークレットは平文でリポジトリやログに残さず、環境変数や
+  秘密管理ツール経由で扱ってください。
+- 対向のPublicKeyは通信の相手方認証に直結するため、正しい対向から
+  取得した値であることを別経路(電話・既知の管理者チャネル等)で
+  確認してから登録してください。
