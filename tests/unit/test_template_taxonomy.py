@@ -46,7 +46,6 @@ ALLOWED_SUBCATEGORIES: Final[dict[str, frozenset[str]]] = {
                 "NIC",
                 "VLAN",
                 "YAMAHA",
-                "firewalld",
                 "iptables",
                 "nftables",
                 "トンネリング",
@@ -79,7 +78,6 @@ ALLOWED_SUBCATEGORIES: Final[dict[str, frozenset[str]]] = {
                 "cron",
                 "sudo",
                 "systemd",
-                "systemd基本",
                 "カーネル",
                 "コンテナ",
                 "ディスク管理",
@@ -150,6 +148,8 @@ ALLOWED_SUBCATEGORIES: Final[dict[str, frozenset[str]]] = {
     ),
 }
 
+# One "{ id: \"...\" }" opener per META entry; used to detect regex under-matching.
+_ENTRY_OPENER = re.compile(r'\{ id: "')
 _ENTRY_RE = re.compile(
     r'\{ id: "(?P<id>[^"]+)",.*?category: "(?P<category>[^"]+)", '
     r'subCategory: "(?P<subCategory>[^"]+)", format: "(?P<format>[^"]+)", '
@@ -164,8 +164,14 @@ def _entries() -> list[dict[str, str]]:
 
 @UNIT
 def test_registry_parses() -> None:
+    text = TEMPLATES_TS.read_text(encoding="utf-8")
+    total = len(_ENTRY_OPENER.findall(text))
     entries = _entries()
-    assert len(entries) >= 246, f"expected >=246 template entries, parsed {len(entries)}"
+    assert entries, "no template entries parsed from the registry"
+    assert len(entries) == total, (
+        f"regex parsed {len(entries)} of {total} META entries "
+        "-- a template line likely drifted from the expected field order"
+    )
 
 
 @UNIT

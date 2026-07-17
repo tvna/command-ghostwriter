@@ -41,13 +41,17 @@ const CAT_ORDER = CATS.map((c) => c.id);
 // their category (so same-category sub-categories stay adjacent, even in the
 // "すべて" view) and, within that, by first appearance; template order inside a
 // group is preserved.
-function groupBySubCategory(list: Template[]): { label: string; items: Template[] }[] {
+function groupBySubCategory(list: Template[]): { key: string; label: string; items: Template[] }[] {
   const sorted = [...list].sort((a, b) => CAT_ORDER.indexOf(a.category) - CAT_ORDER.indexOf(b.category));
-  const groups: { label: string; items: Template[] }[] = [];
+  const groups: { key: string; label: string; items: Template[] }[] = [];
   for (const t of sorted) {
-    let g = groups.find((x) => x.label === t.subCategory);
+    // Group by (category, subCategory), not sub-category text alone: the same
+    // sub-category name (e.g. "監視") can legitimately appear under more than one
+    // domain, and those must stay separate sections in the "すべて" view.
+    const key = `${t.category}/${t.subCategory}`;
+    let g = groups.find((x) => x.key === key);
     if (!g) {
-      g = { label: t.subCategory, items: [] };
+      g = { key, label: t.subCategory, items: [] };
       groups.push(g);
     }
     g.items.push(t);
@@ -113,7 +117,11 @@ export function Library({ onOpen, onClose }: LibraryProps) {
   const byCat = cat === 'all' ? all : all.filter((t) => t.category === cat);
   const list = act === 'all' ? byCat : byCat.filter((t) => activityOf(t) === act);
   const groups = groupBySubCategory(list);
-  const count = (id: TemplateCategory | 'all') => (id === 'all' ? all.length : all.filter((t) => t.category === id).length);
+  // Both rails count within the OTHER axis's current selection, so each number
+  // matches what the grid shows: category counts respect the active activity,
+  // activity counts respect the active category.
+  const byAct = act === 'all' ? all : all.filter((t) => activityOf(t) === act);
+  const count = (id: TemplateCategory | 'all') => (id === 'all' ? byAct.length : byAct.filter((t) => t.category === id).length);
   const actCount = (id: TemplateActivity | 'all') => (id === 'all' ? byCat.length : byCat.filter((t) => activityOf(t) === id).length);
 
   return (
@@ -235,7 +243,7 @@ export function Library({ onOpen, onClose }: LibraryProps) {
 
           {/* sub-category sections */}
           {groups.map((g) => (
-            <section key={g.label} style={{ marginBottom: 26 }}>
+            <section key={g.key} style={{ marginBottom: 26 }}>
               <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, margin: '0 0 12px', paddingBottom: 6, borderBottom: '1px solid var(--cg-border)' }}>
                 <span style={{ fontSize: 'var(--text-sm)', fontWeight: 700, color: 'var(--cg-text)' }}>{g.label}</span>
                 <span style={{ fontSize: 11, color: 'var(--cg-text-faint)', fontFamily: 'var(--font-mono)' }}>{g.items.length}</span>
