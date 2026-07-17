@@ -273,6 +273,7 @@ const META: Meta[] = [
   { id: "model-storage-backup", name: "モデル資産と推論設定のバックアップ", desc: "大容量モデルファイル・推論サーバ設定・プロンプト資産を対象に、容量効率を考えたバックアップを設計する手順書を生成。", category: "ai", subCategory: "モデル管理", format: "yaml", output: "markdown", updated: "2026-07-16", live: true },
   { id: "inference-api-key-auth", name: "推論APIのAPIキー認証とレート制限の導入", desc: "リバースプロキシで推論APIにAPIキー認証・利用者別レート制限を追加し、無制限公開を防ぐ手順書を生成。", category: "ai", subCategory: "APIゲートウェイ", format: "csv", output: "markdown", updated: "2026-07-16", live: true },
   { id: "airgapped-model-transfer", name: "オフライン環境へのモデル搬入手順", desc: "インターネット非接続のGPUサーバへ、モデルと依存パッケージを検証付きで安全に搬入する手順書を生成。", category: "ai", subCategory: "モデル管理", format: "yaml", output: "markdown", updated: "2026-07-16", live: true },
+  { id: "inference-gpu-oom-triage", name: "推論サーバのGPUメモリ不足の切り分け", desc: "CUDA out of memory発生時にnvidia-smiとログで原因を特定し、メモリ設定を調整して復旧する手順書を生成。", category: "ai", subCategory: "推論サーバ", format: "toml", output: "markdown", activity: "troubleshoot", updated: "2026-07-17", live: true },
 ];
 
 export const CGTemplates: Template[] = META.map((m) => ({
