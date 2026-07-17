@@ -2,7 +2,7 @@ import React from 'react';
 import { Badge } from '../ds';
 import { Icon } from './Icon';
 import { CGTemplates } from '../lib/templates';
-import type { Template, TemplateCategory, TemplateOutput } from '../lib/types';
+import type { Template, TemplateActivity, TemplateCategory, TemplateOutput } from '../lib/types';
 import type { Format } from '../lib/format';
 import logoMark from '../assets/brand/logo-mark.svg';
 
@@ -14,9 +14,24 @@ const CATS: { id: TemplateCategory | 'all'; label: string; icon: string }[] = [
   { id: 'network', label: 'ネットワーク機器', icon: 'router' },
   { id: 'server',  label: 'サーバ / Linux',  icon: 'server' },
   { id: 'dns',     label: 'DNS',            icon: 'ethernet-port' },
-  { id: 'runbook', label: '手順書',          icon: 'config-file' },
   { id: 'ai',      label: 'AIインフラ',       icon: 'terminal' },
+  { id: 'ops',     label: '運用共通',         icon: 'config-file' },
 ];
+
+// Activity axis (orthogonal to the domain category). "すべて" clears the filter.
+// A template with no `activity` is treated as "build". The "障害対応" chip
+// generalizes the old runbook cross-cut: it surfaces troubleshoot templates
+// across every domain, not a fixed category.
+const ACTS: { id: TemplateActivity | 'all'; label: string }[] = [
+  { id: 'all',               label: 'すべて' },
+  { id: 'build',             label: '構築・設定' },
+  { id: 'troubleshoot',      label: '障害対応' },
+  { id: 'security-response', label: 'セキュリティ対応' },
+  { id: 'change',            label: '変更・リリース' },
+  { id: 'routine',           label: '定期運用' },
+  { id: 'drill',             label: '訓練' },
+];
+const activityOf = (t: Template): TemplateActivity => t.activity ?? 'build';
 const FMT_TONE: Record<Format, 'brand' | 'info' | 'warning'> = { toml: 'brand', yaml: 'info', csv: 'warning' };
 const OUT_LABEL: Record<TemplateOutput, string> = { cli: 'CLI', config: 'config', markdown: 'Markdown' };
 
@@ -26,13 +41,17 @@ const CAT_ORDER = CATS.map((c) => c.id);
 // their category (so same-category sub-categories stay adjacent, even in the
 // "すべて" view) and, within that, by first appearance; template order inside a
 // group is preserved.
-function groupBySubCategory(list: Template[]): { label: string; items: Template[] }[] {
+function groupBySubCategory(list: Template[]): { key: string; label: string; items: Template[] }[] {
   const sorted = [...list].sort((a, b) => CAT_ORDER.indexOf(a.category) - CAT_ORDER.indexOf(b.category));
-  const groups: { label: string; items: Template[] }[] = [];
+  const groups: { key: string; label: string; items: Template[] }[] = [];
   for (const t of sorted) {
-    let g = groups.find((x) => x.label === t.subCategory);
+    // Group by (category, subCategory), not sub-category text alone: the same
+    // sub-category name (e.g. "監視") can legitimately appear under more than one
+    // domain, and those must stay separate sections in the "すべて" view.
+    const key = `${t.category}/${t.subCategory}`;
+    let g = groups.find((x) => x.key === key);
     if (!g) {
-      g = { label: t.subCategory, items: [] };
+      g = { key, label: t.subCategory, items: [] };
       groups.push(g);
     }
     g.items.push(t);
@@ -93,10 +112,17 @@ export interface LibraryProps {
 
 export function Library({ onOpen, onClose }: LibraryProps) {
   const [cat, setCat] = React.useState<TemplateCategory | 'all'>('all');
+  const [act, setAct] = React.useState<TemplateActivity | 'all'>('all');
   const all = CGTemplates;
-  const list = cat === 'all' ? all : all.filter((t) => t.category === cat);
+  const byCat = cat === 'all' ? all : all.filter((t) => t.category === cat);
+  const list = act === 'all' ? byCat : byCat.filter((t) => activityOf(t) === act);
   const groups = groupBySubCategory(list);
-  const count = (id: TemplateCategory | 'all') => (id === 'all' ? all.length : all.filter((t) => t.category === id).length);
+  // Both rails count within the OTHER axis's current selection, so each number
+  // matches what the grid shows: category counts respect the active activity,
+  // activity counts respect the active category.
+  const byAct = act === 'all' ? all : all.filter((t) => activityOf(t) === act);
+  const count = (id: TemplateCategory | 'all') => (id === 'all' ? byAct.length : byAct.filter((t) => t.category === id).length);
+  const actCount = (id: TemplateActivity | 'all') => (id === 'all' ? byCat.length : byCat.filter((t) => activityOf(t) === id).length);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: 'var(--cg-bg)', fontFamily: 'var(--font-sans)', color: 'var(--cg-text)' }}>
@@ -123,7 +149,7 @@ export function Library({ onOpen, onClose }: LibraryProps) {
             return (
               <button
                 key={c.id}
-                onClick={() => setCat(c.id)}
+                onClick={() => { setCat(c.id); setAct('all'); }}
                 style={{
                   width: '100%',
                   display: 'flex',
@@ -156,6 +182,40 @@ export function Library({ onOpen, onClose }: LibraryProps) {
           <p style={{ fontSize: 'var(--text-sm)', color: 'var(--cg-text-muted)', margin: '0 0 22px' }}>
             定型作業のテンプレートを選ぶと、データ定義とテンプレートを読み込んだ状態でエディタが開きます。
           </p>
+          {/* activity (目的) filter chips — orthogonal to the left domain rail */}
+          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, marginBottom: 22 }}>
+            <span style={{ fontSize: 'var(--text-2xs)', textTransform: 'uppercase', letterSpacing: '.06em', color: 'var(--cg-text-faint)', fontWeight: 700, marginRight: 2 }}>目的</span>
+            {ACTS.map((a) => {
+              const on = a.id === act;
+              const n = actCount(a.id);
+              const empty = n === 0 && a.id !== 'all';
+              return (
+                <button
+                  key={a.id}
+                  onClick={() => setAct(a.id)}
+                  disabled={empty}
+                  style={{
+                    cursor: empty ? 'default' : 'pointer',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    background: on ? 'rgba(255,75,75,.1)' : 'transparent',
+                    border: `1px solid ${on ? 'var(--cg-red)' : 'var(--cg-border)'}`,
+                    borderRadius: 999,
+                    padding: '5px 12px',
+                    color: on ? 'var(--cg-red-tint)' : empty ? 'var(--cg-text-faint)' : 'var(--cg-text-muted)',
+                    fontFamily: 'var(--font-sans)',
+                    fontSize: 'var(--text-xs)',
+                    fontWeight: on ? 600 : 400,
+                    opacity: empty ? 0.5 : 1,
+                  }}
+                >
+                  <span>{a.label}</span>
+                  <span style={{ fontSize: 10, color: 'var(--cg-text-faint)', fontFamily: 'var(--font-mono)' }}>{n}</span>
+                </button>
+              );
+            })}
+          </div>
           {/* 空から作成 */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(244px, 1fr))', gap: 14, marginBottom: 28 }}>
             <button
@@ -183,7 +243,7 @@ export function Library({ onOpen, onClose }: LibraryProps) {
 
           {/* sub-category sections */}
           {groups.map((g) => (
-            <section key={g.label} style={{ marginBottom: 26 }}>
+            <section key={g.key} style={{ marginBottom: 26 }}>
               <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, margin: '0 0 12px', paddingBottom: 6, borderBottom: '1px solid var(--cg-border)' }}>
                 <span style={{ fontSize: 'var(--text-sm)', fontWeight: 700, color: 'var(--cg-text)' }}>{g.label}</span>
                 <span style={{ fontSize: 11, color: 'var(--cg-text-faint)', fontFamily: 'var(--font-mono)' }}>{g.items.length}</span>
