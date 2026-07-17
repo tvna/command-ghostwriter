@@ -1,0 +1,130 @@
+# Vault auto-unseal（{{ seal.seal_type }} seal）構成による運用自動化 — {{ vault.host }}
+
+対象ノード **{{ vault.host }}** の Vault を、Shamir シールから Transit シール（{{ seal.mount_path }} 配下の {{ seal.key_name }} キーによる auto-unseal）へ移行する手順です。移行中に自分自身を起動不能な状態に追い込まないよう、各段階で確認を挟みながら進めてください。
+
+## 目的
+
+別の Vault（またはクラウド KMS）をアンシールプロバイダとする `seal "transit"` 構成を導入し、再起動のたびに複数人が集まって Shamir unseal key を持ち寄る運用を廃し、Vault サービスの起動を自動化できるようにすることを目指します。あわせて、auto-unseal 移行後に root 権限操作へ使う recovery key の役割を理解します。
+
+## 用語解説
+
+- **seal（シール）**: Vault のマスター鍵を暗号化して保管する仕組み。デフォルトは Shamir シール
+- **Shamir シール**: マスター鍵を複数の unseal key に分割し、閾値分を集めて手動で unseal する方式
+- **Transit シール（auto-unseal）**: 別の Vault クラスタの Transit シークレットエンジンをアンシールプロバイダとし、起動時に自動で unseal する方式
+- **アンシールプロバイダ**: auto-unseal 時にマスター鍵の暗号化/復号を代行する外部システム（本手順では Transit Vault）
+- **recovery key**: auto-unseal 移行後、unseal key の代わりに `generate-root` や `rekey` などの root 権限操作に使う鍵。Shamir 方式の unseal key に相当する役割を、auto-unseal では起動ではなく root 操作の認可に限定して担う
+- **seal migration**: 稼働中の seal 方式を別方式へ切り替える手続き。`-migrate` フラグ付き unseal で実行する
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 対象ノード | {{ vault.host }} |
+| VAULT_ADDR | {{ vault.addr }} |
+| 設定ファイル | {{ vault.config_path }} |
+| systemd サービス名 | {{ vault.service_name }} |
+| seal タイプ | {{ seal.seal_type }} |
+| Transit アドレス | {{ seal.transit_address }} |
+| Transit マウントパス | {{ seal.mount_path }} |
+| Transit キー名 | {{ seal.key_name }} |
+| 既存 Shamir unseal 閾値 | {{ shamir.unseal_threshold }} |
+| recovery shares | {{ recovery.recovery_shares }} |
+| recovery threshold | {{ recovery.recovery_threshold }} |
+
+## 1. 移行前の確保・確認（ロックアウト防止）
+
+移行に失敗すると Vault が起動不能になり得ます。**必ず以下をすべて満たしてから次に進んでください。**
+
+- 既存の Shamir unseal key を、閾値（{{ shamir.unseal_threshold }} 個）以上まとめて確保していること
+- アンシールプロバイダ（Transit Vault）が到達可能で、認証・稼働していることを確認していること
+
+```bash
+ssh {{ vault.admin_user }}@{{ vault.host }} "curl -fsS {{ seal.transit_address }}/v1/sys/health"
+```
+
+現在の設定ファイルをバックアップします（切り戻し用）。
+
+```bash
+ssh {{ vault.admin_user }}@{{ vault.host }} "sudo cp {{ vault.config_path }} {{ vault.backup_path }}"
+```
+
+Transit 側に auto-unseal 専用キーを作成し、このノードからトークンで到達できることを確認します。
+
+```bash
+ssh {{ vault.admin_user }}@{{ vault.host }} \
+  "VAULT_ADDR={{ seal.transit_address }} VAULT_TOKEN={{ seal.transit_token }} \
+   vault write -f {{ seal.mount_path }}keys/{{ seal.key_name }}"
+```
+
+## 2. seal "transit" スタンザを disabled 状態で追加する
+
+既存の Shamir シールはそのままに、新しい seal スタンザを `disabled = "true"` で追記します。この時点ではまだ Transit シールは有効化されません。
+
+```bash
+ssh {{ vault.admin_user }}@{{ vault.host }} 'sudo tee -a {{ vault.config_path }} <<EOF
+
+seal "transit" {
+  address         = "{{ seal.transit_address }}"
+  token           = "{{ seal.transit_token }}"
+  key_name        = "{{ seal.key_name }}"
+  mount_path      = "{{ seal.mount_path }}"
+  disable_renewal = "false"
+  disabled        = "true"
+}
+EOF'
+```
+
+設定を構文検証します。
+
+```bash
+ssh {{ vault.admin_user }}@{{ vault.host }} "sudo vault server -config={{ vault.config_path }} -test-verify-only"
+```
+
+## 3. Vault を再起動し、Shamir key で移行用 unseal を実行する
+
+Vault を再起動すると、`disabled = "true"` の Transit シールは無視され、これまでどおり Shamir でシールされた状態で起動します。
+
+```bash
+ssh {{ vault.admin_user }}@{{ vault.host }} "sudo systemctl restart {{ vault.service_name }}"
+```
+
+`-migrate` を付けて、既存の Shamir unseal key を閾値（{{ shamir.unseal_threshold }} 個）分、1つずつ投入します。
+
+```bash
+ssh {{ vault.admin_user }}@{{ vault.host }} "VAULT_ADDR={{ vault.addr }} vault operator unseal -migrate"
+```
+
+閾値に達した時点で Vault が Shamir → Transit への移行を自動実行し、Sealed が false になります。
+
+## 4. disabled フラグを外し、Transit シールを本稼働させる
+
+移行完了後、`disabled = "true"` の行を削除（または `disabled = "false"` に変更）し、Shamir 時代の設定と揃えて Transit シールのみを有効な状態にします。
+
+```bash
+ssh {{ vault.admin_user }}@{{ vault.host }} "sudo sed -i '/disabled\s*=\s*\"true\"/d' {{ vault.config_path }}"
+ssh {{ vault.admin_user }}@{{ vault.host }} "sudo systemctl restart {{ vault.service_name }}"
+```
+
+## 動作確認
+
+1. 再起動直後に手動 unseal を行わず、`vault status` の `Sealed` が `false` になっていることを確認する
+
+   ```bash
+   ssh {{ vault.admin_user }}@{{ vault.host }} "VAULT_ADDR={{ vault.addr }} vault status"
+   ```
+
+2. recovery key（{{ recovery.recovery_threshold }}/{{ recovery.recovery_shares }} 閾値）を使って root 権限操作（generate-root）が実行できることを確認する
+
+   ```bash
+   ssh {{ vault.admin_user }}@{{ vault.host }} "VAULT_ADDR={{ vault.addr }} vault operator generate-root -init"
+   ```
+
+3. アンシールプロバイダ（{{ seal.transit_address }}）を意図的に一時停止できる検証環境がある場合、Vault 起動不能になる依存関係を実際に確認しておく
+
+## 注意事項
+
+- アンシールプロバイダ（Transit Vault）が到達不能・トークン失効・キー削除などで使えなくなると、本体 Vault は起動不能（unseal 不能）になる。移行前にプロバイダ側の可用性・トークン有効期限・アクセス経路を確認すること。
+- 移行前に Shamir unseal key と recovery key の両方を、責任者が分散保管する運用に沿って確実に確保してから着手する。確保前に移行を開始しない。
+- `{{ seal.transit_token }}` はアンシールプロバイダへの機微なトークンであり、`{{ vault.config_path }}` に平文で残る。ファイル権限を600等に制限し、Vault Agent や環境変数注入など、より安全なトークン供給方式への置き換えも検討する。
+- 移行に失敗し `vault operator unseal -migrate` が完了しない場合は、`{{ vault.backup_path }}` から `{{ vault.config_path }}` を復元し、Shamir unseal key で通常どおり unseal してロールバックする。
+- Transit シール導入後は Shamir unseal key での通常 unseal はできなくなる（recovery key は root 操作専用）。recovery key の保管・ローテーション手順を別途整備すること。

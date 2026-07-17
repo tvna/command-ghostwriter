@@ -33,11 +33,13 @@ Zeekの`Intel`フレームワークに脅威IoC(indicator)を取り込み、通�
 
 ```bash
 mkdir -p /opt/zeek/intel
-cat > /opt/zeek/intel/iocs.dat <<'EOF'
-#fields\tindicator\tindicator_type\tmeta.source
-{% for r in csv_rows %}{{ r["indicator"] }}\tIntel::{{ r["indicator_type"] }}\t{{ r["source"] }}
-{% endfor %}EOF
-```
+: > /opt/zeek/intel/iocs.dat
+printf '#fields\tindicator\tindicator_type\tmeta.source\n' >> /opt/zeek/intel/iocs.dat
+{% for r in csv_rows %}printf '{{ r["indicator"] }}\tIntel::{{ r["indicator_type"] }}\t{{ r["source"] }}\n' >> /opt/zeek/intel/iocs.dat
+{% endfor %}```
+
+`printf`の`\t`はシェルが実際のタブ文字に展開するため、`cat`によるヒアドキュメントではなく`printf`でファイルを生成しています。
+
 
 生成後、タブ区切りになっていることを確認します。
 

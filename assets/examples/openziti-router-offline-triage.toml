@@ -1,0 +1,4 @@
+router_name = "edge-router-tokyo-01"
+ctrl_endpoint = "ziti-controller.internal.example.com:6262"
+cert_expiry_check = true
+ntp_check = true

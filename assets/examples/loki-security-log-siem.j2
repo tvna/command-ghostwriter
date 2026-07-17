@@ -1,0 +1,121 @@
+# Lokiによるセキュリティログ集約とSIEM補完
+
+認証・監査・IDS/IPS・FWの各ログをGrafana Loki + Promtailへ集約し、LogQLで横断検索できるようにする手順です。専用SIEM(Wazuh等)の相関分析を置き換えるものではなく、横断検索と可視化で補完する位置づけです。
+
+## 目的
+
+promtailで複数のセキュリティログソースを収集してLokiへ集約し、LogQLによる認証失敗の相関確認・IPソースの横断追跡・Grafanaダッシュボード表示までを一通り実施できるようになることを目指します。
+
+## 用語解説
+
+- **Loki**: ログをインデックスせずラベルのみインデックス化し、圧縮して保存する検索基盤。フルテキスト検索エンジンではなくラベル起点のクエリを前提とする
+- **Promtail**: ログファイルを収集し、パイプラインステージでラベル付け・パースを行いLokiへ送信するエージェント
+- **LogQL**: Lokiのクエリ言語。ラベルセレクタとパイプライン(フィルタ・パース・集計)を組み合わせて横断検索や集計を行う
+- **eve.json**: Suricataが出力するJSON形式のイベントログ。alert/dns/httpなど複数のevent_typeを含む
+- **WORM (Write Once Read Many)**: 一度書き込んだら変更・削除できない保存方式。ログの改ざん防止に用いる
+- **Loki vs 専用SIEM(Wazuh)のトレードオフ**: Wazuhはルールベースでイベントをリアルタイムにリレーションさせる相関エンジンを持つが、ルール設計・チューニングの負荷が高い。Lokiは相関エンジンを持たず、ラベルとLogQLによる柔軟な横断検索・可視化に強いが、リアルタイムの自動相関判定はできない。両者は代替ではなく補完関係にあり、一次検知・相関はWazuh、横断調査・可視化はLokiが担う運用が現実的
+
+## シナリオ設定
+
+保持期間は {{ retention_days }} 日です。収集対象のセキュリティログソースは以下の {{ security_sources | length }} 件です。
+
+| ソース | ジョブ名 | パス | 形式 |
+| --- | --- | --- | --- |
+{% for src in security_sources %}| {{ src.label }} | {{ src.job_name }} | {{ src.path }} | {{ src.format }} |
+{% endfor %}
+
+## 手順
+
+### 1. Promtailのスクレイプ設定を作成する
+
+各セキュリティログソースをjob単位で収集対象に登録します。
+
+```yaml
+scrape_configs:
+{% for src in security_sources %}  - job_name: {{ src.job_name }}
+    static_configs:
+      - targets: ["localhost"]
+        labels:
+          job: {{ src.job_name }}
+          source: {{ src.name }}
+          __path__: {{ src.path }}
+{% endfor %}```
+
+### 2. パイプラインステージでラベル抽出を設定する
+
+ソースごとの形式に合わせてパイプラインステージを設定し、検索・相関に使うフィールドをラベル化します。
+
+```yaml
+{% for stage in parse_stages %}  # {{ stage.job_name }}: {{ stage.description }}
+{% if stage.stage_type == "regex" %}  pipeline_stages:
+    - regex:
+        expression: '{{ stage.regex }}'
+    - labels:
+        src_ip:
+{% else %}  pipeline_stages:
+    - json:
+        expressions:
+          event_type: event_type
+          src_ip: src_ip
+          dest_ip: dest_ip
+          signature: alert.signature
+    - labels:
+        event_type:
+        src_ip:
+{% endif %}
+{% endfor %}```
+
+### 3. Lokiの保持期間(retention)を設定する
+
+セキュリティログは監査・調査目的で一定期間の保持が要件となることが多いため、コンプライアンス上必要な日数を明示的に設定します。
+
+```yaml
+limits_config:
+  retention_period: {{ retention_days }}d
+compactor:
+  retention_enabled: true
+  retention_delete_delay: 2h
+```
+
+反映後、Promtail・Lokiを再起動します。
+
+```bash
+sudo systemctl restart promtail
+sudo systemctl restart loki
+```
+
+### 4. LogQLで横断検索・相関確認を行う
+
+認証失敗の相関確認、IPソースの横断追跡、IDSアラートの集計をそれぞれ実施します。
+
+```logql
+{% for dash in dashboards %}# {{ dash.title }} ({{ dash.panel_type }}): {{ dash.description }}
+{% if dash.job_pattern %}{job=~"{{ dash.job_pattern }}"} |= "{{ dash.match_text }}"
+{% elif dash.window %}sum by (src_ip) (count_over_time({job="{{ dash.job_name }}"} |= "{{ dash.match_text }}" [{{ dash.window }}]))
+{% else %}{job="{{ dash.job_name }}"} |= "{{ dash.match_text }}"
+{% endif %}
+{% endfor %}```
+
+### 5. Grafanaダッシュボードへパネルを追加する
+
+上記のLogQLクエリをそれぞれパネルとして登録し、ダッシュボードに配置します。
+
+{% for dash in dashboards %}- **{{ dash.title }}** ({{ dash.panel_type }}): {{ dash.description }}
+{% endfor %}
+
+## 動作確認
+
+1. 各セキュリティソースについて、対応するjobラベルでログが取り込まれていることを確認する
+   ```logql
+{% for src in security_sources %}   {job="{{ src.job_name }}"}
+{% endfor %}   ```
+2. 上記の横断検索クエリ(認証失敗の相関確認・IPソース横断追跡)がエラーなく結果を返すことを確認する
+3. Grafanaダッシュボードを開き、{{ dashboards | length }} 件のパネルすべてにデータが表示されることを確認する
+
+## 注意事項
+
+- Lokiはラベルベースの検索基盤であり、Wazuhのようなルールベースの相関エンジンではない。一次検知・自動相関判定はWazuh等の専用SIEMに担わせ、Lokiは横断調査・可視化の補完として位置づけること
+- セキュリティログにはユーザー名・IPアドレス等のPIIや認証情報が含まれ得るため、Loki/Grafanaへのアクセスは関係者のみに限定し、ロールベースのアクセス制御を設定すること
+- 改ざん防止のため、保存先ストレージにWORM(Write Once Read Many)設定またはそれに準じるイミュータブル設定を検討すること。retention_periodの短縮・削除は関係者の承認を経てから行うこと
+- Promtailの新設定を投入する際は、既存のsyslog/journald等によるローカルログ保存やログローテーションを止めず並行稼働させ、各ソースの取り込みを`動作確認`の手順1で確認できてから旧来の収集経路を縮退させること
+- 保持期間({{ retention_days }}日)は監査・コンプライアンス要件を満たすように設定し、要件変更時は関係者と合意の上で見直すこと

@@ -1,0 +1,5 @@
+netns_name = "wg-confined"
+interface = "wg0"
+tunnel_address = "10.66.0.2/32"
+dns_server = "10.66.0.1"
+confined_command = "curl --silent https://ifconfig.co"

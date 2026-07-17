@@ -1,0 +1,4 @@
+group_name,server_role,syscheck_dirs,sca_policies,agent_count
+web-servers,Webサーバ,/etc/nginx;/var/www/html,cis_debian12,12
+db-servers,DBサーバ,/etc/mysql;/var/lib/mysql,cis_debian12,4
+default,未分類,/etc,-,3

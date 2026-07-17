@@ -52,7 +52,7 @@ pin_cpus={{ n.pin_cpus }}
 `lb_procs`は対象NICのRSSキュー数と一致させてください。キュー数より`lb_procs`が多いと一部プロセスにパケットが偏り、少ないとキューを使い切れず取りこぼしの原因になります。RSSキュー数は次で確認できます。
 
 ```bash
-ethtool -l {{ cluster_nodes[3].interface.split("::")[1] }}
+ethtool -l {{ worker_nic }}
 ```
 
 ### 2. networks.cfgでローカルネットを定義する

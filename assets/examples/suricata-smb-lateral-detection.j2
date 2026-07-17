@@ -1,0 +1,157 @@
+# Suricata SMB横展開検知ルール整備手順
+
+{{ sensor_name }} 上のSuricataに、内部セグメント間のSMB管理共有アクセスと
+exe転送を検知するローカルルールを追加します。app-layer SMBパーサが有効な
+ことを前提に、ルール投入から模擬アクセスによる検知確認、正常業務通信の
+チューニングまでを行います。
+
+## 目的
+
+内部横展開（lateral movement）の代表的な兆候である ADMIN$ / C$ などの
+管理共有への不審なアクセスと、SMB経由の実行ファイル転送を検知できる
+状態を作ります。あわせて、バックアップソフトや資産管理ツールなど正当な
+SMB通信を誤検知させないチューニングまでを完了させることを目指します。
+
+## 用語解説
+
+- **app-layerパーサ (SMB)**: Suricataがパケットを再構成しSMBプロトコルの
+  フィールド（共有名、ファイル名など）をルールから参照できるようにする機能
+- **fileinfoイベント**: SMBやHTTPなどでファイル転送を検出した際にeve.jsonへ
+  記録される、ファイル名・ハッシュ・転送方向を含むイベント
+- **pass / suppressルール**: 特定条件に一致する通信のアラートを抑制する
+  チューニング用のルール（検知ルール自体は残したまま除外する）
+- **東西トラフィック (east-west traffic)**: データセンターやオフィス内部の
+  セグメント間で発生する通信。南北（外部⇔内部）と区別される横展開検知の対象
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| センサー名 | {{ sensor_name }} |
+| ミラー元 | {{ mirror_source }} |
+| HOME_NET | {{ home_net }} |
+| 監視対象共有 | {% for share in watch_shares %}{{ share }}{% if not loop.last %}, {% endif %}{% endfor %} |
+| exe転送検知 | {{ alert_on_exe_transfer }} |
+| ルールファイル | {{ rule_file_path }} |
+| eve.jsonパス | {{ eve_json_path }} |
+
+対象の内部セグメントは以下の通りです。
+
+{% for seg in internal_segments %}
+- {{ seg }}
+{% endfor %}
+
+## 手順
+
+### 1. HOME_NETとapp-layer SMBパーサ設定を確認する
+
+`suricata.yaml` で `HOME_NET` に内部セグメントが含まれていること、
+`app-layer.protocols.smb.enabled` が `yes` になっていることを確認します。
+
+```bash
+grep -A2 "HOME_NET:" /etc/suricata/suricata.yaml
+grep -A3 "smb:" /etc/suricata/suricata.yaml
+```
+
+`HOME_NET` には `{{ home_net }}` が含まれている必要があります。
+
+### 2. SMB管理共有アクセス検知ルールを作成する
+
+{{ rule_file_path }} に、監視対象共有への内部間アクセスを検知するルールを
+追加します。
+
+```
+alert smb $HOME_NET any -> $HOME_NET any (msg:"LOCAL SMB ADMIN$ access"; flow:established,to_server; smb.share; content:"ADMIN$"; sid:{{ sid_admin_share }}; rev:{{ rev_number }}; classtype:attempted-admin;)
+```
+
+同様に、監視対象共有（{% for share in watch_shares %}{{ share }}{% if not loop.last %} / {% endif %}{% endfor %}）ごとに
+`content` 部分を差し替えて追加してください。
+
+### 3. SMB経由のexe転送検知ルールを作成する
+
+exe転送検知（{{ alert_on_exe_transfer }}）が有効な場合、fileinfoイベントを
+用いて内部間でのexeファイル転送を検知するルールも同じファイルに追加します。
+
+```
+alert smb $HOME_NET any -> $HOME_NET any (msg:"LOCAL SMB EXE file transfer"; flow:established,to_server; file.name; endswith:".exe"; filestore; sid:{{ sid_exe_transfer }}; rev:{{ rev_number }}; classtype:policy-violation;)
+```
+
+### 4. ルールを読み込ませる
+
+```bash
+suricata -T -c /etc/suricata/suricata.yaml -v
+{{ reload_command }}
+```
+
+`-T` での文法チェックがエラー無しで終わることを確認してから reload します。
+
+### 5. 模擬アクセスで検知を確認する
+
+検証用端末から、監視対象の共有 {{ test_share }} に対して模擬アクセスを
+行います。
+
+```bash
+smbclient //{{ test_target_host }}/{{ test_share }} -U {{ test_user }}
+```
+
+接続後、以下でeve.jsonのsmbイベントを確認します。
+
+```bash
+tail -n 200 {{ eve_json_path }} | jq 'select(.event_type=="alert" and .alert.signature_id=={{ sid_admin_share }})'
+```
+
+`alert.signature_id` が `{{ sid_admin_share }}` のアラートが記録されて
+いれば検知成功です。
+
+### 5. 正当なSMB通信を除外するチューニングを行う
+
+バックアップソフト（{{ backup_tool_ip }}）や資産管理ツール
+（{{ asset_mgmt_ip }}）による定期的な管理共有アクセスは、検知ルールを
+消さずにpass/suppressルールで個別に除外します。
+
+```
+suppress gen_id 1, sig_id {{ sid_admin_share }}, track by_src, ip {{ backup_tool_ip }}
+suppress gen_id 1, sig_id {{ sid_admin_share }}, track by_src, ip {{ asset_mgmt_ip }}
+```
+
+上記を {{ suppress_rule_path }} に追記し、再読み込みします。
+
+```bash
+{{ reload_command }}
+```
+
+再読み込み後、バックアップソフトと資産管理ツールからの通常アクセス時に
+アラートが発生しなくなったことをeve.jsonで確認してください。
+
+```bash
+tail -n 200 {{ eve_json_path }} | jq 'select(.event_type=="alert" and .alert.signature_id=={{ sid_admin_share }} and .src_ip=="{{ backup_tool_ip }}")'
+```
+
+このクエリで結果が出力されないことを確認します。
+
+## 動作確認
+
+- 手順4の模擬アクセスで `sid:{{ sid_admin_share }}` のアラートがeve.jsonに
+  記録されること
+- exe転送検知（{{ alert_on_exe_transfer }}）が有効な場合、テスト用exeを
+  SMB経由で転送し `sid:{{ sid_exe_transfer }}` のアラートが記録されること
+- 手順5のsuppress設定後、{{ backup_tool_ip }} と {{ asset_mgmt_ip }} からの
+  通常アクセスでアラートが発生しないこと
+- suppressルール適用後も、手順4の模擬アクセス（{{ test_target_host }}宛て）
+  では引き続きアラートが発生し、検知そのものが無効化されていないこと
+
+## 注意事項
+
+- 本ルールは {{ mirror_source }} によって東西トラフィックがセンサーに
+  届くミラー設計を前提とします。南北トラフィックのみをミラーしている
+  環境では、内部セグメント間（{% for seg in internal_segments %}{{ seg }}{% if not loop.last %} / {% endif %}{% endfor %}）の通信が
+  センサーに到達せず、検知が機能しません。導入前にミラー設計を必ず確認
+  してください。
+- suppress/passルールによるチューニングは、対象を送信元IP単位など
+  必要最小限のスコープに限定し、共有名や検知シグネチャ全体を無条件に
+  除外しないこと。チューニング後は手順5・動作確認の通り、正当な通信の
+  誤検知が消えたことと、模擬アクセスによる検知が引き続き機能している
+  ことの両方を確認してから運用に反映してください。
+- ルール追加やsuppress設定の反映前には必ず `suricata -T` で文法検証を
+  行い、既存の検知ルール群を壊していないことを確認したうえで
+  {{ reload_command }} を実行してください。

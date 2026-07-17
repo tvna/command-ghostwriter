@@ -13,6 +13,7 @@ change_log_source = "変更管理台帳 (CHANGE-xxxx, Redmineチケット一覧)
 test_id = "SSH-7408"
 category = "SSH"
 message = "AllowTcpForwarding is enabled (default: yes) in sshd_config"
+
 suggestion = "Disable AllowTcpForwarding unless a documented business need exists"
 change_ticket = "unmanaged"
 
@@ -33,7 +34,7 @@ change_ticket = "unmanaged"
 [[new_warnings]]
 test_id = "PKGS-7392"
 category = "パッケージ"
-message = "Deprecated package 'telnet-server' found installed"
+message = "Deprecated package telnet-server found installed"
 suggestion = "Remove telnet-server package (apt purge telnet-server)"
 change_ticket = "unmanaged"
 

@@ -1,0 +1,6 @@
+test_id,category,warning,likely_finding,remediation_status,owner
+AUTH-9262,認証,パスワード最大有効日数が99999日に設定されPASS_MAX_DAYSが未強制,CIS 5.4.1.1 / PCI DSS 8.3.9 未達,未着手,infra-team
+SSH-7408,SSH,sshd_configでPermitRootLoginがyesのまま,CIS 5.2.10 / PCI DSS 2.2.4 未達,対応中,sec-team
+FILE-6310,ファイル権限,world-writableなファイルが/var配下に検出,CIS 6.1.10 / PCI DSS 2.2.4 未達,完了,infra-team
+KRNL-5820,カーネル,net.ipv4.conf.all.rp_filterが未設定でsysctl未強化,CIS 3.3.2 / PCI DSS 1.4.1 未達,未着手,infra-team
+ACCT-9622,アカウント,90日以上ログイン履歴のないアカウントが残存,CIS 5.4.3 / PCI DSS 8.1.4 未達,説明準備,sec-team
