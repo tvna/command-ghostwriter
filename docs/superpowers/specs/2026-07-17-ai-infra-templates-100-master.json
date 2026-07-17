@@ -1,0 +1,829 @@
+[
+  {
+    "id": "slurm-gpu-gres-setup",
+    "name": "SlurmのGRESによるGPU資源定義と割り当て",
+    "desc": "slurm.confとgres.confでGPUをGRESとして定義し、ノードへの割り当てとジョブでの利用を検証する手順書を生成。",
+    "subCategory": "GPUクラスタ",
+    "format": "toml",
+    "outline": "GresTypesとNodeName定義をslurm.confへ追記; gres.confでGPUデバイスを宣言; scontrol reconfigureで設定を反映; sinfoでGRES公開状況を確認; srun --gres=gpu:1でジョブ割り当てを検証"
+  },
+  {
+    "id": "slurm-topology-aware-scheduling",
+    "name": "Slurmトポロジ考慮スケジューリングの設定",
+    "desc": "topology.confとtopology/treeプラグインでスイッチ配線を定義し、同一スイッチ配下へのジョブ集約を確認する手順書を生成。",
+    "subCategory": "GPUクラスタ",
+    "format": "yaml",
+    "outline": "物理配線からスイッチ階層を整理; topology.confを作成; slurm.confでtopology/treeを有効化; scontrol show topologyで反映を確認; --switchesオプション付きジョブで集約を検証"
+  },
+  {
+    "id": "nccl-allreduce-benchmark",
+    "name": "NCCLによるマルチノード集合通信ベンチマーク",
+    "desc": "nccl-testsのall_reduce_perfをmpirunで複数ノード実行し、集合通信帯域を測定して理論値と比較評価する手順書を生成。",
+    "subCategory": "GPUクラスタ",
+    "format": "toml",
+    "outline": "nccl-testsをビルド; ホストファイルとNCCL環境変数を準備; 単一ノードでall_reduce_perfを実行; mpirunで複数ノード実行; busbw測定値を理論帯域と比較評価"
+  },
+  {
+    "id": "dcgm-gpu-health-monitoring",
+    "name": "DCGMによるGPUヘルスチェックと常時監視",
+    "desc": "dcgmiによるGPUグループ作成・ヘルスウォッチ・レベル別診断と、dcgm-exporterによるメトリクス常時監視の手順書を生成。",
+    "subCategory": "GPUクラスタ",
+    "format": "yaml",
+    "outline": "datacenter-gpu-managerを導入しnvidia-dcgmを起動; dcgmi discoveryでGPUを確認; GPUグループを作成しヘルスウォッチを有効化; dcgmi diagでレベル別診断を実行; dcgm-exporterでメトリクスを公開"
+  },
+  {
+    "id": "k8s-gpu-operator-deploy",
+    "name": "GPU OperatorによるGPUノードの自動管理",
+    "desc": "HelmでNVIDIA GPU Operatorを導入し、ドライバ・デバイスプラグインの展開とGPU要求Podの実行を確認する手順書を生成。",
+    "subCategory": "GPUクラスタ",
+    "format": "yaml",
+    "outline": "Helmリポジトリを登録; values設定を準備; gpu-operatorをインストール; オペレータ各Podの起動を確認; nvidia.com/gpuを要求するテストPodで検証"
+  },
+  {
+    "id": "k8s-gpu-node-drain",
+    "name": "GPUノードの安全なドレインと保守復帰",
+    "desc": "kubectl cordon/drainでGPUノードからワークロードを退避し、保守作業後にuncordonで復帰させる手順書を生成。",
+    "subCategory": "GPUクラスタ",
+    "format": "csv",
+    "outline": "対象ノードをcordonで新規割当停止; 実行中Podを確認; drainでワークロードを退避; 保守作業を実施; uncordonで復帰しGPU Podのスケジュールを確認"
+  },
+  {
+    "id": "nvlink-fabric-manager-ops",
+    "name": "NVLink構成確認とFabric Manager運用",
+    "desc": "nvidia-smi nvlink/topoでNVLinkトポロジとリンク状態を確認し、Fabric Managerサービスを健全に運用する手順書を生成。",
+    "subCategory": "GPUクラスタ",
+    "format": "toml",
+    "outline": "nvidia-fabricmanagerパッケージを導入; サービスを起動し状態を確認; nvidia-smi topo -mでGPU間トポロジを確認; nvidia-smi nvlink -sでリンク状態を点検; GPU間帯域テストで疎通を検証"
+  },
+  {
+    "id": "infiniband-fabric-health-check",
+    "name": "InfiniBandファブリックの定期健全性点検",
+    "desc": "ibstat・iblinkinfo・ibdiagnetでリンク状態とエラーカウンタを定期点検し、劣化ポートを特定する手順書を生成。",
+    "subCategory": "GPUクラスタ",
+    "format": "csv",
+    "activity": "routine",
+    "outline": "対象ノード・スイッチ一覧を確認; ibstat/ibstatusでポート状態を点検; iblinkinfoでリンク速度・幅を確認; ibdiagnetでファブリック全体を診断; エラーカウンタを記録し前回値と比較"
+  },
+  {
+    "id": "gpu-xid-error-triage",
+    "name": "Xidエラーに基づくGPU故障の切り分け",
+    "desc": "dmesgのXidエラーとnvidia-smi・dcgmi diagの結果からGPU故障箇所を切り分け、交換要否を判断する手順書を生成。",
+    "subCategory": "GPUクラスタ",
+    "format": "csv",
+    "activity": "troubleshoot",
+    "outline": "dmesgとjournalctlでXidコードを収集; Xidコードの意味と深刻度を分類; nvidia-smi -qでECCエラーとRow Remappingを確認; dcgmi diagで診断を実行; 交換・リセット・経過観察を判定"
+  },
+  {
+    "id": "rack-power-capacity-design",
+    "name": "GPUラックの電源容量設計と実測検証",
+    "desc": "GPUサーバの消費電力を実測し、ラックPDU・ブレーカ容量と冗長構成を考慮した電源設計を行う手順書を生成。",
+    "subCategory": "GPUクラスタ",
+    "format": "csv",
+    "outline": "搭載機器の定格消費電力を棚卸し; nvidia-smiとipmitoolで実負荷時電力を実測; ラック合計電力とPDU容量を照合; ブレーカ余裕率と冗長構成を設計; 増設余地と電力閾値アラートを定義"
+  },
+  {
+    "id": "dvc-dataset-versioning",
+    "name": "DVCによるデータセットのバージョン管理",
+    "desc": "dvc initによる初期化・リモート設定・add/pushでデータセットをGitと連携して版管理する手順書を生成。",
+    "subCategory": "データ基盤",
+    "format": "toml",
+    "outline": "DVCの初期化とGit連携; リモートストレージの登録; dvc addによるデータセットの追跡; dvc pushによるデータ同期; 過去バージョンの取り出し(checkout)"
+  },
+  {
+    "id": "duckdb-dataset-etl",
+    "name": "DuckDBによるトレーニングデータのETL処理",
+    "desc": "duckdb CLIでCSVの読み込み・SQLによる変換・Parquet出力を行い、学習用データを整形する手順書を生成。",
+    "subCategory": "データ基盤",
+    "format": "yaml",
+    "outline": "DuckDB CLIの導入と動作確認; ソースCSVの読み込みとスキーマ確認; SQLによる変換・フィルタリング; COPY文によるParquet出力; 出力データの件数・スキーマ検証"
+  },
+  {
+    "id": "training-data-dedup",
+    "name": "学習データの重複排除とハッシュ検査",
+    "desc": "sha256sumとsort・uniqによる行単位、jdupesによるファイル単位の重複検出と除去を行う手順書を生成。",
+    "subCategory": "データ基盤",
+    "format": "csv",
+    "outline": "対象ファイルの棚卸しと件数確認; sha256sumによるファイル単位の重複検出; sort・uniqによる行単位の重複除去; jdupesによるディレクトリ横断の検査; 除去前後の件数比較と記録"
+  },
+  {
+    "id": "label-studio-setup",
+    "name": "Label Studioによるラベリング基盤の構築",
+    "desc": "pipによるLabel Studioの導入・起動・プロジェクト作成とアノテーション結果のエクスポートを行う手順書を生成。",
+    "subCategory": "データ基盤",
+    "format": "yaml",
+    "outline": "仮想環境の作成とpipによる導入; label-studio startによる起動; プロジェクト作成とデータインポート; アノテーション結果のエクスポート; systemdによる常時起動化"
+  },
+  {
+    "id": "pdf-text-extraction",
+    "name": "poppler-utilsによるPDFテキスト抽出",
+    "desc": "pdfinfoでの事前調査、pdftotextによる本文抽出、ocrmypdfによるスキャンPDFのOCR化を行う手順書を生成。",
+    "subCategory": "データ基盤",
+    "format": "csv",
+    "outline": "poppler-utilsとocrmypdfの導入; pdfinfoによるPDFの事前調査; pdftotextによるテキスト抽出; スキャンPDFへのOCR適用; 抽出テキストの文字化け・欠落確認"
+  },
+  {
+    "id": "image-preprocessing-batch",
+    "name": "ImageMagickによる学習用画像の一括前処理",
+    "desc": "identifyによる破損検査とmogrify・convertでのリサイズ・形式統一で学習用画像を整える手順書を生成。",
+    "subCategory": "データ基盤",
+    "format": "toml",
+    "outline": "ImageMagickの導入と対象画像の確認; identifyによる破損・メタデータ検査; mogrifyによる一括リサイズ; convertによる形式・カラースペース統一; 処理後の枚数・サイズ検証"
+  },
+  {
+    "id": "webdataset-shard-build",
+    "name": "マルチモーダル学習データのtarシャード構築",
+    "desc": "画像とキャプションの対応検査とtarによるWebDataset形式シャードへの分割梱包を行う手順書を生成。",
+    "subCategory": "データ基盤",
+    "format": "yaml",
+    "outline": "画像・キャプションの対応関係の検査; ファイル命名規則の統一; tarによるシャード作成; tar -tfによるシャード内容の検証; 破損シャードの検出と再作成"
+  },
+  {
+    "id": "csv-data-quality-check",
+    "name": "csvkitによるデータ品質の定期検査",
+    "desc": "csvclean・csvstat・csvgrepで欠損や型不整合を定期点検し、結果を記録して品質を維持する手順書を生成。",
+    "subCategory": "データ基盤",
+    "format": "csv",
+    "activity": "routine",
+    "outline": "csvkitの導入と対象データの確認; csvcleanによる構文エラー検出; csvstatによる統計・欠損の把握; csvgrepによる異常値の抽出; 検査結果の記録と共有"
+  },
+  {
+    "id": "eval-dataset-split",
+    "name": "評価用データセットの分割とサンプリング",
+    "desc": "shufとsplitによる再現可能な学習/評価データの分割と、commによるデータリーク検査を行う手順書を生成。",
+    "subCategory": "データ基盤",
+    "format": "toml",
+    "outline": "分割方針と乱数シードの決定; shufによる再現可能なシャッフル; splitによる学習/評価データの分割; commによるリーク(重複)検査; 件数と分布の確認"
+  },
+  {
+    "id": "dataset-encoding-triage",
+    "name": "テキストデータの文字化けの切り分け",
+    "desc": "file・uchardet・nkf・iconvで文字化けの原因を切り分け、安全な変換方針を確定する手順書を生成。",
+    "subCategory": "データ基盤",
+    "format": "csv",
+    "activity": "troubleshoot",
+    "outline": "症状の再現と対象ファイルの特定; fileとuchardetによるエンコーディング推定; nkf -gによる日本語コードの判定; iconvによる試験変換と差分比較; 原因の確定と恒久対応の決定"
+  },
+  {
+    "id": "gguf-model-conversion",
+    "name": "llama.cppによるGGUF変換と量子化",
+    "desc": "llama.cppの変換スクリプトとllama-quantizeでモデルをGGUF化し、量子化と動作確認まで行う手順書を生成。",
+    "subCategory": "モデル管理",
+    "format": "toml",
+    "outline": "変換環境とllama.cppの準備; convert_hf_to_gguf.pyでGGUFへ変換; llama-quantizeで量子化; gguf-dumpでメタデータ確認; llama-cliで推論スモークテスト"
+  },
+  {
+    "id": "onnx-model-export",
+    "name": "OptimumによるONNXエクスポートと推論検証",
+    "desc": "optimum-cliでTransformersモデルをONNXへエクスポートし、ONNX Runtimeで推論検証する手順書を生成。",
+    "subCategory": "モデル管理",
+    "format": "toml",
+    "outline": "optimumと依存パッケージの導入; optimum-cli export onnxでエクスポート; 出力ファイル構成の確認; ONNX Runtimeで推論検証; PyTorch出力との差分比較"
+  },
+  {
+    "id": "awq-gptq-quantization",
+    "name": "AWQ・GPTQによるLLM量子化とモデル保存",
+    "desc": "AutoAWQとGPTQでLLMを4bit量子化し、保存・サイズ確認からvLLMでのロード確認まで行う手順書を生成。",
+    "subCategory": "モデル管理",
+    "format": "yaml",
+    "outline": "量子化環境とキャリブレーションデータの準備; AutoAWQによるAWQ量子化; GPTQによる量子化と比較; 量子化モデルの保存とサイズ確認; vLLMでのロード確認"
+  },
+  {
+    "id": "lora-adapter-merge",
+    "name": "LoRAアダプタのマージと配布用モデル生成",
+    "desc": "peftでLoRAアダプタをベースモデルへマージし、safetensors保存とGGUF変換まで行う手順書を生成。",
+    "subCategory": "モデル管理",
+    "format": "yaml",
+    "outline": "ベースモデルとLoRAアダプタの取得; peftのmerge_and_unloadによるマージ; safetensors形式での保存; convert_lora_to_gguf.pyによる変換; マージ前後の出力比較"
+  },
+  {
+    "id": "safetensors-migration",
+    "name": "PyTorchモデルのsafetensors形式移行",
+    "desc": "pickle形式のpytorch_model.binをsafetensorsへ一括変換し、テンソルの整合性検証まで行う手順書を生成。",
+    "subCategory": "モデル管理",
+    "format": "csv",
+    "outline": "対象モデルディレクトリの棚卸し; 変換スクリプトの準備; pickleからsafetensorsへの一括変換; テンソル数と数値の整合性検証; 旧ファイルの退避と切替"
+  },
+  {
+    "id": "model-artifact-signing",
+    "name": "cosignによるモデル成果物の署名と検証",
+    "desc": "sha256sumとcosignのsign-blob/verify-blobでモデル成果物の署名・検証と配布時の改ざん検知を行う手順書を生成。",
+    "subCategory": "モデル管理",
+    "format": "toml",
+    "outline": "署名鍵の生成と保管方針の確認; sha256sumによるマニフェスト作成; cosign sign-blobによる署名; cosign verify-blobによる検証; 配布先での検証手順の共有"
+  },
+  {
+    "id": "minio-model-distribution",
+    "name": "MinIOによる学習済みモデルの社内配布",
+    "desc": "mcコマンドでMinIOバケットへモデルを配置し、ミラー同期と期限付きURL共有で社内配布を行う手順書を生成。",
+    "subCategory": "モデル管理",
+    "format": "yaml",
+    "outline": "mc aliasによる接続設定; バケット作成とアクセスポリシー設定; mc mirrorによるモデル配置; mc share downloadによる期限付きURL発行; 取得側での整合性確認"
+  },
+  {
+    "id": "mlflow-model-registry",
+    "name": "MLflowモデルレジストリによるバージョン管理",
+    "desc": "MLflowモデルレジストリへの登録・エイリアス運用・ロールバックでモデルの版管理を行う手順書を生成。",
+    "subCategory": "モデル管理",
+    "format": "toml",
+    "outline": "MLflowトラッキングサーバの起動; モデルの登録とバージョン付与; エイリアスによるステージ運用; mlflow models serveでの動作確認; 旧バージョンへのロールバック"
+  },
+  {
+    "id": "model-card-audit",
+    "name": "モデルカードとライセンス表記の定期棚卸し",
+    "desc": "配布中モデルのモデルカード記載とライセンス表記を定期的に棚卸しし、不備の是正まで行う手順書を生成。",
+    "subCategory": "モデル管理",
+    "format": "csv",
+    "activity": "routine",
+    "outline": "配布中モデルの一覧確認; モデルカードの取得と記載確認; ライセンス表記と利用条件の照合; 不備の是正とアップロード; 棚卸し結果の記録"
+  },
+  {
+    "id": "quant-quality-triage",
+    "name": "量子化モデルの品質劣化の切り分け",
+    "desc": "量子化後モデルの品質劣化をllama-perplexityとllama-benchで測定し、原因を切り分ける手順書を生成。",
+    "subCategory": "モデル管理",
+    "format": "csv",
+    "activity": "troubleshoot",
+    "outline": "事象と比較対象の整理; llama-perplexityによるPPL測定; 量子化タイプ間の比較; llama-benchによる速度測定; 原因の特定と量子化タイプ再選定"
+  },
+  {
+    "id": "triton-model-repository-deploy",
+    "name": "Tritonサーバによるモデルリポジトリ配備",
+    "desc": "モデルリポジトリの構成とconfig.pbtxtの記述、tritonserverコンテナの起動と推論確認を行う手順書を生成。",
+    "subCategory": "推論サーバ",
+    "format": "yaml",
+    "outline": "モデルリポジトリのディレクトリ構成を作成する; config.pbtxtを記述する; tritonserverコンテナを起動する; ヘルスエンドポイントを確認する; 推論リクエストを送信する"
+  },
+  {
+    "id": "tgi-server-deploy",
+    "name": "TGIによるLLM推論サーバの構築と運用",
+    "desc": "text-generation-inferenceコンテナをDocker Composeで起動し、量子化設定と生成APIの動作確認を行う手順書を生成。",
+    "subCategory": "推論サーバ",
+    "format": "yaml",
+    "outline": "モデルと量子化方式を選定する; docker-compose.ymlを記述する; コンテナを起動しログを確認する; 生成APIへリクエストを送信する; 起動パラメータを調整する"
+  },
+  {
+    "id": "sglang-server-deploy",
+    "name": "SGLangによる高速LLM推論サーバの構築",
+    "desc": "sglang.launch_serverによるサーバ起動とOpenAI互換APIの確認、ベンチマークによる性能測定を行う手順書を生成。",
+    "subCategory": "推論サーバ",
+    "format": "toml",
+    "outline": "sglangをインストールする; launch_serverでサーバを起動する; OpenAI互換APIで動作確認する; bench_servingで性能を測定する"
+  },
+  {
+    "id": "tensorrt-llm-engine-build",
+    "name": "TensorRT-LLMエンジンのビルドと配備",
+    "desc": "convert_checkpointとtrtllm-buildによるエンジン変換・ビルドと、trtllm-serveでの配信確認を行う手順書を生成。",
+    "subCategory": "推論サーバ",
+    "format": "yaml",
+    "outline": "ベースモデルのチェックポイントを取得する; convert_checkpointで形式変換する; trtllm-buildでエンジンをビルドする; trtllm-serveで配信を開始する; 推論結果を確認する"
+  },
+  {
+    "id": "llama-cpp-server-deploy",
+    "name": "llama.cppサーバによるローカルLLM配信",
+    "desc": "GGUFモデルをllama-serverで配信し、GPUオフロード層数の調整とOpenAI互換APIの動作確認を行う手順書を生成。",
+    "subCategory": "推論サーバ",
+    "format": "toml",
+    "outline": "GGUFモデルを取得する; llama-serverを起動する; GPUオフロード層数を調整する; OpenAI互換APIで動作確認する"
+  },
+  {
+    "id": "whisper-asr-server-deploy",
+    "name": "whisper.cppによる音声認識サーバの構築",
+    "desc": "whisper.cppのビルドとモデル選定、whisper-serverの起動と文字起こしAPIの動作確認を行う手順書を生成。",
+    "subCategory": "推論サーバ",
+    "format": "toml",
+    "outline": "whisper.cppをビルドする; ggmlモデルをダウンロードする; whisper-serverを起動する; 音声ファイルをAPIで文字起こしする; モデルサイズと速度のバランスを調整する"
+  },
+  {
+    "id": "inference-canary-release",
+    "name": "新モデルのカナリアデプロイと段階移行",
+    "desc": "Nginxの重み付きupstreamで新旧モデルへ段階的にトラフィックを移行し、指標監視と切り戻しを行う手順書を生成。",
+    "subCategory": "推論サーバ",
+    "format": "csv",
+    "outline": "新旧バージョンのコンテナを並行起動する; Nginxの重み付きupstreamを設定する; 初期比率でトラフィックを流す; 指標を監視し段階的に比率を上げる; 完全切替または切り戻しを実施する"
+  },
+  {
+    "id": "llm-ab-test-comparison",
+    "name": "LLM新旧モデルのA/Bテスト比較評価",
+    "desc": "新旧モデルのエンドポイントへ同一プロンプト集を送信し、応答品質とレイテンシを比較評価する手順書を生成。",
+    "subCategory": "推論サーバ",
+    "format": "csv",
+    "outline": "比較対象エンドポイントを準備する; プロンプト集をCSVで整備する; 両エンドポイントへ同一リクエストを送信する; レイテンシと応答内容を記録する; 評価基準に沿って採否を判定する"
+  },
+  {
+    "id": "inference-gpu-oom-triage",
+    "name": "推論サーバのGPUメモリ不足の切り分け",
+    "desc": "CUDA out of memory発生時にnvidia-smiとログで原因を特定し、メモリ設定を調整して復旧する手順書を生成。",
+    "subCategory": "推論サーバ",
+    "format": "toml",
+    "activity": "troubleshoot",
+    "outline": "エラーログでOOMの発生箇所を特定する; nvidia-smiでGPUメモリ使用状況を確認する; コンテキスト長とバッチ設定を見直す; メモリ利用率設定を調整して再起動する; 再発監視を設定する"
+  },
+  {
+    "id": "inference-endpoint-inventory",
+    "name": "推論エンドポイントの定期棚卸し点検",
+    "desc": "推論エンドポイント一覧に対しヘルスチェックと提供モデルの照合・応答確認を定期実施し、台帳を更新する手順書を生成。",
+    "subCategory": "推論サーバ",
+    "format": "csv",
+    "activity": "routine",
+    "outline": "エンドポイント一覧を読み込む; ヘルスチェックを実行する; 提供モデル一覧を照合する; 応答レイテンシを記録する; 台帳を更新し差分を報告する"
+  },
+  {
+    "id": "qdrant-collection-setup",
+    "name": "Qdrantの導入とコレクション作成・検索の基本",
+    "desc": "DockerでQdrantを起動し、コレクション作成・ポイント登録・類似検索と距離関数の設定を行う手順書を生成。",
+    "subCategory": "ベクトルDB",
+    "format": "toml",
+    "outline": "DockerでQdrantを起動する; コレクションを作成し距離関数を設定する; ポイントを一括登録する; 類似検索とフィルタ検索を実行する; コレクション情報と容量を確認する"
+  },
+  {
+    "id": "milvus-standalone-deploy",
+    "name": "Milvusスタンドアロン構築とインデックス作成",
+    "desc": "Docker ComposeでMilvusスタンドアロンを構築し、コレクション定義・インデックス作成・検索確認を行う手順書を生成。",
+    "subCategory": "ベクトルDB",
+    "format": "yaml",
+    "outline": "Docker Composeで構成を定義し起動する; ヘルスチェックで各コンポーネントを確認する; コレクションとスキーマを定義する; ベクトルを挿入しインデックスを作成する; 検索を実行して応答を確認する"
+  },
+  {
+    "id": "weaviate-hybrid-search",
+    "name": "Weaviateのスキーマ設計とハイブリッド検索",
+    "desc": "Weaviateを起動してコレクションスキーマを定義し、BM25とベクトルを融合するハイブリッド検索を構成する手順書を生成。",
+    "subCategory": "ベクトルDB",
+    "format": "yaml",
+    "outline": "DockerでWeaviateを起動する; コレクションスキーマを定義する; オブジェクトとベクトルを登録する; hybridクエリでalpha値を調整する; キーワード検索とベクトル検索の結果を比較する"
+  },
+  {
+    "id": "pgvector-hnsw-index",
+    "name": "pgvector導入とHNSWインデックス設計",
+    "desc": "PostgreSQLにpgvector拡張を導入し、embedding列の定義・HNSWインデックス作成・近傍検索を行う手順書を生成。",
+    "subCategory": "ベクトルDB",
+    "format": "toml",
+    "outline": "pgvector拡張をインストールし有効化する; vector型の列を持つテーブルを作成する; embeddingデータを投入する; HNSWインデックスを作成しパラメータを設定する; EXPLAINで近傍検索の実行計画を確認する"
+  },
+  {
+    "id": "elasticsearch-knn-search",
+    "name": "ElasticsearchのkNNベクトル検索構築",
+    "desc": "dense_vectorフィールドのマッピング定義からベクトル投入・kNN検索・フィルタ併用までを構成する手順書を生成。",
+    "subCategory": "ベクトルDB",
+    "format": "yaml",
+    "outline": "dense_vectorマッピングでインデックスを作成する; ドキュメントとベクトルをbulk投入する; knnオプションで近傍検索を実行する; フィルタ条件と組み合わせる; num_candidatesを調整して精度と速度を確認する"
+  },
+  {
+    "id": "text-chunking-pipeline",
+    "name": "RAG向けドキュメントのチャンク分割パイプライン",
+    "desc": "対象ドキュメント一覧に対して、分割サイズ・オーバーラップを設計しチャンク化と品質確認を行う手順書を生成。",
+    "subCategory": "ベクトルDB",
+    "format": "csv",
+    "outline": "対象ドキュメントを棚卸しする; チャンクサイズとオーバーラップを設計する; 分割スクリプトを実行する; チャンクの文字数分布を集計する; 分割品質を抽出検査で確認する"
+  },
+  {
+    "id": "embedding-batch-generation",
+    "name": "embeddingバッチ生成とベクトルDB一括登録",
+    "desc": "コーパス一覧からembeddingをバッチ生成し、正規化・次元検証を経てベクトルDBへ一括登録する手順書を生成。",
+    "subCategory": "ベクトルDB",
+    "format": "csv",
+    "outline": "入力コーパスと出力先を確認する; embeddingモデルを準備する; バッチ生成スクリプトを実行する; 次元数と件数を検証する; ベクトルDBへ一括登録する; 登録件数を照合する"
+  },
+  {
+    "id": "vector-index-rebuild",
+    "name": "ベクトルインデックスの定期再構築と最適化",
+    "desc": "コレクション一覧を棚卸しし、断片化状況の確認・インデックス再構築・検索品質の再検証を定期実施する手順書を生成。",
+    "subCategory": "ベクトルDB",
+    "format": "csv",
+    "activity": "routine",
+    "outline": "対象コレクションを棚卸しする; 断片化とセグメント状態を確認する; 再構築の実施枠を確保する; インデックスを再構築する; 再構築後の検索品質と速度を検証する"
+  },
+  {
+    "id": "vector-search-quality-eval",
+    "name": "ベクトル検索の精度評価とパラメータ調整",
+    "desc": "評価クエリと正解データからRecall@kやMRRを算出し、検索パラメータの調整判断につなげる手順書を生成。",
+    "subCategory": "ベクトルDB",
+    "format": "csv",
+    "outline": "評価クエリと正解データを整備する; 評価対象の検索設定を固定する; 検索を一括実行し結果を記録する; Recall@kとMRRを算出する; パラメータを変えて再評価し比較する"
+  },
+  {
+    "id": "vector-search-latency-triage",
+    "name": "ベクトル検索の遅延・低精度切り分け",
+    "desc": "検索遅延や精度低下の発生時に、インデックス状態・検索パラメータ・リソースの観点で原因を切り分ける手順書を生成。",
+    "subCategory": "ベクトルDB",
+    "format": "toml",
+    "activity": "troubleshoot",
+    "outline": "事象と発生範囲を整理する; 検索パラメータとフィルタ条件を確認する; インデックス状態とセグメントを確認する; CPU・メモリ・ディスクI/Oを確認する; 暫定対処と恒久対策を判断する"
+  },
+  {
+    "id": "mlflow-tracking-server",
+    "name": "MLflowトラッキングサーバの構築と実験記録管理",
+    "desc": "mlflow serverでバックエンドストアとアーティファクト保存先を設定し、実験記録を一元管理する手順書を生成。",
+    "subCategory": "MLOps",
+    "format": "yaml",
+    "outline": "バックエンドストアの準備; mlflow serverの起動; 実験記録の送信テスト; アーティファクト保存の確認; systemdによる常駐化"
+  },
+  {
+    "id": "dvc-data-versioning",
+    "name": "DVCによるデータセットのバージョン管理",
+    "desc": "dvc add/push/pullでデータセットをGitと連携してバージョン管理し、リモートストレージへ同期する手順書を生成。",
+    "subCategory": "MLOps",
+    "format": "toml",
+    "outline": "dvc initとリポジトリ初期化; リモートストレージの登録; dvc addによるデータ登録; dvc pushでの同期; 過去バージョンの復元"
+  },
+  {
+    "id": "wandb-selfhost-server",
+    "name": "W&Bセルフホストサーバの構築と実験可視化",
+    "desc": "Dockerでwandb/localコンテナを起動し、初期設定・ユーザー登録・実験ログの送信確認を行う手順書を生成。",
+    "subCategory": "MLOps",
+    "format": "toml",
+    "outline": "wandb/localコンテナの起動; 初期ユーザーとライセンスの設定; wandb loginによる接続確認; 実験ログの送信テスト; データ永続化とバックアップ設定"
+  },
+  {
+    "id": "feast-feature-store",
+    "name": "Feastによるフィーチャーストアの構築運用",
+    "desc": "feast init/apply/materializeで特徴量定義を登録し、オンラインストアへ特徴量を供給する手順書を生成。",
+    "subCategory": "MLOps",
+    "format": "yaml",
+    "outline": "feast initによるリポジトリ作成; 特徴量定義の記述; feast applyでの登録; feast materializeによるオンラインストア供給; 特徴量取得の確認"
+  },
+  {
+    "id": "airflow-ml-pipeline",
+    "name": "Airflowによる機械学習パイプラインの定期実行",
+    "desc": "学習・評価・成果物登録のDAGを配置し、airflow CLIでテスト実行とスケジュール運用を行う手順書を生成。",
+    "subCategory": "MLOps",
+    "format": "yaml",
+    "outline": "DAGファイルの配置; airflow tasks testによる単体確認; DAGの有効化とスケジュール設定; 手動トリガと実行監視; 失敗時リトライと通知の設定"
+  },
+  {
+    "id": "distributed-training-torchrun",
+    "name": "torchrunによるマルチノード分散学習ジョブ管理",
+    "desc": "torchrunのランデブー設定で複数ノードに学習ジョブを起動し、NCCL疎通と進捗を管理する手順書を生成。",
+    "subCategory": "MLOps",
+    "format": "csv",
+    "outline": "ノード間疎通とNCCL環境の確認; ランデブーエンドポイントの決定; 各ノードでのtorchrun起動; 学習進捗とGPU使用率の監視; ジョブの停止と再開"
+  },
+  {
+    "id": "training-checkpoint-cleanup",
+    "name": "学習チェックポイントの定期棚卸しと容量整理",
+    "desc": "保存済みチェックポイントを一覧し、保持ポリシーに沿って不要世代を削除し容量を回収する定期棚卸し手順書を生成。",
+    "subCategory": "MLOps",
+    "format": "csv",
+    "activity": "routine",
+    "outline": "チェックポイント一覧の取得; 保持ポリシーとの突合; 削除候補の確認; 不要世代の削除; 容量回収の確認"
+  },
+  {
+    "id": "optuna-hyperparameter-search",
+    "name": "Optunaによるハイパーパラメータ探索の運用",
+    "desc": "optuna CLIとRDBストレージでスタディを作成し、探索の実行・監視・結果集計を行う手順書を生成。",
+    "subCategory": "MLOps",
+    "format": "toml",
+    "outline": "RDBストレージの準備; optuna create-studyによるスタディ作成; 探索スクリプトの実行; optuna-dashboardによる監視; ベストトライアルの集計"
+  },
+  {
+    "id": "ml-experiment-reproducibility",
+    "name": "機械学習実験の再現性確保と環境固定",
+    "desc": "乱数シード固定・依存パッケージ凍結・コードとデータの版数記録により学習結果を再現可能にする手順書を生成。",
+    "subCategory": "MLOps",
+    "format": "toml",
+    "outline": "乱数シードの固定; 依存パッケージの凍結; コードとデータの版数記録; 学習の再実行; 結果一致の検証"
+  },
+  {
+    "id": "training-job-failure-triage",
+    "name": "分散学習ジョブ失敗の切り分けと復旧",
+    "desc": "分散学習ジョブの異常終了をGPU・NCCL・OOM・ストレージの観点で切り分けて復旧する手順書を生成。",
+    "subCategory": "MLOps",
+    "format": "csv",
+    "activity": "troubleshoot",
+    "outline": "異常終了ログの収集; GPUとメモリ状態の確認; NCCL通信エラーの切り分け; ストレージとデータ供給の確認; 再実行と再発防止策の記録"
+  },
+  {
+    "id": "langfuse-selfhost-deploy",
+    "name": "Langfuseセルフホスト構築とLLMトレース収集",
+    "desc": "Langfuseをdocker composeでセルフホストし、LLMアプリのトレース・プロンプト記録を収集・可視化する手順書を生成。",
+    "subCategory": "監視・可観測性",
+    "format": "yaml",
+    "outline": "docker composeでLangfuseを起動する; 管理画面で組織とAPIキーを作成する; アプリケーションにSDKを組み込んでトレースを送信する; トレースとプロンプト記録を画面で確認する; データ保持とバックアップを設定する"
+  },
+  {
+    "id": "litellm-prompt-logging",
+    "name": "LiteLLM Proxyのプロンプト・応答ロギング設定",
+    "desc": "LiteLLM Proxyのコールバック設定でプロンプトと応答をログ基盤へ記録し、マスキング方針を定める手順書を生成。",
+    "subCategory": "監視・可観測性",
+    "format": "yaml",
+    "outline": "config.yamlでsuccess_callbackを設定する; ログ送信先の認証情報を環境変数で渡す; litellm --configでProxyを起動する; テストリクエストでログ記録を確認する; マスキング・保持期間の方針を定める"
+  },
+  {
+    "id": "llm-token-usage-dashboard",
+    "name": "vLLM推論APIのトークン使用量ダッシュボード構築",
+    "desc": "vLLMの/metricsをPrometheusで収集し、モデル別トークン使用量をGrafanaで可視化する手順書を生成。",
+    "subCategory": "監視・可観測性",
+    "format": "csv",
+    "outline": "vLLMの/metricsエンドポイントを確認する; prometheus.ymlにスクレイプ設定を追加する; PromQLでトークン使用量を集計する; Grafanaにデータソースとパネルを作成する; モデル別・期間別の集計ビューを整備する"
+  },
+  {
+    "id": "dcgm-exporter-grafana",
+    "name": "DCGM ExporterによるGPUクラスタのGrafana監視",
+    "desc": "DCGM ExporterとPrometheusでGPUクラスタのメトリクスを集約し、Grafanaダッシュボードを整備する手順書を生成。",
+    "subCategory": "監視・可観測性",
+    "format": "yaml",
+    "outline": "dcgm-exporterをコンテナで起動する; Prometheusにスクレイプ設定を追加する; 公式ダッシュボードをGrafanaにインポートする; ノード横断のGPU使用率・温度を確認する; アラート閾値を設定する"
+  },
+  {
+    "id": "llm-latency-slo-alert",
+    "name": "推論APIレイテンシのSLO定義とアラート設定",
+    "desc": "vLLMのレイテンシ指標からSLOを定義し、Prometheusのアラートルールで違反を通知する手順書を生成。",
+    "subCategory": "監視・可観測性",
+    "format": "toml",
+    "outline": "現状のレイテンシ分布を計測する; SLI/SLO(p95目標)を定義する; Prometheusアラートルールを記述する; promtoolでルールを検証する; 通知先を設定して発報試験を行う"
+  },
+  {
+    "id": "llm-capacity-planning-review",
+    "name": "推論基盤キャパシティの定期棚卸しと増設計画",
+    "desc": "トークンスループットとGPU使用率の推移から推論基盤の空き容量を定期評価し、増設判断につなげる手順書を生成。",
+    "subCategory": "監視・可観測性",
+    "format": "csv",
+    "activity": "routine",
+    "outline": "PromQLで期間中のスループット推移を取得する; GPU使用率・メモリの飽和度を集計する; ピーク時の余裕率を算出する; 増設・縮退の判断基準と照合する; 棚卸し結果を記録して次回に引き継ぐ"
+  },
+  {
+    "id": "llm-inference-outage-triage",
+    "name": "推論API無応答時の障害切り分け",
+    "desc": "無応答となった推論APIをプロセス・ポート・GPU・ログの順に切り分け、復旧と再発記録を行う手順書を生成。",
+    "subCategory": "監視・可観測性",
+    "format": "toml",
+    "activity": "troubleshoot",
+    "outline": "curlで疎通と応答コードを確認する; ss・systemctlでプロセスとポートを確認する; journalctlでサービスログを確認する; nvidia-smiでGPU状態を確認する; 原因層を特定して復旧する; 事象と対処を記録する"
+  },
+  {
+    "id": "llm-error-rate-spike-triage",
+    "name": "推論APIエラー率急上昇の切り分け",
+    "desc": "推論APIの5xx/4xx比率の急上昇をメトリクスとログから切り分け、原因別の一次対処を行う手順書を生成。",
+    "subCategory": "監視・可観測性",
+    "format": "toml",
+    "activity": "troubleshoot",
+    "outline": "メトリクスでエラー率の急上昇時刻を特定する; ステータスコード別に内訳を集計する; サービスログから該当エラーを抽出する; 直近の変更・負荷との相関を確認する; 原因別の一次対処を実施する"
+  },
+  {
+    "id": "llm-cost-anomaly-triage",
+    "name": "LLM利用コスト急増の検知と切り分け",
+    "desc": "利用ログからモデル・チーム別コストを集計して急増を検知し、原因の切り分けと上限設定を行う手順書を生成。",
+    "subCategory": "監視・可観測性",
+    "format": "csv",
+    "activity": "troubleshoot",
+    "outline": "利用ログからモデル・チーム別コストを集計する; 過去平均と比較して急増箇所を特定する; 該当リクエストの内訳を調査する; 原因(リトライ・長文化・不正利用)を切り分ける; 上限・アラートを設定する"
+  },
+  {
+    "id": "vllm-oom-crash-triage",
+    "name": "vLLMのCUDA OOMクラッシュ切り分け",
+    "desc": "CUDA out of memoryで停止したvLLMをログとGPUメモリ状況から切り分け、起動パラメータを調整する手順書を生成。",
+    "subCategory": "監視・可観測性",
+    "format": "toml",
+    "activity": "troubleshoot",
+    "outline": "journalctlでOOM発生時のログを確認する; nvidia-smiでGPUメモリ状況を確認する; gpu-memory-utilizationとmax-model-lenを見直す; 調整後に再起動して安定性を確認する; 恒久対策(モデル・並列度の見直し)を記録する"
+  },
+  {
+    "id": "prompt-injection-guardrails",
+    "name": "プロンプトインジェクションを防ぐガードレール構築",
+    "desc": "NeMo Guardrailsで入力・出力レールを定義し、既知の攻撃プロンプトを遮断・検証する手順書を生成。",
+    "subCategory": "セキュリティ・ガバナンス",
+    "format": "yaml",
+    "outline": "NeMo Guardrailsを導入しconfig.ymlの雛形を作成; 入力レールでjailbreak・インジェクション検知を定義; 出力レールで自己チェックと情報漏洩防止を定義; nemoguardrails chatで既知攻撃プロンプトを試験; 検知結果とレイテンシを記録し閾値を調整"
+  },
+  {
+    "id": "pii-redaction-presidio",
+    "name": "PresidioによるPIIの検出とマスキング",
+    "desc": "presidio-analyzer/anonymizerで入出力中のPIIを検出し、匿名化ルールを検証する手順書を生成。",
+    "subCategory": "セキュリティ・ガバナンス",
+    "format": "yaml",
+    "outline": "presidio-analyzer/anonymizerとspaCyモデルを導入; 検出対象エンティティと信頼度閾値を設定; 社内ID等のカスタム認識器を追加; サンプル入出力で検出と匿名化を実行; 誤検知・見逃しを評価し閾値を調整"
+  },
+  {
+    "id": "model-access-control-policy",
+    "name": "OPAによるモデルアクセス制御ポリシーの整備",
+    "desc": "Open Policy Agentのregoでモデル別アクセス方針を定義し、許可・拒否をopa testで検証する手順書を生成。",
+    "subCategory": "セキュリティ・ガバナンス",
+    "format": "yaml",
+    "outline": "モデル別のアクセス方針(利用者・モデル・操作)を整理; OPAを導入しregoポリシーを作成; 入力データとテストケースを定義; opa evalとopa testで許可・拒否を検証; 拒否ログの出力と定期見直しを設定"
+  },
+  {
+    "id": "llm-prompt-audit-logging",
+    "name": "LLMプロンプト監査ログの収集と改ざん防止",
+    "desc": "アプリのプロンプト監査ログを構造化出力・集約し、ハッシュ封緘で改ざんを検知する手順書を生成。",
+    "subCategory": "セキュリティ・ガバナンス",
+    "format": "toml",
+    "outline": "監査対象フィールド(利用者・モデル・プロンプト要約・判定)を定義; アプリからJSON構造化ログを出力設定; rsyslogで集約ログサーバへ転送; logrotateで保持期間を設定; sha256による日次ハッシュ封緘で改ざんを検知"
+  },
+  {
+    "id": "model-api-key-rotation",
+    "name": "モデルAPIキーの定期ローテーション",
+    "desc": "モデルAPIキーを新規発行・反映・旧キー失効の順で安全に定期ローテーションする手順書を生成。",
+    "subCategory": "セキュリティ・ガバナンス",
+    "format": "toml",
+    "activity": "routine",
+    "outline": "現行キーの棚卸しと有効期限を確認; 新キーを発行しシークレットストアへ登録; サービスへ新キーを反映し再起動; 疎通確認後に旧キーを失効; ローテーション日時と次回予定を記録"
+  },
+  {
+    "id": "model-artifact-supply-chain-scan",
+    "name": "モデル成果物のサプライチェーン検証",
+    "desc": "modelscanとハッシュ・署名検証でモデル成果物の悪性コードと完全性を確認する手順書を生成。",
+    "subCategory": "セキュリティ・ガバナンス",
+    "format": "toml",
+    "outline": "取得元・ハッシュ・署名を記録; sha256sumとcosignで完全性と署名を検証; modelscanでpickleへの悪性コード混入を走査; safetensorsへ変換し安全性を担保; 検証済みモデルのみレジストリへ登録"
+  },
+  {
+    "id": "llm-red-team-garak",
+    "name": "garakによるLLM脆弱性レッドチーム演習",
+    "desc": "garakで既知の攻撃プローブを走査し、LLMの脆弱性を評価してガードレールへ反映する手順書を生成。",
+    "subCategory": "セキュリティ・ガバナンス",
+    "format": "csv",
+    "activity": "drill",
+    "outline": "検証環境と対象モデルエンドポイントを用意; garakを導入しmodel_typeとprobesを選定; garak実行で既知攻撃プローブを走査; hitrate等の結果レポートを集計; 高リスク項目をガードレールへ反映し再演"
+  },
+  {
+    "id": "jailbreak-incident-response",
+    "name": "プロンプトインジェクション被害のインシデント対応",
+    "desc": "検知したプロンプトインジェクションの初動対応・封じ込め・恒久対策を進めるインシデント対応手順書を生成。",
+    "subCategory": "セキュリティ・ガバナンス",
+    "format": "csv",
+    "activity": "security-response",
+    "outline": "検知アラートの初動確認と影響範囲を特定; 該当エンドポイント・機能を一時停止; 監査ログとプロンプト履歴を保全; 悪用手口を分析しガードレールを更新; 恒久対策と再発防止報告を作成"
+  },
+  {
+    "id": "data-exfiltration-response",
+    "name": "LLM経由データ漏洩のインシデント対応",
+    "desc": "LLM経由のデータ漏洩を封じ込め、露出した認証情報を失効・調査する漏洩インシデント対応手順書を生成。",
+    "subCategory": "セキュリティ・ガバナンス",
+    "format": "csv",
+    "activity": "security-response",
+    "outline": "漏洩検知の確認と流出データ種別を特定; 該当機能の停止と外部送信経路を遮断; 露出した認証情報・トークンを失効しローテーション; 影響範囲を調査しログを保全; DLP・レダクションを強化し関係者へ報告"
+  },
+  {
+    "id": "ai-service-compromise-recovery-drill",
+    "name": "AIサービス侵害からの復旧訓練",
+    "desc": "検証環境でAIサービス侵害を再現し、検証済みバックアップからのクリーン復旧を試す復旧訓練手順書を生成。",
+    "subCategory": "セキュリティ・ガバナンス",
+    "format": "csv",
+    "activity": "drill",
+    "outline": "訓練シナリオと目標復旧時間を設定; 検証環境で侵害状態を再現; サービス停止と侵害成果物を隔離; 検証済みバックアップ・レジストリからクリーン復元; 完全性を再検証し復旧時間を記録"
+  },
+  {
+    "id": "qdrant-rag-collection",
+    "name": "RAG向けQdrantベクトルDBの構築とコレクション設計",
+    "desc": "DockerでQdrantを起動し、REST APIによるコレクション作成・文書ベクトル投入・類似検索の確認を行う手順書を生成。",
+    "subCategory": "エージェント基盤",
+    "format": "yaml",
+    "outline": "Qdrantコンテナを起動する; コレクションを作成する; 文書ベクトルを投入する; 類似検索を実行する; スナップショットを取得する"
+  },
+  {
+    "id": "mcp-server-hosting",
+    "name": "MCPサーバのsystemd常駐ホスティング",
+    "desc": "npxで起動するMCPサーバをsystemdユニットとして常駐化し、自動再起動設定とログ確認を行う手順書を生成。",
+    "subCategory": "エージェント基盤",
+    "format": "toml",
+    "outline": "MCPサーバを単体起動で動作確認する; 専用ユーザーを作成する; systemdユニットを作成する; サービスを起動し自動起動を有効化する; journalctlでログを確認する"
+  },
+  {
+    "id": "langgraph-agent-server",
+    "name": "LangGraphエージェントサーバの構築とデプロイ",
+    "desc": "langgraph-cliでエージェントアプリをローカル起動し、Dockerイメージ化してAPIサーバとして公開する手順書を生成。",
+    "subCategory": "エージェント基盤",
+    "format": "yaml",
+    "outline": "langgraph-cliを導入する; langgraph.jsonを作成する; langgraph devでローカル起動する; langgraph buildでイメージ化する; langgraph upでサーバを起動する; APIエンドポイントを確認する"
+  },
+  {
+    "id": "mcp-tool-gateway",
+    "name": "mcpoによるMCPツールのAPIゲートウェイ公開",
+    "desc": "mcpoで複数のMCPサーバをOpenAPI互換のHTTPエンドポイントとして公開し、APIキーで保護する手順書を生成。",
+    "subCategory": "エージェント基盤",
+    "format": "csv",
+    "outline": "uvでmcpoを導入する; 公開対象のMCPサーバを一覧化する; 設定ファイルを作成する; APIキー付きでmcpoを起動する; OpenAPIドキュメントと疎通を確認する"
+  },
+  {
+    "id": "prompt-template-registry",
+    "name": "Gitによるプロンプトテンプレートの版管理",
+    "desc": "プロンプトテンプレート群をGitリポジトリで一元管理し、タグ付け・差分確認・配布までを運用する手順書を生成。",
+    "subCategory": "エージェント基盤",
+    "format": "csv",
+    "outline": "リポジトリとディレクトリ構成を作成する; テンプレート一覧を登録する; 変更をコミットしタグを付与する; git diffで版間差分を確認する; 利用側にタグ指定で取得させる"
+  },
+  {
+    "id": "agent-session-store",
+    "name": "Redisによるエージェント会話セッションの永続化",
+    "desc": "redis-cliでセッションキーのTTL設計・書き込み・容量監視を行い、エージェントの会話状態を保全する手順書を生成。",
+    "subCategory": "エージェント基盤",
+    "format": "toml",
+    "outline": "Redisの永続化設定を確認する; セッションキーの命名規則を設計する; TTL付きでセッションを書き込む; SCANとTTLで残存状況を確認する; INFOでメモリ使用量を監視する"
+  },
+  {
+    "id": "langfuse-llm-tracing",
+    "name": "LangfuseによるLLMツール呼び出しの監視基盤構築",
+    "desc": "Docker ComposeでLangfuseを自己ホストし、function callingを含むLLMトレースの収集・可視化を行う手順書を生成。",
+    "subCategory": "エージェント基盤",
+    "format": "yaml",
+    "outline": "Docker ComposeでLangfuseを起動する; 管理ユーザーとAPIキーを作成する; SDKからテストトレースを送信する; ツール呼び出しのスパンを確認する; ダッシュボードでエラー率を確認する"
+  },
+  {
+    "id": "playwright-headless-setup",
+    "name": "Playwrightによるヘッドレスブラウザ自動化基盤",
+    "desc": "npx playwrightでブラウザと依存パッケージを導入し、サーバ上にヘッドレス実行環境を整備する手順書を生成。",
+    "subCategory": "エージェント基盤",
+    "format": "toml",
+    "outline": "Node.jsとPlaywrightを導入する; ブラウザと依存パッケージをインストールする; ヘッドレスでスクリーンショットを取得する; 実行ユーザーと権限を設計する; 一時ファイルの後始末を設定する"
+  },
+  {
+    "id": "rag-retrieval-triage",
+    "name": "RAG検索品質低下の切り分けとチューニング",
+    "desc": "検索結果が期待と異なる際に、埋め込み・インデックス・スコア閾値の順で原因を切り分けて対処する手順書を生成。",
+    "subCategory": "エージェント基盤",
+    "format": "csv",
+    "activity": "troubleshoot",
+    "outline": "症状と再現クエリを整理する; ベクトルDBの件数と状態を確認する; 埋め込みモデルの一貫性を確認する; 検索スコアと閾値を検証する; チャンク分割を見直す; 改善結果を記録する"
+  },
+  {
+    "id": "mcp-server-inventory",
+    "name": "MCPサーバと公開ツールの定期棚卸し",
+    "desc": "稼働中のMCPサーバ・公開ツール・認証キーを一覧化し、不要サーバの停止と権限見直しを定期実施する手順書を生成。",
+    "subCategory": "エージェント基盤",
+    "format": "csv",
+    "activity": "routine",
+    "outline": "稼働プロセスと待ち受けポートを一覧化する; 台帳と公開ツール一覧を突き合わせる; 認証キーの有効期限を確認する; 不要サーバを停止する; 棚卸し結果を記録する"
+  },
+  {
+    "id": "aws-bedrock-model-invocation",
+    "name": "AWS Bedrock基盤モデルの呼び出しと利用設定",
+    "desc": "aws bedrockコマンドで基盤モデルの一覧確認・アクセス設定・invoke-modelによる呼び出し検証を行う手順書を生成。",
+    "subCategory": "クラウドAI",
+    "format": "toml",
+    "outline": "モデルアクセスの有効化状況を確認する; list-foundation-modelsで利用可能モデルを確認する; invoke-modelでテキスト生成を検証する; converseで対話形式の呼び出しを行う; CloudWatchで呼び出しメトリクスを確認する"
+  },
+  {
+    "id": "sagemaker-realtime-endpoint-deploy",
+    "name": "SageMakerリアルタイム推論エンドポイントの構築",
+    "desc": "aws sagemakerコマンドでモデル登録からエンドポイント作成・推論呼び出しまでを行うデプロイ手順書を生成。",
+    "subCategory": "クラウドAI",
+    "format": "yaml",
+    "outline": "モデルアーティファクトをS3に配置する; create-modelでモデルを登録する; create-endpoint-configで構成を定義する; create-endpointでエンドポイントを作成する; invoke-endpointで推論を検証する"
+  },
+  {
+    "id": "azure-openai-deployment-setup",
+    "name": "Azure OpenAI Serviceのリソース作成とモデルデプロイ",
+    "desc": "az cognitiveservicesコマンドでAzure OpenAIリソースを作成し、モデルデプロイとキー管理を行う手順書を生成。",
+    "subCategory": "クラウドAI",
+    "format": "toml",
+    "outline": "az loginとサブスクリプションを選択する; cognitiveservices account createでリソースを作成する; account deployment createでモデルをデプロイする; keys listでAPIキーを取得し疎通確認する; キーローテーションとアクセス制御方針を設定する"
+  },
+  {
+    "id": "vertex-ai-model-deploy",
+    "name": "Vertex AIへのモデル登録とエンドポイント公開",
+    "desc": "gcloud aiコマンドでモデルをVertex AIに登録し、エンドポイント作成とデプロイ・予測検証を行う手順書を生成。",
+    "subCategory": "クラウドAI",
+    "format": "yaml",
+    "outline": "モデルアーティファクトをCloud Storageに配置する; gcloud ai models uploadでモデルを登録する; gcloud ai endpoints createでエンドポイントを作成する; endpoints deploy-modelでモデルを配備する; endpoints predictで推論を検証する"
+  },
+  {
+    "id": "cloud-gpu-spot-training",
+    "name": "スポットGPUインスタンスによるAI学習環境の構築",
+    "desc": "スポット価格の調査からGPUインスタンス起動・中断通知対応・チェックポイント保全までを行う手順書を生成。",
+    "subCategory": "クラウドAI",
+    "format": "toml",
+    "outline": "describe-spot-price-historyで価格動向を調査する; run-instancesのinstance-market-optionsでスポット起動する; nvidia-smiでGPUを確認し学習ジョブを開始する; IMDSの中断通知を監視する仕組みを整える; チェックポイントをS3へ定期保存する"
+  },
+  {
+    "id": "cross-cloud-model-migration",
+    "name": "クラウド間でのモデル成果物の移行",
+    "desc": "aws s3・gcloud storage・azcopyを使い分け、モデル成果物を検証付きで別クラウドへ移行する手順書を生成。",
+    "subCategory": "クラウドAI",
+    "format": "csv",
+    "outline": "移行対象モデルと転送先の一覧を確認する; 転送元ストレージからモデル成果物を取得する; 転送先クラウドのストレージへアップロードする; チェックサムで整合性を検証する; 転送元の後片付けとアクセス権を整理する"
+  },
+  {
+    "id": "multicloud-inference-failover",
+    "name": "マルチクラウド推論エンドポイントの切替訓練",
+    "desc": "プライマリ障害を想定し、Route 53のDNS切替でセカンダリ推論エンドポイントへ切り替える復旧訓練の手順書を生成。",
+    "subCategory": "クラウドAI",
+    "format": "yaml",
+    "activity": "drill",
+    "outline": "プライマリ・セカンダリ両系の正常性を確認する; プライマリ障害を擬似的に発生させる; change-resource-record-setsでDNSを切り替える; 切替後の推論応答とレイテンシを検証する; 切り戻しと訓練結果の記録を行う"
+  },
+  {
+    "id": "cloud-ai-cost-review",
+    "name": "クラウドAIサービスのコスト定期棚卸し",
+    "desc": "aws ceコマンドでAI関連サービスの利用コストを集計し、予算超過や不要リソースを点検する定期棚卸し手順書を生成。",
+    "subCategory": "クラウドAI",
+    "format": "csv",
+    "activity": "routine",
+    "outline": "get-cost-and-usageでサービス別コストを集計する; 対象AIサービスの内訳と増減を確認する; 未使用エンドポイントや遊休リソースを洗い出す; 予算アラートの設定状況を点検する; 棚卸し結果を記録し是正対応を起票する"
+  },
+  {
+    "id": "ai-workload-iam-design",
+    "name": "AIワークロード向けIAM最小権限設計",
+    "desc": "BedrockやSageMakerに絞ったIAMポリシー作成とロール付与・権限シミュレーション検証を行う手順書を生成。",
+    "subCategory": "クラウドAI",
+    "format": "csv",
+    "outline": "対象ワークロードと必要アクションを整理する; 最小権限のIAMポリシーを作成する; ロールを作成しポリシーをアタッチする; simulate-principal-policyで許可と拒否を検証する; 過剰権限がないことを確認し文書化する"
+  },
+  {
+    "id": "sagemaker-endpoint-troubleshoot",
+    "name": "SageMaker推論エンドポイントの障害切り分け",
+    "desc": "describe-endpointとCloudWatchログ・メトリクスでSageMaker推論障害の原因を切り分ける手順書を生成。",
+    "subCategory": "クラウドAI",
+    "format": "toml",
+    "activity": "troubleshoot",
+    "outline": "describe-endpointでステータスと失敗理由を確認する; CloudWatchログでコンテナのエラーを調査する; メトリクスでレイテンシとエラー率を確認する; インスタンスリソースの逼迫有無を切り分ける; 修正後の再デプロイと回復を確認する"
+  }
+]
