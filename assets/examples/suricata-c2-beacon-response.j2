@@ -1,0 +1,125 @@
+# SuricataでのC2ビーコン検知時の初動対応 — SID {{ alert_sid }}
+
+ET MALWARE/ET CnC系シグネチャ（SID {{ alert_sid }}）が発報したC2通信アラートを起点に、感染ホストの特定、C2宛先の通信遮断、証跡保全、ホスト隔離手順への引き継ぎまでを時系列で実施します。
+
+## 目的
+
+Suricataが検知したC2（Command and Control）通信アラートに対し、eve.jsonのalert/flowイベントから感染ホストを特定し、インシデント指揮者の判断のもとで通信遮断と証跡保全を行い、以降のホスト隔離対応へ安全に引き継げるようになることを目指します。
+
+## 用語解説
+
+- **C2 (Command and Control) 通信**: マルウェアに感染したホストが攻撃者の管理サーバと行う通信。指令の受信や窃取データの送出に使われる
+- **ビーコン (beacon)**: 感染ホストがC2サーバへ一定間隔・一定サイズ前後で送出する定期通信。生存確認や指令の問い合わせを目的とする
+- **周期性**: ビーコン通信の特徴の一つ。flowイベントのstart時刻の間隔がほぼ一定（例: 60秒±数秒）になる
+- **一定サイズ**: ビーコン通信のもう一つの特徴。往路パケット長がほぼ同一（例: 480〜520バイト程度）になりやすい
+- **eve.json**: Suricataが出力するJSON形式のログ。alert（シグネチャ一致）、flow（通信フロー統計）などのイベント種別を含む
+- **5-tuple**: 通信を一意に識別する src_ip / src_port / dst_ip / dst_port / proto の組
+- **証跡保全**: インシデント対応において、後の調査・法的手続きのために生ログやパケットキャプチャを改変されない形で確保すること
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 発報シグネチャSID | {{ alert_sid }} |
+| C2宛先 | {{ c2_dest }} |
+| 感染疑いホスト | {% for h in infected_hosts %}{{ h }}{% if not loop.last %}, {% endif %}{% endfor %} |
+| 証跡保存先 | {{ evidence_dir }} |
+| エスカレーション連絡先 | {{ escalation_contact }} |
+
+## 手順
+
+### 1. アラートを確認し対象を絞り込む
+
+eve.jsonからSID {{ alert_sid }} のalertイベントを抽出し、宛先が {{ c2_dest }} であることを確認します。
+
+```bash
+jq -c 'select(.event_type=="alert" and .alert.signature_id=={{ alert_sid }})' /var/log/suricata/eve.json
+```
+
+### 2. src_ip別に該当フローを集計し感染ホストを特定する
+
+alertイベントのsrc_ipごとの件数を集計し、感染ホスト候補を洗い出します。
+
+```bash
+jq -r 'select(.event_type=="alert" and .alert.signature_id=={{ alert_sid }}) | .src_ip' /var/log/suricata/eve.json \
+  | sort | uniq -c | sort -rn
+```
+
+### 3. flowイベントの周期性を確認しビーコンと判定する
+
+同一src_ip・同一宛先のflowイベントについて、start時刻の間隔（周期性）とパケット長（一定サイズ）を確認します。
+
+```bash
+jq -r --arg dest "{{ c2_dest }}" \
+  'select(.event_type=="flow" and (.dest_ip + ":" + (.dest_port|tostring))==$dest) | .flow.start' \
+  /var/log/suricata/eve.json | sort
+```
+
+→ 出力された時刻を目視で差分計算し、一定間隔（周期性）で並んでいれば当該ホストをビーコン発信元と判断します。
+
+### 4. 感染ホストを台帳の値と突き合わせて確定する
+
+シナリオ設定に記載の感染疑いホストと、手順2・3で特定したsrc_ipが一致することを確認します。
+
+```bash
+{% for h in infected_hosts %}jq -c --arg ip "{{ h }}" 'select(.event_type=="alert" and .src_ip==$ip and .alert.signature_id=={{ alert_sid }})' /var/log/suricata/eve.json
+{% endfor %}```
+
+### 5. 証跡を保全する（遮断より先に実施する）
+
+該当期間のeve.jsonと、該当5-tupleのパケットをpcapとして保全します。通信遮断によって攻撃者が破壊行動へ移った場合に備え、遮断の前に必ず実施します。
+
+```bash
+mkdir -p {{ evidence_dir }}
+cp /var/log/suricata/eve.json {{ evidence_dir }}/eve-$(date +%Y%m%d%H%M%S).json
+
+# 該当5-tuple（例: 感染ホスト → C2宛先）のtcpdump保全
+sudo tcpdump -i any -w {{ evidence_dir }}/c2-capture-$(date +%Y%m%d%H%M%S).pcap \
+  host {{ c2_dest.split(':')[0] }} and port {{ c2_dest.split(':')[1] }}
+```
+
+### 6. インシデント指揮者の判断を得て遮断ルールを投入する
+
+C2宛先の遮断は攻撃者に検知される可能性があるため、遮断タイミングはインシデント指揮者（{{ escalation_contact }}）の承認を得てから実施します。承認後、Suricataのdropルールとファイアウォール側の遮断を併せて投入します。
+
+```bash
+# Suricata側: dropルールを追加（inline/IPSモードで有効）
+cat >> /etc/suricata/rules/local.rules <<'EOF'
+drop tcp any any -> {{ c2_dest }} (msg:"LOCAL C2 dest block - incident response"; sid:9000001; rev:1; classtype:trojan-activity;)
+EOF
+suricatasc -c reload-rules
+
+# ファイアウォール側: iptablesでも同一宛先を遮断（多層防御）
+sudo iptables -I OUTPUT -d {{ c2_dest.split(':')[0] }} -p tcp --dport {{ c2_dest.split(':')[1] }} -j DROP
+```
+
+### 7. 遮断が有効であることを確認する
+
+```bash
+sudo iptables -L OUTPUT -v -n | grep {{ c2_dest.split(':')[0] }}
+suricatasc -c ruleset-stats
+```
+
+### 8. ホスト隔離手順へ引き継ぐ
+
+感染ホスト一覧をホスト隔離担当へ連絡し、証跡保存先（{{ evidence_dir }}）を共有します。
+
+```bash
+{% for h in infected_hosts %}echo "隔離対象: {{ h }} - 証跡: {{ evidence_dir }}"
+{% endfor %}```
+
+## 動作確認
+
+- 証跡保全（手順5）が遮断投入（手順6）より前に完了していること
+- `{{ evidence_dir }}` にeve.jsonのコピーとpcapファイルが保存されていること
+- `iptables -L OUTPUT` に {{ c2_dest }} を対象としたDROPルールが存在すること
+- Suricata側のdropルール（sid:9000001）が `ruleset-stats` に反映されていること
+- 感染ホスト（{% for h in infected_hosts %}{{ h }}{% if not loop.last %}, {% endif %}{% endfor %}）がホスト隔離担当へ引き継がれ、対応中であることが記録されていること
+
+## 注意事項
+
+- C2宛先への遮断は攻撃者に検知され、証拠隠滅やデータ破壊などの破壊行動に攻撃者が移行するリスクを伴う。遮断タイミングは現場担当者の独断で決めず、必ずインシデント指揮者（{{ escalation_contact }}）の判断・承認を得てから実施する。
+- 証跡保全（eve.jsonのコピーとpcap取得）は、通信遮断より先に完了させる。遮断後では該当期間のトラフィックが失われ、後続の調査・報告に支障が出る。
+- Suricataのdropルール投入はinline/IPS配置でのみ有効。パッシブ配置（IDSのみ）の場合はファイアウォール側の遮断のみが有効な手段となるため、事前に配置構成を確認する。
+- 遮断ルール（sid:9000001およびiptables DROP）は暫定対応であり、根本対応（マルウェア除去・ホスト再構築）の完了後、変更管理手順に従って撤去する。
+- 感染ホストの特定は自動化スクリプトの出力を鵜呑みにせず、手順3の周期性確認など複数の根拠を突き合わせたうえで確定する。

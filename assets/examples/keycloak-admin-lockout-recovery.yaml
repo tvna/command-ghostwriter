@@ -1,0 +1,26 @@
+server:
+  container: keycloak
+  base_url: "https://idp.example.internal"
+  realm: master
+
+lockout:
+  cause: mfa
+  recovery_method: temp_admin_env
+  temp_admin: true
+
+temp_admin:
+  username: break-glass-admin
+  env_user_var: KC_BOOTSTRAP_ADMIN_USERNAME
+  env_pass_var: KC_BOOTSTRAP_ADMIN_PASSWORD
+
+permanent_admin:
+  username: kc-admin-01
+  totp_credential_label: "kc-admin-01 - authenticator"
+
+federation:
+  provider_alias: corp-ldap
+  connection_url: "ldaps://ldap.example.internal:636"
+
+paths:
+  env_file: /etc/keycloak/bootstrap-admin.env
+  history_file: /root/.bash_history
