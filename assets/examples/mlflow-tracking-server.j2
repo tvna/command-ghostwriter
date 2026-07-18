@@ -1,0 +1,141 @@
+# MLflowトラッキングサーバの構築と実験記録管理
+
+`mlflow server` でバックエンドストアとアーティファクト保存先を設定し、実験記録(Experiment/Run)を一元管理するトラッキングサーバを構築します。動作確認とsystemdによる常駐化までを一巡します。
+
+## 目的
+
+バックエンドストアとアーティファクトストアの役割の違いを理解したうえで、`mlflow server` を起動して実験記録の送信・保存を確認し、systemdサービスとして常駐運用できる状態を目指します。
+
+## 用語解説
+
+- **トラッキングサーバ (Tracking Server)**: 実験・runのメタデータと成果物の保存先を仲介するAPIサーバ。ここでは `{{ tracking_uri }}` で公開する
+- **バックエンドストア (backend store)**: 実験・run・パラメータ・メトリクスなどのメタデータを保存するDB。ここでは `{{ backend_store_uri }}` のPostgreSQLを使用する
+- **アーティファクトストア (artifact store)**: モデルファイルやログなどの成果物本体の保存先。ここではローカルディレクトリ `{{ artifact_root }}` を使用する
+- **実験 (Experiment)**: run(1回の学習・実行の記録単位)をまとめる論理グループ。ここでは `{{ experiment_name }}` を使用する
+- **run**: パラメータ・メトリクス・アーティファクトを1回の実行単位で記録するレコード
+
+## シナリオ設定
+
+トラッキングサーバを `{{ tracking_uri }}` で稼働させ、バックエンドストアには `{{ backend_db_host }}:{{ backend_db_port }}` 上のPostgreSQLデータベース `{{ backend_db_name }}`(接続ユーザー: `{{ backend_db_user }}`)を、アーティファクトストアにはローカルディレクトリ `{{ artifact_root }}` を使用します。実験 `{{ experiment_name }}` に対してテスト用のrunを送信し、メタデータとアーティファクトの両方が保存されることを確認したうえで、`{{ systemd_unit_name }}` としてsystemdに常駐登録します。
+
+## 手順
+
+### 1. バックエンドストアの準備
+
+```bash
+sudo -u postgres psql -c "CREATE ROLE {{ backend_db_user }} WITH LOGIN PASSWORD '<安全な方法で生成したパスワードに置き換える>'"
+sudo -u postgres psql -c "CREATE DATABASE {{ backend_db_name }} OWNER {{ backend_db_user }}"
+sudo mkdir -p {{ artifact_root }}
+sudo useradd --system --home-dir /opt/mlflow --shell /usr/sbin/nologin {{ mlflow_user }}
+sudo chown -R {{ mlflow_user }}:{{ mlflow_group }} {{ artifact_root }}
+pip install mlflow psycopg2-binary
+```
+
+{{ credential_note }}。接続確認は次のコマンドで行います。
+
+```bash
+psql "{{ backend_store_uri }}" -c "\conninfo"
+```
+
+### 2. mlflow serverの起動
+
+```bash
+export PGPASSWORD=<手順1で設定したパスワード>
+{{ mlflow_bin }} server --backend-store-uri {{ backend_store_uri }} --default-artifact-root {{ artifact_root }} --host {{ server_host }} --port {{ server_port }} &
+sleep 5
+curl -sf http://127.0.0.1:{{ server_port }}/health
+```
+
+`/health` エンドポイントが `OK` を返せば、バックエンドストアへの接続とサーバ起動が完了しています。
+
+### 3. 実験記録の送信テスト
+
+```bash
+export MLFLOW_TRACKING_URI={{ tracking_uri }}
+python3 -c "
+import mlflow
+mlflow.set_experiment('{{ experiment_name }}')
+with mlflow.start_run() as run:
+    mlflow.log_param('learning_rate', 0.01)
+    mlflow.log_metric('rmse', 0.42)
+    print(run.info.run_id)
+"
+```
+
+```bash
+python3 -c "
+from mlflow import MlflowClient
+client = MlflowClient(tracking_uri='{{ tracking_uri }}')
+exp = client.get_experiment_by_name('{{ experiment_name }}')
+for run in client.search_runs([exp.experiment_id]):
+    print(run.info.run_id, run.data.params, run.data.metrics)
+"
+```
+
+### 4. アーティファクト保存の確認
+
+```bash
+export MLFLOW_TRACKING_URI={{ tracking_uri }}
+python3 -c "
+import mlflow
+mlflow.set_experiment('{{ experiment_name }}')
+with mlflow.start_run() as run:
+    with open('note.txt', 'w') as f:
+        f.write('tracking server verification')
+    mlflow.log_artifact('note.txt')
+    print(run.info.run_id)
+"
+find {{ artifact_root }} -maxdepth 5 -name note.txt
+```
+
+`find` の結果に `note.txt` が表示されれば、アーティファクトが `{{ artifact_root }}` 配下へ実体として保存されています。
+
+### 5. systemdによる常駐化
+
+```bash
+sudo mkdir -p /etc/mlflow
+sudo tee /etc/mlflow/tracking-server.env > /dev/null <<'EOF'
+PGPASSWORD=<手順1で設定したパスワードに置き換える>
+EOF
+sudo chmod 600 /etc/mlflow/tracking-server.env
+sudo chown {{ mlflow_user }}:{{ mlflow_group }} /etc/mlflow/tracking-server.env
+```
+
+```bash
+sudo tee /etc/systemd/system/{{ systemd_unit_name }} > /dev/null <<EOF
+[Unit]
+Description=MLflow Tracking Server
+After=network.target postgresql.service
+
+[Service]
+User={{ mlflow_user }}
+Group={{ mlflow_group }}
+EnvironmentFile=/etc/mlflow/tracking-server.env
+ExecStart={{ mlflow_bin }} server --backend-store-uri {{ backend_store_uri }} --default-artifact-root {{ artifact_root }} --host {{ server_host }} --port {{ server_port }}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now {{ systemd_unit_name }}
+sudo systemctl status {{ systemd_unit_name }} --no-pager
+```
+
+## 動作確認
+
+- `curl -sf http://127.0.0.1:{{ server_port }}/health` が `OK` を返すこと
+- 手順3の `search_runs` 出力に、送信した `learning_rate` / `rmse` を含むrunが表示されること
+- 手順4の `find {{ artifact_root }}` が `note.txt` を検出すること
+- `sudo systemctl status {{ systemd_unit_name }} --no-pager` が `active (running)` を示すこと
+- サーバプロセス再起動後も `{{ backend_db_name }}` に保存済みの実験記録が引き続き参照できること
+
+## 注意事項
+
+- {{ credential_note }}。パスワードをコマンド履歴やユニットファイルに直接書き込まない。
+- `{{ artifact_root }}` はrunごとにファイルが積み上がるため、容量監視と保持期間ポリシーを別途定める。
+- `mlflow server` はデフォルトで認証機構を持たないため、`{{ server_host }}` を `0.0.0.0` などで外部公開する場合はリバースプロキシ等でアクセス制御を行う。
+- バックエンドストア(`{{ backend_db_name }}`)は実験記録の唯一の正本であるため、`pg_dump` 等による定期バックアップの対象に含める。
+- 常駐化後の設定変更は `/etc/systemd/system/{{ systemd_unit_name }}` の編集後に `sudo systemctl daemon-reload` と再起動を必ず行う。反映を確認せずに変更を放置しない。

@@ -1,0 +1,167 @@
+# embeddingバッチ生成とベクトルDB一括登録
+
+sentence-transformersによるembeddingのバッチ生成、生成結果の次元数・件数検証、Qdrant互換ベクトルDBのREST APIへの一括登録(bulk upsert)までを、コーパス {{ csv_rows | length }} 件を対象に行う手順です。
+
+## 目的
+
+コーパスごとの入力・出力・登録先を台帳で管理しながら、embeddingの生成から正規化・次元検証・ベクトルDB登録・件数照合までを一貫した手順で再現できるようになることを目指します。
+
+## 用語解説
+
+- **embedding**: テキストを固定次元の実数値ベクトルに変換したもの。意味的な近さをベクトル空間上の距離として扱えるようにする
+- **正規化(normalize)**: 各embeddingベクトルの長さ(L2ノルム)を1に揃える処理。正規化済みベクトルはコサイン類似度と内積の順位が一致するため、Cosine/Dotいずれの距離関数でも扱いやすくなる
+- **バッチ生成**: 複数件のテキストをまとめてモデルに投入し、1回の推論呼び出しで複数のembeddingを得る処理。1件ずつ推論するより高速
+- **次元数(embedding dimension)**: embeddingベクトルの要素数。使用するモデルによって固定され、登録先コレクションの次元数と一致させる必要がある
+- **一括登録(bulk upsert)**: ベクトルDBへ複数件のベクトルをまとめて登録する操作。1件ずつ登録するよりAPI呼び出し回数を抑えられる
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 件のコーパスを対象にembeddingを生成し、ベクトルDBへ登録します。バッチサイズは全コーパス共通で64件に固定します。
+
+| corpus_id | corpus_name | corpus_path | text_field | embedding_model | embedding_dim | output_path | collection_name | vector_db_endpoint |
+|---|---|---|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["corpus_id"] }} | {{ r["corpus_name"] }} | {{ r["corpus_path"] }} | {{ r["text_field"] }} | {{ r["embedding_model"] }} | {{ r["embedding_dim"] }} | {{ r["output_path"] }} | {{ r["collection_name"] }} | {{ r["vector_db_endpoint"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 入力コーパスと出力先を確認する
+
+```bash
+{% for r in csv_rows %}test -f {{ r["corpus_path"] }} && echo "OK: {{ r["corpus_id"] }} ({{ r["corpus_path"] }})"
+mkdir -p $(dirname {{ r["output_path"] }})
+wc -l {{ r["corpus_path"] }}
+{% endfor %}```
+
+`corpus_path` の各ファイルはJSON Lines形式で、1行1レコードとして扱います。各レコードは一意な `id` フィールドと、台帳の `text_field` に対応するテキストフィールドを持つ前提です。件数は `wc -l` で数え、後続の生成件数・登録件数と突き合わせる基準にします。
+
+### 2. embeddingモデルを準備する
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install sentence-transformers
+{% for r in csv_rows %}python3 -c 'from sentence_transformers import SentenceTransformer; m = SentenceTransformer("{{ r["embedding_model"] }}"); print("{{ r["corpus_id"] }}", m.get_sentence_embedding_dimension())'
+{% endfor %}```
+
+出力される次元数が、台帳の `embedding_dim` と一致していることをここで確認します。一致していない場合は後続のコレクション作成・登録がすべて失敗するため、先に修正します。
+
+### 3. バッチ生成スクリプトを実行する
+
+```bash
+{% for r in csv_rows %}python3 <<'EOF'
+import json
+from sentence_transformers import SentenceTransformer
+
+corpus_path = "{{ r["corpus_path"] }}"
+output_path = "{{ r["output_path"] }}"
+text_field = "{{ r["text_field"] }}"
+
+records = []
+with open(corpus_path) as f:
+    for line in f:
+        records.append(json.loads(line))
+
+model = SentenceTransformer("{{ r["embedding_model"] }}")
+texts = [rec[text_field] for rec in records]
+vectors = model.encode(texts, batch_size=64, normalize_embeddings=True, show_progress_bar=True)
+
+with open(output_path, "w") as out:
+    for rec, vec in zip(records, vectors):
+        out.write(json.dumps({"id": rec["id"], "vector": vec.tolist()}) + "\n")
+
+print("{{ r["corpus_id"] }}:", len(records), "records ->", output_path)
+EOF
+{% endfor %}```
+
+`normalize_embeddings=True` により、生成される各ベクトルはL2ノルム1に正規化されます。出力の各行は入力レコードの `id` と `vector`(embedding配列)を持つJSON Linesです。
+
+### 4. 次元数と件数を検証する
+
+```bash
+{% for r in csv_rows %}INPUT_COUNT=$(wc -l < {{ r["corpus_path"] }})
+OUTPUT_COUNT=$(wc -l < {{ r["output_path"] }})
+python3 <<'EOF'
+import json
+
+output_path = "{{ r["output_path"] }}"
+expected_dim = {{ r["embedding_dim"] }}
+
+dims = set()
+count = 0
+with open(output_path) as f:
+    for line in f:
+        rec = json.loads(line)
+        dims.add(len(rec["vector"]))
+        count += 1
+
+print("{{ r["corpus_id"] }}: records=", count, "dims=", dims)
+assert dims == {expected_dim}, f"dimension mismatch for {{ r["corpus_id"] }}: {dims} != {expected_dim}"
+EOF
+if [ "$INPUT_COUNT" -ne "$OUTPUT_COUNT" ]; then
+  echo "COUNT MISMATCH: {{ r["corpus_id"] }} input=${INPUT_COUNT} output=${OUTPUT_COUNT}"
+else
+  echo "OK: {{ r["corpus_id"] }} count=${OUTPUT_COUNT}"
+fi
+{% endfor %}```
+
+`dims` が単一の値(台帳の `embedding_dim`)に揃っていない場合、モデルの入出力設定に誤りがあるためベクトルDBへの登録前に原因を切り分けます。
+
+### 5. ベクトルDBへ一括登録する
+
+```bash
+{% for r in csv_rows %}curl -X PUT "{{ r["vector_db_endpoint"] }}/collections/{{ r["collection_name"] }}" \
+  -H "Content-Type: application/json" \
+  --data-raw '{"vectors": {"size": {{ r["embedding_dim"] }}, "distance": "Cosine"}}'
+
+python3 <<'EOF'
+import json
+
+output_path = "{{ r["output_path"] }}"
+points_path = "{{ r["output_path"] }}.points.json"
+
+points = []
+with open(output_path) as f:
+    for line in f:
+        rec = json.loads(line)
+        points.append({"id": rec["id"], "vector": rec["vector"]})
+
+with open(points_path, "w") as out:
+    json.dump({"points": points}, out)
+
+print("{{ r["corpus_id"] }}: points file ->", points_path, "count=", len(points))
+EOF
+
+curl -X PUT "{{ r["vector_db_endpoint"] }}/collections/{{ r["collection_name"] }}/points?wait=true" \
+  -H "Content-Type: application/json" \
+  --data-binary @{{ r["output_path"] }}.points.json
+{% endfor %}```
+
+コレクションは正規化済みベクトルの類似度計算に合わせて `Cosine` 距離で作成します。`wait=true` を付けることで、登録処理の完了を待ってからレスポンスを返させます。
+
+### 6. 登録件数を照合する
+
+```bash
+{% for r in csv_rows %}EXPECTED_COUNT=$(wc -l < {{ r["output_path"] }})
+ACTUAL_COUNT=$(curl -s "{{ r["vector_db_endpoint"] }}/collections/{{ r["collection_name"] }}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["points_count"])')
+echo "{{ r["corpus_id"] }}: expected=${EXPECTED_COUNT} actual=${ACTUAL_COUNT}"
+if [ "$EXPECTED_COUNT" -ne "$ACTUAL_COUNT" ]; then
+  echo "REGISTRATION MISMATCH: {{ r["corpus_id"] }}"
+fi
+{% endfor %}```
+
+`points_count` はコレクションAPIのレスポンスに含まれる登録済みポイント数です。生成したファイルの行数と一致しない場合、登録漏れまたは重複が疑われます。
+
+## 動作確認
+
+- 手順1で確認した各 `corpus_path` の行数と、手順4で確認した `output_path` の行数が一致していること
+- 手順4の `dims` が、各コーパスの `embedding_dim` と一致していること(次元数の混在がないこと)
+- 手順6で `EXPECTED_COUNT` と `ACTUAL_COUNT` が一致し、`REGISTRATION MISMATCH` が出力されていないこと
+- `curl "{{ csv_rows[0]["vector_db_endpoint"] }}/collections/{{ csv_rows[0]["collection_name"] }}"` のレスポンスで `status` が `green` であること
+
+## 注意事項
+
+- `embedding_model` を変更すると出力される次元数も変わりうるため、既存コレクションと異なる次元数のモデルに切り替える場合は、コレクションを作り直すか新しいコレクション名を使う。
+- コレクション作成時に指定する距離関数(`Cosine`)は、`normalize_embeddings=True` で正規化したベクトルを前提としている。正規化しないベクトルを登録する場合は距離関数の選定から見直す。
+- 手順5の一括登録は同じ `id` を再送すると上書き(upsert)される。再実行時に意図せず古いベクトルを新しいベクトルへ差し替えていないか、`id` の採番方針を事前に確認する。
+- 大規模なコーパスをバッチサイズ64で処理する場合、GPUメモリまたは推論時間が想定より増える可能性がある。処理時間が長くなる場合は、コーパスをさらに分割するかバッチサイズを見直す。

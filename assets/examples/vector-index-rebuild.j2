@@ -1,0 +1,119 @@
+# ベクトルインデックスの定期再構築と最適化
+
+Qdrantのコレクション一覧を棚卸しし、セグメントの断片化状況を確認したうえで、インデックスを再構築し、検索品質と速度を再検証する定期メンテナンス手順です。
+
+## 目的
+
+セグメントの断片化がベクトル検索の速度・再現率に与える影響を理解し、`indexing_threshold` を用いたインデックス再構築を安全な実施枠の中で行い、再構築後の効果を数値で確認できるようになることを目指します。
+
+## 用語解説
+
+- **セグメント(segment)**: コレクション内部でポイントが分割保存される単位。書き込みが繰り返されるとセグメント数が増え、断片化が進む
+- **断片化**: セグメント数が増えすぎることで検索対象の分散が進み、1回の検索で走査するセグメントが増えて速度・メモリ効率が低下する状態
+- **optimizer_status**: コレクションのオプティマイザ(セグメントの統合・インデックス構築を担うバックグラウンド処理)の状態。`"ok"` 以外はエラーまたは処理中を示す
+- **indexing_threshold**: セグメント内の未インデックスポイント数がこの値を超えるとオプティマイザがインデックス構築を開始するしきい値。`0` に設定すると即座に全セグメントの再インデックスがスケジュールされる
+- **indexed_vectors_count**: HNSWインデックスへの組み込みが完了しているベクトル数。`points_count` との差が大きいほど未インデックス分が多い
+
+## シナリオ設定
+
+今回の定期メンテナンス対象は {{ csv_rows | length }} コレクションです。各コレクションについて `points_count` / `segments_count` を棚卸しし、`segments_threshold` を超えているものを断片化ありと判断します。再構築は `maintenance_window` の枠内で実施し、完了後は `indexing_threshold` を棚卸し時の値に戻します。
+
+## 手順
+
+### 1. 対象コレクションを棚卸しする
+
+```bash
+{% for r in csv_rows %}curl -s "{{ r["vector_db_endpoint"] }}/collections/{{ r["collection_name"] }}" | jq '{name: "{{ r["collection_name"] }}", status: .result.status, points_count: .result.points_count, segments_count: .result.segments_count}'
+{% endfor %}```
+
+台帳上の想定値と突き合わせます。
+
+```bash
+{% for r in csv_rows %}echo "{{ r["collection_name"] }}: 台帳値 points_count={{ r["points_count"] }} segments_count={{ r["segments_count"] }} (優先度: {{ r["priority"] }})"
+{% endfor %}```
+
+### 2. 断片化とセグメント状態を確認する
+
+```bash
+{% for r in csv_rows %}curl -s "{{ r["vector_db_endpoint"] }}/collections/{{ r["collection_name"] }}" | jq '{optimizer_status: .result.optimizer_status, indexed_vectors_count: .result.indexed_vectors_count}'
+{% endfor %}```
+
+セグメント数が台帳のしきい値 `segments_threshold` を超えているコレクションを断片化ありと判断します。
+
+```bash
+{% for r in csv_rows %}echo "{{ r["collection_name"] }}: segments_count={{ r["segments_count"] }} / segments_threshold={{ r["segments_threshold"] }}"
+{% endfor %}```
+
+### 3. 再構築の実施枠を確保する
+
+再構築中はオプティマイザ負荷が上がり検索レイテンシが一時的に増加するため、書き込み・検索の負荷が低い時間帯に実施枠を確保します。
+
+```bash
+{% for r in csv_rows %}echo "{{ r["collection_name"] }}(優先度: {{ r["priority"] }}) の再構築枠: {{ r["maintenance_window"] }}"
+{% endfor %}```
+
+実施枠に入る直前に、他の最適化処理が進行中でないことを確認します。
+
+```bash
+{% for r in csv_rows %}curl -s "{{ r["vector_db_endpoint"] }}/collections/{{ r["collection_name"] }}" | jq -r '.result.optimizer_status'
+{% endfor %}```
+
+`"ok"` 以外が返る場合は現在進行中の最適化が完了するまで待ってから次の手順に進みます。
+
+### 4. インデックスを再構築する
+
+`indexing_threshold` を `0` に設定し、対象セグメントの再インデックスを即座にスケジュールします。
+
+```bash
+{% for r in csv_rows %}curl -X PATCH "{{ r["vector_db_endpoint"] }}/collections/{{ r["collection_name"] }}" \
+  -H "Content-Type: application/json" \
+  --data-raw '{"optimizers_config": {"indexing_threshold": 0}}'
+{% endfor %}```
+
+`optimizer_status` が `"ok"` に戻るまでの経過を確認します。
+
+```bash
+{% for r in csv_rows %}watch -n 5 "curl -s '{{ r["vector_db_endpoint"] }}/collections/{{ r["collection_name"] }}' | jq '{optimizer_status: .result.optimizer_status, indexed_vectors_count: .result.indexed_vectors_count}'"
+{% endfor %}```
+
+再構築完了を確認したら、`indexing_threshold` を棚卸し時の値に戻します。
+
+```bash
+{% for r in csv_rows %}curl -X PATCH "{{ r["vector_db_endpoint"] }}/collections/{{ r["collection_name"] }}" \
+  -H "Content-Type: application/json" \
+  --data-raw '{"optimizers_config": {"indexing_threshold": {{ r["indexing_threshold"] }}}}'
+{% endfor %}```
+
+### 5. 再構築後の検索品質と速度を検証する
+
+コレクションの状態が再構築前と整合しているかを確認します。
+
+```bash
+{% for r in csv_rows %}curl -s "{{ r["vector_db_endpoint"] }}/collections/{{ r["collection_name"] }}" | jq '{status: .result.status, points_count: .result.points_count, segments_count: .result.segments_count, indexed_vectors_count: .result.indexed_vectors_count}'
+{% endfor %}```
+
+検索速度と件数を計測します。
+
+```bash
+{% for r in csv_rows %}echo "=== {{ r["collection_name"] }} (vector_size={{ r["vector_size"] }}, distance={{ r["distance_metric"] }}) ==="
+time curl -s -X POST "{{ r["vector_db_endpoint"] }}/collections/{{ r["collection_name"] }}/points/search" \
+  -H "Content-Type: application/json" \
+  --data-raw '{"vector": [0.05, 0.10, 0.02], "limit": {{ r["search_top_k"] }}, "with_payload": true}' | jq '.result | length'
+{% endfor %}```
+
+上記のクエリベクトルは例示であり、実運用では登録時と同じ埋め込みモデルで生成した各コレクションの `vector_size` 次元のベクトルに置き換えます。
+
+## 動作確認
+
+- 全 {{ csv_rows | length }} コレクションで `optimizer_status` が `"ok"` に戻っていること
+- 各コレクションの `points_count` が棚卸し時の値から変化していないこと(再構築はインデックス構造のみを対象とし、データ自体は変更しない)
+- `indexed_vectors_count` が `points_count` と一致し、未インデックス分が解消されていること
+- 検索クエリが `search_top_k` 件以内の結果を返し、再構築前後でレイテンシが悪化していないこと
+- `indexing_threshold` が棚卸し時の値に戻されていること
+
+## 注意事項
+
+- `indexing_threshold` を `0` にすると全セグメントの再インデックスが即座にスケジュールされ、CPU・メモリ負荷が一時的に上昇する。必ず `maintenance_window` の枠内で実施する。
+- 再構築完了後に `indexing_threshold` を元の値へ戻し忘れると、以降の小さな書き込みのたびに再インデックスが走り続け、恒常的な負荷増となる。
+- `optimizer_status` が `"ok"` に戻る前に次のコレクションの再構築へ進むと、同時実行によるリソース競合で完了までの時間がかえって伸びる。優先度(`priority`)の高いコレクションから順に、1件ずつ完了を確認しながら進める。
+- 本手順はインデックス構造の再構築であり、埋め込みモデルの変更やベクトルの再生成は対象外とする。

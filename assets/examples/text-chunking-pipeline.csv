@@ -1,0 +1,5 @@
+doc_id,doc_path,doc_type,chunk_size,chunk_overlap,sample_check_index,work_dir
+user_manual,/data/rag/source/user_manual.txt,マニュアル,800,100,2,/data/rag/text-chunking-pipeline
+faq,/data/rag/source/faq.txt,FAQ,300,50,1,/data/rag/text-chunking-pipeline
+api_spec,/data/rag/source/api_spec.txt,API仕様書,600,80,3,/data/rag/text-chunking-pipeline
+release_notes,/data/rag/source/release_notes.txt,リリースノート,400,60,0,/data/rag/text-chunking-pipeline

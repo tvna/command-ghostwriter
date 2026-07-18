@@ -1,0 +1,132 @@
+# RAG向けドキュメントのチャンク分割パイプライン
+
+`langchain-text-splitters` を用いて、対象 {{ csv_rows | length }} 件のドキュメントをチャンクサイズ・オーバーラップの設計に基づいて分割し、文字数分布の集計と抽出検査によって分割品質を確認する手順です。
+
+## 目的
+
+ドキュメントの性質(マニュアル・FAQ・仕様書等)に応じたチャンクサイズ・オーバーラップの設計方針を理解し、`RecursiveCharacterTextSplitter` によるチャンク化を実行したうえで、文字数分布の集計と抽出検査(スポットチェック)によって分割品質を検証できるようになることを目指します。
+
+## 用語解説
+
+- **チャンク(chunk)**: 検索・embedding生成のために長文ドキュメントを分割した各断片。RAGでは1チャンクが検索・引用の最小単位になる
+- **チャンクサイズ(chunk_size)**: 1チャンクあたりの目標文字数。小さすぎると文脈が失われやすく、大きすぎるとembeddingモデルの入力上限を超えたり検索精度が下がったりする
+- **オーバーラップ(chunk_overlap)**: 隣接するチャンク間で重複させる文字数。文や段落の境界がチャンク境界と一致しない場合に生じる文脈の欠落を緩和する
+- **RecursiveCharacterTextSplitter**: `langchain-text-splitters` が提供するテキスト分割クラス。改行・句点等の区切り文字を優先度順に試しながら、`chunk_size` 以内に収まるよう再帰的に分割する
+- **抽出検査(spot check)**: 全チャンクを逐次確認する代わりに、一部のチャンクを抽出して境界や内容の妥当性を目視で確認する検査手法
+
+## シナリオ設定
+
+以下 {{ csv_rows | length }} 件のドキュメントを対象にチャンク分割を行います。作業ディレクトリは `{{ csv_rows[0]["work_dir"] }}` とします。
+
+| doc_id | doc_path | doc_type | chunk_size | chunk_overlap | sample_check_index |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["doc_id"] }} | {{ r["doc_path"] }} | {{ r["doc_type"] }} | {{ r["chunk_size"] }} | {{ r["chunk_overlap"] }} | {{ r["sample_check_index"] }} |
+{% endfor %}
+
+`doc_type` ごとに、FAQのように短い項目単位で完結する文書は小さめの `chunk_size`、マニュアルのように手順の前後関係が重要な文書は大きめの `chunk_size` を設定しています。
+
+## 手順
+
+### 1. 対象ドキュメントを棚卸しする
+
+```bash
+mkdir -p {{ csv_rows[0]["work_dir"] }}
+{% for r in csv_rows %}test -f {{ r["doc_path"] }} && echo "対象確認: {{ r["doc_id"] }} ({{ r["doc_path"] }})"
+{% endfor %}```
+
+```bash
+{% for r in csv_rows %}echo "=== {{ r["doc_id"] }}: {{ r["doc_type"] }} ==="
+wc -m {{ r["doc_path"] }}
+{% endfor %}```
+
+`wc -m` はUTF-8を前提とした文字数を表示します。以降のチャンクサイズ設計は、この実測の文字数と `doc_type` の性質を踏まえて見直します。
+
+### 2. チャンクサイズとオーバーラップを設計する
+
+```bash
+{% for r in csv_rows %}chars=$(wc -m < {{ r["doc_path"] }})
+awk -v chars="$chars" -v size={{ r["chunk_size"] }} -v overlap={{ r["chunk_overlap"] }} -v name={{ r["doc_id"] }} 'BEGIN {
+    step = size - overlap
+    est = (chars > overlap) ? int((chars - overlap + step - 1) / step) : 1
+    printf "%s: chars=%d chunk_size=%d chunk_overlap=%d estimated_chunks=%d\n", name, chars, size, overlap, est
+}'
+{% endfor %}```
+
+`estimated_chunks` は `(文字数 - overlap) / (chunk_size - overlap)` の切り上げによる概算です。実際の分割数は区切り文字の位置によって前後します。オーバーラップは、embeddingモデルの入力上限とのバランスを見ながら `chunk_size` の1〜2割程度を目安に設定します。
+
+### 3. 分割スクリプトを実行する
+
+```bash
+pip install langchain-text-splitters
+mkdir -p ~/text-chunking-pipeline
+cat <<'PYEOF' > ~/text-chunking-pipeline/chunk_text.py
+import sys
+
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+src_path, output_dir, chunk_size, chunk_overlap = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+
+with open(src_path, encoding="utf-8") as f:
+    text = f.read()
+
+splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+chunks = splitter.split_text(text)
+
+for i, chunk in enumerate(chunks):
+    with open(f"{output_dir}/chunk_{i}.txt", "w", encoding="utf-8") as f:
+        f.write(chunk)
+
+print(f"generated: {len(chunks)} chunks -> {output_dir}")
+PYEOF
+```
+
+```bash
+{% for r in csv_rows %}mkdir -p {{ r["work_dir"] }}/chunks/{{ r["doc_id"] }}
+python3 ~/text-chunking-pipeline/chunk_text.py {{ r["doc_path"] }} {{ r["work_dir"] }}/chunks/{{ r["doc_id"] }} {{ r["chunk_size"] }} {{ r["chunk_overlap"] }}
+{% endfor %}```
+
+### 4. チャンクの文字数分布を集計する
+
+```bash
+{% for r in csv_rows %}chunk_dir={{ r["work_dir"] }}/chunks/{{ r["doc_id"] }}
+wc -m ${chunk_dir}/chunk_*.txt | grep -v total > ${chunk_dir}/char_counts.txt
+awk -v name={{ r["doc_id"] }} '{sum += $1; n++; if (min == "" || $1 < min) min = $1; if ($1 > max) max = $1} END {printf "%s: n=%d min=%d max=%d avg=%.1f\n", name, n, min, max, sum / n}' ${chunk_dir}/char_counts.txt
+{% endfor %}```
+
+`min`/`max` が設計値の `chunk_size`(手順2)から大きく外れていないかを確認します。`max` が `chunk_size` を大幅に超える場合は、区切り文字が少なく再帰分割が効いていない可能性があるため、対象ドキュメントの構成を見直します。
+
+### 5. 分割品質を抽出検査で確認する
+
+```bash
+{% for r in csv_rows %}chunk_dir={{ r["work_dir"] }}/chunks/{{ r["doc_id"] }}
+sample={{ r["sample_check_index"] }}
+next=$(( sample + 1 ))
+echo "=== {{ r["doc_id"] }}: chunk_${sample}.txt の内容 ==="
+cat ${chunk_dir}/chunk_${sample}.txt
+echo "--- 文字数(設計値 chunk_size={{ r["chunk_size"] }}) ---"
+wc -m ${chunk_dir}/chunk_${sample}.txt
+if [ -f ${chunk_dir}/chunk_${next}.txt ]; then
+    echo "--- chunk_${sample}.txt の末尾 {{ r["chunk_overlap"] }} バイト ---"
+    tail -c {{ r["chunk_overlap"] }} ${chunk_dir}/chunk_${sample}.txt
+    echo ""
+    echo "--- chunk_${next}.txt の先頭 {{ r["chunk_overlap"] }} バイト ---"
+    head -c {{ r["chunk_overlap"] }} ${chunk_dir}/chunk_${next}.txt
+    echo ""
+fi
+{% endfor %}```
+
+`sample_check_index` で指定したチャンクの内容が文単位で完結しているか、末尾と次チャンク先頭のオーバーラップ部分が文脈的に繋がっているかを目視で確認します。
+
+## 動作確認
+
+- 各対象ドキュメントについて `{{ csv_rows[0]["work_dir"] }}/chunks/<doc_id>/` に `chunk_0.txt` 以降のファイルが生成されていること
+- 手順4の集計で、各ドキュメントの `max` が設計値の `chunk_size` から大幅に超過していないこと
+- 手順5で抽出した `sample_check_index` のチャンクが文の途中で不自然に切れておらず、次チャンクとのオーバーラップ部分が内容として繋がっていること
+- 全 {{ csv_rows | length }} 件のドキュメントで上記が確認できていること
+
+## 注意事項
+
+- `wc -m` は文字数(UTF-8想定)、`tail -c`/`head -c` はバイト数基準であるため、日本語等マルチバイト文字を含む場合は境界がずれることがある。手順5の目視確認で内容面から補う。
+- `RecursiveCharacterTextSplitter` は `chunk_overlap` を厳密には保証せず、区切り文字(段落・改行・句点等)の位置によって実際のオーバーラップ量やチャンクサイズが前後する。手順4・5はその前提でのスポットチェックであり、全件の完全性を保証するものではない。
+- `chunk_size` を大きくしすぎると、後続で使用するembeddingモデルの入力上限(トークン数)を超える可能性がある。実際に使用するモデルの上限に合わせて手順2の設計値を調整する。
+- 本手順はテキスト抽出済みのプレーンテキストファイル(`.txt`)を対象としており、PDF/Word等からのテキスト抽出自体は本手順の対象外とする。

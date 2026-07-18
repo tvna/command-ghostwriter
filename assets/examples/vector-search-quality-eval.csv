@@ -1,0 +1,6 @@
+query_id,query_text,expected_doc_id,collection_name,vector_db_endpoint,embedding_model,top_k,baseline_hnsw_ef,candidate_hnsw_ef
+Q1,返品の手続き方法を知りたい,101,product_docs_embeddings,http://localhost:6333,intfloat/multilingual-e5-large,5,64,128
+Q2,パスワードを忘れた場合の対応を教えてほしい,205,product_docs_embeddings,http://localhost:6333,intfloat/multilingual-e5-large,5,64,128
+Q3,配送状況を確認する方法,318,product_docs_embeddings,http://localhost:6333,intfloat/multilingual-e5-large,5,64,128
+Q4,領収書の再発行はできますか,120,product_docs_embeddings,http://localhost:6333,intfloat/multilingual-e5-large,5,64,128
+Q5,解約手続きの流れを知りたい,450,product_docs_embeddings,http://localhost:6333,intfloat/multilingual-e5-large,5,64,128
