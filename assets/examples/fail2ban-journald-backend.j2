@@ -93,7 +93,7 @@ sudo fail2ban-client reload
 
 ## 注意事項
 
-- `journalmatch`の絞り込みが�695不足していると(例: `_COMM`を指定せず`_SYSTEMD_UNIT`のみ)、同一ユニット配下の無関係なログまで読み取り対象になり、誤検知やCPU負荷増大につながる。手順1のdry-runで対象ログのみが抽出されることを必ず確認する。
+- `journalmatch`の絞り込みが不足していると(例: `_COMM`を指定せず`_SYSTEMD_UNIT`のみ)、同一ユニット配下の無関係なログまで読み取り対象になり、誤検知やCPU負荷増大につながる。手順1のdry-runで対象ログのみが抽出されることを必ず確認する。
 - rsyslogなどでファイルログ出力も併用している環境では、logpath監視jailとjournalmatch監視jailを同時に有効化すると同じ失敗試行を二重にカウントし、`maxretry`到達が想定より早まる。切り替え完了後は必ずlogpath側のjailを`enabled = false`にする。
 - journaldの`Storage=`設定が`volatile`または未永続化の場合、再起動でログが失われ検知が機能しなくなる。`/etc/systemd/journald.conf`で`Storage=persistent`とローテーション上限(`SystemMaxUse=`等)を確認する。
 - `backend = systemd`の利用には`python3-systemd`パッケージが必須であり、未導入の場合fail2banはjournald backendへ自動フォールバックせずエラー終了する。

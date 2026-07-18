@@ -1,0 +1,230 @@
+# OPAサーバの本番配備とハードニング — {{ host }}
+
+Open Policy Agent (OPA) をサーバモード（`opa run --server`）で本番配備し、TLS・認証・最小権限（非rootコンテナ）・ヘルスチェックまでを安全な順序で構成する手順です。
+
+## 目的
+
+`opa run --server` を TLS 終端・トークン認証・認可・ヘルスチェック付きで本番配備し、ロックアウト（管理者自身が締め出される事故）を起こさずに匿名アクセスを閉じられるようになることを目指します。
+
+## 用語解説
+
+- **OPA (Open Policy Agent)**: Rego 言語でポリシーを記述し、REST API 経由で許可判定を返す汎用ポリシーエンジン
+- **バンドル (bundle)**: ポリシーとデータをまとめて配布・更新するアーカイブ（`.tar.gz`）。`bundles` 設定でポーリング取得する
+- **decision log**: OPA が下した各判定（入力・結果・タイムスタンプ）の記録。監査・デバッグに使う
+- **認証 (authentication)**: OPA API サーバへの接続元が何者かを確認する仕組み。`token`（Bearer トークン）または `tls`（クライアント証明書=mTLS）を指定する
+- **認可 (authorization)**: 認証された相手が何を実行できるかを制御する仕組み。既定の `authz.rego` は「自分自身のトークンに紐づく `system/authz` 権限データ」だけを見て判定し、management API（`PUT /v1/policies`, `PUT /v1/data` などポリシー・データを書き換えるエンドポイント）への書き込みを許可されたトークンだけに絞る
+- **management API**: `/v1/policies/*`、`/v1/data/*` など OPA 自身のポリシー・データを読み書きする API 群。ここが誰でも書き換え可能だと任意のポリシー混入につながる
+- **/health エンドポイント**: プロセスの生存だけでなく、`?bundle=true` を付けるとバンドル読み込み完了まで確認できるヘルスチェック用 API
+
+## シナリオ設定
+
+| 項目 | 値 |
+|---|---|
+| ホスト | {{ host }} |
+| バインドアドレス:ポート | {{ bind_addr }}:{{ port }} |
+| TLS証明書 | {{ tls_cert_path }} |
+| TLS秘密鍵 | {{ tls_key_path }} |
+| TLS CA証明書 | {{ tls_ca_path }} |
+| 認証方式 | {{ authentication_mode }} |
+| 認可 | {{ authorization_enabled }} |
+| 管理者トークンファイル | {{ management_token_path }} |
+| ブートストラップ用トークンファイル | {{ bootstrap_token_path }} |
+| バンドル名 | {{ bundle_name }} |
+| バンドル取得元サービス | {{ bundle_service }} |
+| バンドルリソースパス | {{ bundle_resource }} |
+| decision log 転送先サービス | {{ decision_logs_service }} |
+| ヘルスチェック | {{ health_endpoint }} |
+| メトリクス | {{ metrics_bind_addr }}:{{ metrics_port }} |
+| コンテナイメージ | {{ container_image }} |
+| 非rootで実行 | {{ run_as_nonroot }} |
+| 実行UID | {{ run_as_uid }} |
+
+方針:
+
+- **ロックアウト防止順序**: 認証・認可を有効化する前に、管理トークンおよび TLS 証明書での疎通を確認してから匿名アクセスを閉じます。順序を逆にすると誰も管理 API に到達できなくなります。
+- **最小権限**: コンテナは非root（UID {{ run_as_uid }}）で実行し、management API へは管理者トークンのみ書き込みを許可します。
+
+## 1. TLS証明書とトークンを準備する（{{ host }}）
+
+自己署名または社内CAで発行した証明書一式と、認証用トークンを配置します。
+
+```bash
+sudo install -d -m 750 -o {{ run_as_uid }} /etc/opa/tls /etc/opa/secrets /etc/opa/policies
+sudo install -m 640 -o {{ run_as_uid }} server.crt {{ tls_cert_path }}
+sudo install -m 600 -o {{ run_as_uid }} server.key {{ tls_key_path }}
+sudo install -m 644 -o {{ run_as_uid }} ca.crt {{ tls_ca_path }}
+# ブートストラップ用トークン（疎通確認専用、確認後に失効させる）
+openssl rand -hex 32 | sudo tee {{ bootstrap_token_path }} >/dev/null
+sudo chmod 600 {{ bootstrap_token_path }}
+# 本番用の管理者トークン
+openssl rand -hex 32 | sudo tee {{ management_token_path }} >/dev/null
+sudo chmod 600 {{ management_token_path }}
+```
+
+## 2. config.yaml を作成する（bundles / decision_logs / status）
+
+```bash
+sudo tee {{ config_path }} <<'EOF'
+services:
+  {{ bundle_service }}:
+    url: https://{{ bundle_service }}.internal/
+    credentials:
+      bearer:
+        token_path: {{ management_token_path }}
+  {{ decision_logs_service }}:
+    url: https://{{ decision_logs_service }}.internal/
+
+bundles:
+  {{ bundle_name }}:
+    service: {{ bundle_service }}
+    resource: {{ bundle_resource }}
+    polling:
+      min_delay_seconds: {{ bundle_polling_min_seconds }}
+      max_delay_seconds: {{ bundle_polling_max_seconds }}
+
+decision_logs:
+  console: {{ decision_logs_console }}
+  service: {{ decision_logs_service }}
+  reporting:
+    min_delay_seconds: 5
+    max_delay_seconds: 10
+
+status:
+  service: {{ decision_logs_service }}
+EOF
+```
+
+最小限の authz ポリシー（management API への書き込みを、認証済みトークンかつ `system/authz` データで許可された相手だけに絞る）を配置します。
+
+```bash
+sudo tee {{ policy_dir }}/authz.rego <<'EOF'
+package system.authz
+
+default allow = false
+
+allow {
+    input.identity == "admin"
+}
+EOF
+```
+
+## 3. 認証・認可を一時的に緩めた状態で起動し、疎通を確認する
+
+**ここで匿名アクセスをまだ閉じないでください。** まずブートストラップトークンで管理 API への疎通を確認してから、次のステップで匿名アクセスを閉じます。
+
+```bash
+sudo -u '#{{ run_as_uid }}' opa run --server \
+  --addr {{ bind_addr }}:{{ port }} \
+  --tls-cert-file {{ tls_cert_path }} \
+  --tls-private-key-file {{ tls_key_path }} \
+  --tls-ca-cert-file {{ tls_ca_path }} \
+  --authentication=token \
+  --authorization=basic \
+  --config-file {{ config_path }} \
+  {{ policy_dir }} &
+sleep 2
+BOOTSTRAP_TOKEN=$(sudo cat {{ bootstrap_token_path }})
+curl --cacert {{ tls_ca_path }} -H "Authorization: Bearer ${BOOTSTRAP_TOKEN}" \
+  "https://{{ host }}:{{ port }}{{ health_endpoint }}?bundle=true"   # 200 が返ることを確認してから先へ進む
+kill %1
+```
+
+## 4. 認証・認可を有効化して匿名アクセスを閉じる
+
+疎通が確認できたら、ブートストラップトークンを失効させ、本番用の管理者トークンのみで運用します。
+
+```bash
+sudo shred -u {{ bootstrap_token_path }}
+```
+
+## 5. 非rootコンテナとして実行する
+
+```bash
+sudo tee /etc/opa/opa-run.env <<'EOF'
+OPA_CONFIG={{ config_path }}
+EOF
+docker run -d \
+  --name {{ container_name }} \
+  --user {{ run_as_uid }}:{{ run_as_uid }} \
+  --read-only \
+  --cap-drop ALL \
+  --security-opt no-new-privileges \
+  -p {{ bind_addr }}:{{ port }}:{{ port }} \
+  -v /etc/opa:/etc/opa:ro \
+  {{ container_image }} \
+  run --server \
+  --addr {{ bind_addr }}:{{ port }} \
+  --tls-cert-file {{ tls_cert_path }} \
+  --tls-private-key-file {{ tls_key_path }} \
+  --tls-ca-cert-file {{ tls_ca_path }} \
+  --authentication=token \
+  --authorization=basic \
+  --config-file {{ config_path }} \
+  {{ policy_dir }}
+docker inspect -f '{{ '{{' }}.Config.User{{ '}}' }}' {{ container_name }}   # {{ run_as_uid }}:{{ run_as_uid }} であること（rootでないこと）を確認
+```
+
+## 6. systemdサービス化する
+
+```bash
+sudo tee /etc/systemd/system/{{ systemd_service }}.service <<'EOF'
+[Unit]
+Description=OPA server ({{ host }})
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+ExecStart=/usr/bin/docker start -a {{ container_name }}
+ExecStop=/usr/bin/docker stop -t 10 {{ container_name }}
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now {{ systemd_service }}
+```
+
+## 7. ファイアウォールを最小公開範囲にする
+
+management API と一般の許可判定 API は同じポート {{ port }} で提供されるため、公開先はポリシー利用側クライアントに限定します。メトリクス（{{ metrics_bind_addr }}:{{ metrics_port }}）は外部公開しません。
+
+```bash
+sudo ufw default deny incoming
+sudo ufw allow from 10.0.0.0/8 to any port {{ port }} proto tcp
+sudo ufw --force enable
+```
+
+## 動作確認
+
+1. `/health` が 200 を返すこと（バンドル読込を含む）:
+
+```bash
+ADMIN_TOKEN=$(sudo cat {{ management_token_path }})
+curl -sS --cacert {{ tls_ca_path }} -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+  -o /dev/null -w '%{http_code}\n' \
+  "https://{{ host }}:{{ port }}{{ health_endpoint }}?bundle=true"   # 200 であること
+```
+
+2. 認証必須化の確認（トークンなし・証明書なしのアクセスは拒否されること）:
+
+```bash
+curl -sS --cacert {{ tls_ca_path }} -o /dev/null -w '%{http_code}\n' \
+  "https://{{ host }}:{{ port }}/v1/data"   # 401 または 403 が返ること（匿名アクセス拒否）
+```
+
+3. bundle 読込状態の確認（`active_revision` が空でないこと、`code` にエラーが出ていないこと）:
+
+```bash
+curl -sS --cacert {{ tls_ca_path }} -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+  "https://{{ host }}:{{ port }}/v1/status" | grep -E 'active_revision|code'
+```
+
+## 注意事項
+
+- 認証・認可を有効化する前に、ブートストラップトークンでの疎通確認（手順3）を必ず先に行う。順序を逆にして匿名アクセスを先に閉じると、管理者自身が management API に到達できなくなる。
+- management API（`/v1/policies`, `/v1/data` の書き込み）は認可ポリシー（`system/authz`）で許可されたトークンだけに絞り、読み取り専用クライアントのトークンと混在させない。
+- {{ management_token_path }} や {{ tls_key_path }} などのトークン・秘密鍵はGit管理・ログ・decision logに出力しない。パーミッションは 600、所有者は実行ユーザー（UID {{ run_as_uid }}）に限定する。
+- TLS は必須とし、平文（`--addr http://...`）での本番待受は行わない。
+- `/metrics`（{{ metrics_bind_addr }}:{{ metrics_port }}）は内部のみ待受とし、外部ネットワークやファイアウォール許可対象に含めない。
+- ブートストラップトークンは疎通確認後に必ず `shred` などで失効・削除する（手順4）。使い回すと本番用トークンと同等の権限を持つ不要な認証情報が残る。

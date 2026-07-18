@@ -1,0 +1,10 @@
+recording_rules:
+  - record: "loki:log_lines:rate5m"
+    expr: 'sum(rate({job="checkout-api"}[5m])) by (job)'
+  - record: "loki:error_rate:rate5m"
+    expr: 'sum(rate({job="checkout-api"} |= "level=error" [5m])) by (job) / sum(rate({job="checkout-api"}[5m])) by (job)'
+  - record: "loki:auth_failure_rate:rate5m"
+    expr: 'sum(rate({job="auth-gateway"} |= "auth_result=failure" [5m])) by (job)'
+remote_write_url: "https://prometheus.example.internal/api/v1/write"
+eval_interval: "1m"
+retention_note: "ログは30日で削除、生成メトリクスはPrometheus側で13ヶ月保持する。保持期間の設計はログとメトリクスで別管理とする。"

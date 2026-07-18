@@ -162,7 +162,7 @@ groups:
   - name: openziti
     rules:
 {% for r in alert_rules %}      - alert: {{ r.name }}
-        expr: {{ r.expr }}
+        expr: {{ r.expr | safe }}
         for: {{ r.for }}
         labels:
           severity: {{ r.severity }}

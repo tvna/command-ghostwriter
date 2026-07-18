@@ -1,0 +1,107 @@
+# Loki recording rulesによるログ由来メトリクス化
+
+rulerのrecording rulesを使い、LogQLの集計クエリをあらかじめメトリクスとして評価し、Prometheus(remote_write)へ送出する手順です。ダッシュボードの毎回のログスキャンをなくし、表示を高速化します。
+
+## 目的
+
+recording rulesの`record`/`expr`定義、remote_writeによるPrometheusへの送出、そしてエラー率・認証失敗率といった頻出集計のメトリクス化手順を理解し、実際にLoki rulerへ設定できるようになることを目指します。
+
+## 用語解説
+
+- **recording rules**: LogQLクエリを定期評価し、その結果を新しいメトリクス(`record`名)として保存するruler機能
+- **ruler**: recording rules/alerting rulesを評価するLokiのコンポーネント
+- **remote_write**: 評価済みメトリクスをPrometheus(またはPrometheus互換のリモートストレージ)へHTTPで送出する仕組み
+- **count_over_time/rate**: LogQLでログ行数の合計や単位時間あたりの発生率を集計する関数。事前集計しておくことでダッシュボード側の再計算を省略できる
+- **eval_interval**: recording ruleを再評価する周期
+- **ログとメトリクスの保持分離**: 生ログは短期間で削除し、生成済みメトリクスはPrometheus側で長期保持するという、保持期間を役割ごとに分ける設計方針
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| remote_write送出先 | `{{ remote_write_url }}` |
+| 評価間隔(eval_interval) | `{{ eval_interval }}` |
+| 定義するrecording rule数 | {{ recording_rules | length }} |
+| 保持方針 | {{ retention_note }} |
+
+定義するrecording rule一覧:
+
+| record | expr |
+| --- | --- |
+{% for rule in recording_rules %}| `{{ rule.record }}` | `{{ rule.expr }}` |
+{% endfor %}
+
+## 手順
+
+### 1. recording rulesファイルを作成する
+
+ruler用のrule groupファイルを作成します。エラー率・認証失敗率のメトリクス化例を含めています。
+
+```yaml
+groups:
+  - name: log-derived-metrics
+    interval: {{ eval_interval }}
+    rules:
+{% for rule in recording_rules %}      - record: {{ rule.record }}
+        expr: |
+          {{ rule.expr }}
+{% endfor %}```
+
+このファイルをrulerのrule storage(例: `/etc/loki/rules/tenant-default/log-derived-metrics.yaml`)に配置します。
+
+```bash
+mkdir -p /etc/loki/rules/tenant-default
+cp log-derived-metrics.yaml /etc/loki/rules/tenant-default/log-derived-metrics.yaml
+```
+
+### 2. ruler設定にremote_writeを追加する
+
+Loki本体の設定ファイル(`loki-config.yaml`)のrulerセクションに、評価間隔とremote_write送出先を設定します。
+
+```yaml
+ruler:
+  evaluation_interval: {{ eval_interval }}
+  rule_path: /tmp/loki/rules-temp
+  storage:
+    type: local
+    local:
+      directory: /etc/loki/rules
+  remote_write:
+    enabled: true
+    client:
+      url: {{ remote_write_url }}
+      queue_config:
+        capacity: 2500
+        max_shards: 10
+```
+
+### 3. Lokiをリロードし、ruleがロードされたことを確認する
+
+```bash
+curl -s -X POST http://localhost:3100/loki/api/v1/rules/tenant-default -H "Content-Type: application/yaml" --data-binary @log-derived-metrics.yaml
+curl -s http://localhost:3100/loki/api/v1/rules/tenant-default | grep -E "record:"
+```
+
+## 動作確認
+
+1. rulerのruler groupが評価されていることを確認します。
+
+   ```bash
+   curl -s http://localhost:3100/prometheus/api/v1/rules | jq '.data.groups[] | select(.name=="log-derived-metrics")'
+   ```
+
+2. 生成されたメトリクスがPrometheus側に届いていることを確認します。
+
+   ```bash
+{% for rule in recording_rules %}   curl -s -G "{{ remote_write_url }}/../query" --data-urlencode 'query={{ rule.record }}'
+{% endfor %}   ```
+
+3. Grafanaダッシュボードのパネルで、上記メトリクス名(例: `{{ recording_rules[0].record }}`)を直接データソースとして参照し、ログを都度スキャンせず高速に表示できることを確認します。
+
+## 注意事項
+
+- remote_write先(`{{ remote_write_url }}`)が停止・応答不可の場合、rulerはメトリクスを送出できず評価結果が失われる。remote_write先の死活監視を別途行うこと。
+- メトリクス名(`record`)は既存のPrometheusメトリクスと衝突しないよう、`loki:`のような命名規則で名前空間を分けて設計する。
+- 評価間隔(`{{ eval_interval }}`)を短くしすぎたり、高カーディナリティなラベル(`by (...)`)を付けたりすると、ruler・remote_write先双方の負荷が急増する。ラベルの絞り込みと評価間隔のバランスを事前に検証する。
+- 生ログとrecording rule生成メトリクスは保持期間を分離する({{ retention_note }})。ログ削除がメトリクスの過去値に影響しないことを、保持設定変更前に確認する。
+- 既存のダッシュボードクエリをrecording ruleベースのメトリクスへ切り替える際は、旧来のLogQL直接集計クエリを残したまま新メトリクスの値を並行して比較し、一致を確認してから旧クエリを削除する。

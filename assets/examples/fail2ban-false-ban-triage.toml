@@ -1,13 +1,13 @@
+banned_ip = "203.0.113.77"
+affected_user = "alice"
+failregex_review = true
+shared_ip = true
+
 [jail]
 name = "sshd"
 logpath = "/var/log/auth.log"
 fail2ban_log = "/var/log/fail2ban.log"
 failregex = "^%(__prefix_line)sFailed password for .* from <HOST>"
-
-banned_ip = "203.0.113.77"
-affected_user = "alice"
-failregex_review = true
-shared_ip = true
 
 [app]
 name = "webapp"

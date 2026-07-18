@@ -21,7 +21,7 @@
 | 対象jail | {{ jail.name }} |
 | 認証ログ | {{ jail.logpath }} |
 | fail2banログ | {{ jail.fail2ban_log }} |
-| 現行failregex | `{{ jail.failregex }}` |
+| 現行failregex | `^%(__prefix_line)sFailed password for .* from <HOST>` |
 | Banされた IP | {{ banned_ip }} |
 | 影響を受けた正規ユーザー | {{ affected_user }} |
 | failregex過剰マッチの疑い | {{ failregex_review }} |
@@ -61,7 +61,7 @@ sudo grep -E "{{ affected_user }}|{{ banned_ip }}" {{ app.logpath }} | tail -n 5
 現行のfailregexが、アプリ側の正常な失敗ログ(認証エラーではなく再試行要求など)まで拾っていないかを、実際にfail2banを動かさずに検証します。
 
 ```bash
-sudo fail2ban-regex {{ jail.logpath }} '{{ jail.failregex }}'
+sudo fail2ban-regex {{ jail.logpath }} '^%(__prefix_line)sFailed password for .* from <HOST>'
 ```
 
 出力の `Failregex: N matched` の内訳行を確認し、`{{ affected_user }}` の正常アクセスに対応する行が含まれていれば、failregexの過剰マッチが確定します。
@@ -70,7 +70,7 @@ sudo fail2ban-regex {{ jail.logpath }} '{{ jail.failregex }}'
 本事象では failregex過剰マッチの疑いがあるため、厳格化した候補で再検証します。
 
 ```bash
-sudo fail2ban-regex {{ jail.logpath }} '{{ strict_failregex.after }}'
+sudo fail2ban-regex {{ jail.logpath }} '^%(__prefix_line)sFailed password for (?!invalid user )\S+ from <HOST> port \d+ ssh2$'
 ```
 
 厳格化前後でマッチ数を比較し、`{{ affected_user }}` の正常アクセス行が厳格化後に除外されていることを確認します。
@@ -106,7 +106,7 @@ sudo fail2ban-client reload {{ jail.name }}
 ```
 
 ```bash
-sudo fail2ban-regex {{ jail.logpath }} '{{ strict_failregex.after }}'
+sudo fail2ban-regex {{ jail.logpath }} '^%(__prefix_line)sFailed password for (?!invalid user )\S+ from <HOST> port \d+ ssh2$'
 sudo fail2ban-client status {{ jail.name }}
 ```
 

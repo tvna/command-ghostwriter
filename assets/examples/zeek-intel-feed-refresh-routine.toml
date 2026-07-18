@@ -1,0 +1,19 @@
+intel_file = "/opt/zeek/intel/intel.dat"
+refresh_schedule = "0 */6 * * *"
+expire_days = 30
+notify_channel = "#soc-intel-ops"
+
+[[feed_sources]]
+name = "abuse_ch_urlhaus"
+url = "https://urlhaus.abuse.ch/downloads/csv_recent/"
+source_tag = "abuse.ch-urlhaus"
+
+[[feed_sources]]
+name = "otx_alienvault"
+url = "https://otx.alienvault.com/api/v1/pulses/subscribed"
+source_tag = "otx-alienvault"
+
+[[feed_sources]]
+name = "internal_soc_watchlist"
+url = "https://intel.internal.example.co.jp/export/watchlist.csv"
+source_tag = "internal-soc-watchlist"
