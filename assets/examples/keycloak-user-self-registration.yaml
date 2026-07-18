@@ -1,0 +1,20 @@
+realm: corp
+kcadm:
+  server: "https://idp.example.com"
+  admin_realm: "master"
+  admin_user: "admin"
+registration_flow: "registration"
+registration_enabled: true
+verify_email: true
+smtp_config:
+  host: "smtp.example.com"
+  port: 587
+  from: "no-reply@example.com"
+  auth: true
+  user: "smtp-user@example.com"
+terms_required: true
+recaptcha_alias: "recaptcha registration action"
+default_required_action_unverified: "VERIFY_EMAIL"
+test_registrant_email: "new-user-test@example.com"
+test_registrant_username: "new-user-test"
+minimum_verified_users_group: "unverified-users"

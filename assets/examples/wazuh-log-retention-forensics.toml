@@ -1,0 +1,15 @@
+[archive]
+archive_enabled = true
+retention_days = 400
+offsite_target = "backup-vault:/srv/wazuh-archives/"
+integrity_check = true
+
+[paths]
+ossec_conf = "/var/ossec/etc/ossec.conf"
+archives_dir = "/var/ossec/logs/archives"
+ledger_dir = "/var/ossec/logs/archives-ledger"
+
+[search]
+query_string = "rule.level:>=5"
+start_time = "2026-07-01 00:00:00"
+end_time = "2026-07-17 23:59:59"
