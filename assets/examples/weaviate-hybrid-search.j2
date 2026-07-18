@@ -1,0 +1,143 @@
+# Weaviateのスキーマ設計とハイブリッド検索
+
+Dockerでベクトル検索エンジン Weaviate を起動し、コレクションスキーマの定義からオブジェクト登録、BM25とベクトルを融合するハイブリッド検索のalpha調整までを行います。
+
+## 目的
+
+Weaviateのコレクション（旧称クラス）とベクトライザーの役割を理解し、REST APIとGraphQLを使ってオブジェクトの登録からハイブリッド検索までを一通り実行できるようになることを目指します。
+
+## 用語解説
+
+- **コレクション(collection)**: 同じプロパティ構成を共有するオブジェクトの集合。REST/GraphQL上は`class`という名前で表現され、慣例として先頭を大文字にする（例: `{{ collection_name }}`）
+- **ベクトライザー(vectorizer)**: プロパティからベクトルを自動生成するモジュール。`none`を指定すると自動生成は行われず、オブジェクト登録時にベクトルを自分で渡す必要がある
+- **BM25**: プロパティのテキストに対するキーワード一致度でスコアリングする、伝統的な全文検索アルゴリズム
+- **ハイブリッド検索(hybrid search)**: BM25によるキーワード検索とベクトルによる類似検索のスコアを`alpha`の比率で融合する検索方式
+- **alphaパラメータ**: ハイブリッド検索の融合比率。`0`で完全にBM25優位、`1`で完全にベクトル優位、`0.5`が均等配分の目安になる
+- **`_additional { score }` / `_additional { distance }`**: GraphQLレスポンスに含められる検索スコア（BM25・ハイブリッド時）や距離（ベクトル検索時）の補助フィールド
+
+## シナリオ設定
+
+コンテナ `{{ container_name }}`(イメージ: `{{ weaviate_image }}`)をRESTポート `{{ host_port_rest }}`、gRPCポート `{{ host_port_grpc }}` で起動し、永続化先を `{{ storage_host_path }}` とします。作成するコレクションは `{{ collection_name }}`(ベクトル次元数 `{{ vector_dim }}`、ベクトライザー`none`)で、プロパティ `{{ title_property }}` と `{{ content_property }}` を持つサポートFAQ記事を登録します。クエリ「{{ query_text }}」に対して、alphaを `{{ alpha_keyword_leaning }}`（キーワード寄り）・`{{ alpha_balanced }}`（均等）・`{{ alpha_vector_leaning }}`（ベクトル寄り）と変化させ、キーワード検索・ベクトル検索単体の結果とも比較します。
+
+## 手順
+
+### 1. Dockerでweaviateを起動する
+
+```bash
+mkdir -p {{ storage_host_path }}
+docker run -d --name {{ container_name }} \
+  -p {{ host_port_rest }}:8080 \
+  -p {{ host_port_grpc }}:50051 \
+  -e QUERY_DEFAULTS_LIMIT=25 \
+  -e AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED=true \
+  -e PERSISTENCE_DATA_PATH={{ storage_container_path }} \
+  -e DEFAULT_VECTORIZER_MODULE=none \
+  -e ENABLE_MODULES= \
+  -e CLUSTER_HOSTNAME={{ cluster_hostname }} \
+  -v {{ storage_host_path }}:{{ storage_container_path }} \
+  {{ weaviate_image }}
+```
+
+起動確認:
+
+```bash
+docker ps --filter name={{ container_name }}
+curl "http://localhost:{{ host_port_rest }}/v1/.well-known/ready"
+curl "http://localhost:{{ host_port_rest }}/v1/meta"
+```
+
+### 2. コレクションスキーマを定義する
+
+ベクトライザーは`none`とし、プロパティ `{{ title_property }}` と `{{ content_property }}` を持つコレクションを作成します。
+
+```bash
+curl -X POST "http://localhost:{{ host_port_rest }}/v1/schema" \
+  -H "Content-Type: application/json" \
+  --data-raw '{"class": "{{ collection_name }}", "vectorizer": "none", "properties": [{"name": "{{ title_property }}", "dataType": ["text"]}, {"name": "{{ content_property }}", "dataType": ["text"]}]}'
+```
+
+作成内容の確認:
+
+```bash
+curl "http://localhost:{{ host_port_rest }}/v1/schema/{{ collection_name }}"
+```
+
+### 3. オブジェクトとベクトルを登録する
+
+ベクトライザーが`none`のため、各オブジェクトに `{{ vector_dim }}` 次元のベクトルを明示的に付けて一括登録します。
+
+```bash
+curl -X POST "http://localhost:{{ host_port_rest }}/v1/batch/objects" \
+  -H "Content-Type: application/json" \
+  --data-raw '{"objects": [{% for o in sample_objects %}{"class": "{{ collection_name }}", "properties": {"{{ title_property }}": "{{ o.title }}", "{{ content_property }}": "{{ o.content }}"}, "vector": [{{ o.vector | join(", ") }}]}{% if not loop.last %}, {% endif %}{% endfor %}]}'
+```
+
+登録件数の確認（GraphQL集計）:
+
+```bash
+curl -X POST "http://localhost:{{ host_port_rest }}/v1/graphql" \
+  -H "Content-Type: application/json" \
+  --data-raw '{"query": "{ Aggregate { {{ collection_name }} { meta { count } } } }"}'
+```
+
+### 4. hybridクエリでalpha値を調整する
+
+クエリ「{{ query_text }}」に対して、alphaを変えながらハイブリッド検索を実行し、ヒット順位の変化を観察します。
+
+キーワード寄り(alpha={{ alpha_keyword_leaning }}):
+
+```bash
+curl -X POST "http://localhost:{{ host_port_rest }}/v1/graphql" \
+  -H "Content-Type: application/json" \
+  --data-raw '{"query": "{ Get { {{ collection_name }}(hybrid: {query: \"{{ query_text }}\", alpha: {{ alpha_keyword_leaning }}, vector: [{{ query_vector | join(", ") }}]}, limit: {{ hybrid_limit }}) { {{ title_property }} {{ content_property }} _additional { score } } } }"}'
+```
+
+均等配分(alpha={{ alpha_balanced }}):
+
+```bash
+curl -X POST "http://localhost:{{ host_port_rest }}/v1/graphql" \
+  -H "Content-Type: application/json" \
+  --data-raw '{"query": "{ Get { {{ collection_name }}(hybrid: {query: \"{{ query_text }}\", alpha: {{ alpha_balanced }}, vector: [{{ query_vector | join(", ") }}]}, limit: {{ hybrid_limit }}) { {{ title_property }} {{ content_property }} _additional { score } } } }"}'
+```
+
+ベクトル寄り(alpha={{ alpha_vector_leaning }}):
+
+```bash
+curl -X POST "http://localhost:{{ host_port_rest }}/v1/graphql" \
+  -H "Content-Type: application/json" \
+  --data-raw '{"query": "{ Get { {{ collection_name }}(hybrid: {query: \"{{ query_text }}\", alpha: {{ alpha_vector_leaning }}, vector: [{{ query_vector | join(", ") }}]}, limit: {{ hybrid_limit }}) { {{ title_property }} {{ content_property }} _additional { score } } } }"}'
+```
+
+### 5. キーワード検索とベクトル検索の結果を比較する
+
+BM25単体（キーワード検索のみ）:
+
+```bash
+curl -X POST "http://localhost:{{ host_port_rest }}/v1/graphql" \
+  -H "Content-Type: application/json" \
+  --data-raw '{"query": "{ Get { {{ collection_name }}(bm25: {query: \"{{ query_text }}\"}, limit: {{ hybrid_limit }}) { {{ title_property }} {{ content_property }} _additional { score } } } }"}'
+```
+
+ベクトル単体（類似検索のみ）:
+
+```bash
+curl -X POST "http://localhost:{{ host_port_rest }}/v1/graphql" \
+  -H "Content-Type: application/json" \
+  --data-raw '{"query": "{ Get { {{ collection_name }}(nearVector: {vector: [{{ query_vector | join(", ") }}]}, limit: {{ hybrid_limit }}) { {{ title_property }} {{ content_property }} _additional { distance } } } }"}'
+```
+
+「{{ query_text }}」はサポート記事本文の表現と語句が一致しないため、BM25単体では取りこぼす可能性があります。手順4のハイブリッド結果と見比べ、alphaを上げるほどベクトル検索寄りの結果（意味的に近い記事）が上位に上がってくることを確認します。
+
+## 動作確認
+
+- `curl "http://localhost:{{ host_port_rest }}/v1/schema/{{ collection_name }}"` のレスポンスで`vectorizer`が`none`、`properties`に`{{ title_property }}`と`{{ content_property }}`が含まれること
+- Aggregateクエリの`meta.count`が登録したオブジェクト数（`{{ sample_objects | length }}`件）と一致すること
+- alphaを`{{ alpha_keyword_leaning }}`から`{{ alpha_vector_leaning }}`に近づけるにつれて、ヒット順位がBM25単体の結果からベクトル単体の結果に近づいていくこと
+- `docker restart {{ container_name }}` の後もAggregateクエリの`meta.count`が同じ値を維持し、`{{ storage_host_path }}`配下にデータが永続化されていること
+
+## 注意事項
+
+- ベクトライザーを`none`にしているため、埋め込みベクトルは呼び出し側で必ず用意する必要がある。本手順のベクトルは動作確認用の簡易値であり、実運用では埋め込みモデルの出力（`{{ vector_dim }}`次元に相当する実際の次元数）に置き換える。
+- `AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED=true`は認証なしでAPIを公開する設定のため、社内ネットワークなどlocal/dev用途に留め、インターネットに直接公開しない。
+- コレクション名(`{{ collection_name }}`)は先頭大文字が慣例であり、プロパティ構成やベクトライザーの変更が必要な場合はコレクションを再作成してオブジェクトを登録し直す。
+- `{{ storage_host_path }}`はコンテナのデータ永続化先であるため、削除や上書きを行う前にバックアップを取得する。

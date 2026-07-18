@@ -1,0 +1,31 @@
+audit_fields = [
+  { key = "timestamp", desc = "ISO8601形式のリクエスト受信時刻", example = "2026-07-18T09:00:00Z" },
+  { key = "user_id", desc = "リクエスト送信元の利用者ID(社内SSOの一意識別子)", example = "u-10234" },
+  { key = "model", desc = "呼び出したLLMモデル名", example = "claude-sonnet-5" },
+  { key = "prompt_summary", desc = "プロンプト本文ではなく要約のみ(生の入力全文は記録しない)", example = "顧客対応メール文面のトーン調整依頼" },
+  { key = "decision", desc = "出力に対する自動判定結果(allow/block/review)", example = "allow" },
+]
+
+[app]
+name = "llm-gateway"
+log_path = "/var/log/llm-gateway/audit.jsonl"
+log_format = "json"
+log_level = "info"
+service_unit = "llm-gateway"
+
+[rsyslog]
+central_server = "10.0.0.30"
+port = 6514
+protocol = "tcp"
+queue_size = 50000
+receiver_template = "/var/log/remote/%HOSTNAME%/llm-audit.jsonl"
+
+[logrotate]
+rotate_interval = "daily"
+retain_days = 90
+
+[hash]
+ledger_dir = "/var/backups/llm-audit-ledger"
+algorithm = "sha256"
+cron_schedule = "0 1 * * *"
+cron_user = "root"

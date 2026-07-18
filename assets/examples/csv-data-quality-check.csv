@@ -1,0 +1,5 @@
+dataset_id,dataset_name,csv_path,required_column,anomaly_regex,result_dir,report_channel
+customers,顧客マスタ,/data/warehouse/customers.csv,email,N/A|不明,/var/log/data-quality-check,#data-quality-alerts
+orders,注文明細,/data/warehouse/orders.csv,order_amount,^-[0-9]+$,/var/log/data-quality-check,#data-quality-alerts
+inventory,在庫データ,/data/warehouse/inventory.csv,stock_qty,^-[0-9]+$,/var/log/data-quality-check,#data-quality-alerts
+member_logs,会員ログ,/data/warehouse/member_logs.csv,last_login,N/A|不明,/var/log/data-quality-check,#data-quality-alerts

@@ -1,0 +1,128 @@
+# クラウドAIサービスのコスト定期棚卸し
+
+`aws ce`(Cost Explorer)コマンドでAIサービス別の利用コストを集計し、予算超過の兆候や遊休リソースの有無を点検したうえで、是正対応を起票するまでの定期棚卸し手順です。
+
+## 目的
+
+`get-cost-and-usage`によるサービス別コスト集計と、AWS Budgetsの予算アラート設定状況をあわせて確認できるようになることを目指します。あわせて、コストの増加がエンドポイントの遊休化(使われていないのに課金が続いている状態)によるものかどうかを切り分け、是正対応の起票まで一連の運用として実施できる状態を作ります。
+
+## 用語解説
+
+- **Cost Explorer(CE)**: AWSの利用コストをサービス・使用タイプ等の軸で集計・可視化するサービス。`aws ce` コマンド群で操作する
+- **UnblendedCost**: 割引適用前の実際の請求額に基づくコスト指標。`get-cost-and-usage` の既定的な集計指標の一つ
+- **group-by / filter**: `get-cost-and-usage` の集計軸を絞り込むオプション。`Type=DIMENSION,Key=SERVICE` でサービス別、`Key=USAGE_TYPE` で使用タイプ別に内訳を取得できる
+- **AWS Budgets**: 予算額としきい値を設定し、超過が見込まれる際に通知する仕組み。`describe-budget` で予算額と実績、`describe-notifications-for-budget` で通知しきい値の設定を確認できる
+- **遊休リソース**: 課金が発生しているにもかかわらず、実質的に利用されていないエンドポイントやプロビジョンド容量。SageMakerのエンドポイントやBedrockのProvisioned Throughputが該当し得る
+
+## シナリオ設定
+
+以下 {{ csv_rows | length }} 件のAIサービスを対象に、AWSプロファイル `{{ csv_rows[0]["aws_profile"] }}`(アカウントID `{{ csv_rows[0]["aws_account_id"] }}`)で過去{{ csv_rows[0]["lookback_months"] }}か月分のコストを棚卸しします。
+
+| service_label | ce_service_name | budget_name | monthly_budget_usd | idle_check_cmd |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["service_label"] }} | {{ r["ce_service_name"] }} | {{ r["budget_name"] }} | {{ r["monthly_budget_usd"] }} | {{ r["idle_check_cmd"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. get-cost-and-usageでサービス別コストを集計する
+
+```bash
+{% for r in csv_rows %}echo "=== {{ r["service_label"] }}: 過去{{ r["lookback_months"] }}か月のコスト推移 ==="
+START=$(date -d "-{{ r["lookback_months"] }} months" +%Y-%m-01)
+END=$(date +%Y-%m-01)
+aws ce get-cost-and-usage \
+  --time-period Start=$START,End=$END \
+  --granularity MONTHLY \
+  --metrics "UnblendedCost" \
+  --filter '{"Dimensions":{"Key":"SERVICE","Values":["{{ r["ce_service_name"] }}"]}}' \
+  --group-by Type=DIMENSION,Key=SERVICE \
+  --profile {{ r["aws_profile"] }} \
+  --query 'ResultsByTime[].{Start:TimePeriod.Start,Amount:Total.UnblendedCost.Amount}' \
+  --output table
+{% endfor %}```
+
+`monthly_budget_usd`(棚卸し台帳の設定値)と各月の`Amount`を見比べ、予算に近づいている月がないかをこの時点で確認します。
+
+### 2. 対象AIサービスの内訳と増減を確認する
+
+今月と前月のコストを比較し、増減率を確認します。あわせて使用タイプ別の内訳を取得し、増加の要因を確認します。
+
+```bash
+{% for r in csv_rows %}echo "=== {{ r["service_label"] }}: 前月比較 ==="
+CUR_START=$(date +%Y-%m-01)
+CUR_END=$(date -d "$CUR_START +1 month" +%Y-%m-01)
+PREV_START=$(date -d "$CUR_START -1 month" +%Y-%m-01)
+CUR_JSON=$(aws ce get-cost-and-usage --time-period Start=$CUR_START,End=$CUR_END --granularity MONTHLY --metrics "UnblendedCost" --filter '{"Dimensions":{"Key":"SERVICE","Values":["{{ r["ce_service_name"] }}"]}}' --group-by Type=DIMENSION,Key=USAGE_TYPE --profile {{ r["aws_profile"] }} --output json)
+CUR=$(echo "$CUR_JSON" | jq -r '[.ResultsByTime[0].Groups[].Metrics.UnblendedCost.Amount | tonumber] | add // 0')
+PREV=$(aws ce get-cost-and-usage --time-period Start=$PREV_START,End=$CUR_START --granularity MONTHLY --metrics "UnblendedCost" --filter '{"Dimensions":{"Key":"SERVICE","Values":["{{ r["ce_service_name"] }}"]}}' --profile {{ r["aws_profile"] }} --query 'ResultsByTime[0].Total.UnblendedCost.Amount' --output text)
+echo "今月: $CUR USD / 前月: $PREV USD"
+awk -v cur="$CUR" -v prev="$PREV" 'BEGIN { if (prev > 0) { printf "増減率: %.1f%%\n", (cur - prev) / prev * 100 } else { print "増減率: 算出不可(前月実績なし)" } }'
+
+echo "=== {{ r["service_label"] }}: 使用タイプ別の内訳(今月) ==="
+echo "$CUR_JSON" | jq -r '.ResultsByTime[0].Groups[] | [.Keys[0], .Metrics.UnblendedCost.Amount] | @tsv'
+{% endfor %}```
+
+今月の合計(`CUR`)は、使用タイプ別の内訳を取得する1回の呼び出し(`CUR_JSON`)から`jq`で`Amount`を合算して算出しており、合計専用の別呼び出しは行いません。Cost Explorer APIはリクエスト1回ごとに課金されるため、同じ期間・同じフィルタに対する呼び出しを1回にまとめています。増減率が`anomaly`と呼べるほど大きい(目安として50%を超える)場合は、使用タイプ別の内訳から要因(特定のAPI呼び出し種別の急増など)を確認してください。
+
+### 3. 未使用エンドポイントや遊休リソースを洗い出す
+
+`idle_check_cmd`にコマンドが設定されているサービスのみ、エンドポイント/プロビジョンド容量の一覧を取得します。
+
+```bash
+{% for r in csv_rows %}echo "=== {{ r["service_label"] }}: 遊休リソースの確認 ==="
+{% if r["idle_check_cmd"] != "-" %}aws {{ r["idle_check_cmd"] }} --profile {{ r["aws_profile"] }}
+{% else %}echo "{{ r["service_label"] }}は永続エンドポイント/プロビジョンド容量を持たないため対象外(リクエスト従量課金のみ)"
+{% endif %}
+{% endfor %}```
+
+一覧に表示されたエンドポイントやプロビジョンド容量について、直近の呼び出し実績がないものは遊休リソースの候補として手順5に記録します。
+
+### 4. 予算アラートの設定状況を点検する
+
+```bash
+{% for r in csv_rows %}echo "=== {{ r["service_label"] }}: 予算アラート設定の確認 ==="
+aws budgets describe-budget \
+  --account-id {{ r["aws_account_id"] }} \
+  --budget-name "{{ r["budget_name"] }}" \
+  --query 'Budget.{Limit:BudgetLimit.Amount,Actual:CalculatedSpend.ActualSpend.Amount}' \
+  --output table
+aws budgets describe-notifications-for-budget \
+  --account-id {{ r["aws_account_id"] }} \
+  --budget-name "{{ r["budget_name"] }}" \
+  --query 'Notifications[].{Threshold:Threshold,Type:NotificationType,ComparisonOperator:ComparisonOperator}' \
+  --output table
+{% endfor %}```
+
+`Budget.BudgetLimit.Amount`が台帳の`monthly_budget_usd`と一致していること、通知が1件以上設定されていることを確認します。一致しない、または通知が0件の場合は予算設定の是正対象とします。
+
+### 5. 棚卸し結果を記録し是正対応を起票する
+
+```bash
+{% for r in csv_rows %}cat <<EOF >> /tmp/cloud-ai-cost-review-$(date +%Y%m).md
+## {{ r["service_label"] }}
+- 予算(monthly_budget_usd): {{ r["monthly_budget_usd"] }} USD
+- 手順1-2で確認した推移・増減率、手順3で見つかった遊休リソース、手順4の予算アラート設定漏れをここに記録する
+- 是正対応が必要な場合の起票先: {{ r["remediation_queue"] }}
+EOF
+{% endfor %}
+cat /tmp/cloud-ai-cost-review-$(date +%Y%m).md
+```
+
+起票先(`{{ csv_rows[0]["remediation_queue"] }}` など)へのチケット登録自体は各チームのチケット管理システム(Jira等)の操作に委ね、本手順の対象外とします。
+
+## 動作確認
+
+- 手順1で全{{ csv_rows | length }}件について過去{{ csv_rows[0]["lookback_months"] }}か月分の月別コストが`table`形式で出力されること
+- 手順2で全件について「今月」「前月」の金額と増減率が出力され、使用タイプ別の内訳が確認できること
+- 手順3で`idle_check_cmd`が設定されているサービス(Amazon Bedrock / Amazon SageMaker / Amazon Comprehend)についてエンドポイントまたはプロビジョンド容量の一覧が取得できること
+- 手順4で全件について`Budget.BudgetLimit.Amount`と通知設定の一覧が出力されること
+- 手順5実行後、`/tmp/cloud-ai-cost-review-<年月>.md` に全{{ csv_rows | length }}件分の記録セクションが作成されていること
+
+## 注意事項
+
+- Cost Explorer API(`aws ce`配下のコマンド)はリクエスト1回ごとに課金される。本手順のように定期実行する場合は、必要な粒度・期間に絞って呼び出し回数を抑える。
+- `get-cost-and-usage`で取得できるコストデータは反映まで最大24時間程度のタイムラグがあるため、当日分の集計は速報値として扱う。
+- Amazon RekognitionとAmazon Textractはリクエスト従量課金のみで永続エンドポイントを持たないため、手順3では遊休リソースの確認対象外(`idle_check_cmd`が`-`)としている。カスタムモデルを別途保有している場合は、当該モデルの起動状態を個別に確認する。
+- `describe-budget`と`describe-notifications-for-budget`の実行には、対象AWSアカウントで`budgets:ViewBudget`権限が必要。権限不足の場合はエラーで停止するため、事前にIAMポリシーを確認する。
+- 本手順は棚卸しと記録・起票までを範囲とし、遊休リソースの削除や予算設定の変更といった是正の実施自体は、起票先での承認プロセスを経てから行う。

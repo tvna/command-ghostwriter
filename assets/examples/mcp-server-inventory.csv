@@ -1,0 +1,4 @@
+server_name,process_name,listen_port,exposed_tools,auth_key_env,key_expiry,decision,ledger_path
+github-mcp,mcp-server-github,8081,"issue_write,pull_request_read,search_code",MCP_GITHUB_TOKEN,2026-09-30,継続,/var/log/mcp/server_inventory.csv
+slack-mcp,mcp-server-slack,8082,"send_message,list_channels",MCP_SLACK_TOKEN,2026-08-01,停止対象,/var/log/mcp/server_inventory.csv
+fs-readonly-mcp,mcp-server-filesystem,8083,"read_file,list_dir",-,-,継続,/var/log/mcp/server_inventory.csv

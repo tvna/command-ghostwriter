@@ -1,0 +1,9 @@
+base_model_repo: meta-llama/Meta-Llama-3.1-8B-Instruct
+adapter_repo: example-org/llama-3.1-8b-sales-support-lora
+base_model_dir: /data/hf-models/Meta-Llama-3.1-8B-Instruct
+adapter_dir: /data/lora-adapters/sales-support-lora
+merged_model_dir: /data/merged-models/llama-3.1-8b-sales-support
+work_dir: /data/lora-merge-work
+llama_cpp_dir: /opt/llama.cpp
+lora_gguf_path: /data/gguf-build/sales-support-lora-f16.gguf
+compare_prompt: 新製品の問い合わせに対する返信メールの書き出しを1文で作成してください。

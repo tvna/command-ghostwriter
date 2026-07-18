@@ -1,0 +1,5 @@
+target_label,target_type,model_name,probes,generations,risk_level
+support-chat-gpt4o,openai,gpt-4o-mini,dan,5,high
+internal-assist-llama3,huggingface,meta-llama/Meta-Llama-3-8B-Instruct,promptinject,5,high
+code-helper-starcoder,huggingface,bigcode/starcoder2-15b,encoding,3,medium
+faq-bot-gpt35,openai,gpt-3.5-turbo,leakreplay,5,medium

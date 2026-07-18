@@ -1,0 +1,110 @@
+# プロンプトインジェクション被害のインシデント対応
+
+検知されたプロンプトインジェクションの疑いに対し、初動確認 → 封じ込め → 証跡保全 → 手口分析とガードレール更新 → 恒久対策の報告までを一気通貫で行います。
+
+## 目的
+
+プロンプトインジェクションの検知アラートから、影響範囲の特定・該当エンドポイントの封じ込め・証跡保全・ガードレール更新・再発防止報告までを、対応の抜け漏れなく実施できるようになることを目指します。
+
+## 用語解説
+
+- **プロンプトインジェクション**: LLMへの入力に悪意ある指示を混入させ、システムプロンプトの上書きやツール誤起動、機密情報の引き出しなどを狙う攻撃手法
+- **ガードレール**: 入力・出力を検査し、危険なプロンプトや応答を検知・遮断する防御機構(フィルタ・ブロックリスト等)
+- **封じ込め(コンテインメント)**: 被害拡大を防ぐため、影響を受けたエンドポイントやサービスを一時停止・制限する初動対応
+- **証跡保全**: 調査に必要な監査ログ・プロンプト履歴を改変せずハッシュ付きで保存すること
+- **恒久対策**: 同じ手口による再発を防ぐための、ガードレール更新やルール追加などの恒久的な対応
+
+## シナリオ設定
+
+監視基盤(Alertmanager)が、以下{{ csv_rows | length }}件のプロンプトインジェクション疑いアラートを検知しました。
+
+| alert_id | endpoint | technique_category | severity | guardrail_triggered |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["alert_id"] }} | {{ r["endpoint"] }} | {{ r["technique_category"] }} | {{ r["severity"] }} | {{ r["guardrail_triggered"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 検知アラートの内容を確認する
+
+```bash
+{% for r in csv_rows %}curl -s http://localhost:9093/api/v2/alerts | jq --arg id "{{ r["alert_id"] }}" '.[] | select(.labels.alert_id == $id)'
+echo "[{{ r["severity"] }}] {{ r["alert_id"] }} endpoint={{ r["endpoint"] }} technique={{ r["technique_category"] }} detected_at={{ r["detected_at"] }} guardrail_triggered={{ r["guardrail_triggered"] }}"
+{% endfor %}```
+
+### 2. 影響範囲を特定する
+
+該当エンドポイントへの直近のアクセスを洗い出し、他に同一手口の呼び出しがなかったかを確認します。
+
+```bash
+{% for r in csv_rows %}sudo grep {{ r["endpoint"] }} {{ r["log_dir"] }}/access.log | tail -n 20
+{% endfor %}```
+
+### 3. 該当エンドポイント・機能を一時停止する
+
+ガードレールで遮断できなかったもの(`guardrail_triggered` が `false`)は直ちに停止し、既に遮断済みのものは継続監視のみとします。
+
+```bash
+{% for r in csv_rows %}{% if r["guardrail_triggered"] == "false" %}sudo systemctl stop {{ r["backing_service"] }}
+sudo systemctl is-active {{ r["backing_service"] }}
+{% else %}echo "{{ r["alert_id"] }}: ガードレールで遮断済みのため {{ r["backing_service"] }} は継続監視のみ"
+{% endif %}{% endfor %}```
+
+### 4. 監査ログとプロンプト履歴を保全する
+
+```bash
+{% for r in csv_rows %}sudo mkdir -p /var/forensics/{{ r["alert_id"] }}
+sudo tar -czf /var/forensics/{{ r["alert_id"] }}/prompt-history.tar.gz {{ r["log_dir"] }}
+sudo sha256sum /var/forensics/{{ r["alert_id"] }}/prompt-history.tar.gz | sudo tee /var/forensics/{{ r["alert_id"] }}/prompt-history.tar.gz.sha256
+{% endfor %}```
+
+### 5. 悪用手口を分析しガードレールを更新する
+
+保全した履歴から実際の指示文を確認し、手口分類をガードレールのブロックリストに追加して反映します。
+
+```bash
+{% for r in csv_rows %}echo "=== {{ r["alert_id"] }} ({{ r["technique_category"] }}) ==="
+sudo tar -xzOf /var/forensics/{{ r["alert_id"] }}/prompt-history.tar.gz | grep -iE "ignore (all )?previous instructions|disregard (the )?system prompt"
+{% endfor %}
+{% for r in csv_rows %}echo "{{ r["technique_category"] }}" | sudo tee -a /etc/llm-guardrail/blocklist-categories.txt
+{% endfor %}
+sudo systemctl reload llm-guardrail.service
+```
+
+### 6. 恒久対策と再発防止報告を作成する
+
+ガードレール更新後、手順3で停止したサービスを再開し、alert_idごとの報告書を作成します。
+
+```bash
+{% for r in csv_rows %}{% if r["guardrail_triggered"] == "false" %}sudo systemctl start {{ r["backing_service"] }}
+sudo systemctl is-active {{ r["backing_service"] }}
+{% endif %}{% endfor %}
+sudo mkdir -p /var/forensics/reports
+{% for r in csv_rows %}cat <<EOF | sudo tee -a /var/forensics/reports/incident-{{ r["alert_id"] }}.md
+# インシデント報告: {{ r["alert_id"] }}
+
+- 検知日時: {{ r["detected_at"] }}
+- 対象エンドポイント: {{ r["endpoint"] }}
+- 対象サービス: {{ r["backing_service"] }}
+- 手口分類: {{ r["technique_category"] }}
+- 重要度: {{ r["severity"] }}
+- ガードレール遮断: {{ r["guardrail_triggered"] }}
+- 恒久対策: ブロックリストへの手口分類追加、および該当サービスの再開確認
+EOF
+{% endfor %}```
+
+## 動作確認
+
+- Alertmanagerで該当 `alert_id` のアラート詳細が確認できたこと
+- `guardrail_triggered` が `false` の対象について、封じ込め時点で `systemctl is-active` が停止状態(`inactive`)を示したこと
+- 各 `alert_id` について `/var/forensics/<alert_id>/prompt-history.tar.gz` とその `.sha256` が保存されていること
+- `/etc/llm-guardrail/blocklist-categories.txt` に全ての `technique_category` が追加され、`llm-guardrail.service` のreloadが成功していること
+- 手順3で停止したサービスがガードレール更新後に再開され、`systemctl is-active` で稼働中(`active`)と確認できること
+- 各 `alert_id` の報告書 `/var/forensics/reports/incident-<alert_id>.md` が作成されていること
+
+## 注意事項
+
+- 一時停止は影響範囲を最小化するため、`guardrail_triggered` が `false` の対象サービスに限定し、無関係なサービスまで止めない。
+- プロンプト履歴には利用者の入力が含まれる可能性があるため、保全先(`/var/forensics/`)へのアクセスは調査担当者に限定する。
+- ガードレールのブロックリスト更新は誤検知(正常なリクエストの過剰ブロック)を招く可能性があるため、更新・再開後は正常系のリクエストでも動作確認する。
+- 既存の `forensic-log-preservation`(汎用の証跡保全手順)や `ssh-bruteforce-response`(侵入対策の一次対応)とは異なり、本手順はLLM特有のプロンプトインジェクション被害の封じ込めとガードレール更新に焦点を当てる。

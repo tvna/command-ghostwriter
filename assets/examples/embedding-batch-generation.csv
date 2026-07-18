@@ -1,0 +1,4 @@
+corpus_id,corpus_name,corpus_path,text_field,embedding_model,embedding_dim,output_path,collection_name,vector_db_endpoint
+product_docs,製品ドキュメント,/data/corpus/product_docs.jsonl,text,intfloat/multilingual-e5-large,1024,/data/embeddings/product_docs.jsonl,product_docs_embeddings,http://localhost:6333
+faq,FAQ集,/data/corpus/faq.jsonl,question,intfloat/multilingual-e5-large,1024,/data/embeddings/faq.jsonl,faq_embeddings,http://localhost:6333
+support_tickets,サポートチケット,/data/corpus/support_tickets.jsonl,body,intfloat/multilingual-e5-large,1024,/data/embeddings/support_tickets.jsonl,support_tickets_embeddings,http://localhost:6333

@@ -1,0 +1,106 @@
+# Gitによるプロンプトテンプレートの版管理
+
+プロンプトテンプレート群をGitリポジトリで一元管理し、リポジトリ作成からタグ付け・差分確認・配布までを一巡します。
+
+## 目的
+
+Gitのタグを使った版管理の考え方を理解し、複数のプロンプトテンプレートを一つのリポジトリで安全に配布・差分確認できるようになることを目指します。
+
+## 用語解説
+
+- **リポジトリ**: プロンプトテンプレート群をGitで管理する入れ物。`{{ csv_rows[0]["repo_url"] }}` を共有リモートとして使う
+- **タグ(annotated tag)**: `git tag -a` で作成する、メッセージ付きの不変な版マーカー。ブランチと異なり指し先が動かないため、配布用の版指定に向く
+- **git diff <タグ1> <タグ2>**: 2つのタグ(コミット)間の差分を表示するコマンド。テンプレートの変更内容をレビューする際に使う
+- **git archive --remote**: リモートリポジトリの特定タグ・特定パスの内容をアーカイブとして取り出すコマンド。リポジトリ全体をcloneせず、特定テンプレートだけを配布したい場合に使う
+- **一覧(index)ファイル**: リポジトリ内にテンプレートの一覧表を置き、新規登録や棚卸しの際の一元的な参照先とする運用
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 件のプロンプトテンプレートを、Gitリポジトリ `{{ csv_rows[0]["repo_url"] }}`(ローカル作業ディレクトリ: `{{ csv_rows[0]["local_repo_dir"] }}`)で版管理します。今回のリリースタグは `{{ csv_rows[0]["release_tag"] }}`、直前のタグは `{{ csv_rows[0]["previous_tag"] }}` です。
+
+| template_id | category | filename | description |
+|---|---|---|---|
+{% for r in csv_rows %}| {{ r["template_id"] }} | {{ r["category"] }} | {{ r["filename"] }} | {{ r["description"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. リポジトリとディレクトリ構成を作成する
+
+```bash
+mkdir -p {{ csv_rows[0]["local_repo_dir"] }}
+cd {{ csv_rows[0]["local_repo_dir"] }}
+git init
+git remote add origin {{ csv_rows[0]["repo_url"] }}
+{% for r in csv_rows %}mkdir -p templates/{{ r["category"] }}
+{% endfor %}```
+
+カテゴリごとにディレクトリを分け、`templates/<category>/<filename>` の形式でテンプレートを配置する構成にします。
+
+### 2. テンプレート一覧を登録する
+
+```bash
+cd {{ csv_rows[0]["local_repo_dir"] }}
+cat > templates/index.md <<'EOF'
+# プロンプトテンプレート一覧
+
+| template_id | category | filename | description |
+|---|---|---|---|
+{% for r in csv_rows %}| {{ r["template_id"] }} | {{ r["category"] }} | {{ r["filename"] }} | {{ r["description"] }} |
+{% endfor %}EOF
+{% for r in csv_rows %}cat > templates/{{ r["category"] }}/{{ r["filename"] }} <<'EOF'
+# {{ r["template_id"] }}
+
+{{ r["description"] }}
+EOF
+{% endfor %}```
+
+`templates/index.md` が一元管理用の一覧台帳、各カテゴリ配下のファイルが個々のテンプレート本体です。
+
+### 3. 変更をコミットしタグを付与する
+
+```bash
+cd {{ csv_rows[0]["local_repo_dir"] }}
+git add templates/
+git commit -m "Add prompt templates ({{ csv_rows | length }} files)"
+git tag -a {{ csv_rows[0]["release_tag"] }} -m "Release {{ csv_rows[0]["release_tag"] }}"
+git push origin main
+git push origin {{ csv_rows[0]["release_tag"] }}
+```
+
+`-a` 付きのannotated tagを使うことで、誰がいつどのような意図で版を切ったかをタグ自体のメッセージに残せます。
+
+### 4. git diffで版間差分を確認する
+
+```bash
+cd {{ csv_rows[0]["local_repo_dir"] }}
+git fetch --tags
+git diff {{ csv_rows[0]["previous_tag"] }} {{ csv_rows[0]["release_tag"] }} --stat
+{% for r in csv_rows %}git diff {{ r["previous_tag"] }} {{ r["release_tag"] }} -- templates/{{ r["category"] }}/{{ r["filename"] }}
+{% endfor %}```
+
+`--stat` で変更ファイル数・行数の全体像を確認し、個別テンプレートごとの差分で内容の変化を確認します。
+
+### 5. 利用側にタグ指定で取得させる
+
+```bash
+git clone --branch {{ csv_rows[0]["release_tag"] }} --depth 1 {{ csv_rows[0]["repo_url"] }} prompt-templates-{{ csv_rows[0]["release_tag"] }}
+```
+
+特定のテンプレート1件だけを取得したい場合は、リポジトリ全体をcloneせずに `git archive --remote` で該当パスのみを取り出します。
+
+```bash
+{% for r in csv_rows %}git archive --remote={{ r["repo_url"] }} {{ r["release_tag"] }} templates/{{ r["category"] }}/{{ r["filename"] }} | tar -x
+{% endfor %}```
+
+## 動作確認
+
+- `git tag` の一覧に `{{ csv_rows[0]["release_tag"] }}` が含まれていること
+- `git diff {{ csv_rows[0]["previous_tag"] }} {{ csv_rows[0]["release_tag"] }} --stat` で、今回登録した {{ csv_rows | length }} 件のテンプレートファイルが変更点として表示されること
+- `git clone --branch {{ csv_rows[0]["release_tag"] }}` で取得したディレクトリに、{{ csv_rows | length }} 件全てのテンプレートファイルと `templates/index.md` が揃っていること
+
+## 注意事項
+
+- annotated tag(`-a`)は一度配布したら書き換えない前提で運用する。`git tag -f` での上書きは、既にそのタグを取得済みの利用側との内容不一致を招く。
+- `git archive --remote` はサーバ側でリモート経由のアーカイブ取得(git-daemonの`--export-all`や、ssh越しの`git-upload-archive`実行許可)が有効になっている必要がある。無効な環境では失敗するため、事前にリポジトリのホスティング設定を確認する。
+- プロンプトテンプレートに機密情報(内部システム名・個人情報・APIキー等)を書き込んでいないか、コミット前にレビューする。

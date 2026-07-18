@@ -1,0 +1,97 @@
+# W&Bセルフホストサーバの構築と実験可視化
+
+Dockerで `wandb/local` コンテナを起動し、初期設定・ユーザー登録・実験ログの送信確認を行います。
+
+## 目的
+
+W&B(Weights & Biases)のセルフホストサーバをDocker上に構築し、外部SaaSに実験データを送らずに実験管理・可視化を行える状態にすることを目指します。
+
+## 用語解説
+
+- **wandb/local**: W&B社が提供するセルフホストサーバのDockerイメージ。Webコンソールと実験データストアを1コンテナで提供する
+- **ライセンスキー**: セルフホストサーバの機能を有効化するために管理コンソールへ登録する鍵。`wandb.ai/authorize` から取得する
+- **Project**: 実験(Run)をグルーピングする単位。`{{ default_project }}` のような名前で管理する
+- **Run**: 1回の実験実行を表すW&Bの記録単位。メトリクスやログがひも付く
+- **WANDB_API_KEY**: クライアントがサーバへ認証するための個人アクセストークン。ユーザーごとに発行する
+- **データボリューム**: コンテナ内のメタデータ・アーティファクトを永続化するホスト側ディレクトリ。`{{ data_volume_path }}` を用いる
+
+## シナリオ設定
+
+コンテナ名 `{{ container_name }}` で `{{ wandb_image }}` イメージを起動し、ホストの `{{ http_port }}` 番ポートで公開します。データ永続化ボリュームは `{{ data_volume_path }}`、接続先URLは `{{ wandb_host_url }}` とします。管理者アカウントは `{{ admin_email }}`、既定プロジェクトは `{{ default_project }}` です。ライセンス方針は「{{ license_note }}」、バックアップ方針は「{{ backup_schedule_note }}」です。
+
+## 手順
+
+### 1. wandb/localコンテナを起動する
+
+```bash
+sudo mkdir -p {{ data_volume_path }}
+docker run -d --name {{ container_name }} --restart unless-stopped -p {{ http_port }}:8080 -v {{ data_volume_path }}:/vol {{ wandb_image }}
+docker ps --filter "name={{ container_name }}"
+```
+
+### 2. 初期ユーザーとライセンスを設定する
+
+```bash
+curl -sf {{ wandb_host_url }}
+```
+
+上記でHTTP応答が返ることを確認したうえで、ブラウザで `{{ wandb_host_url }}` にアクセスし、セットアップウィザードから管理者アカウント(メール: `{{ admin_email }}`)を作成します。続けて管理コンソールでライセンスキーを登録します。ライセンス方針: 「{{ license_note }}」。
+
+### 3. wandb loginによる接続確認を行う
+
+```bash
+export WANDB_BASE_URL={{ wandb_host_url }}
+export WANDB_API_KEY="<User Settingsページで発行したPersonal API Key>"
+wandb login --host {{ wandb_host_url }} --relogin
+wandb verify
+```
+
+`{{ api_key_note }}`。`wandb verify` が全チェック項目でパスすることを確認します。
+
+### 4. 実験ログの送信テストを行う
+
+```bash
+export WANDB_BASE_URL={{ wandb_host_url }}
+python3 - <<'PY'
+import wandb
+
+run = wandb.init(project="{{ default_project }}")
+wandb.log({"accuracy": 0.91, "loss": 0.12})
+wandb.finish()
+PY
+```
+
+### 5. データ永続化とバックアップを設定する
+
+```bash
+sudo mkdir -p {{ backup_dest_path }}
+docker stop {{ container_name }}
+tar czf {{ backup_dest_path }}/wandb-backup-$(date +%Y%m%d).tar.gz -C {{ data_volume_path }} .
+docker start {{ container_name }}
+```
+
+定期実行は `/etc/cron.d` に登録します。
+
+```bash
+sudo tee /etc/cron.d/wandb-backup <<'EOF'
+0 3 * * * root docker stop {{ container_name }} && tar czf {{ backup_dest_path }}/wandb-backup-$(date +\%Y\%m\%d).tar.gz -C {{ data_volume_path }} . && docker start {{ container_name }}
+EOF
+```
+
+バックアップ方針: 「{{ backup_schedule_note }}」。
+
+## 動作確認
+
+- `docker ps --filter "name={{ container_name }}"` で `{{ container_name }}` がUp状態であること
+- ブラウザで `{{ wandb_host_url }}` にアクセスし、ログイン画面またはダッシュボードが表示されること
+- `wandb verify` の全チェック項目がパスすること
+- W&B UI上のプロジェクト `{{ default_project }}` に手順4で送信したRunが1件表示され、`accuracy` と `loss` のメトリクスが確認できること
+- `{{ backup_dest_path }}` に当日日付のバックアップアーカイブが生成されていること
+
+## 注意事項
+
+- ライセンス方針(「{{ license_note }}」)の範囲を超える利用(ユーザー数・組織数の上限超過など)がないか定期的に確認する。
+- APIキーは「{{ api_key_note }}」の方針を守り、シェル履歴やコミット、ログに平文で残さない。
+- バックアップ実施中はコンテナを停止するためダッシュボードが一時的に利用不可になる。実行前に利用者へ周知するか、業務影響の小さい時間帯(「{{ backup_schedule_note }}」)に限定する。
+- `{{ data_volume_path }}` にはメタデータとアーティファクトが蓄積され続けるため、容量を定期的に確認し、不要な古いアーティファクトの削除方針を別途検討する。
+- `{{ wandb_host_url }}` への到達性は社内DNS・ファイアウォール設定に依存するため、本手順の実行前に別途疎通確認を行う。

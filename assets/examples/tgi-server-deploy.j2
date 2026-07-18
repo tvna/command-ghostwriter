@@ -1,0 +1,115 @@
+# TGIによるLLM推論サーバの構築と運用 — {{ model_repo }}
+
+Hugging Face **text-generation-inference (TGI)** コンテナを Docker Compose で起動し、量子化設定を反映した状態で生成APIの動作確認を行います。
+
+## 目的
+
+TGIの起動オプション(量子化方式・シャード数・トークン上限)がGPUメモリ使用量とAPI応答に与える影響を理解し、Docker Composeで安全に構築・調整・運用できるようになることを目指します。
+
+## 用語解説
+
+- **TGI (text-generation-inference)**: Hugging Faceが開発するLLM推論サーバ実装。continuous batchingやFlash Attentionに対応し、OpenAI互換ではない独自の`/generate`系APIを提供する
+- **quantize**: 起動時に指定する量子化方式。`bitsandbytes-nf4`/`bitsandbytes-fp4`/`awq`/`gptq`/`eetq`/`fp8`などを指定でき、GPUメモリ使用量とレイテンシのトレードオフを調整する
+- **num-shard**: モデルを分割して複数GPUで並列実行する際の分割数。搭載GPU数を超えて指定すると起動に失敗する
+- **max-input-tokens / max-total-tokens**: 1リクエストあたりの入力上限と、入力+生成を合わせた合計上限。合計上限を上げるほどKVキャッシュのメモリ消費が増える
+- **shm_size**: コンテナに割り当てる共有メモリサイズ。マルチGPUでのシャーディング時に不足すると通信エラーの原因になる
+
+## シナリオ設定
+
+モデル `{{ model_repo }}` を量子化方式 `{{ quantize_method }}` で読み込み、イメージ `{{ tgi_image }}` のコンテナとして起動します。ホスト側ポート `{{ host_port }}` をコンテナの `{{ container_port }}` にマッピングし、モデルキャッシュは `{{ model_cache_path }}` に永続化します。`num-shard={{ num_shard }}`、`max-input-tokens={{ max_input_tokens }}`、`max-total-tokens={{ max_total_tokens }}` とし、プロジェクト名は `{{ project_name }}` とします。
+
+## 手順
+
+### 1. モデルと量子化方式を選定する
+
+```bash
+nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv
+export MODEL_REPO={{ model_repo }}
+export QUANTIZE_METHOD={{ quantize_method }}
+echo "model=$MODEL_REPO quantize=$QUANTIZE_METHOD num_shard={{ num_shard }}"
+```
+
+空きVRAMと `{{ num_shard }}` 台分のGPU搭載数を確認したうえで、`{{ quantize_method }}` がモデル `{{ model_repo }}` に対応した量子化方式であることを事前に確認します。
+
+### 2. docker-compose.ymlを記述する
+
+```bash
+mkdir -p ~/{{ project_name }}
+sudo mkdir -p {{ model_cache_path }}
+cat > ~/{{ project_name }}/docker-compose.yml <<'EOF'
+services:
+  tgi:
+    image: {{ tgi_image }}
+    container_name: {{ project_name }}
+    ports:
+      - "{{ host_port }}:{{ container_port }}"
+    volumes:
+      - {{ model_cache_path }}:/data
+    shm_size: "1g"
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+    command: >
+      --model-id {{ model_repo }}
+      --quantize {{ quantize_method }}
+      --num-shard {{ num_shard }}
+      --max-input-tokens {{ max_input_tokens }}
+      --max-total-tokens {{ max_total_tokens }}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+EOF
+```
+
+`HF_TOKEN` はコンテナ起動時の環境変数として渡し、`docker-compose.yml` 本体には書き込みません。
+
+### 3. コンテナを起動しログを確認する
+
+```bash
+cd ~/{{ project_name }}
+export HF_TOKEN="$HF_TOKEN"
+docker compose -p {{ project_name }} up -d
+docker compose -p {{ project_name }} logs -f tgi --tail 50
+```
+
+ログに `Connected` が出力され、モデル `{{ model_repo }}` のロードと量子化方式 `{{ quantize_method }}` の適用がエラーなく完了することを確認します。
+
+### 4. 生成APIへリクエストを送信する
+
+```bash
+curl -i http://127.0.0.1:{{ host_port }}/health
+curl -s http://127.0.0.1:{{ host_port }}/info
+curl -s http://127.0.0.1:{{ host_port }}/generate \
+  -H "Content-Type: application/json" \
+  -d '{"inputs": "こんにちは、自己紹介してください", "parameters": {"max_new_tokens": 64}}'
+```
+
+`/health` が200を返し、`/generate` の応答に生成テキストを含むJSONが返ることを確認します。
+
+### 5. 起動パラメータを調整する
+
+```bash
+docker compose -p {{ project_name }} up -d --force-recreate tgi
+docker compose -p {{ project_name }} logs tgi --tail 30
+nvidia-smi --query-gpu=memory.used,memory.total --format=csv
+```
+
+VRAM使用量が搭載量に対して余裕がない場合は `{{ quantize_method }}` をより圧縮率の高い方式に変更するか、`max-total-tokens`(現在値 `{{ max_total_tokens }}`)を下げてから`docker-compose.yml`を編集し、`--force-recreate`で確実に反映させます。
+
+## 動作確認
+
+- `docker compose -p {{ project_name }} ps` で `tgi` サービスが `running` 状態であること
+- `curl http://127.0.0.1:{{ host_port }}/health` が200を返すこと
+- `curl http://127.0.0.1:{{ host_port }}/generate` の応答に生成されたテキストが含まれること
+- `nvidia-smi` のメモリ使用量が搭載VRAMを超えずOOMしていないこと
+
+## 注意事項
+
+- `HF_TOKEN` はシェル履歴やComposeファイルに直書きせず、環境変数またはシークレットストア経由で渡す。gated modelを取得する場合は事前にライセンス同意が必要。
+- `num-shard={{ num_shard }}` を変更する場合、搭載GPU数を上回る値を指定すると起動に失敗する。
+- `--quantize {{ quantize_method }}` はモデルによって対応状況が異なり、`awq`/`gptq`は事前量子化済みモデルでないと使用できない。
+- `max-total-tokens={{ max_total_tokens }}` を大きくするとKVキャッシュのメモリ消費が増え、OOMしやすくなる。
+- `shm_size` が小さいとマルチGPUでのシャーディング時に共有メモリ不足で通信エラーになることがある。

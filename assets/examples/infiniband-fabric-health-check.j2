@@ -1,0 +1,94 @@
+# InfiniBandファブリックの定期健全性点検
+
+`ibstat`・`iblinkinfo`・`ibdiagnet` を使い、対象ノード・スイッチのポート状態とリンク速度・幅を点検したうえで、エラーカウンタを記録して前回値と比較し、劣化ポートを早期に特定します。
+
+## 目的
+
+`ibstat`/`ibstatus`（ホスト単体のポート状態）、`iblinkinfo`（ファブリック全体のリンク一覧）、`ibdiagnet`（ファブリック全体診断）の役割の違いを理解し、対象ノード・スイッチ一覧に基づいて定期点検を実施したうえで、エラーカウンタを前回値と比較して劣化ポートを継続的に検知できるようになることを目指します。
+
+## 用語解説
+
+- **HCA (Host Channel Adapter)**: サーバ側でInfiniBandファブリックに接続するアダプタ。本手順では `mlx5_0` のような `ib_device` 名で識別する
+- **LID (Local Identifier)**: サブネット内でポートを一意に識別する番号。`opensm` が自動的に割り当てる
+- **リンク幅 (Link Width)**: リンクを構成するレーン数。`1X`/`4X`/`8X`/`12X` などで表される
+- **リンクレート (Link Rate)**: SDR/QDR/FDR/EDR/HDR/NDRなど世代に応じたリンクの転送速度(Gb/s)
+- **SymbolErrorCounter**: 物理層で検出されたビット誤りの累積カウンタ。継続的な増加はケーブルやトランシーバの劣化を示す代表的な指標
+- **perfquery**: 指定したLID・ポートのPMA(Performance Management Agent)カウンタを取得するコマンド
+- **ibdiagnet**: ファブリック全体のトポロジ・設定・カウンタを一括診断し、レポートを出力するツール
+
+## シナリオ設定
+
+今回の定期点検対象は次の {{ csv_rows | length }} 件（ノード・スイッチ）です。
+
+| node_name | node_type | ib_device | port_num | lid | expected_rate | expected_width | prev_symbol_errors |
+|---|---|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["node_name"] }} | {{ r["node_type"] }} | {{ r["ib_device"] }} | {{ r["port_num"] }} | {{ r["lid"] }} | {{ r["expected_rate"] }} | {{ r["expected_width"] }} | {{ r["prev_symbol_errors"] }} |
+{% endfor %}
+
+`prev_symbol_errors` は前回点検時に記録した `SymbolErrorCounter` の値です。今回の点検ではこの値と現在値を比較し、増加しているポートを劣化候補として洗い出します。
+
+## 手順
+
+### 1. 対象ノード・スイッチ一覧を確認する
+
+```bash
+sudo ibnetdiscover | grep -E "^Ca|^Switch"
+```
+
+出力に含まれるノード・スイッチ数と、上記の点検台帳（{{ csv_rows | length }}件）を突合し、台帳にない未知のノードや、台帳にあるのに検出されないノードがないかを確認します。
+
+### 2. ibstat/ibstatusでポート状態を点検する
+
+```bash
+{% for r in csv_rows %}{% if r["node_type"] == "host" %}ssh {{ r["node_name"] }} sudo ibstat {{ r["ib_device"] }} {{ r["port_num"] }}
+ssh {{ r["node_name"] }} sudo ibstatus {{ r["ib_device"] }}
+{% endif %}{% endfor %}```
+
+各ホストで `State: Active` と `Physical state: LinkUp` になっていることを確認します。スイッチは `ibstat`/`ibstatus` の対象外のため、手順3の `iblinkinfo` で確認します。
+
+### 3. iblinkinfoでリンク速度・幅を確認する
+
+```bash
+sudo iblinkinfo > /tmp/iblinkinfo_$(date +%Y%m%d).log
+{% for r in csv_rows %}grep -A 1 "{{ r["node_name"] }}" /tmp/iblinkinfo_$(date +%Y%m%d).log
+{% endfor %}```
+
+各ノード・スイッチについて、表示されたリンクレートとリンク幅が台帳の `expected_rate`/`expected_width` と一致しているかを確認します。一致しない場合や `Down` 表示の場合は、ケーブル・トランシーバ・スイッチポートの点検対象として記録します。
+
+### 4. ibdiagnetでファブリック全体を診断する
+
+```bash
+sudo mkdir -p /var/log/ibdiagnet
+sudo ibdiagnet -o /var/log/ibdiagnet/$(date +%Y%m%d)
+```
+
+出力ログに `-E-` で始まるエラー行がないこと、検出ノード数が台帳の {{ csv_rows | length }} 件と整合していることを確認します。
+
+### 5. エラーカウンタを記録し前回値と比較する
+
+```bash
+sudo mkdir -p /var/log/ib-health
+{% for r in csv_rows %}{% if r["node_type"] == "host" %}CURRENT_{{ loop.index }}=$(sudo perfquery {{ r["lid"] }} {{ r["port_num"] }} | grep SymbolErrorCounter | tr -d '.' | awk -F: '{print $2}')
+echo "{{ r["node_name"] }} (lid {{ r["lid"] }} port {{ r["port_num"] }}): prev={{ r["prev_symbol_errors"] }} current=$CURRENT_{{ loop.index }}"
+if [ "$CURRENT_{{ loop.index }}" -gt {{ r["prev_symbol_errors"] }} ]; then
+  echo "劣化疑い: {{ r["node_name"] }} のSymbolErrorCounterが前回値({{ r["prev_symbol_errors"] }})から増加しています"
+fi
+echo "$(date +%Y-%m-%d),{{ r["node_name"] }},{{ r["lid"] }},{{ r["port_num"] }},$CURRENT_{{ loop.index }}" | sudo tee -a /var/log/ib-health/symbol-error-history.csv
+{% endif %}{% endfor %}```
+
+記録した `symbol-error-history.csv` の最新行が、次回点検時の `prev_symbol_errors` の元データになります。
+
+## 動作確認
+
+- `ibnetdiscover` の検出結果に台帳（{{ csv_rows | length }}件）のノード・スイッチがすべて含まれていること
+- 対象ホストの `ibstat` が `State: Active`、`Physical state: LinkUp` であること
+- `iblinkinfo` のリンクレート・リンク幅が各ノードの `expected_rate`/`expected_width` と一致していること
+- `ibdiagnet` のレポートに `-E-` エラーが含まれていないこと
+- `perfquery` で取得した `SymbolErrorCounter` の現在値が `prev_symbol_errors` を上回るポートがないこと（上回った場合は劣化候補として個別調査すること）
+
+## 注意事項
+
+- `ibdiagnet` はファブリック全体にトラフィックを発生させて診断するため、大規模ジョブの実行中は避け、メンテナンスウィンドウ内で実施することが望ましい。
+- `SymbolErrorCounter` を含むPMAカウンタは、原因を特定しないまま `perfquery -R` 等でリセットすると前回値との比較ができなくなる。本手順では記録のみを行い、リセットは対象外とする。
+- 単発の非ゼロ値だけで即座に部品交換を判断せず、`symbol-error-history.csv` に蓄積した推移（増加傾向が続くか）を見て劣化を判断する。
+- スイッチ側ポートは本手順の `perfquery` 点検対象に含めていない。スイッチ側の劣化が疑われる場合は、手順4の `ibdiagnet` レポートおよび対象スイッチへの個別ログインで追加調査する。

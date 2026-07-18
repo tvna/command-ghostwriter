@@ -1,0 +1,10 @@
+dataset_name: "product-image-caption-pairs"
+source_image_dir: "/data/raw/images"
+source_caption_dir: "/data/raw/captions"
+staging_dir: "/data/staging/webdataset"
+naming_prefix: "sample"
+shard_output_dir: "/data/processed/webdataset"
+shard_basename: "product-pairs"
+samples_per_shard: 1000
+expected_shard_count: 42
+verify_log_path: "/data/processed/webdataset/shard_verify.log"

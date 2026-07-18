@@ -1,0 +1,9 @@
+node_hostname = "gpu-node-03"
+gpu_count = 8
+expected_nvlink_per_gpu = 12
+topology_note = "NVSwitchを介したフルメッシュ接続(NV12)を想定"
+fabricmanager_package = "nvidia-fabricmanager-535"
+fabricmanager_service = "nvidia-fabricmanager"
+driver_version_note = "ドライバとFabric Managerのメジャーバージョン(例: 535系ドライバには535系のFabric Manager)を一致させること"
+bandwidth_test_binary_path = "/usr/local/cuda/samples/bin/x86_64/linux/release/p2pBandwidthLatencyTest"
+min_bandwidth_gbps = 300

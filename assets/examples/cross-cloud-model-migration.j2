@@ -1,0 +1,113 @@
+# クラウド間でのモデル成果物の移行
+
+`aws s3`・`gcloud storage`・`azcopy`を転送元/転送先のクラウドに応じて使い分け、モデル成果物をローカルステージング経由で別クラウドへ移行し、チェックサムによる整合性検証と転送元の後片付けまでを行う手順です。
+
+## 目的
+
+クラウドプロバイダごとに異なるCLIツールの取得・アップロード操作の違いを理解し、複数クラウドにまたがるモデル成果物の移行を、整合性検証と転送元のアクセス権整理まで含めて安全に実施できるようになることを目指します。
+
+## 用語解説
+
+- **モデル成果物**: 学習済みの重みファイルや設定ファイルなど、モデルとして配布・共有される一連のファイル群。ここではクラウドストレージ上のプレフィックス(ディレクトリ相当)単位で扱う
+- **aws s3 sync**: AWSのオブジェクトストレージS3とローカル/S3間で差分同期を行うAWS CLIのサブコマンド
+- **gcloud storage rsync**: Google Cloud Storageとローカル/GCS間で差分同期を行うgcloud CLIのサブコマンド(gsutilの後継)
+- **azcopy**: Azure Blob Storageとの間でファイルを高速転送する専用CLIツール。SAS(Shared Access Signature)トークンによる認証を用いる
+- **ローカルステージング**: クラウド間の直接転送に対応しない組み合わせを扱うため、一度ローカルディスクを経由してモデル成果物を取得し、取得したファイルを転送先クラウドへ再アップロードする方式
+- **チェックサムマニフェスト**: 転送対象ファイル群のsha256ハッシュ値の一覧。転送前後で比較し、欠落や破損がないことを確認する材料にする
+
+## シナリオ設定
+
+以下 {{ csv_rows | length }} 件のモデル成果物をクラウド間で移行します。
+
+| model_name | src_cloud | src_uri | dst_cloud | dst_uri | cleanup_policy |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["model_name"] }} | {{ r["src_cloud"] }} | {{ r["src_uri"] }} | {{ r["dst_cloud"] }} | {{ r["dst_uri"] }} | {{ r["cleanup_policy"] }} |
+{% endfor %}
+
+作業ログは `{{ csv_rows[0]["log_dir"] }}` に記録します。Azure向けのSAS付きクエリ文字列は環境変数`AZURE_SAS_QUERY`(先頭に`?`を含む)として事前にエクスポートしておき、AWS/GCPの認証情報は`aws configure`・`gcloud auth login`で設定済みであることを前提とします。
+
+## 手順
+
+### 1. 移行対象モデルと転送先の一覧を確認する
+
+```bash
+aws --version
+gcloud --version
+azcopy --version
+{% for r in csv_rows %}echo "=== {{ r["model_name"] }} ({{ r["model_id"] }}): {{ r["src_cloud"] }} -> {{ r["dst_cloud"] }} ==="
+{% if r["src_cloud"] == "aws" %}aws s3 ls {{ r["src_uri"] }}
+{% elif r["src_cloud"] == "gcp" %}gcloud storage ls {{ r["src_uri"] }}
+{% elif r["src_cloud"] == "azure" %}azcopy list "{{ r["src_uri"] }}$AZURE_SAS_QUERY"
+{% endif %}
+{% endfor %}```
+
+各行の`src_cloud`に対応するコマンドで、転送元に想定通りのオブジェクトが存在することを先に確認します。存在しない、または空の場合は台帳(`src_uri`)を先に見直します。
+
+### 2. 転送元ストレージからモデル成果物を取得する
+
+```bash
+{% for r in csv_rows %}mkdir -p {{ r["staging_dir"] }}/src
+{% if r["src_cloud"] == "aws" %}aws s3 sync {{ r["src_uri"] }} {{ r["staging_dir"] }}/src
+{% elif r["src_cloud"] == "gcp" %}gcloud storage rsync {{ r["src_uri"] }} {{ r["staging_dir"] }}/src --recursive
+{% elif r["src_cloud"] == "azure" %}azcopy copy "{{ r["src_uri"] }}$AZURE_SAS_QUERY" "{{ r["staging_dir"] }}/src" --recursive
+{% endif %}
+find {{ r["staging_dir"] }}/src -type f -exec sha256sum {} \; | sed "s#{{ r["staging_dir"] }}/src/##" | sort > {{ r["staging_dir"] }}/manifest-src.sha256
+{% endfor %}```
+
+取得直後に、モデルごとの`staging_dir`配下(例: `{{ csv_rows[0]["staging_dir"] }}/manifest-src.sha256`)にsha256のマニフェストを作成し、手順4の整合性検証の基準にします。
+
+### 3. 転送先クラウドのストレージへアップロードする
+
+```bash
+{% for r in csv_rows %}{% if r["dst_cloud"] == "aws" %}aws s3 sync {{ r["staging_dir"] }}/src {{ r["dst_uri"] }}
+{% elif r["dst_cloud"] == "gcp" %}gcloud storage rsync {{ r["staging_dir"] }}/src {{ r["dst_uri"] }} --recursive
+{% elif r["dst_cloud"] == "azure" %}azcopy copy "{{ r["staging_dir"] }}/src" "{{ r["dst_uri"] }}$AZURE_SAS_QUERY" --recursive
+{% endif %}
+{% endfor %}```
+
+アップロード先は`dst_cloud`に応じたコマンドを使い分けます。同一モデルでも`src_cloud`と`dst_cloud`が異なるツールになる組み合わせ(例: gcp -> azure)があるため、行ごとにコマンドが変わる点に注意します。
+
+### 4. チェックサムで整合性を検証する
+
+```bash
+{% for r in csv_rows %}mkdir -p {{ r["staging_dir"] }}/verify
+{% if r["dst_cloud"] == "aws" %}aws s3 sync {{ r["dst_uri"] }} {{ r["staging_dir"] }}/verify
+{% elif r["dst_cloud"] == "gcp" %}gcloud storage rsync {{ r["dst_uri"] }} {{ r["staging_dir"] }}/verify --recursive
+{% elif r["dst_cloud"] == "azure" %}azcopy copy "{{ r["dst_uri"] }}$AZURE_SAS_QUERY" "{{ r["staging_dir"] }}/verify" --recursive
+{% endif %}
+find {{ r["staging_dir"] }}/verify -type f -exec sha256sum {} \; | sed "s#{{ r["staging_dir"] }}/verify/##" | sort > {{ r["staging_dir"] }}/manifest-verify.sha256
+diff {{ r["staging_dir"] }}/manifest-src.sha256 {{ r["staging_dir"] }}/manifest-verify.sha256 && echo "OK: {{ r["model_name"] }} 整合性確認済み" || echo "NG: {{ r["model_name"] }} に差分あり"
+{% endfor %}```
+
+転送先から再取得したファイル群のハッシュ値を`manifest-verify.sha256`として保存し、手順2で作成した`manifest-src.sha256`と`diff`で比較します。`NG`が出た行は手順3のアップロードをやり直し、転送元の削除(手順5)には進みません。
+
+### 5. 転送元の後片付けとアクセス権を整理する
+
+```bash
+{% for r in csv_rows %}{% if r["cleanup_policy"] == "delete" %}{% if r["src_cloud"] == "aws" %}aws s3 rm {{ r["src_uri"] }} --recursive
+{% elif r["src_cloud"] == "gcp" %}gcloud storage rm -r {{ r["src_uri"] }}
+{% elif r["src_cloud"] == "azure" %}azcopy remove "{{ r["src_uri"] }}$AZURE_SAS_QUERY" --recursive
+{% endif %}
+logger -t cross-cloud-migration "{{ r["model_name"] }} ({{ r["model_id"] }}): 転送元 {{ r["src_cloud"] }} のオブジェクトを削除しました"
+{% else %}logger -t cross-cloud-migration "{{ r["model_name"] }} ({{ r["model_id"] }}): 転送元 {{ r["src_cloud"] }} は保持方針のため削除せず、書き込み権限の見直しを運用チームへ依頼してください"
+{% endif %}
+{% endfor %}mkdir -p {{ csv_rows[0]["log_dir"] }}
+echo "migration completed at $(date -Iseconds)" >> {{ csv_rows[0]["log_dir"] }}/cross-cloud-migration.log
+```
+
+`cleanup_policy`が`delete`の行のみ転送元オブジェクトを実際に削除し、`keep`の行は削除せず権限見直しの依頼記録のみを残します。全行の完了記録は`{{ csv_rows[0]["log_dir"] }}/cross-cloud-migration.log`に追記します。
+
+## 動作確認
+
+- 手順4の`diff`が全 {{ csv_rows | length }} 件で差分なし(`OK`)と表示されること
+- 各モデルの`staging_dir`配下(例: `{{ csv_rows[0]["staging_dir"] }}`)に`manifest-src.sha256`と`manifest-verify.sha256`が生成され、内容が一致していること
+- `cleanup_policy`が`delete`の行について、転送元ストレージへの一覧コマンド(手順1と同じコマンド)を再実行した際、対象オブジェクトが表示されなくなっていること
+- `{{ csv_rows[0]["log_dir"] }}/cross-cloud-migration.log`に全モデル分の完了記録が残っていること
+
+## 注意事項
+
+- Azure向けのSASトークンはCSVやテンプレートに直接記載せず、環境変数`AZURE_SAS_QUERY`経由で渡す。有効期限が切れていないか実行前に確認する。
+- `aws configure`・`gcloud auth login`によるクラウド認証情報の設定は本手順の対象外とし、事前に完了していることを前提とする。
+- ステージング領域(`staging_dir`、例: `{{ csv_rows[0]["staging_dir"] }}`)の空き容量がモデルサイズに対して不足していると、`sync`/`rsync`/`azcopy copy`が途中で失敗する。実行前にディスク空き容量を確認する。
+- `cleanup_policy`が`delete`の行は手順5で転送元を即座に削除するため、必ず手順4の整合性検証で`OK`を確認してから手順5を実行する。`OK`確認前に削除すると復旧できない。
+- 手順2・4で作成したローカルのステージングディレクトリ(`src`・`verify`)は、検証完了後もディスク容量の運用方針に従って一定期間保持してから削除を検討する。削除そのものは本手順の対象外とする。

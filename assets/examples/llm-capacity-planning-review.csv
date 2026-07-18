@@ -1,0 +1,5 @@
+node_name,model_name,prometheus_url,review_period_days,gpu_util_avg_percent,gpu_util_peak_percent,gpu_mem_used_percent,headroom_target_percent,expansion_threshold_percent,reduction_threshold_percent,action
+gpu-node01,llama-3.1-70b-instruct,http://prometheus.internal:9090,30,74,92,88,20,85,30,増設検討
+gpu-node02,llama-3.1-8b-instruct,http://prometheus.internal:9090,30,55,78,60,20,85,30,監視継続
+gpu-node03,qwen2.5-32b-instruct,http://prometheus.internal:9090,30,18,35,25,20,85,30,縮退候補
+gpu-node04,mistral-7b-instruct-v0.3,http://prometheus.internal:9090,30,62,79,70,20,85,30,監視継続

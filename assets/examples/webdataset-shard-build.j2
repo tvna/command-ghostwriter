@@ -1,0 +1,125 @@
+# マルチモーダル学習データのtarシャード構築
+
+データセット `{{ dataset_name }}` について、画像とキャプションの対応関係を検査したうえでファイル命名規則を統一し、tarコマンドでWebDataset形式のシャードに分割梱包します。作成後は `tar -tf` で内容を検証し、破損したシャードを検出・再作成します。
+
+## 目的
+
+画像・キャプションの対応漏れやファイル名の不一致を作成前に検出し、`tar -tf` による検証を経た壊れていないWebDataset形式シャード一式を安定して生成できるようになることを目指します。
+
+## 用語解説
+
+- **WebDataset形式**: 学習サンプルを`tar`アーカイブにまとめ、拡張子違いで同じキー(ベースファイル名)を持つファイル群(例: `000001.jpg` と `000001.txt`)を1サンプルとして扱うデータ格納形式
+- **シャード(shard)**: 1つの巨大なtarアーカイブではなく、一定件数ごとに分割した複数のtarファイル。並列読み込みやストリーミング処理に適する
+- **キー(key)**: シャード内で1サンプルを構成するファイル群に共通するベースファイル名(拡張子を除いた部分)。画像とキャプションはこのキーで対応付けられる
+- **`tar --files-from`**: ファイル一覧を記載したテキストファイルを読み込み、そこに列挙された順序でアーカイブへ格納するtarのオプション
+- **`tar -tf`**: アーカイブを展開せずに内部のファイル一覧を表示するオプション。破損したアーカイブに対しては読み取りエラーで異常終了する
+
+## シナリオ設定
+
+画像ディレクトリ `{{ source_image_dir }}` とキャプションディレクトリ `{{ source_caption_dir }}` にあるペアから、ステージング用ディレクトリ `{{ staging_dir }}` を経由して、接頭辞 `{{ naming_prefix }}` の連番キーに揃えます。1シャードあたり `{{ samples_per_shard }}` 件、想定シャード数 `{{ expected_shard_count }}` として、出力先 `{{ shard_output_dir }}` に `{{ shard_basename }}-<連番>.tar` を作成し、検証ログを `{{ verify_log_path }}` に記録します。
+
+## 手順
+
+### 1. 画像・キャプションの対応関係の検査
+
+```bash
+find {{ source_image_dir }} -maxdepth 1 -type f -name "*.jpg" -printf "%f\n" | sed "s/\.jpg$//" | sort > /tmp/webdataset_images.txt
+find {{ source_caption_dir }} -maxdepth 1 -type f -name "*.txt" -printf "%f\n" | sed "s/\.txt$//" | sort > /tmp/webdataset_captions.txt
+comm -3 /tmp/webdataset_images.txt /tmp/webdataset_captions.txt
+```
+
+`comm -3` の出力に1件でも行が現れた場合、画像またはキャプションのどちらか一方しか存在しないベースファイル名があることを意味します。次の手順に進む前に、欠落分を補うか対象から除外します。
+
+### 2. ファイル命名規則の統一
+
+```bash
+mkdir -p {{ staging_dir }}
+counter=0
+find {{ source_image_dir }} -maxdepth 1 -type f -name "*.jpg" | sort | while read -r img_path; do
+  base=$(basename "$img_path" .jpg)
+  seq_num=$(printf "%06d" "$counter")
+  cp "$img_path" {{ staging_dir }}/{{ naming_prefix }}_${seq_num}.jpg
+  cp {{ source_caption_dir }}/"$base".txt {{ staging_dir }}/{{ naming_prefix }}_${seq_num}.txt
+  counter=$((counter + 1))
+done
+```
+
+画像とキャプションを同じ連番キー `{{ naming_prefix }}_<6桁連番>` に揃えて `{{ staging_dir }}` へコピーします。連番はソート順に採番するため、同じ元ファイルからは常に同じペアが同じキーに割り当てられます。
+
+### 3. tarによるシャード作成
+
+```bash
+mkdir -p {{ shard_output_dir }}
+cd {{ staging_dir }}
+ls *.jpg | sed "s/\.jpg$//" | sort | split -l {{ samples_per_shard }} -d -a 6 --additional-suffix=.keys - shard_
+
+for keyfile in shard_*.keys; do
+  shard_id=$(basename "$keyfile" .keys | sed "s/^shard_//")
+  manifest=$(mktemp)
+  while read -r key; do
+    echo "${key}.jpg" >> "$manifest"
+    echo "${key}.txt" >> "$manifest"
+  done < "$keyfile"
+  tar -cf {{ shard_output_dir }}/{{ shard_basename }}-${shard_id}.tar --files-from="$manifest"
+  rm -f "$manifest"
+done
+```
+
+`split -l {{ samples_per_shard }}` でキー一覧を `{{ samples_per_shard }}` 件ずつに分割し、シャードごとの `.keys` ファイルを作ります。各 `.keys` からjpg/txtの両方を列挙したマニフェストを組み立て、`tar --files-from` でシャードに固めます。
+
+### 4. tar -tfによるシャード内容の検証
+
+```bash
+for shard in {{ shard_output_dir }}/{{ shard_basename }}-*.tar; do
+  echo "=== ${shard} ==="
+  tar -tf "$shard" | wc -l
+done
+
+actual_shard_count=$(find {{ shard_output_dir }} -maxdepth 1 -name "{{ shard_basename }}-*.tar" | wc -l)
+echo "actual_shard_count=${actual_shard_count} expected_shard_count={{ expected_shard_count }}"
+```
+
+各シャードのエントリ数(通常はキー1件につきjpg/txtの2エントリ)と、シャードファイルの総数が `{{ expected_shard_count }}` と一致するかを確認します。
+
+### 5. 破損シャードの検出と再作成
+
+```bash
+: > {{ verify_log_path }}
+for shard in {{ shard_output_dir }}/{{ shard_basename }}-*.tar; do
+  if ! tar -tf "$shard" > /dev/null 2>> {{ verify_log_path }}; then
+    echo "corrupt: ${shard}" >> {{ verify_log_path }}
+  fi
+done
+cat {{ verify_log_path }}
+```
+
+`{{ verify_log_path }}` に記録された破損シャードごとに、対応する `.keys` ファイルから同じ内容で再作成します。
+
+```bash
+shard_id=000000
+cd {{ staging_dir }}
+manifest=$(mktemp)
+while read -r key; do
+  echo "${key}.jpg" >> "$manifest"
+  echo "${key}.txt" >> "$manifest"
+done < shard_${shard_id}.keys
+tar -cf {{ shard_output_dir }}/{{ shard_basename }}-${shard_id}.tar --files-from="$manifest"
+rm -f "$manifest"
+tar -tf {{ shard_output_dir }}/{{ shard_basename }}-${shard_id}.tar | wc -l
+```
+
+`shard_id` は破損が検出されたシャードの連番に置き換えて実行します。
+
+## 動作確認
+
+- 手順1の `comm -3` の出力が空であること(画像・キャプションの対応漏れがないこと)
+- `{{ shard_output_dir }}` 配下の `{{ shard_basename }}-*.tar` の総数が `{{ expected_shard_count }}` と一致すること
+- 各シャードに対する `tar -tf` がエラーなく終了し、`{{ verify_log_path }}` に `corrupt:` の行が含まれないこと
+- 再作成後のシャードでも `tar -tf` のエントリ数が再作成前の想定件数と一致すること
+
+## 注意事項
+
+- `{{ source_image_dir }}` と `{{ source_caption_dir }}` の元データは変更せず、必ず `{{ staging_dir }}` 側でリネーム・再構成する。元データを直接上書きすると対応関係の検査をやり直せなくなる。
+- 手順3の `split -d -a 6` は連番の桁数を固定するため、`{{ samples_per_shard }}` を変更した場合はシャード数が変わり、`{{ expected_shard_count }}` との照合結果も変わる。
+- 破損シャードの再作成は必ず元の `.keys` ファイルを使う。手動でファイルを選び直すと、他のシャードとキーが重複したり欠落したりする可能性がある。
+- 学習ジョブ側でのシャード読み込み順序やシャッフル設定は本手順の対象外とする。

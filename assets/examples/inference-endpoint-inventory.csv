@@ -1,0 +1,4 @@
+endpoint_name,endpoint_url,expected_model,health_path,models_path,api_key_env,latency_threshold_ms,ledger_path
+infer-tokyo-01,https://infer-tokyo-01.internal:8443,llama-3.1-8b-instruct,/health,/v1/models,INFER_TOKYO_01_KEY,800,/var/log/inference/endpoint_ledger.csv
+infer-tokyo-02,https://infer-tokyo-02.internal:8443,llama-3.1-8b-instruct,/health,/v1/models,INFER_TOKYO_02_KEY,800,/var/log/inference/endpoint_ledger.csv
+infer-osaka-01,https://infer-osaka-01.internal:8443,qwen2.5-7b-instruct,/healthz,/v1/models,-,1200,/var/log/inference/endpoint_ledger.csv

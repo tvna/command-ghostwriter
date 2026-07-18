@@ -1,0 +1,134 @@
+# AWS Bedrock基盤モデルの呼び出しと利用設定
+
+`aws bedrock` / `aws bedrock-runtime` コマンドで、基盤モデルの一覧確認・アクセス設定の検証・`invoke-model` / `converse` による呼び出し、CloudWatchでの呼び出しメトリクス確認を行います。
+
+## 目的
+
+Bedrockのモデルアクセス許可の仕組みを理解し、利用可能なモデルの確認、`invoke-model` と `converse` それぞれの呼び出し方式の違いを把握したうえで、CloudWatchで呼び出し状況を監視できるようになることを目指します。
+
+## 用語解説
+
+- **基盤モデル(Foundation Model)**: Bedrockが提供する事前学習済みモデル。`{{ model_id }}` のように `プロバイダ名.モデル名-バージョン` の形式のモデルIDで指定する
+- **モデルアクセス(Model Access)**: アカウント単位・モデルごとに有効化が必要な利用許可。AWSマネジメントコンソールのモデルアクセス画面またはIAMポリシーで制御される
+- **invoke-model**: 単発のリクエストでテキスト生成などを行う低レベルAPI。モデルプロバイダごとに異なるリクエスト/レスポンス形式(ペイロード)を使う
+- **converse**: モデル間で共通のメッセージ形式を使い、対話形式の呼び出しを行う統一API。invoke-modelよりモデル間の差異を吸収できる
+- **CloudWatchメトリクス**: `{{ metric_namespace }}` 名前空間で呼び出し回数・レイテンシ・トークン数などが計測される
+
+## シナリオ設定
+
+リージョン `{{ aws_region }}`(プロファイル: `{{ aws_profile }}`)で、`{{ model_provider }}` プロバイダのモデル `{{ model_id }}` を対象に、IAMロール `{{ iam_principal_arn }}` からの呼び出し可否を確認したうえで、invoke-modelとconverseの両方で呼び出し検証を行います。IAM権限方針は「{{ iam_permission_note }}」です。
+
+## 手順
+
+### 1. モデルアクセスの有効化状況を確認する
+
+```bash
+aws bedrock get-foundation-model \
+  --model-identifier {{ model_id }} \
+  --region {{ aws_region }} \
+  --profile {{ aws_profile }} \
+  --query 'modelDetails.modelLifecycle.status' \
+  --output text
+```
+
+出力が `ACTIVE` であることを確認します。続けてIAM権限方針「{{ iam_permission_note }}」に沿って、対象ロールに呼び出し権限があるかをシミュレートします。
+
+```bash
+aws iam simulate-principal-policy \
+  --policy-source-arn {{ iam_principal_arn }} \
+  --action-names bedrock:InvokeModel bedrock:InvokeModelWithResponseStream \
+  --resource-arns arn:aws:bedrock:{{ aws_region }}::foundation-model/{{ model_id }} \
+  --profile {{ aws_profile }} \
+  --query 'EvaluationResults[].EvalDecision' \
+  --output text
+```
+
+すべて `allowed` と表示されない場合は、手順3・4に進む前にIAMポリシーまたはモデルアクセス設定を見直します。
+
+### 2. list-foundation-modelsで利用可能モデルを確認する
+
+```bash
+aws bedrock list-foundation-models \
+  --region {{ aws_region }} \
+  --profile {{ aws_profile }} \
+  --by-provider {{ model_provider }} \
+  --by-output-modality TEXT \
+  --query 'modelSummaries[].{id:modelId,status:modelLifecycle.status}' \
+  --output table
+```
+
+一覧に `{{ model_id }}` が含まれ、ステータスが `ACTIVE` であることを確認します。
+
+### 3. invoke-modelでテキスト生成を検証する
+
+```bash
+aws bedrock-runtime invoke-model \
+  --model-id {{ model_id }} \
+  --region {{ aws_region }} \
+  --profile {{ aws_profile }} \
+  --content-type application/json \
+  --accept application/json \
+  --cli-binary-format raw-in-base64-out \
+  --body "{\"anthropic_version\":\"bedrock-2023-05-31\",\"max_tokens\":{{ max_tokens }},\"messages\":[{\"role\":\"user\",\"content\":\"{{ prompt_text }}\"}]}" \
+  {{ invoke_output_path }}
+
+cat {{ invoke_output_path }}
+```
+
+`max_tokens` は `{{ max_tokens }}` を上限とし、レスポンスJSONの `content` にテキストが生成されていることを確認します。
+
+### 4. converseで対話形式の呼び出しを行う
+
+```bash
+aws bedrock-runtime converse \
+  --model-id {{ model_id }} \
+  --region {{ aws_region }} \
+  --profile {{ aws_profile }} \
+  --messages "[{\"role\":\"user\",\"content\":[{\"text\":\"{{ prompt_text }}\"}]}]" \
+  --query 'output.message.content[0].text' \
+  --output text > {{ converse_output_path }}
+
+cat {{ converse_output_path }}
+```
+
+invoke-modelとの違いとして、converseはモデル間で共通のメッセージ形式(`role` / `content`)を使う点を確認します。
+
+### 5. CloudWatchで呼び出しメトリクスを確認する
+
+```bash
+aws cloudwatch list-metrics \
+  --namespace {{ metric_namespace }} \
+  --dimensions Name=ModelId,Value={{ model_id }} \
+  --region {{ aws_region }} \
+  --profile {{ aws_profile }}
+```
+
+```bash
+aws cloudwatch get-metric-statistics \
+  --namespace {{ metric_namespace }} \
+  --metric-name {{ metric_name }} \
+  --dimensions Name=ModelId,Value={{ model_id }} \
+  --start-time {{ metric_start_time }} \
+  --end-time {{ metric_end_time }} \
+  --period {{ metric_period_seconds }} \
+  --statistics {{ metric_statistic }} \
+  --region {{ aws_region }} \
+  --profile {{ aws_profile }}
+```
+
+手順3・4で実行した呼び出しが、`{{ metric_name }}` の合計値(`{{ metric_statistic }}`)に反映されていることを確認します。
+
+## 動作確認
+
+- 手順1で `modelDetails.modelLifecycle.status` が `ACTIVE`、かつ `simulate-principal-policy` の結果がすべて `allowed` であること
+- 手順2の一覧に `{{ model_id }}` が含まれること
+- 手順3実行後、`{{ invoke_output_path }}` にテキスト生成結果が保存されていること
+- 手順4実行後、`{{ converse_output_path }}` に応答テキストが保存されていること
+- 手順5で `{{ metric_name }}` メトリクスに手順3・4の呼び出し分が計上されていること
+
+## 注意事項
+
+- IAM権限方針は「{{ iam_permission_note }}」を守り、`bedrock:*` のような広範な権限を常設のロールに付与しない。
+- invoke-modelのリクエストボディはモデルプロバイダごとに形式が異なるため、`{{ model_id }}` 以外のモデルに流用する場合はペイロードを見直す。
+- 呼び出しにはトークン数に応じた課金が発生するため、`max_tokens` を`{{ max_tokens }}`程度に抑えるなど検証時のコストを意識する。
+- CloudWatchメトリクスの反映には数分の遅延があるため、手順5の実行直後は値が0のままでも異常ではない。

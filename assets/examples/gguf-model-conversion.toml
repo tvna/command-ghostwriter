@@ -1,0 +1,9 @@
+source_model_dir = "/data/hf-models/Meta-Llama-3.1-8B-Instruct"
+llama_cpp_dir = "/opt/llama.cpp"
+work_dir = "/data/gguf-build"
+output_f16_gguf = "/data/gguf-build/llama-3.1-8b-f16.gguf"
+quant_type = "Q4_K_M"
+output_quant_gguf = "/data/gguf-build/llama-3.1-8b-Q4_K_M.gguf"
+smoke_test_prompt = "日本の首都はどこですか？"
+ctx_size = 4096
+gpu_layers = 999

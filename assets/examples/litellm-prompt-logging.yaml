@@ -1,0 +1,15 @@
+config_path: "/etc/litellm/config.yaml"
+proxy_port: 4000
+proxy_host: "127.0.0.1"
+test_model_alias: "chat-gpt4o-mini"
+actual_model: "gpt-4o-mini"
+actual_model_api_key_env: "OPENAI_API_KEY"
+callback_id: "datadog"
+log_backend_name: "Datadog"
+dd_api_key_env: "DD_API_KEY"
+dd_site_env: "DD_SITE"
+dd_site_value: "datadoghq.com"
+test_request_marker: "logging-verification-001"
+retention_days: 90
+retention_policy_note: "ログ基盤側の保持期間はプラン既定に従い、延長が必要な場合はコスト影響を確認してから申請する"
+masking_policy_note: "氏名・メールアドレス・電話番号等の個人情報を含む入力はマスキング対象とし、turn_off_message_loggingで本文をログ対象外にする"

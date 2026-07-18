@@ -1,0 +1,139 @@
+# LLM利用コスト急増の検知と切り分け
+
+チーム・モデル別の利用ログからコストを集計し、過去平均との比較で急増を検知したうえで、原因(リトライ・長文化・不正利用)を切り分け、上限とアラートを設定するまでの手順です。
+
+## 目的
+
+利用ログをチーム・モデル単位で日次集計し、過去{{ csv_rows[0]["lookback_days"] }}日程度の平均コストと比較して急増箇所を機械的に特定できるようになることを目指します。あわせて、急増の原因がリトライなのか長文化なのか未知のAPIキーによる利用なのかを切り分け、再発防止のための日次上限とアラートを設定できる状態を作ります。
+
+## 用語解説
+
+- **利用ログ**: 各リクエストを1行として記録したCSV。本手順では `timestamp,team,model,request_id,prompt_tokens,completion_tokens,cost_usd,retry_count,api_key_id` の9列構成を前提とする
+- **baseline(過去平均)**: `lookback_days` で指定した直近の期間のうち、集計対象日を除いた日別コストの平均値
+- **anomaly_threshold_pct**: 集計対象日のコストが baseline の何%を超えたら急増とみなすかを表す閾値。100が同水準、150ならbaselineの1.5倍を超えると急増と判定する
+- **retry_count**: 同一リクエストが再試行された回数。0より大きい行はリトライによる追加コストが発生している
+- **daily_budget_usd**: チーム・モデルごとに設定する日次コストの上限額(USD)
+- **api_key_id**: リクエストに使われたAPIキーの識別子。baseline期間に現れなかった `api_key_id` が集計対象日に出現した場合、意図しない利用(不正利用や共有漏れ)の兆候として扱う
+
+## シナリオ設定
+
+以下 {{ csv_rows | length }} 件のチーム・モデルの組み合わせを監視対象とします。アラート通知先はいずれも `{{ csv_rows[0]["alert_channel"] }}` です。
+
+| team_name | model_name | usage_log_path | lookback_days | anomaly_threshold_pct | daily_budget_usd |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["team_name"] }} | {{ r["model_name"] }} | {{ r["usage_log_path"] }} | {{ r["lookback_days"] }} | {{ r["anomaly_threshold_pct"] }} | {{ r["daily_budget_usd"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 利用ログからモデル・チーム別コストを集計する
+
+各チームの利用ログを日別に集計し、直近の推移を確認します。
+
+```bash
+{% for r in csv_rows %}echo "=== {{ r["team_name"] }}/{{ r["model_name"] }}: 日別コスト集計 ==="
+awk -F, 'NR>1 {day=substr($1,1,10); cost[day]+=$7} END {for (d in cost) printf "%s,%.4f\n", d, cost[d]}' {{ r["usage_log_path"] }} | sort
+{% endfor %}
+```
+
+`cost_usd`(9列中7列目)を日単位で合算し、日付順に並べ替えて出力します。以降の手順ではこの日別集計を土台に、集計対象日(既定では実行日当日)を評価します。
+
+### 2. 過去平均と比較して急増箇所を特定する
+
+集計対象日のコストを、集計対象日を除く直近 `lookback_days` 日間の平均(baseline)と比較します。
+
+```bash
+TARGET_DAY=$(date +%Y-%m-%d)
+{% for r in csv_rows %}echo "=== {{ r["team_name"] }}/{{ r["model_name"] }}: 急増判定 ==="
+BASE_START=$(date -d "$TARGET_DAY -{{ r["lookback_days"] }} days" +%Y-%m-%d)
+awk -F, -v today="$TARGET_DAY" -v start="$BASE_START" -v thresh={{ r["anomaly_threshold_pct"] }} '
+NR>1 {
+    day=substr($1,1,10)
+    if (day==today) { t+=$7 }
+    else if (day>=start && day<today) { b+=$7; seen[day]=1 }
+}
+END {
+    n=0
+    for (d in seen) n++
+    avg=(n>0)?b/n:0
+    printf "today_cost=%.4f baseline_avg=%.4f threshold_pct=%d\n", t, avg, thresh
+    if (avg>0 && t>avg*thresh/100) print "ANOMALY_DETECTED: {{ r["team_name"] }}/{{ r["model_name"] }}"
+}' {{ r["usage_log_path"] }}
+{% endfor %}
+```
+
+`ANOMALY_DETECTED` が出力されたチーム・モデルの組み合わせを、以降の手順で詳細調査します。
+
+### 3. 該当リクエストの内訳を調査する
+
+急増が疑われる集計対象日について、コストの大きいリクエストから優先的に内訳を確認します。
+
+```bash
+TARGET_DAY=$(date +%Y-%m-%d)
+{% for r in csv_rows %}echo "=== {{ r["team_name"] }}/{{ r["model_name"] }}: $TARGET_DAY のリクエスト内訳(コスト降順 上位20件) ==="
+head -1 {{ r["usage_log_path"] }}
+awk -F, -v day="$TARGET_DAY" 'NR>1 && substr($1,1,10)==day' {{ r["usage_log_path"] }} | sort -t, -k7,7gr | head -20
+{% endfor %}
+```
+
+`retry_count` が0より大きい行、`prompt_tokens` が突出して大きい行、見慣れない `api_key_id` の行がないかをこの出力から確認します。
+
+### 4. 原因(リトライ・長文化・不正利用)を切り分ける
+
+内訳から見えた候補を、リトライ・長文化・不正利用の3観点でそれぞれ定量的に確認します。
+
+```bash
+TARGET_DAY=$(date +%Y-%m-%d)
+{% for r in csv_rows %}echo "=== {{ r["team_name"] }}/{{ r["model_name"] }}: リトライ起因の確認 ==="
+awk -F, -v day="$TARGET_DAY" 'NR>1 && substr($1,1,10)==day && $8>0 {n++; c+=$7} END {printf "retry_requests=%d retry_cost=%.4f\n", n+0, c+0}' {{ r["usage_log_path"] }}
+
+echo "=== {{ r["team_name"] }}/{{ r["model_name"] }}: 長文化(プロンプトトークン増)の確認 ==="
+awk -F, -v day="$TARGET_DAY" 'NR>1 {if (substr($1,1,10)==day) {t+=$5; tn++} else {b+=$5; bn++}} END {printf "today_avg_prompt_tokens=%.1f baseline_avg_prompt_tokens=%.1f\n", (tn>0?t/tn:0), (bn>0?b/bn:0)}' {{ r["usage_log_path"] }}
+
+echo "=== {{ r["team_name"] }}/{{ r["model_name"] }}: 未知APIキーの確認(不正利用の兆候) ==="
+awk -F, -v day="$TARGET_DAY" 'NR>1 && substr($1,1,10)==day {seen[$9]=1} END {for (k in seen) print k}' {{ r["usage_log_path"] }} | sort > /tmp/{{ r["team_name"] }}_today_keys.txt
+awk -F, -v day="$TARGET_DAY" 'NR>1 && substr($1,1,10)!=day {seen[$9]=1} END {for (k in seen) print k}' {{ r["usage_log_path"] }} | sort > /tmp/{{ r["team_name"] }}_baseline_keys.txt
+comm -23 /tmp/{{ r["team_name"] }}_today_keys.txt /tmp/{{ r["team_name"] }}_baseline_keys.txt
+{% endfor %}
+```
+
+`comm -23` の出力は、baseline期間には現れず集計対象日だけに現れた `api_key_id` です。1件でも出力があれば、鍵の共有範囲やローテーション状況を鍵の発行者に確認します。
+
+### 5. 上限・アラートを設定する
+
+チーム・モデルごとに日次上限を監視するスクリプトを配置し、cronで定期実行します。
+
+```bash
+{% for r in csv_rows %}cat <<'SCRIPT' | sudo tee /usr/local/bin/llm-cost-guard-{{ r["team_name"] }}.sh > /dev/null
+#!/bin/bash
+set -euo pipefail
+LOG="{{ r["usage_log_path"] }}"
+BUDGET={{ r["daily_budget_usd"] }}
+TODAY=$(date +%Y-%m-%d)
+TOTAL=$(awk -F, -v day="$TODAY" 'NR>1 && substr($1,1,10)==day {s+=$7} END {printf "%.4f", s+0}' "$LOG")
+if awk -v t="$TOTAL" -v b="$BUDGET" 'BEGIN {exit !(t > b)}'; then
+    logger -t llm-cost-guard "budget exceeded: team={{ r["team_name"] }} model={{ r["model_name"] }} total=$TOTAL budget=$BUDGET alert_channel={{ r["alert_channel"] }}"
+fi
+SCRIPT
+sudo chmod 755 /usr/local/bin/llm-cost-guard-{{ r["team_name"] }}.sh
+{% endfor %}(crontab -l 2>/dev/null; {% for r in csv_rows %}echo "0 * * * * /usr/local/bin/llm-cost-guard-{{ r["team_name"] }}.sh >> /var/log/llm-cost-guard.log 2>&1"; {% endfor %}) | crontab -
+crontab -l
+```
+
+`logger` の出力先(`journalctl -t llm-cost-guard` または `/var/log/syslog`)を、`alert_channel`(`{{ csv_rows[0]["alert_channel"] }}` など)へ転送する仕組みは監視基盤側の既存の連携設定を利用し、本手順の対象外とします。
+
+## 動作確認
+
+- 手順1で全{{ csv_rows | length }}件について日別コストの集計行が出力され、直近日を含む推移が確認できること
+- 手順2の出力に `today_cost` / `baseline_avg` / `threshold_pct` が含まれ、急増しているチーム・モデルには `ANOMALY_DETECTED` が出力されていること
+- 手順3で該当日のリクエストがコスト降順で確認でき、`head -1` で表示した列名と各行の値が対応していること
+- 手順4で `retry_requests` / `today_avg_prompt_tokens` / 未知の `api_key_id` のいずれかから急増原因の手がかりが得られること
+- 手順5実行後、`crontab -l` に全{{ csv_rows | length }}件分の `llm-cost-guard-*.sh` が1時間ごとの実行として登録されていること
+
+## 注意事項
+
+- 利用ログの列構成(`timestamp,team,model,request_id,prompt_tokens,completion_tokens,cost_usd,retry_count,api_key_id`)が実際のログと異なる場合、`awk` の列番号(`$5`, `$7`, `$8`, `$9`)をログの実際の列順に合わせて修正する。
+- `anomaly_threshold_pct` はチームの利用実態に応じた仮の閾値であり、閾値が低すぎると通常の利用変動でも `ANOMALY_DETECTED` が頻発する。誤検知が続く場合は手順2の閾値を見直す。
+- `comm -23` による未知APIキーの検出は、baseline期間中に一度もそのキーで利用がなかったことを条件とするため、キーのローテーション直後は正規のキーであっても一時的に「未知」として検出される。ローテーション予定は事前に把握しておく。
+- 本手順は検知・切り分け・上限設定までを範囲とし、不正利用と判断した場合のAPIキー無効化はキー管理者による別途対応とする。
+- `daily_budget_usd` を超えた場合の `logger` 出力はローカルログへの記録のみであり、`{{ csv_rows[0]["alert_channel"] }}` への実際の通知配送(Slack連携等)は監視基盤側の設定に依存する。

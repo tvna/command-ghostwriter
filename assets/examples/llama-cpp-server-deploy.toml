@@ -1,0 +1,10 @@
+model_repo = "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF"
+gguf_filename = "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
+model_dir = "/opt/models/llama-cpp"
+build_dir = "/opt/llama.cpp"
+n_gpu_layers = 33
+ctx_size = 8192
+api_host = "0.0.0.0"
+api_port = 8080
+threads = 8
+served_model_alias = "llama3.1-8b-instruct-q4"

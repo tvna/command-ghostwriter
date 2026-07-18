@@ -1,0 +1,97 @@
+# RAG向けQdrantベクトルDBの構築とコレクション設計
+
+`{{ rag_app_note }}` のためのベクトルDB基盤として、DockerでQdrantを起動し、REST APIによるコレクション作成・文書ベクトルの投入・類似検索の確認・スナップショット取得までを行います。
+
+## 目的
+
+RAG(Retrieval-Augmented Generation)の検索基盤としてQdrantコレクションを設計し、埋め込みモデルの次元数・距離関数に整合したコレクションを作成したうえで、文書ベクトルの投入から類似検索、バックアップ用スナップショット取得までを一貫して行えるようになることを目指します。
+
+## 用語解説
+
+- **RAG(Retrieval-Augmented Generation)**: 質問に関連する文書をベクトル検索で取得し、その内容をLLMへの入力に含めて回答生成する方式
+- **コレクション(collection)**: 同じ次元数・距離関数を共有するベクトルの集合。RDBのテーブルに相当する
+- **ポイント(point)**: コレクションに登録される1件のデータ。ID・ベクトル・任意のペイロード(メタデータ)から成る。本手順ではチャンク分割した文書1件が1ポイントに対応する
+- **ペイロード(payload)**: ポイントに付与するJSON形式のメタデータ。文書の出典やタイトルなどを保持し、フィルタ検索の条件にも使える
+- **距離関数(distance)**: ベクトル間の類似度計算方式。`Cosine`(コサイン類似度)・`Euclid`(ユークリッド距離)・`Dot`(内積)から選択し、コレクション作成後は変更できない
+- **スナップショット(snapshot)**: ある時点のコレクション全体を1ファイルにまとめたバックアップ。障害復旧や別環境への移行に利用する
+
+## シナリオ設定
+
+コンテナ `{{ container_name }}`(イメージ: `{{ qdrant_image }}`)をREST APIポート `{{ rest_port }}`、gRPCポート `{{ grpc_port }}` で起動し、データ永続化先を `{{ storage_host_path }}`、スナップショット保存先を `{{ snapshot_host_path }}` とします。作成するコレクションは `{{ collection_name }}`(次元数 `{{ vector_size }}`、距離関数 `{{ distance_metric }}`)で、埋め込みモデルは `{{ embedding_model_note }}` を使用します。投入する文書ベクトルは「{{ doc_source_note }}」であり、`{{ points_file_path }}` にJSON形式で用意したうえで一括登録します。
+
+## 手順
+
+### 1. Qdrantコンテナを起動する
+
+```bash
+mkdir -p {{ storage_host_path }}
+mkdir -p {{ snapshot_host_path }}
+docker run -d --name {{ container_name }} \
+  -p {{ rest_port }}:6333 \
+  -p {{ grpc_port }}:6334 \
+  -v {{ storage_host_path }}:{{ storage_container_path }} \
+  -v {{ snapshot_host_path }}:{{ snapshot_container_path }} \
+  {{ qdrant_image }}
+```
+
+起動確認:
+
+```bash
+docker ps --filter name={{ container_name }}
+curl "http://localhost:{{ rest_port }}/"
+```
+
+### 2. コレクションを作成する
+
+```bash
+curl -X PUT "http://localhost:{{ rest_port }}/collections/{{ collection_name }}" \
+  -H "Content-Type: application/json" \
+  --data-raw '{"vectors": {"size": {{ vector_size }}, "distance": "{{ distance_metric }}"}}'
+```
+
+次元数 `{{ vector_size }}` は埋め込みモデル `{{ embedding_model_note }}` の出力次元数と一致させ、距離関数はコレクション作成後には変更できないため事前に `{{ distance_metric }}` で問題ないかを確認します。
+
+### 3. 文書ベクトルを投入する
+
+「{{ doc_source_note }}」を対象に、事前に埋め込みモデル `{{ embedding_model_note }}` でチャンクごとのベクトルを生成し、`{{ points_file_path }}` に `{"points": [{"id": 1, "vector": [...], "payload": {"text": "...", "source": "..."}}, ...]}` の形式で保存しておきます。各ベクトルの要素数は `{{ vector_size }}` と一致させます。
+
+```bash
+curl -X PUT "http://localhost:{{ rest_port }}/collections/{{ collection_name }}/points?wait=true" \
+  -H "Content-Type: application/json" \
+  --data-binary @{{ points_file_path }}
+```
+
+### 4. 類似検索を実行する
+
+```bash
+curl -X POST "http://localhost:{{ rest_port }}/collections/{{ collection_name }}/points/search" \
+  -H "Content-Type: application/json" \
+  --data-raw '{"vector": [0.01, 0.02, 0.03], "limit": {{ search_top_k }}, "score_threshold": {{ score_threshold }}, "with_payload": true}'
+```
+
+上記のクエリベクトルはあくまで例示であり、実運用ではユーザーの質問文を `{{ embedding_model_note }}` で埋め込み化した `{{ vector_size }}` 次元のベクトルに置き換えます。`score_threshold` を `{{ score_threshold }}` 未満のヒットは除外し、RAGの回答生成に無関係な文書が渡らないようにします。
+
+### 5. スナップショットを取得する
+
+```bash
+curl -X POST "http://localhost:{{ rest_port }}/collections/{{ collection_name }}/snapshots"
+curl "http://localhost:{{ rest_port }}/collections/{{ collection_name }}/snapshots"
+ls -lh {{ snapshot_host_path }}
+```
+
+作成したスナップショットは `{{ snapshot_host_path }}` 配下に保存されるため、別環境への復元やバックアップローテーションの対象にします。
+
+## 動作確認
+
+- `curl "http://localhost:{{ rest_port }}/collections/{{ collection_name }}"` のレスポンスで `status` が `green` であり、`points_count` が投入した文書ベクトルの件数と一致すること
+- コレクションの次元数が `{{ vector_size }}`、距離関数が `{{ distance_metric }}` で設定されていること
+- Step 4の類似検索が `score_threshold` `{{ score_threshold }}` 以上のスコアを持つ結果のみを `limit` `{{ search_top_k }}` 件以内で返すこと
+- `{{ snapshot_host_path }}` 配下にStep 5で取得したスナップショットファイルが存在すること
+
+## 注意事項
+
+- `-p {{ rest_port }}:6333` で待受ポートをホストに公開するため、認証を設定しないままインターネットに公開しない。社内ネットワークやVPN経由に限定するか、APIキー認証を別途構成する。
+- 距離関数(`{{ distance_metric }}`)はコレクション作成後には変更できないため、変更が必要な場合はコレクションを再作成し、文書ベクトルを登録し直す。
+- 投入するベクトルの次元数が `{{ vector_size }}` と一致しない場合はエラーになるため、埋め込みモデル `{{ embedding_model_note }}` を変更した際は次元数も見直す。
+- `{{ storage_host_path }}` と `{{ snapshot_host_path }}` はいずれもコンテナのデータ永続化先であるため、削除や上書きを行う前にバックアップの有無を確認する。
+- スナップショットにはペイロードの内容(文書テキストの断片)も含まれるため、「{{ doc_source_note }}」に機密情報が含まれる場合は保存先・共有範囲のアクセス制御を確認する。

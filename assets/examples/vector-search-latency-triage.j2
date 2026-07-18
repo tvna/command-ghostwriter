@@ -1,0 +1,88 @@
+# ベクトル検索の遅延・低精度切り分け
+
+検索API `{{ app_service_name }}` からベクトルDB `{{ vector_db_endpoint }}` のコレクション `{{ collection_name }}` に対する検索が遅延・低精度化した際に、検索パラメータ・インデックス状態・リソースの観点で原因を切り分けます。
+
+## 目的
+
+コレクション `{{ collection_name }}` を利用する検索でp99レイテンシがSLA `{{ latency_sla_ms }}` msを超過した際に、検索パラメータの設定ミス・インデックスの未完了/断片化・リソース枯渇のどれが主因かを順序立てて切り分け、暫定対処と恒久対策を判断できるようになることを目指します。
+
+## 用語解説
+
+- **HNSW / ef(hnsw_ef)**: 近似最近傍探索アルゴリズムHNSWにおける探索幅パラメータ。値が大きいほど再現率(精度)は上がるがレイテンシも増える
+- **セグメント(segment)**: ベクトルデータが分割保存される単位。書き込みが進むと小さなセグメントが増え、検索時に横断的な走査コストが増える(断片化)
+- **ペイロードインデックス**: `{{ filter_field_name }}` のようなフィルタ条件に使うフィールドへ張るインデックス。未設定だとフィルタ付き検索がフルスキャンに近くなり遅延する
+- **optimizer / indexing_threshold**: バックグラウンドでセグメントを統合・最適化する仕組みと、その動作を開始するベクトル数のしきい値
+- **p99レイテンシ**: リクエストの99パーセンタイル応答時間。平均値では見えない外れ値的な遅延を捉える指標
+
+## シナリオ設定
+
+`{{ incident_start_time }}` 頃から、コレクション `{{ collection_name }}`(ベクトルDBエンドポイント: `{{ vector_db_endpoint }}`)を利用する検索API `{{ app_service_name }}` でp99レイテンシが `{{ observed_p99_latency_ms }}` msまで悪化し、SLA `{{ latency_sla_ms }}` msを超過しています。影響範囲: {{ affected_scope_note }}。
+
+## 手順
+
+### 1. 事象と発生範囲を整理する
+
+```bash
+sudo systemctl status {{ app_service_name }} --no-pager
+sudo journalctl -u {{ app_service_name }} --since "{{ incident_start_time }}" | grep -i -E "timeout|slow|latency" | tail -n 50
+curl -s -w "\nhttp_status=%{http_code}\n" {{ vector_db_endpoint }}/collections/{{ collection_name }}
+```
+
+→ `{{ app_service_name }}` が `{{ incident_start_time }}` 以降に出しているタイムアウト・遅延関連のログと、ベクトルDB自体の疎通(`http_status=200`)を確認し、観測値 `{{ observed_p99_latency_ms }}` msがSLA `{{ latency_sla_ms }}` msに対してどの程度超過しているかを整理します。
+
+### 2. 検索パラメータとフィルタ条件を確認する
+
+```bash
+grep -i "hnsw_ef" {{ app_log_path }} | tail -n 20
+curl -s -X POST {{ vector_db_endpoint }}/collections/{{ collection_name }}/points/search \
+  -H "Content-Type: application/json" \
+  -d '{"vector": [0.01, 0.02, 0.03], "limit": {{ search_top_k }}, "params": {"hnsw_ef": {{ current_hnsw_ef }}}, "filter": {"must": [{"key": "{{ filter_field_name }}", "match": {"value": "{{ filter_field_value }}"}}]}}'
+curl -s {{ vector_db_endpoint }}/collections/{{ collection_name }} | grep -A 5 "payload_schema"
+```
+
+→ 実運用のリクエストが `hnsw_ef={{ current_hnsw_ef }}`(ベースライン `{{ baseline_hnsw_ef }}`)で送られていること、フィルタ条件 `{{ filter_field_name }}={{ filter_field_value }}` を指定していることを確認します。`payload_schema` に `{{ filter_field_name }}` のインデックスが存在しない場合、フィルタ付き検索がフルスキャンに近い挙動になり遅延の主因になり得ます。
+
+### 3. インデックス状態とセグメントを確認する
+
+```bash
+curl -s {{ vector_db_endpoint }}/collections/{{ collection_name }} | python3 -m json.tool
+```
+
+→ 出力中の `status`(`green`以外は異常)、`vectors_count` と `indexed_vectors_count` の差(未インデックスの残数)、`segments_count`、`config.params.vectors.size`、`config.params.vectors.distance`、`config.optimizer_config.indexing_threshold` を確認します。期待値は `points_count` が概ね `{{ points_count }}` 件、`segments_count` が `{{ segments_threshold }}` に近いこと(現状 `{{ segments_count }}` はしきい値を超えており断片化の疑いあり)、`vector_size` が `{{ vector_size }}`、`distance_metric` が `{{ distance_metric }}`、`indexing_threshold` が `{{ indexing_threshold }}` であることです。
+
+### 4. CPU・メモリ・ディスクI/Oを確認する
+
+```bash
+top -bn1 | head -n 15
+free -h
+iostat -xz 1 3 | grep -A 1 "{{ disk_device }}"
+df -h /
+```
+
+→ CPU使用率が `{{ cpu_alert_threshold_percent }}` %、メモリ使用率が `{{ mem_alert_threshold_percent }}` %、ディスク `{{ disk_device }}` の使用率(`%util`)が `{{ disk_util_alert_threshold_percent }}` %を超えていないかを確認します。超えている場合はリソース枯渇が遅延の主因である可能性が高くなります。
+
+### 5. 暫定対処と恒久対策を判断する
+
+```bash
+curl -s -X POST {{ vector_db_endpoint }}/collections/{{ collection_name }}/points/search \
+  -H "Content-Type: application/json" \
+  -d '{"vector": [0.01, 0.02, 0.03], "limit": {{ search_top_k }}, "params": {"hnsw_ef": {{ baseline_hnsw_ef }}}}'
+```
+
+暫定対処: {{ interim_action_note }}。上記コマンドで `hnsw_ef` をベースライン値 `{{ baseline_hnsw_ef }}` まで下げた場合のレイテンシを実測し、SLA `{{ latency_sla_ms }}` ms内に収まるかを確認します。
+
+恒久対策: {{ permanent_action_issue_note }}。手順3・4で特定した根本原因(インデックス未完了・セグメント断片化・リソース枯渇のいずれか)に応じて、別Issueとして恒久対策を追跡します。
+
+## 動作確認
+
+- `curl -s {{ vector_db_endpoint }}/collections/{{ collection_name }}` の `status` が `green` であること
+- 手順5の暫定対処後、`{{ app_service_name }}` のp99レイテンシがSLA `{{ latency_sla_ms }}` ms以内に収まること
+- `indexed_vectors_count` が `vectors_count`(概ね `{{ points_count }}` 件)と一致していること
+- `segments_count` が `{{ segments_threshold }}` に向けて減少傾向にあること(即時に到達しなくても構わない)
+
+## 注意事項
+
+- `hnsw_ef` を `{{ baseline_hnsw_ef }}` まで下げると検索精度(再現率)が低下するため、暫定対処に留め、恒久対策の判断が終わるまでの一時的な措置とする。
+- 手順2・5の検索リクエストはダミーのベクトル値を使用している。実際の精度検証を行う場合は本番相当の埋め込みベクトルに差し替えること。
+- `{{ vector_db_endpoint }}` への直接アクセスに認証が設定されている環境では、`curl` に認証ヘッダーを追加する必要がある。本手順は認証なしの検証環境を前提とする。
+- {{ permanent_action_issue_note }} は本手順の対象外であり、原因確定後に別Issueとして追跡する。

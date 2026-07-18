@@ -1,0 +1,85 @@
+# モデルカードとライセンス表記の定期棚卸し
+
+配布中の {{ csv_rows | length }} 件のモデルについて、モデルカードの記載内容とライセンス表記を定期的に棚卸しし、不備が見つかった場合は是正してアップロードするまでの手順を実行します。
+
+## 目的
+
+モデルカードとライセンス表記が果たす役割を理解し、配布中モデルの記載状況を台帳と突き合わせて確認したうえで、不備を是正・再アップロードし、棚卸し結果を記録できるようになることを目指します。
+
+## 用語解説
+
+- **モデルカード**: モデルの用途・学習データ・評価結果・既知の制限などを記載した文書。Hugging Face Hubでは `README.md` の先頭にあるYAMLメタデータ(cardData)とその本文がモデルカードとして扱われる
+- **ライセンス表記**: モデルの再配布・改変・商用利用等の可否を示す条項。`cardData.license` にSPDX識別子(例: `apache-2.0`)またはカスタムライセンス名で記載される
+- **SPDX識別子**: ライセンスを一意に識別するための標準化された文字列表記
+- **gated model**: 利用にあたって利用規約への同意やアクセス申請が必要なモデル
+- **Acceptable Use Policy(利用条件)**: ライセンス本体とは別に定められる、禁止用途などの利用範囲の制限事項。モデルカード本文に記載されることが多い
+
+## シナリオ設定
+
+台帳(下表)に基づき、以下の {{ csv_rows | length }} 件のモデルを棚卸しします。`current_license_label` は前回確認時点でモデルカードに記載されていたライセンス、`expected_license` はライセンス管理台帳上の正しいライセンスです。
+
+| model_repo | current_license_label | expected_license | model_card_status | review_owner |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["model_repo"] }} | {{ r["current_license_label"] }} | {{ r["expected_license"] }} | {{ r["model_card_status"] }} | {{ r["review_owner"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 配布中モデルの一覧確認
+
+台帳上のモデルについて、Hugging Face Hub API から現在公開されているメタデータを取得し、実際の公開状況を確認します。
+
+```bash
+mkdir -p ./model-card-audit
+{% for r in csv_rows %}curl -s https://huggingface.co/api/models/{{ r["model_repo"] }} -o ./model-card-audit/{{ r["review_owner"] }}_meta.json
+{% endfor %}```
+
+### 2. モデルカードの取得と記載確認
+
+各モデルの `README.md`(モデルカード)を取得し、ライセンス節と利用条件の記載有無を確認します。
+
+```bash
+{% for r in csv_rows %}mkdir -p ./model-card-audit/{{ r["model_repo"] }}
+huggingface-cli download {{ r["model_repo"] }} README.md --local-dir ./model-card-audit/{{ r["model_repo"] }}
+grep -qi "license" ./model-card-audit/{{ r["model_repo"] }}/README.md
+echo "license節の有無({{ r["model_repo"] }}): $?"
+{% endfor %}```
+
+### 3. ライセンス表記と利用条件の照合
+
+`current_license_label` と台帳側の `expected_license` を突き合わせ、不一致のモデルを洗い出します。
+
+```bash
+{% for r in csv_rows %}{% if r["current_license_label"] != r["expected_license"] %}echo "ライセンス不一致: {{ r["model_repo"] }} (現状: {{ r["current_license_label"] }} / 正: {{ r["expected_license"] }})"
+{% else %}echo "ライセンス一致: {{ r["model_repo"] }} ({{ r["expected_license"] }})"
+{% endif %}{% endfor %}```
+
+### 4. 不備の是正とアップロード
+
+`model_card_status` が「整備済み」以外のモデルは、モデルカードのライセンス節を `expected_license` に合わせて修正し、再アップロードします。
+
+```bash
+{% for r in csv_rows %}{% if r["model_card_status"] != "整備済み" %}sed -i "s/^license:.*/license: {{ r["expected_license"] }}/" ./model-card-audit/{{ r["model_repo"] }}/README.md
+huggingface-cli upload {{ r["model_repo"] }} ./model-card-audit/{{ r["model_repo"] }}/README.md README.md --commit-message "Fix license metadata and model card"
+{% endif %}{% endfor %}```
+
+### 5. 棚卸し結果の記録
+
+是正の有無を含めた棚卸し結果を、日時付きでログファイルに記録します。
+
+```bash
+{% for r in csv_rows %}echo "$(date -Iseconds),{{ r["model_repo"] }},{{ r["model_card_status"] }},{{ r["expected_license"] }},{{ r["review_owner"] }}" >> ./model-card-audit/audit-log.csv
+{% endfor %}```
+
+## 動作確認
+
+- `./model-card-audit/audit-log.csv` に対象 {{ csv_rows | length }} 件すべての監査結果が1行ずつ記録されていること
+- 是正対象(`model_card_status` が「整備済み」以外)のモデルで、再取得した `README.md` の `license` 行が `expected_license` と一致していること
+- `https://huggingface.co/api/models/{repo}` から再取得したメタデータ上の `cardData.license` が、是正後は台帳の `expected_license` と一致していること
+
+## 注意事項
+
+- ライセンスの修正は法務・ライセンス管理担当(台帳の `review_owner`)の承認を得たうえで実施し、独断で `expected_license` を変更しない。
+- `huggingface-cli upload` によるモデルカードの上書きは既存の公開内容を書き換える操作のため、コミットメッセージに変更内容を明記し、可能であれば事前にプルリクエスト経由でのレビューを検討する。
+- gated modelやカスタムライセンスのモデルは、ライセンス条項の解釈に法的判断を要する場合があるため、判断に迷う場合は棚卸しを中断してエスカレーションする。
+- 本手順はモデルカードとライセンス表記の棚卸しに焦点を当てており、モデル本体の取得・キャッシュ管理(huggingface-model-cache)とは対象が異なる。

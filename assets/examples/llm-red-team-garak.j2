@@ -1,0 +1,109 @@
+# garakによるLLM脆弱性レッドチーム演習
+
+garakで対象 {{ csv_rows | length }} 件のLLMエンドポイントに既知の攻撃プローブ(probe)を走査し、hit率などの結果をもとにガードレール強化へ反映する演習手順書を生成します。
+
+## 目的
+
+garakのprobe/detector機構を理解し、対象モデルへ既知の攻撃パターンを走査してhit率を評価した上で、高リスクな項目をガードレールへ反映し、再走査で低減効果を確認できるようになることを目指します。
+
+## 用語解説
+
+- **garak**: LLMの脆弱性を既知の攻撃パターン(probe)で自動走査するOSSスキャナ
+- **probe**: DAN攻撃・プロンプトインジェクション・エンコーディング回避など、既知の攻撃手法を模したプローブモジュール。`--probes` で指定する
+- **detector**: probeが送った応答に脆弱性(攻撃成立)が含まれるかを判定するモジュール。probeごとに対応するdetectorが自動選択される
+- **target_type / target_name**: 走査対象のモデルインタフェース種別(`openai`・`huggingface`等)とモデル識別子を指定するオプション。旧称は `--model_type` / `--model_name` で、現在もエイリアスとして利用できる
+- **hit率(Attack Success Rate)**: probeの試行のうちdetectorが攻撃成立と判定した割合。`report.jsonl` と `report.html` に信頼区間つきで記録される
+- **hitlog**: 攻撃が成立した(脆弱性が検出された)試行のみを記録するJSONLファイル。検出がなければ生成されない
+- **ガードレール**: システムプロンプトの強化、出力フィルタ、モデレーションAPI等でLLMの入出力を制御する防御機構
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 件の対象に対してgarakを走査します。
+
+| target_label | target_type | model_name | probes | generations | risk_level |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["target_label"] }} | {{ r["target_type"] }} | {{ r["model_name"] }} | {{ r["probes"] }} | {{ r["generations"] }} | {{ r["risk_level"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 検証環境と対象モデルエンドポイントを用意する
+
+garakの走査は攻撃的なプロンプトを大量に送信するため、本番トラフィックとは分離した検証環境で実施します。
+
+```bash
+python3 -m venv ~/garak-venv
+source ~/garak-venv/bin/activate
+pip install --upgrade pip
+mkdir -p ~/garak-reports
+```
+
+APIキーは環境変数として渡し、コマンド引数や生成物に直書きしません。
+
+```bash
+export OPENAI_API_KEY="$OPENAI_API_KEY"
+```
+
+### 2. garakを導入し対象種別(target_type)とprobesを選定する
+
+```bash
+pip install garak
+garak --version
+garak --list_generators
+garak --list_probes -v
+```
+
+対象ごとの走査計画は以下の通りです。
+
+```bash
+{% for r in csv_rows %}echo "{{ r["target_label"] }}: target_type={{ r["target_type"] }} model_name={{ r["model_name"] }} probes={{ r["probes"] }} generations={{ r["generations"] }} risk_level={{ r["risk_level"] }}"
+{% endfor %}```
+
+### 3. garak実行で既知攻撃プローブを走査する
+
+```bash
+{% for r in csv_rows %}echo "=== {{ r["target_label"] }} ({{ r["target_type"] }}/{{ r["model_name"] }}) ==="
+garak --target_type {{ r["target_type"] }} --target_name {{ r["model_name"] }} --probes {{ r["probes"] }} --generations {{ r["generations"] }} --report_prefix ~/garak-reports/{{ r["target_label"] }} 2>&1 | tee ~/garak-reports/{{ r["target_label"] }}.console.log
+{% endfor %}```
+
+### 4. hit率等の結果レポートを集計する
+
+garakは走査ごとに `<report_prefix>.report.jsonl`(詳細結果)、`<report_prefix>.report.html`(hit率・信頼区間つきの要約)、脆弱性検出時のみ `<report_prefix>.hitlog.jsonl` を生成します。
+
+```bash
+{% for r in csv_rows %}echo "=== {{ r["target_label"] }} ==="
+ls -la ~/garak-reports/{{ r["target_label"] }}.report.jsonl ~/garak-reports/{{ r["target_label"] }}.report.html
+if [ -f ~/garak-reports/{{ r["target_label"] }}.hitlog.jsonl ]; then echo "hitlogあり: 既知probeで脆弱性を検出"; else echo "hitlogなし: 今回のprobesでは検出なし"; fi
+{% endfor %}```
+
+`report.html` をブラウザで開き、probe別のhit率(Attack Success Rate)とDEFCONスコア(1〜5、低いほど脆弱)を確認します。既存の `report.jsonl` からHTML要約を再生成する場合は以下のコマンドを使います。
+
+```bash
+python -m garak.analyze.report_digest -r ~/garak-reports/report_prefix.report.jsonl -o ~/garak-reports/report_prefix.report.html
+```
+
+### 5. 高リスク項目をガードレールへ反映し再走査する
+
+`risk_level` が `high` の対象は、検出されたprobe(DAN攻撃・プロンプトインジェクション等)に対応するシステムプロンプトの強化や出力モデレーションをガードレールとして追加した上で、同一条件で再走査し低減効果を確認します。
+
+```bash
+{% for r in csv_rows %}{% if r["risk_level"] == "high" %}echo "=== {{ r["target_label"] }}: ガードレール反映後の再走査 ==="
+garak --target_type {{ r["target_type"] }} --target_name {{ r["model_name"] }} --probes {{ r["probes"] }} --generations {{ r["generations"] }} --report_prefix ~/garak-reports/{{ r["target_label"] }}-rescan 2>&1 | tee ~/garak-reports/{{ r["target_label"] }}-rescan.console.log
+{% endif %}{% endfor %}```
+
+```bash
+{% for r in csv_rows %}{% if r["risk_level"] == "high" %}if [ -f ~/garak-reports/{{ r["target_label"] }}-rescan.hitlog.jsonl ]; then echo "{{ r["target_label"] }}: 再走査後もhitlogあり - ガードレールの強化が不十分"; else echo "{{ r["target_label"] }}: 再走査でhitlogなし - リスク低減を確認"; fi
+{% endif %}{% endfor %}```
+
+## 動作確認
+
+- `garak --list_generators` の出力に `openai` と `huggingface` が表示されること
+- 対象 {{ csv_rows | length }} 件それぞれで `~/garak-reports/<target_label>.report.jsonl` と `.report.html` が生成されていること(`<target_label>` は各行の値)
+- `risk_level` が `high` の対象について、ガードレール反映後の再走査(`-rescan` サフィックス)でhitlogファイルが消失、またはreport.html上のhit率が低下していること
+
+## 注意事項
+
+- garakは大量の攻撃的プロンプトを対象に送信するため、必ず検証環境か、レート制限・コストを許容できる対象で実施し、本番トラフィックに影響を与えないこと。
+- APIキー等の認証情報はコマンド引数や生成物に直書きせず、環境変数またはシークレットストア経由で渡すこと。
+- `hitlog`/`report.jsonl` には攻撃が成立したプロンプトと応答がそのまま含まれるため、機密情報として扱い、共有範囲を限定すること。
+- probesは既知の攻撃パターンに基づくものであり、未知の攻撃手法や対象固有の業務ロジックに起因するリスクまでは網羅しない。ガードレール反映後も定期的な再走査を継続すること。

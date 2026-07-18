@@ -1,0 +1,84 @@
+# llama.cppサーバによるローカルLLM配信 — {{ served_model_alias }}
+
+GGUFモデルを `llama-server` で配信し、GPUオフロード層数の調整とOpenAI互換APIの動作確認を行います。
+
+## 目的
+
+GGUF形式のモデルファイルと`llama-server`の役割を理解し、VRAM容量に合わせてGPUオフロード層数を調整しながら、OpenAI互換APIとしてローカル配信できるようになることを目指します。
+
+## 用語解説
+
+- **GGUF**: llama.cpp系エンジンが読み込む単一ファイル形式のモデル。量子化レベル(例: `Q4_K_M`)によりファイルサイズと精度がトレードオフになる
+- **llama-server**: llama.cppに含まれるHTTPサーバ実装。GGUFモデルを読み込み、独自APIに加えOpenAI互換のエンドポイントを提供する
+- **GPUオフロード層数(`-ngl`)**: モデルの各層(レイヤー)のうち、GPU上で計算させる層の数。多いほど推論は高速化するがVRAM消費が増える
+- **コンテキストサイズ(`-c`)**: 1回の推論で保持できるトークン数の上限。KVキャッシュのメモリ消費に直結する
+- **OpenAI互換API**: `/v1/chat/completions` などOpenAI SDKと同じスキーマでリクエストを受け付けるAPI仕様
+
+## シナリオ設定
+
+モデル `{{ model_repo }}` の量子化版 `{{ gguf_filename }}` を `{{ model_dir }}` に取得し、`{{ build_dir }}` でビルドした`llama-server`で配信します。コンテキストサイズは `{{ ctx_size }}`、GPUオフロード層数は `{{ n_gpu_layers }}`、待受は `{{ api_host }}:{{ api_port }}`、モデルのエイリアス名は `{{ served_model_alias }}` とします。
+
+## 手順
+
+### 1. GGUFモデルを取得する
+
+```bash
+huggingface-cli download {{ model_repo }} {{ gguf_filename }} --local-dir {{ model_dir }}
+ls -lh {{ model_dir }}/{{ gguf_filename }}
+```
+
+### 2. llama-serverをビルドする(CUDA対応)
+
+```bash
+git clone https://github.com/ggml-org/llama.cpp {{ build_dir }}
+cd {{ build_dir }}
+cmake -B build -DGGML_CUDA=ON
+cmake --build build --config Release -j --target llama-server
+```
+
+### 3. llama-serverを起動する
+
+```bash
+{{ build_dir }}/build/bin/llama-server \
+  -m {{ model_dir }}/{{ gguf_filename }} \
+  -c {{ ctx_size }} \
+  -ngl {{ n_gpu_layers }} \
+  -t {{ threads }} \
+  --host {{ api_host }} \
+  --port {{ api_port }} \
+  -a {{ served_model_alias }}
+```
+
+起動ログに `offloaded {{ n_gpu_layers }}/N layers to GPU` のような行が出力されることを確認します(Nはモデルの総層数)。
+
+### 4. GPUオフロード層数を調整する
+
+```bash
+nvidia-smi --query-gpu=memory.used,memory.total --format=csv
+```
+
+VRAM使用量に余裕がある場合は `-ngl` を総層数(起動ログのNの値)まで引き上げて全層をGPUへ載せ、VRAM不足で起動に失敗したりOOMする場合は `-ngl {{ n_gpu_layers }}` から値を下げてサーバを再起動し、収まる値を探します。
+
+### 5. OpenAI互換APIで動作確認する
+
+```bash
+curl http://127.0.0.1:{{ api_port }}/health
+curl http://127.0.0.1:{{ api_port }}/v1/models
+curl http://127.0.0.1:{{ api_port }}/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "{{ served_model_alias }}", "messages": [{"role": "user", "content": "こんにちは"}]}'
+```
+
+## 動作確認
+
+- `/health` が正常応答を返すこと
+- `/v1/models` のレスポンスに `{{ served_model_alias }}` が含まれること
+- `/v1/chat/completions` が `{{ served_model_alias }}` からの応答を含むJSONを返すこと
+- `nvidia-smi` のVRAM使用量が搭載メモリを超えずOOMしていないこと
+
+## 注意事項
+
+- `-ngl {{ n_gpu_layers }}` をモデルの総層数より大きい値にしても、llama.cppが自動的に総層数までに丸めて全層をGPUへオフロードするため、迷った場合は大きめの値を指定して起動ログで実際のオフロード数を確認するとよい。
+- `{{ gguf_filename }}` の量子化レベルを変えると必要VRAM量が変わるため、`-ngl` は量子化レベルを変更するたびに調整し直す。
+- `-c {{ ctx_size }}` を大きくするとKVキャッシュのメモリ消費が増え、`-ngl` との兼ね合いでOOMしやすくなる。
+- 本手順はollamaによる簡易運用(dgx-spark-ollama)やvLLM(vllm-inference-server)とは異なり、単一プロセス・省メモリでのローカル配信を重視するllama-serverの構築手順である。

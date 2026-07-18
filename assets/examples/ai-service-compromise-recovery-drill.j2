@@ -1,0 +1,98 @@
+# AIサービス侵害からの復旧訓練
+
+本手順は、検証環境（本番から隔離されたステージング環境）でAIサービスの侵害状態を意図的に再現し、検証済みバックアップ・レジストリからのクリーン復旧を試す訓練です。対象はAIサービスを構成する{{ csv_rows | length }}件のコンポーネントで、最も長い個別目標復旧時間(RTO)は{{ csv_rows | map(attribute="rto_target_min") | map("int") | max }}分です。
+
+## 目的
+
+検証環境でAIサービスの侵害状態を安全に再現し、汚染されていないことが確認済みのバックアップ・レジストリからクリーンな状態へ復元する一連の流れを、目標復旧時間(RTO)を意識しながら実施できるようになることを目指します。
+
+## 用語解説
+
+- **復旧訓練(リカバリドリル)**: 実際に侵害・障害を模擬し、復旧手順とRTOの妥当性を検証する演習
+- **目標復旧時間(RTO)**: 侵害検知からサービスが正常な状態に戻るまでに許容される時間の目標値
+- **検証環境**: 本番と分離された、訓練・検証専用の環境。本手順の再現・隔離作業はここでのみ実施する
+- **クリーン復元**: 侵害の影響を受けていないことが確認済みのバックアップからのみ復元すること。侵害後に取得したバックアップは対象外とする
+- **完全性検証(sha256sum -c)**: マニフェストに記録したハッシュ値と実ファイルのハッシュ値を照合し、改ざん・破損がないことを確認する方法
+- **隔離(クアランティン)**: 侵害の疑いがある成果物を稼働環境から切り離し、原因調査が完了するまで保持すること
+
+## シナリオ設定
+
+対象コンポーネントは{{ csv_rows | length }}件です。
+
+| component | component_type | compromise_method | rto_target_min |
+|---|---|---|---|
+{% for r in csv_rows %}| {{ r["component"] }} | {{ r["component_type"] }} | {{ r["compromise_method"] }} | {{ r["rto_target_min"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 検証環境であることを確認し、訓練シナリオと目標復旧時間を設定する
+
+```bash
+[ -f /etc/ai-svc-environment ] && grep -qx staging /etc/ai-svc-environment || {
+  echo "ERROR: /etc/ai-svc-environment が 'staging' ではありません。本番環境の可能性があるため中止します。" >&2
+  exit 1
+}
+mkdir -p /srv/ai-svc-drill
+{% for r in csv_rows %}echo "{{ r["component"] }}: 個別目標RTO {{ r["rto_target_min"] }}分" >> /srv/ai-svc-drill/scenario.txt
+{% endfor %}echo "全体目標RTO: {{ csv_rows | map(attribute="rto_target_min") | map("int") | max }}分" >> /srv/ai-svc-drill/scenario.txt
+```
+
+`/etc/ai-svc-environment` に `staging` とだけ書かれたマーカーファイルを検証環境側で事前に用意しておきます。存在しない、または内容が `staging` でない場合はここで即座に中止し、以降の破壊的操作（サービス停止・隔離・上書き）が本番環境に対して実行されることを防ぎます。各コンポーネントの目標RTOのうち最大値を、訓練全体の目標復旧時間として採用します。
+
+### 2. 検証環境で侵害状態を再現する
+
+```bash
+{% for r in csv_rows %}mkdir -p /srv/ai-svc-staging/{{ r["component"] }}
+echo "{{ r["compromise_method"] }}" > /srv/ai-svc-staging/{{ r["component"] }}/COMPROMISE_SIMULATION.txt
+{% endfor %}```
+
+`compromise_method` に記載した模擬シナリオを、検証環境上のマーカーファイルとして再現します。侵害の再現・隔離・復元は一貫して `/srv/ai-svc-staging/` 配下でのみ行い、本番相当のパス(`/srv/ai-svc/`)には一切書き込みません。
+
+### 3. サービス停止と侵害成果物を隔離する
+
+```bash
+mkdir -p /quarantine
+{% for r in csv_rows %}systemctl --root=/srv/ai-svc-staging stop {{ r["component"] }} 2>/dev/null || true
+mv /srv/ai-svc-staging/{{ r["component"] }} /quarantine/{{ r["component"] }}-$(date +%Y%m%d%H%M%S)
+{% endfor %}```
+
+サービスを停止したうえで、再現した侵害成果物を `/quarantine/` 配下へ移動し、稼働環境から切り離します。`systemctl --root=` で検証環境専用のルートを明示し、本番のユニット名と衝突しないようにします。
+
+### 4. 検証済みバックアップ・レジストリからクリーン復元する
+
+```bash
+START=$(date +%s)
+{% for r in csv_rows %}mkdir -p /srv/ai-svc-staging/{{ r["component"] }}
+tar xzf {{ r["backup_source"] }} -C /srv/ai-svc-staging/{{ r["component"] }}
+{% endfor %}```
+
+各コンポーネントを、完全性検証済みのバックアップアーカイブ(`backup_source`)から、手順2・3と同じ検証環境パス(`/srv/ai-svc-staging/`)へクリーンな状態で展開します。
+
+### 5. 完全性を再検証し復旧時間を記録する
+
+```bash
+{% for r in csv_rows %}(cd /srv/ai-svc-staging/{{ r["component"] }} && sha256sum -c {{ r["integrity_manifest"] }})
+{% endfor %}```
+
+```bash
+{% for r in csv_rows %}systemctl --root=/srv/ai-svc-staging start {{ r["component"] }}
+{% endfor %}END=$(date +%s)
+echo "復旧時間実測値: $((END - START))秒" | tee -a /srv/ai-svc-drill/scenario.txt
+```
+
+全コンポーネントの `sha256sum -c` が成功した後にサービスを再起動し、開始から完了までの所要時間を記録します。
+
+## 動作確認
+
+- 全{{ csv_rows | length }}件について `sha256sum -c` の結果が `OK` と表示されること
+- 全{{ csv_rows | length }}件について `systemctl --root=/srv/ai-svc-staging status <component>` が `active (running)` と表示されること
+- `/srv/ai-svc-drill/scenario.txt` に記録された復旧時間実測値が、全体目標RTO({{ csv_rows | map(attribute="rto_target_min") | map("int") | max }}分)以内であること
+- `/quarantine/` 配下に、再現した侵害成果物がコンポーネントごとに保持されていること
+
+## 注意事項
+
+- 手順1の `/etc/ai-svc-environment` ガードは、このドリルを検証環境以外で実行してしまうことを防ぐ最終防衛線です。検証環境側で必ず事前に用意しておく。
+- 本手順は必ず本番から隔離された検証環境で実施し、対象コンポーネント名({{ csv_rows | map(attribute="component") | join(" / ") }})が本番サービスと重複しないことを事前に確認する。
+- `/quarantine/` 配下に移動した侵害成果物は、原因調査が完了するまで削除しない。
+- 復元には必ず `integrity_manifest` で完全性検証済みのバックアップ世代のみを使用する。侵害後に取得したバックアップを誤って復元すると訓練自体が無意味になる。

@@ -1,0 +1,12 @@
+mcp_package = "@modelcontextprotocol/server-filesystem"
+mcp_package_version = "0.6.3"
+mcp_allowed_dir = "/srv/mcp-data"
+npx_bin_path = "/usr/bin/npx"
+startup_log_line = "Secure MCP Filesystem Server running on stdio"
+service_user = "mcpsvc"
+service_group = "mcpsvc"
+work_dir = "/opt/mcp-filesystem"
+systemd_unit_name = "mcp-filesystem.service"
+service_description = "MCP Filesystem Server (npx-hosted)"
+restart_sec = 5
+credential_note = "このfilesystemサーバ自体はAPIキー等の認証情報を必要としないが、GitHub連携など認証が必要な他のMCPサーバをホスティングする場合はアクセストークンをsystemdのEnvironmentFileに分離し、ユニットファイルへ平文で書き込まない"

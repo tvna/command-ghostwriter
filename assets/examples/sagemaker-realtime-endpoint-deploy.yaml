@@ -1,0 +1,16 @@
+profile: training
+region: ap-northeast-1
+model_artifact_local_path: ./model.tar.gz
+s3_bucket: training-sagemaker-artifacts
+s3_key_prefix: models/fraud-detection
+model_name: fraud-detection-xgboost
+container_image_uri: 123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/fraud-detection-xgboost:1.7-1
+execution_role_arn: arn:aws:iam::123456789012:role/SageMakerExecutionRole
+endpoint_config_name: fraud-detection-xgboost-config
+variant_name: AllTraffic
+instance_type: ml.m5.large
+initial_instance_count: 1
+endpoint_name: fraud-detection-endpoint
+invoke_content_type: application/json
+invoke_payload_path: ./payload.json
+invoke_output_path: ./invoke-output.json

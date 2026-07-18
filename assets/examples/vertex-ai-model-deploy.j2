@@ -1,0 +1,113 @@
+# Vertex AIへのモデル登録とエンドポイント公開
+
+`gcloud ai` コマンドで学習済みモデルをVertex AI Model Registryに登録し、エンドポイントの作成・デプロイ・予測リクエストによる検証までを一巡します。
+
+## 目的
+
+モデルアーティファクトをCloud Storageに配置してからModel Registryへの登録、Endpointの作成、モデルのデプロイ、`predict` による疎通確認までの一連の流れを理解し、Vertex AIでの推論公開を再現可能な手順として実行できるようになることを目指します。
+
+## 用語解説
+
+- **Model Registry**: Vertex AIに登録したモデルのバージョンとメタデータを管理する仕組み。`gcloud ai models upload` で新しいモデル(またはモデルの新バージョン)を登録する
+- **アーティファクト(artifact)**: 学習済みモデルの実体ファイル一式。Cloud Storage上のディレクトリを指す `--artifact-uri` で登録時に参照する
+- **プリビルドコンテナ**: Googleが提供する推論用の標準コンテナイメージ。`{{ container_image_uri }}` のように用途・フレームワーク・リージョンごとに用意されている
+- **エンドポイント(Endpoint)**: 予測リクエストを受け付けるHTTPS窓口。モデル本体とは別リソースとして作成し、1つのエンドポイントに複数モデルをデプロイしてトラフィックを分割できる
+- **デプロイ(deploy-model)**: 登録済みモデルをエンドポイントに紐付け、実際に推論可能な状態にする操作。マシンタイプとレプリカ数(オートスケーリング範囲)を指定する
+- **トラフィック分割(traffic split)**: エンドポイント上で複数のデプロイ済みモデルにリクエストを振り分ける比率。単一モデルの場合は100%を割り当てる
+
+## シナリオ設定
+
+プロジェクト `{{ project_id }}` のリージョン `{{ region }}` で、ローカルの `{{ local_artifact_dir }}`(中身: `{{ model_artifact_filename }}`)にあるモデルアーティファクトを `{{ gcs_artifact_uri }}` に配置します。プリビルドコンテナ `{{ container_image_uri }}` を使ってモデル `{{ model_display_name }}` としてModel Registryに登録し、エンドポイント `{{ endpoint_display_name }}` を作成します。デプロイ名 `{{ deployed_model_display_name }}` でマシンタイプ `{{ machine_type }}`、レプリカ数 `{{ min_replica_count }}`〜`{{ max_replica_count }}` の設定でデプロイし、最後に `{{ predict_request_file }}` を使った予測リクエストで疎通を確認します。
+
+## 手順
+
+### 1. モデルアーティファクトをCloud Storageに配置する
+
+```bash
+gcloud config set project {{ project_id }}
+gcloud storage cp --recursive {{ local_artifact_dir }} {{ gcs_artifact_uri }}
+gcloud storage ls {{ gcs_artifact_uri }}
+```
+
+配置先に `{{ model_artifact_filename }}` が含まれていることを確認します。
+
+### 2. gcloud ai models uploadでモデルを登録する
+
+```bash
+gcloud ai models upload \
+  --region={{ region }} \
+  --display-name={{ model_display_name }} \
+  --container-image-uri={{ container_image_uri }} \
+  --artifact-uri={{ gcs_artifact_uri }}
+
+MODEL_ID=$(gcloud ai models list \
+  --region={{ region }} \
+  --filter="displayName={{ model_display_name }}" \
+  --format="value(name.basename())")
+
+echo "MODEL_ID=$MODEL_ID"
+```
+
+### 3. gcloud ai endpoints createでエンドポイントを作成する
+
+```bash
+gcloud ai endpoints create \
+  --region={{ region }} \
+  --display-name={{ endpoint_display_name }}
+
+ENDPOINT_ID=$(gcloud ai endpoints list \
+  --region={{ region }} \
+  --filter="displayName={{ endpoint_display_name }}" \
+  --format="value(name.basename())")
+
+echo "ENDPOINT_ID=$ENDPOINT_ID"
+```
+
+### 4. endpoints deploy-modelでモデルを配備する
+
+```bash
+gcloud ai endpoints deploy-model $ENDPOINT_ID \
+  --region={{ region }} \
+  --model=$MODEL_ID \
+  --display-name={{ deployed_model_display_name }} \
+  --machine-type={{ machine_type }} \
+  --min-replica-count={{ min_replica_count }} \
+  --max-replica-count={{ max_replica_count }} \
+  --traffic-split=0=100
+```
+
+デプロイの完了には数分かかります。完了するまで次の手順に進みません。
+
+### 5. endpoints predictで推論を検証する
+
+```bash
+cat > {{ predict_request_file }} <<'EOF'
+{
+  "instances": [
+    {
+      "{{ predict_feature_1_name }}": {{ predict_feature_1_value }},
+      "{{ predict_feature_2_name }}": {{ predict_feature_2_value }},
+      "{{ predict_feature_3_name }}": {{ predict_feature_3_value }}
+    }
+  ]
+}
+EOF
+
+gcloud ai endpoints predict $ENDPOINT_ID \
+  --region={{ region }} \
+  --json-request={{ predict_request_file }}
+```
+
+## 動作確認
+
+- `gcloud ai models list --region={{ region }}` に `{{ model_display_name }}` が表示されること
+- `gcloud ai endpoints describe $ENDPOINT_ID --region={{ region }}` の `deployedModels` に `{{ deployed_model_display_name }}` が含まれ、状態がデプロイ完了していること
+- `gcloud ai endpoints predict` の実行結果に `predictions` フィールドが含まれ、エラーなく応答が返ること
+- レプリカ数が `{{ min_replica_count }}`〜`{{ max_replica_count }}` の範囲でオートスケーリングされていること(`gcloud ai endpoints describe` で確認)
+
+## 注意事項
+
+- デプロイ済みエンドポイントはレプリカが起動している間、リクエストの有無にかかわらず課金が発生する。検証後に不要であれば `gcloud ai endpoints undeploy-model` でモデルの配備を解除し、`gcloud ai endpoints delete` および `gcloud ai models delete` で不要なリソースを削除する。
+- `--artifact-uri` に指定するCloud Storageのバケットとエンドポイントのリージョンは、`{{ region }}` のように同一(または対応)リージョンに揃える。
+- `--traffic-split=0=100` はデプロイするモデルにトラフィックを100%割り当てる指定であり、複数モデルを同一エンドポイントにデプロイする場合は既存モデルの配分もあわせて見直す。
+- 予測リクエストに含める特徴量(`{{ predict_feature_1_name }}` など)の型と順序は、学習時に使用した前処理と一致させる。不一致はエラーまたは不正確な予測の原因になる。

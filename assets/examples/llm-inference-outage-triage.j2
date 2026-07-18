@@ -1,0 +1,100 @@
+# 推論API無応答時の障害切り分け — {{ service_name }}
+
+推論APIサービス `{{ service_name }}`(`{{ api_base_url }}{{ health_path }}`)が無応答になった際に、プロセス・ポート・GPU・ログの順で原因層を切り分け、復旧と再発記録までを行います。
+
+## 目的
+
+「応答が返らない」という一つの症状の背後にある複数の原因層（アプリケーション未起動、ポート未リッスン、プロセスハング、GPUリソース枯渇、ドライバ異常）を区別し、再起動一択に頼らず原因層に応じた復旧判断ができるようになることを目指します。
+
+## 用語解説
+
+- **ヘルスチェックエンドポイント**: サービスが正常に応答できるかを確認するための専用URL。今回は `{{ health_path }}`
+- **リッスンポート**: プロセスが接続を受け付けるために開いているTCPポート。今回は `{{ listen_port }}`
+- **ss**: ソケットの状態(LISTEN/ESTABLISHED等)を確認するコマンド。`netstat`の後継
+- **journalctl**: systemdジャーナルに記録されたサービスログを閲覧するコマンド
+- **nvidia-smi**: NVIDIA GPUの使用率・メモリ・温度・プロセス占有状況を確認するコマンド
+- **Xidエラー**: NVIDIAドライバがカーネルログに出力するGPUハードウェア/ドライバレベルの異常コード
+
+## シナリオ設定
+
+推論API `{{ service_name }}` への問い合わせがタイムアウトし、無応答であるとの報告がありました。エンドポイントは `{{ api_base_url }}{{ health_path }}`、想定リッスンポートは `{{ listen_port }}` です。GPUノードには本来 `{{ gpu_expected_count }}` 基のGPUが搭載されている前提で切り分けを行い、エスカレーション先は {{ escalation_channel }} です。
+
+## 手順
+
+### 1. curlで疎通と応答コードを確認する
+
+```bash
+curl -o /dev/null -s -w "http_code=%{http_code} time_total=%{time_total}\n" --max-time 5 {{ api_base_url }}{{ health_path }}
+curl -s --max-time 5 {{ api_base_url }}{{ health_path }}
+```
+
+タイムアウトする(応答なし)のか、接続自体が拒否される(Connection refused)のか、エラーコードが返る(5xx等)のかで、この後に見るべき層が変わります。
+
+### 2. ss・systemctlでプロセスとポートを確認する
+
+```bash
+ss -ltnp | grep {{ listen_port }}
+systemctl status {{ service_name }} --no-pager
+systemctl is-active {{ service_name }}
+```
+
+`ss`でポート `{{ listen_port }}` がLISTEN状態か、`systemctl`でプロセス自体が起動しているかを確認します。プロセスは起動しているがポートがLISTENしていない場合はアプリケーション初期化中またはハングを疑います。
+
+### 3. journalctlでサービスログを確認する
+
+```bash
+journalctl -u {{ service_name }} -n {{ journal_lines }} --no-pager
+journalctl -u {{ service_name }} -p err --since "-30min" --no-pager
+```
+
+直近 `{{ journal_lines }}` 行の全体ログと、直近30分のエラーレベル以上のログを分けて確認します。OOM(メモリ不足)やモデルロード失敗、例外スタックトレースが記録されていないかを確認します。
+
+### 4. nvidia-smiでGPU状態を確認する
+
+```bash
+nvidia-smi
+nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu,temperature.gpu --format=csv
+dmesg | grep -i xid
+```
+
+`nvidia-smi`に表示されるGPU数が本来の `{{ gpu_expected_count }}` 基と一致するか、いずれかのGPUのメモリ使用率が張り付いていないかを確認します。`dmesg`にXidエラーが出ている場合はドライバ/ハードウェア層の異常であり、単純な再起動では解消しない可能性があります。
+
+### 5. 原因層を特定して復旧する
+
+手順1〜4の結果を突き合わせ、原因層に応じて対応します。
+
+- プロセス停止・ポート未リッスン: サービスを再起動する
+- プロセスは生きているがヘルスチェック無応答(ハング): サービスを再起動する
+- GPUメモリが張り付いている・Xidエラーあり: 再起動しても再発するおそれがあるため、{{ escalation_channel }} にエスカレーションしてからハードウェア対応を検討する
+
+```bash
+systemctl restart {{ service_name }}
+sleep 5
+systemctl is-active {{ service_name }}
+curl -o /dev/null -s -w "http_code=%{http_code}\n" --max-time 5 {{ api_base_url }}{{ health_path }}
+```
+
+### 6. 事象と対処を記録する
+
+```bash
+cat <<EOF >> {{ incident_log_path }}
+[$(date "+%Y-%m-%d %H:%M:%S")] service={{ service_name }} endpoint={{ api_base_url }}{{ health_path }} action=restart operator=$(whoami)
+EOF
+cat {{ incident_log_path }}
+```
+
+発生時刻、対象サービス、切り分けで判明した原因層、実施した対処を記録に残します。GPUハードウェア層に起因する場合は、{{ escalation_channel }} への連絡内容と対応状況も追記します。
+
+## 動作確認
+
+- `curl {{ api_base_url }}{{ health_path }}` がタイムアウトせず200系のHTTPステータスを返すこと
+- `ss -ltnp` で `{{ listen_port }}` がLISTEN状態であること
+- `systemctl is-active {{ service_name }}` が `active` を返すこと
+- `nvidia-smi` に表示されるGPU数が `{{ gpu_expected_count }}` 基であること
+- `{{ incident_log_path }}` に今回の事象と対処が記録されていること
+
+## 注意事項
+
+- `systemctl restart` はハング中のリクエストを含め処理中の推論をすべて中断させる。実行前に他のオンコール担当者・利用者へ影響を周知する。
+- GPUのXidエラーやメモリの張り付きが見られる場合、再起動のみで復旧しても同一原因で再発する可能性が高い。恒久対応は {{ escalation_channel }} と連携したハードウェア診断に委ねる。
+- `dmesg` の出力はカーネルバッファのローテーションにより古い情報が失われることがあるため、必要に応じて早い段階で控えを取る。

@@ -1,0 +1,10 @@
+model_repo: "mistralai/Mistral-7B-Instruct-v0.3"
+quantize_method: "bitsandbytes-nf4"
+tgi_image: "ghcr.io/huggingface/text-generation-inference:2.3.1"
+project_name: "tgi-server"
+host_port: 8080
+container_port: 80
+model_cache_path: "/data/tgi-cache"
+max_input_tokens: 4096
+max_total_tokens: 8192
+num_shard: 1

@@ -1,0 +1,96 @@
+# 学習チェックポイントの定期棚卸しと容量整理
+
+台帳（CSV）に登録された学習チェックポイントを一覧し、保持ポリシー（直近世代数 + ベストモデル）と突き合わせて削除候補を確認したうえで、不要世代を削除して容量を回収する定期棚卸し手順です。
+
+## 目的
+
+チェックポイントの世代管理（generation_rank）とベストモデルフラグ（is_best）の意味を理解し、台帳の保持ポリシーに沿って削除候補を安全に見極め、容量回収まで確認できるようになることを目指します。
+
+## 用語解説
+
+- **チェックポイント(checkpoint)**: 学習途中のモデル重み・optimizer状態などをまとめて保存したスナップショット。`checkpoint_path` はその保存先ディレクトリを指す
+- **generation_rank**: 同一 `run_name` 内でチェックポイントを新しい順に並べた世代の順位。`1` が最新世代
+- **is_best**: 評価指標上最良のチェックポイントであることを示す列。該当する場合は `best`、該当しない場合は明示的なセンチネル値 `-` を格納する（空文字は使わない）
+- **保持ポリシー**: 「直近3世代、または `is_best` が `best` のチェックポイントを保持し、それ以外を削除候補とする」という本手順の判断基準
+- **decision**: 台帳上で保持ポリシーを適用した結果を記録する列。`保持` または `削除候補` のいずれかを持つ
+
+## シナリオ設定
+
+台帳には {{ csv_rows | length }} 件のチェックポイントが登録されています。保持ポリシーは「直近3世代、または `is_best=best` を保持し、それ以外を削除候補とする」です。
+
+| run_name | checkpoint_path | step | created_at | size_gb | generation_rank | is_best | decision |
+|---|---|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["run_name"] }} | {{ r["checkpoint_path"] }} | {{ r["step"] }} | {{ r["created_at"] }} | {{ r["size_gb"] }} | {{ r["generation_rank"] }} | {{ r["is_best"] }} | {{ r["decision"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. チェックポイント一覧の取得
+
+```bash
+{% for r in csv_rows %}du -sh {{ r["checkpoint_path"] }} 2>/dev/null || echo "見つかりません: {{ r["checkpoint_path"] }}"
+{% endfor %}```
+
+台帳上の想定サイズと突き合わせます。
+
+```bash
+{% for r in csv_rows %}echo "{{ r["run_name"] }} step={{ r["step"] }}: 台帳サイズ={{ r["size_gb"] }}GB 作成日={{ r["created_at"] }}"
+{% endfor %}```
+
+### 2. 保持ポリシーとの突合
+
+`generation_rank` と `is_best` から保持ポリシーを再確認し、台帳の `decision` 列と一致しているかを確認します。
+
+```bash
+{% for r in csv_rows %}echo "{{ r["run_name"] }} step={{ r["step"] }} generation_rank={{ r["generation_rank"] }} is_best={{ r["is_best"] }} -> 台帳判定: {{ r["decision"] }}"
+{% endfor %}```
+
+ベストモデルに指定されているチェックポイントを個別に確認します。
+
+```bash
+{% for r in csv_rows %}{% if r["is_best"] != "-" %}echo "ベストモデル: {{ r["run_name"] }} step={{ r["step"] }}（削除対象から常に除外）"
+{% endif %}{% endfor %}```
+
+### 3. 削除候補の確認
+
+`decision` が `削除候補` の行のみを対象に、削除前の状態を目視で確認します。
+
+```bash
+{% for r in csv_rows %}{% if r["decision"] == "削除候補" %}ls -la {{ r["checkpoint_path"] }}
+echo "削除候補: {{ r["run_name"] }} step={{ r["step"] }} size={{ r["size_gb"] }}GB generation_rank={{ r["generation_rank"] }}"
+{% endif %}{% endfor %}```
+
+### 4. 不要世代の削除
+
+確認が済んだ削除候補のみを削除します。
+
+```bash
+{% for r in csv_rows %}{% if r["decision"] == "削除候補" %}rm -rf {{ r["checkpoint_path"] }}
+{% endif %}{% endfor %}```
+
+### 5. 容量回収の確認
+
+```bash
+df -h /data/training/checkpoints
+{% for r in csv_rows %}{% if r["decision"] == "削除候補" %}test -e {{ r["checkpoint_path"] }} && echo "削除失敗: {{ r["checkpoint_path"] }}" || echo "削除確認OK: {{ r["checkpoint_path"] }}"
+{% endif %}{% endfor %}```
+
+保持対象が引き続き存在することも確認します。
+
+```bash
+{% for r in csv_rows %}{% if r["decision"] == "保持" %}test -e {{ r["checkpoint_path"] }} && echo "保持確認OK: {{ r["checkpoint_path"] }}" || echo "保持対象が消失: {{ r["checkpoint_path"] }}"
+{% endif %}{% endfor %}```
+
+## 動作確認
+
+- `decision` が `削除候補` の全チェックポイントについて `checkpoint_path` が存在しないこと
+- `decision` が `保持` の全チェックポイント（`is_best=best` を含む）が引き続き存在すること
+- `df -h /data/training/checkpoints` の空き容量が削除前より増加していること
+- 台帳の `decision` 列と実際のファイルシステム上の状態が一致していること
+
+## 注意事項
+
+- `rm -rf` は元に戻せないため、手順3で対象を目視確認してから手順4を実行する。対象を誤ると再学習が必要になる。
+- `is_best=best` のチェックポイントは評価指標上重要なため、`generation_rank` に関わらず削除対象に含めない。
+- 対象の `run_name` が現在も学習ジョブとして稼働中でないことを事前に確認する。稼働中のrunのチェックポイントを削除すると学習が中断する。
+- 本手順はローカルディスク上のチェックポイント整理を対象とし、リモートストレージへのバックアップ運用は対象外とする。

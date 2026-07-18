@@ -1,0 +1,104 @@
+# 推論エンドポイントの定期棚卸し点検
+
+複数の推論エンドポイントに対し、死活・提供モデル・応答レイテンシを定期的に確認し、結果を台帳(CSV)へ追記して差分を報告する仕組みを作ります。
+
+## 目的
+
+推論エンドポイントが「動いているはず」という思い込みに頼らず、ヘルスチェック・提供モデルの一致・レイテンシ劣化を定期点検で機械的に検知し、点検結果を台帳として蓄積できるようになることを目指します。
+
+## 用語解説
+
+- **エンドポイント棚卸し**: 稼働中の推論エンドポイントを定期的に一覧化し、想定どおり応答しているかを確認する運用作業
+- **ヘルスチェック**: `health_path` で示される死活確認用エンドポイントへ問い合わせ、HTTPステータスから稼働状態を判定すること
+- **提供モデル一覧**: `models_path`(OpenAI互換APIの`/v1/models`相当)が返す、そのエンドポイントで実際に提供中のモデル一覧
+- **応答レイテンシ**: リクエスト送信から応答完了までの所要時間。`latency_threshold_ms`を超えると劣化の兆候とみなす
+- **台帳(ledger)**: 点検結果を時系列で追記していくCSVファイル。過去分との差分を見ることで変化点を追跡できる
+
+## シナリオ設定
+
+点検対象は{{ csv_rows | length }}件です。台帳は `{{ csv_rows[0]["ledger_path"] }}` に集約します。
+
+| endpoint_name | endpoint_url | expected_model | latency_threshold_ms |
+|---|---|---|---|
+{% for r in csv_rows %}| {{ r["endpoint_name"] }} | {{ r["endpoint_url"] }} | {{ r["expected_model"] }} | {{ r["latency_threshold_ms"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. エンドポイント一覧を読み込む
+
+```bash
+LEDGER_PATH="{{ csv_rows[0]["ledger_path"] }}"
+sudo mkdir -p "$(dirname "$LEDGER_PATH")"
+if [ ! -f "$LEDGER_PATH" ]; then
+    echo "checked_at,endpoint_name,health_status,model_match,latency_ms" | sudo tee "$LEDGER_PATH" > /dev/null
+fi
+{% for r in csv_rows %}echo "対象: {{ r["endpoint_name"] }} ({{ r["endpoint_url"] }}) expected_model={{ r["expected_model"] }}"
+{% endfor %}
+```
+
+### 2. ヘルスチェックを実行する
+
+```bash
+{% for r in csv_rows %}echo "=== {{ r["endpoint_name"] }} ヘルスチェック ==="
+{% if r["api_key_env"] != "-" %}health_code=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${{ r["api_key_env"] }}" {{ r["endpoint_url"] }}{{ r["health_path"] }})
+{% else %}health_code=$(curl -s -o /dev/null -w "%{http_code}" {{ r["endpoint_url"] }}{{ r["health_path"] }})
+{% endif %}echo "{{ r["endpoint_name"] }} health_code=$health_code"
+{% endfor %}
+```
+
+### 3. 提供モデル一覧を照合する
+
+```bash
+{% for r in csv_rows %}echo "=== {{ r["endpoint_name"] }} 提供モデル照合 ==="
+{% if r["api_key_env"] != "-" %}models_json=$(curl -s -H "Authorization: Bearer ${{ r["api_key_env"] }}" {{ r["endpoint_url"] }}{{ r["models_path"] }})
+{% else %}models_json=$(curl -s {{ r["endpoint_url"] }}{{ r["models_path"] }})
+{% endif %}if echo "$models_json" | grep -q "{{ r["expected_model"] }}"; then
+    echo "{{ r["endpoint_name"] }}: {{ r["expected_model"] }} を確認"
+else
+    echo "{{ r["endpoint_name"] }}: {{ r["expected_model"] }} が提供モデル一覧に見当たらない"
+fi
+{% endfor %}
+```
+
+### 4. 応答レイテンシを記録する
+
+```bash
+{% for r in csv_rows %}latency_sec=$(curl -s -o /dev/null -w "%{time_total}" {{ r["endpoint_url"] }}{{ r["health_path"] }})
+awk -v sec="$latency_sec" -v name="{{ r["endpoint_name"] }}" -v th="{{ r["latency_threshold_ms"] }}" 'BEGIN { ms = sec * 1000; status = (ms > th) ? "NG" : "OK"; printf "%s latency_ms=%.1f threshold_ms=%s status=%s\n", name, ms, th, status }'
+{% endfor %}
+```
+
+### 5. 台帳を更新し差分を報告する
+
+```bash
+LEDGER_PATH="{{ csv_rows[0]["ledger_path"] }}"
+CHECKED_AT=$(date -Is)
+sudo cp "$LEDGER_PATH" "$LEDGER_PATH.prev"
+{% for r in csv_rows %}{% if r["api_key_env"] != "-" %}health_code=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${{ r["api_key_env"] }}" {{ r["endpoint_url"] }}{{ r["health_path"] }})
+models_json=$(curl -s -H "Authorization: Bearer ${{ r["api_key_env"] }}" {{ r["endpoint_url"] }}{{ r["models_path"] }})
+{% else %}health_code=$(curl -s -o /dev/null -w "%{http_code}" {{ r["endpoint_url"] }}{{ r["health_path"] }})
+models_json=$(curl -s {{ r["endpoint_url"] }}{{ r["models_path"] }})
+{% endif %}if echo "$models_json" | grep -q "{{ r["expected_model"] }}"; then model_match="ok"; else model_match="ng"; fi
+latency_sec=$(curl -s -o /dev/null -w "%{time_total}" {{ r["endpoint_url"] }}{{ r["health_path"] }})
+latency_ms=$(awk -v sec="$latency_sec" 'BEGIN { printf "%.1f", sec * 1000 }')
+echo "$CHECKED_AT,{{ r["endpoint_name"] }},$health_code,$model_match,$latency_ms" | sudo tee -a "$LEDGER_PATH" > /dev/null
+{% endfor %}
+diff "$LEDGER_PATH.prev" "$LEDGER_PATH" || true
+```
+
+`diff`の出力に新規追加行(点検結果)のみが表示されれば、台帳が想定どおり更新されています。
+
+## 動作確認
+
+- 手順2で全{{ csv_rows | length }}件の`health_code`が`200`であること
+- 手順3で各エンドポイントの提供モデル一覧に、対応する`expected_model`が含まれていること
+- 手順4で`latency_ms`が対応する`latency_threshold_ms`を超えていない(`status=OK`)こと
+- 手順5実行後、`{{ csv_rows[0]["ledger_path"] }}`に点検対象{{ csv_rows | length }}件分の新規行が追記され、`diff`で追加内容を確認できること
+
+## 注意事項
+
+- `health_code`が`200`以外、または`model_match`が`ng`の場合は、該当エンドポイントを次の点検サイクルまで放置せず、直ちに個別調査を開始すること。
+- `latency_threshold_ms`は回線条件やモデルサイズによって適正値が異なるため、誤検知が続く場合は閾値そのものを見直す。
+- 認証が必要なエンドポイント(`api_key_env`が`-`以外の行)では、対応する環境変数にAPIキーを事前に設定しておくこと。キー自体を台帳やログに書き込まない。
+- 台帳(`{{ csv_rows[0]["ledger_path"] }}`)は追記専用として扱い、過去分を書き換えない。容量が肥大化した場合はログローテーションなど別の仕組みで整理する。

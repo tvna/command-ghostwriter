@@ -1,0 +1,9 @@
+node_major_version = "20"
+playwright_version = "1.47.0"
+install_dir = "/opt/playwright-app"
+target_browser = "chromium"
+run_user = "playwright"
+screenshot_url = "https://example.com"
+screenshot_output_path = "/opt/playwright-app/output/screenshot.png"
+tmp_dir = "/opt/playwright-app/tmp"
+tmp_retention_days = 3

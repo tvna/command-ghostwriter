@@ -1,0 +1,112 @@
+# MCPサーバと公開ツールの定期棚卸し
+
+稼働中のMCPサーバ・待ち受けポート・公開ツール一覧を台帳と突き合わせ、認証キーの有効期限を確認したうえで、不要になったサーバを停止して棚卸し結果を記録する運用を一巡します。
+
+## 目的
+
+MCPサーバは一度導入すると「動いているはず」のまま放置されやすく、不要になったサーバや期限切れの認証キーが公開ツールとして残存するリスクがあります。稼働プロセス・公開ツール・認証キーを定期的に台帳と突き合わせ、不要サーバの停止と棚卸し結果の記録を機械的に行えるようになることを目指します。
+
+## 用語解説
+
+- **MCPサーバ**: Model Context Protocolに基づき、外部ツールやリソースをエージェントに公開するサーバプロセス。ここでは`process_name`で示すプロセス名で稼働する
+- **公開ツール(tools)**: MCPサーバが`tools/list`メソッドで返す、エージェントから呼び出し可能な操作の一覧
+- **台帳(ledger)**: 各MCPサーバの想定構成（公開ツール・認証キー方針）と点検結果を記録するCSVファイル
+- **認証キーの有効期限**: `auth_key_env`で示す環境変数に保持する認証キーの失効日。認証不要なサーバでは該当なしとして`-`で表す
+- **不要サーバ**: 用途が終了した、または重複導入されたMCPサーバ。`decision`列が「継続」以外の行が該当する
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 台を棚卸し対象とします。点検結果は `{{ csv_rows[0]["ledger_path"] }}` に集約します。
+
+| server_name | process_name | listen_port | exposed_tools | decision |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["server_name"] }} | {{ r["process_name"] }} | {{ r["listen_port"] }} | {{ r["exposed_tools"] }} | {{ r["decision"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 稼働プロセスと待ち受けポートを一覧化する
+
+```bash
+{% for r in csv_rows %}echo "=== {{ r["server_name"] }} ==="
+ps -eo pid,comm,args | grep -- "{{ r["process_name"] }}" | grep -v grep
+sudo ss -ltnp | grep ":{{ r["listen_port"] }} "
+{% endfor %}
+```
+
+`ps`でプロセスの存在を、`ss -ltnp`でポート`{{ csv_rows[0]["listen_port"] }}`等の待ち受け状態を確認します。いずれも表示されない場合は、台帳上は稼働中とされていても実際には停止しています。
+
+### 2. 台帳と公開ツール一覧を突き合わせる
+
+```bash
+{% for r in csv_rows %}echo "=== {{ r["server_name"] }} 公開ツール照合 ==="
+actual_tools=$(curl -s -X POST "http://127.0.0.1:{{ r["listen_port"] }}/mcp" -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}')
+echo "{{ r["exposed_tools"] }}" | tr ',' '\n' | while IFS= read -r tool_name; do
+    if echo "$actual_tools" | grep -q "\"$tool_name\""; then
+        echo "{{ r["server_name"] }}: $tool_name を確認"
+    else
+        echo "{{ r["server_name"] }}: $tool_name が公開ツール一覧に見当たらない（台帳の記載を見直す）"
+    fi
+done
+{% endfor %}
+```
+
+台帳の`exposed_tools`(`{{ csv_rows[0]["exposed_tools"] }}`など)と、`tools/list`が実際に返す一覧を突き合わせます。台帳にのみ存在するツールは棚卸し漏れ、実サーバにのみ存在するツールは台帳未更新の兆候です。
+
+### 3. 認証キーの有効期限を確認する
+
+```bash
+now_epoch=$(date +%s)
+{% for r in csv_rows %}{% if r["key_expiry"] != "-" %}exp_epoch=$(date -d "{{ r["key_expiry"] }}" +%s)
+if [ "$exp_epoch" -lt "$now_epoch" ]; then
+    echo "{{ r["server_name"] }}: 認証キー期限切れ（{{ r["key_expiry"] }}、環境変数 {{ r["auth_key_env"] }}）"
+else
+    echo "{{ r["server_name"] }}: 認証キー有効（期限 {{ r["key_expiry"] }}、環境変数 {{ r["auth_key_env"] }}）"
+fi
+{% else %}echo "{{ r["server_name"] }}: 認証キーなし（認証不要な構成）"
+{% endif %}{% endfor %}
+```
+
+`key_expiry`が`-`のサーバ（`{{ csv_rows[2]["server_name"] }}`など）は認証キーを使わない構成のため、期限確認の対象外です。
+
+### 4. 不要サーバを停止する
+
+```bash
+{% for r in csv_rows %}{% if r["decision"] != "継続" %}echo "停止対象: {{ r["server_name"] }}（判定: {{ r["decision"] }}）"
+sudo systemctl stop {{ r["process_name"] }}
+sudo systemctl disable {{ r["process_name"] }}
+sudo ss -ltnp | grep ":{{ r["listen_port"] }} " || echo "{{ r["server_name"] }}: ポート{{ r["listen_port"] }}の待ち受けを停止済み"
+{% endif %}{% endfor %}
+```
+
+`decision`が「継続」以外の行のみを停止します。「継続」判定のサーバは本手順では一切操作しません。
+
+### 5. 棚卸し結果を記録する
+
+```bash
+LEDGER_PATH="{{ csv_rows[0]["ledger_path"] }}"
+sudo mkdir -p "$(dirname "$LEDGER_PATH")"
+if [ ! -f "$LEDGER_PATH" ]; then
+    echo "checked_at,server_name,listen_port,tool_count,decision" | sudo tee "$LEDGER_PATH" > /dev/null
+fi
+CHECKED_AT=$(date -Is)
+{% for r in csv_rows %}tool_count=$(echo "{{ r["exposed_tools"] }}" | tr ',' '\n' | wc -l)
+echo "$CHECKED_AT,{{ r["server_name"] }},{{ r["listen_port"] }},$tool_count,{{ r["decision"] }}" | sudo tee -a "$LEDGER_PATH" > /dev/null
+{% endfor %}
+cat "$LEDGER_PATH"
+```
+
+## 動作確認
+
+- 手順1で稼働中と判断したサーバ全てで、`ps`にプロセスが表示され、かつ`ss -ltnp`に対応する`listen_port`が表示されること
+- 手順2で「継続」判定のサーバの`exposed_tools`が、すべて`tools/list`の応答に含まれること
+- 手順3で認証キーを使うサーバ（`auth_key_env`が`-`以外の行）について、期限切れ・有効のいずれかが判定済みであること
+- 手順4実行後、「停止対象」判定のサーバで`ss -ltnp`から該当ポートの表示が消えていること
+- 手順5実行後、`{{ csv_rows[0]["ledger_path"] }}`に棚卸し対象{{ csv_rows | length }}件分の新規行が追記されていること
+
+## 注意事項
+
+- 手順4はサーバプロセスを停止する不可逆に近い操作である。停止前に手順1〜3の結果を確認し、「停止対象」の判定に誤りがないか台帳の作成者に確認してから実行する。
+- 認証キー自体（`auth_key_env`が指す環境変数の値）は台帳・ログ・コマンド出力に書き込まない。台帳に記録するのは環境変数名と有効期限のみとする。
+- 期限切れの認証キーを見つけた場合は、キーの失効・再発行の手続きを別途行う。本手順はキーの失効を検知するところまでを対象とし、失効処理自体は対象外とする。
+- 「継続」と判定したサーバでも、`tools/list`の応答に台帳未記載のツールが含まれていた場合は、意図しない機能公開の可能性があるため個別に調査する。

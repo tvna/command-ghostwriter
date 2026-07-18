@@ -1,0 +1,6 @@
+aws_profile,aws_account_id,service_label,ce_service_name,budget_name,monthly_budget_usd,idle_check_cmd,lookback_months,remediation_queue
+ai-ops,123456789012,Amazon Bedrock,Amazon Bedrock,ai-bedrock-monthly,3000,bedrock list-provisioned-model-throughputs,3,AI-COST-JIRA
+ai-ops,123456789012,Amazon SageMaker,Amazon SageMaker,ai-sagemaker-monthly,5000,sagemaker list-endpoints,3,AI-COST-JIRA
+ai-ops,123456789012,Amazon Comprehend,Amazon Comprehend,ai-comprehend-monthly,800,comprehend list-endpoints,3,AI-COST-JIRA
+ai-ops,123456789012,Amazon Rekognition,Amazon Rekognition,ai-rekognition-monthly,600,-,3,AI-COST-JIRA
+ai-ops,123456789012,Amazon Textract,Amazon Textract,ai-textract-monthly,400,-,3,AI-COST-JIRA

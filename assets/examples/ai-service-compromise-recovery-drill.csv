@@ -1,0 +1,6 @@
+component,component_type,compromise_method,backup_source,integrity_manifest,rto_target_min
+inference-api,推論APIコンテナの設定とルーティング定義,検証済みイメージと異なる改ざんバイナリへの差し替えを模擬,/backup/ai-svc/inference-api/verified-2026-07-10.tar.gz,/backup/ai-svc/inference-api/verified-2026-07-10.sha256,15
+model-registry,モデルアーティファクトのレジストリ台帳,マニフェスト外のモデルファイル混入を模擬,/backup/ai-svc/model-registry/verified-2026-07-10.tar.gz,/backup/ai-svc/model-registry/verified-2026-07-10.sha256,30
+vector-db,RAG用ベクトルDBのスナップショット,埋め込みデータへの不正レコード注入を模擬,/backup/ai-svc/vector-db/verified-2026-07-10.tar.gz,/backup/ai-svc/vector-db/verified-2026-07-10.sha256,20
+prompt-config,システムプロンプトとガードレール設定,システムプロンプトの不正な書き換えを模擬,/backup/ai-svc/prompt-config/verified-2026-07-10.tar.gz,/backup/ai-svc/prompt-config/verified-2026-07-10.sha256,10
+api-gateway-config,APIゲートウェイの認証とレート制限設定,認証バイパス設定の混入を模擬,/backup/ai-svc/api-gateway-config/verified-2026-07-10.tar.gz,/backup/ai-svc/api-gateway-config/verified-2026-07-10.sha256,10

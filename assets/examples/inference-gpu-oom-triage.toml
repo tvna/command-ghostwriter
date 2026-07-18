@@ -1,0 +1,16 @@
+service_name = "vllm-llama3-70b"
+model_id = "meta-llama/Meta-Llama-3.1-70B-Instruct"
+gpu_device_id = 0
+oom_error_pattern = "CUDA out of memory"
+current_max_model_len = 16384
+current_max_num_seqs = 64
+current_gpu_memory_utilization = 0.95
+reduced_max_model_len = 8192
+reduced_max_num_seqs = 16
+reduced_gpu_memory_utilization = 0.85
+vllm_venv_path = "/opt/vllm-env"
+api_port = 8000
+restart_wait_seconds = 10
+monitor_interval_minutes = 5
+memory_alert_threshold_percent = 90
+monitor_log_path = "/var/log/gpu-oom-watch.log"

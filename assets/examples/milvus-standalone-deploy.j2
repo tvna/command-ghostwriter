@@ -1,0 +1,151 @@
+# Docker ComposeによるMilvusスタンドアロン構築とインデックス作成 — {{ collection_name }}
+
+Docker Composeでベクトル検索エンジン **Milvus** ( {{ milvus_version }} ) のスタンドアロン構成を起動し、コレクション `{{ collection_name }}` のスキーマ定義・ベクトル挿入・インデックス作成・検索確認までを一巡します。
+
+## 目的
+
+Milvusスタンドアロンの内部構成（etcd / MinIO / Milvus本体）を理解し、コレクション設計からインデックス作成、検索応答の確認までの一連の流れを、CLIとPythonクライアント(pymilvus)を用いて自力で再現できるようになることを目指します。
+
+## 用語解説
+
+- **Milvusスタンドアロン**: メタデータ管理を担う **etcd**、オブジェクトストレージを担う **MinIO**、検索処理本体の **Milvus** の3コンテナで構成される単一ノード構成
+- **コレクション(Collection)**: RDBのテーブルに相当する、ベクトルと付随フィールドの格納単位
+- **フィールドスキーマ(FieldSchema)**: コレクション内の各フィールドの型・次元数・主キーか否かを定義するもの
+- **メトリックタイプ(metric_type)**: ベクトル間の距離・類似度の算出方式。`L2`はユークリッド距離、`COSINE`はコサイン類似度など
+- **インデックスタイプ(index_type)**: 近似最近傍探索を高速化する索引構造。`IVF_FLAT`はベクトル空間をクラスタ分割して探索範囲を絞る方式
+- **nlist**: `IVF_FLAT`系インデックスのクラスタ数パラメータ。値が大きいほど検索精度は上がるが構築・検索コストも増える
+- **healthz**: Milvus本体が公開するHTTPヘルスチェックエンドポイント（メトリクスポート上に存在）
+
+## シナリオ設定
+
+`{{ compose_dir }}` にMilvus `{{ milvus_version }}` のDocker Compose構成を配置し、gRPCポート `{{ milvus_grpc_port }}` でサービスを公開します。コレクション `{{ collection_name }}` を、ベクトルフィールド `{{ vector_field_name }}`（次元数 {{ vector_dim }}）とテキストフィールド `{{ text_field_name }}` で定義し、`{{ insert_row_count }}` 件のサンプルベクトルを挿入したうえで `{{ index_type }}`（metric_type: `{{ metric_type }}`, nlist: {{ index_nlist }}）のインデックスを作成します。最後に上位 {{ search_topk }} 件の検索で応答を確認します。
+
+## 手順
+
+### 1. Docker Composeで構成を定義し起動する
+
+```bash
+mkdir -p {{ compose_dir }}
+cd {{ compose_dir }}
+curl -sSfL https://github.com/milvus-io/milvus/releases/download/{{ milvus_version }}/milvus-standalone-docker-compose.yml -o docker-compose.yml
+docker compose up -d
+```
+
+`docker-compose.yml` には `etcd` / `minio` / `standalone`（Milvus本体）の3サービスが定義されています。初回起動はイメージ取得のため数分かかることがあります。
+
+### 2. ヘルスチェックで各コンポーネントを確認する
+
+```bash
+cd {{ compose_dir }}
+docker compose ps
+docker compose exec etcd etcdctl endpoint health
+docker compose exec minio mc ready local
+curl -sf http://localhost:{{ milvus_metrics_port }}/healthz
+```
+
+`docker compose ps` の `STATUS` 列が3サービスとも `healthy` になっていること、`etcdctl endpoint health` が正常応答すること、`curl` がエラー終了しないことを確認してから次の手順に進みます。
+
+### 3. コレクションとスキーマを定義する
+
+```bash
+pip install "pymilvus=={{ pymilvus_version }}"
+python3 <<'PYEOF'
+from pymilvus import MilvusClient, DataType
+
+client = MilvusClient("http://localhost:{{ milvus_grpc_port }}")
+
+if client.has_collection("{{ collection_name }}"):
+    client.drop_collection("{{ collection_name }}")
+
+schema = client.create_schema(enable_dynamic_field=True, auto_id=True)
+schema.add_field("id", DataType.INT64, is_primary=True)
+schema.add_field("{{ vector_field_name }}", DataType.FLOAT_VECTOR, dim={{ vector_dim }})
+schema.add_field("{{ text_field_name }}", DataType.VARCHAR, max_length={{ text_field_max_length }})
+
+client.create_collection("{{ collection_name }}", schema=schema, consistency_level="Strong")
+
+print(client.list_collections())
+print(client.describe_collection("{{ collection_name }}"))
+PYEOF
+```
+
+この時点ではインデックスをまだ作成していないため、コレクションは検索可能な状態ではありません。
+
+### 4. ベクトルを挿入しインデックスを作成する
+
+```bash
+python3 <<'PYEOF'
+import numpy as np
+from pymilvus import MilvusClient
+
+client = MilvusClient("http://localhost:{{ milvus_grpc_port }}")
+
+rng = np.random.default_rng(seed=19530)
+rows = [
+    {
+        "{{ vector_field_name }}": rng.random({{ vector_dim }}).tolist(),
+        "{{ text_field_name }}": f"doc-{i}",
+    }
+    for i in range({{ insert_row_count }})
+]
+
+insert_result = client.insert("{{ collection_name }}", rows)
+print("inserted:", insert_result)
+
+index_params = client.prepare_index_params()
+index_params.add_index(
+    field_name="{{ vector_field_name }}",
+    index_type="{{ index_type }}",
+    metric_type="{{ metric_type }}",
+    params={"nlist": {{ index_nlist }}},
+)
+client.create_index("{{ collection_name }}", index_params)
+
+for index_name in client.list_indexes("{{ collection_name }}"):
+    print(client.describe_index("{{ collection_name }}", index_name=index_name))
+
+client.load_collection("{{ collection_name }}")
+print(client.get_load_state("{{ collection_name }}"))
+PYEOF
+```
+
+`create_index` はインデックス構築を投入する呼び出しであり、大規模データでは完了まで時間がかかります。`load_collection` はインデックス構築後にコレクションをメモリへロードし、検索可能にする操作です。
+
+### 5. 検索を実行して応答を確認する
+
+```bash
+python3 <<'PYEOF'
+import numpy as np
+from pymilvus import MilvusClient
+
+client = MilvusClient("http://localhost:{{ milvus_grpc_port }}")
+
+rng = np.random.default_rng(seed=12345)
+query_vector = rng.random({{ vector_dim }}).tolist()
+
+results = client.search(
+    "{{ collection_name }}",
+    [query_vector],
+    limit={{ search_topk }},
+    output_fields=["{{ text_field_name }}"],
+)
+for hits in results:
+    for hit in hits:
+        print(hit)
+PYEOF
+```
+
+## 動作確認
+
+- 手順2で `docker compose ps` の3サービスが `healthy` であり、`/healthz` へのcurlがエラー終了しないこと
+- 手順3の `describe_collection` 出力に、フィールド `{{ vector_field_name }}`（次元 {{ vector_dim }}）と `{{ text_field_name }}` が含まれていること
+- 手順4の `list_indexes` / `describe_index` 出力にインデックスタイプ `{{ index_type }}` が表示されること、および `get_load_state` がロード済み状態を示すこと
+- 手順5の検索結果が {{ search_topk }} 件返り、各ヒットに距離(distance)と `{{ text_field_name }}` フィールドの値が含まれていること
+
+## 注意事項
+
+- `create_index` の直後は非同期でインデックス構築が進行するため、大規模データでは `describe_index` の状態や `list_indexes` の結果を確認してから `load_collection` を呼び出す。
+- `load_collection` を実行する前に検索(`search`)を呼び出すとエラーになる。挿入・インデックス作成・ロードの順序を崩さない。
+- 本手順のベクトルは検証用の乱数生成であり、実運用では埋め込みモデルが生成した実データに置き換える。
+- `docker compose down` はコンテナのみ削除し、`{{ compose_dir }}/volumes` 配下のデータは残る。完全に破棄する場合は `docker compose down --volumes` を使うが、この操作は不可逆であるため事前にバックアップの要否を確認する。
+- pymilvusのバージョンはMilvusサーバのメジャー.マイナーバージョンに合わせる（本手順では `{{ pymilvus_version }}` を使用）。バージョン不一致はAPI非互換エラーの原因になる。

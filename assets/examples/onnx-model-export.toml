@@ -1,0 +1,7 @@
+model_id = "distilbert-base-uncased-finetuned-sst-2-english"
+task = "text-classification"
+opset = 17
+export_dir = "/opt/models/onnx/distilbert-sst2"
+onnx_filename = "model.onnx"
+input_text = "This movie was great"
+max_diff_threshold = 0.0001

@@ -1,0 +1,110 @@
+# LLM経由データ漏洩のインシデント対応
+
+LLMのプロンプト・出力や関連サービスを経由して機密情報が外部へ流出した疑いに対し、検知確認 → 機能停止・外部送信経路の遮断 → 認証情報の失効とローテーション → 影響範囲調査・証跡保全 → DLP強化と報告までを一気通貫で行います。
+
+## 目的
+
+データ漏洩の検知アラートから、流出データ種別の特定・該当機能の封じ込め・露出した認証情報の失効ローテーション・影響範囲調査・DLP/レダクション強化までを、対応の抜け漏れなく実施できるようになることを目指します。
+
+## 用語解説
+
+- **データ漏洩(exfiltration)**: LLMの出力や関連サービスの通信を通じて、機密情報が意図しない外部宛先へ流出すること
+- **外部送信経路(egress)**: アプリケーションが外部ネットワークへ通信する経路。遮断することで漏洩の継続を防ぐ
+- **認証情報のローテーション**: 露出した可能性のあるAPIキー・トークン・パスワードを失効させ、新しい値に置き換えること
+- **DLP(Data Loss Prevention)**: 機密情報の外部流出を検知・防止する仕組み
+- **レダクション(redaction)**: ログや出力から機密情報を伏字・マスキングする処理
+- **証跡保全**: 調査に必要なログを改変せずハッシュ付きで保存すること
+
+## シナリオ設定
+
+監視基盤(DLPアラート/Alertmanager)が、以下{{ csv_rows | length }}件のデータ漏洩疑いアラートを検知しました。
+
+| incident_id | endpoint | data_category | destination_host | severity | contained |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["incident_id"] }} | {{ r["endpoint"] }} | {{ r["data_category"] }} | {{ r["destination_host"] }} | {{ r["severity"] }} | {{ r["contained"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 漏洩検知を確認し流出データ種別を特定する
+
+```bash
+{% for r in csv_rows %}curl -s http://localhost:9093/api/v2/alerts | jq --arg id "{{ r["incident_id"] }}" '.[] | select(.labels.incident_id == $id)'
+echo "[{{ r["severity"] }}] {{ r["incident_id"] }} endpoint={{ r["endpoint"] }} data_category={{ r["data_category"] }} detected_at={{ r["detected_at"] }}"
+{% endfor %}```
+
+### 2. 該当機能を停止し外部送信経路を遮断する
+
+既に遮断済みのもの(`contained` が `true`)は継続監視のみとし、未対応のものは直ちに機能を停止します。外部送信先はいずれも新規にドロップルールを追加します。
+
+```bash
+{% for r in csv_rows %}{% if r["contained"] != "true" %}sudo systemctl stop {{ r["backing_service"] }}
+sudo systemctl is-active {{ r["backing_service"] }}
+{% else %}echo "{{ r["incident_id"] }}: 既に封じ込め済みのため {{ r["backing_service"] }} は継続監視のみ"
+{% endif %}sudo iptables -I OUTPUT -d {{ r["destination_host"] }} -j DROP -m comment --comment "{{ r["egress_rule_name"] }}"
+sudo iptables -C OUTPUT -d {{ r["destination_host"] }} -j DROP -m comment --comment "{{ r["egress_rule_name"] }}"
+{% endfor %}```
+
+### 3. 露出した認証情報・トークンを失効しローテーションする
+
+```bash
+{% for r in csv_rows %}vault kv put {{ r["secret_store_path"] }} value="$(openssl rand -hex 32)"
+NEW_SECRET=$(vault kv get -field=value {{ r["secret_store_path"] }})
+echo "{{ r["credential_env_var"] }}=$NEW_SECRET" | sudo tee {{ r["credential_config_path"] }} > /dev/null
+sudo chmod 600 {{ r["credential_config_path"] }}
+sudo systemctl restart {{ r["backing_service"] }}
+sudo systemctl is-active {{ r["backing_service"] }}
+{% endfor %}```
+
+新しいシークレット値はシェル変数(`NEW_SECRET`)に保持するのみで、ログやチャットへ平文出力しません。
+
+### 4. 影響範囲を調査しログを保全する
+
+```bash
+{% for r in csv_rows %}sudo mkdir -p /var/forensics/{{ r["incident_id"] }}
+sudo grep {{ r["destination_host"] }} {{ r["log_dir"] }}/access.log | tail -n 50
+sudo tar -czf /var/forensics/{{ r["incident_id"] }}/exfil-evidence.tar.gz {{ r["log_dir"] }}
+sudo sha256sum /var/forensics/{{ r["incident_id"] }}/exfil-evidence.tar.gz | sudo tee /var/forensics/{{ r["incident_id"] }}/exfil-evidence.tar.gz.sha256
+{% endfor %}```
+
+### 5. DLP・レダクションを強化し関係者へ報告する
+
+流出したデータ種別をDLPのレダクション対象カテゴリへ反映し、インシデントごとの報告書を作成します。
+
+```bash
+{% for r in csv_rows %}echo "{{ r["data_category"] }}" | sudo tee -a /etc/llm-dlp/redaction-categories.txt
+{% endfor %}sudo systemctl reload llm-dlp.service
+sudo mkdir -p /var/forensics/reports
+{% for r in csv_rows %}cat <<EOF | sudo tee -a /var/forensics/reports/incident-{{ r["incident_id"] }}.md
+# データ漏洩インシデント報告: {{ r["incident_id"] }}
+
+- 検知日時: {{ r["detected_at"] }}
+- 対象エンドポイント: {{ r["endpoint"] }}
+- 対象サービス: {{ r["backing_service"] }}
+- 流出データ種別: {{ r["data_category"] }}
+- 外部送信先: {{ r["destination_host"] }}
+- 重要度: {{ r["severity"] }}
+- ローテーション済み認証情報: {{ r["credential_name"] }}
+- 恒久対策: DLP/レダクションカテゴリへの追加、および外部送信経路の遮断維持
+EOF
+{% endfor %}```
+
+## 動作確認
+
+- Alertmanagerで該当 `incident_id` のアラート詳細が確認できたこと
+- `contained` が `false` だった対象について、封じ込め時点で `systemctl is-active` が停止状態(`inactive`)を示したこと
+- 各 `destination_host` 宛のDROPルールが `iptables -C OUTPUT -d <destination_host> -j DROP` で存在確認(終了コード0)できること
+- `vault kv get -field=value <secret_store_path>` で新しいシークレット値が取得でき、`credential_config_path` の権限が600であること
+- 手順3で再起動した各 `backing_service` が `systemctl is-active` で稼働中(`active`)と確認できること
+- 各 `incident_id` について `/var/forensics/<incident_id>/exfil-evidence.tar.gz` とその `.sha256` が保存されていること
+- `/etc/llm-dlp/redaction-categories.txt` に全ての `data_category` が追加され、`llm-dlp.service` のreloadが成功していること
+- 各 `incident_id` の報告書 `/var/forensics/reports/incident-<incident_id>.md` が作成されていること
+
+## 注意事項
+
+- 機能停止は影響範囲を最小化するため、`contained` が `false` の対象サービスに限定し、無関係なサービスまで止めない。
+- 認証情報のローテーション後は `credential_config_path` を参照する全サービスを再起動しないと旧値が使われ続けるため、対象漏れがないか確認する。
+- 新しいシークレット値(`NEW_SECRET`)はシェル履歴・ログ・チャットに残さず、シークレットストア経由でのみ受け渡す。
+- 証跡(`/var/forensics/`)には流出データの内容が含まれる可能性があるため、アクセスは調査担当者に限定する。
+- DLPのレダクションカテゴリ追加は誤検知(正常な出力の過剰マスキング)を招く可能性があるため、更新後は正常系のリクエストでも動作確認する。
+- 既存の `jailbreak-incident-response`(プロンプトインジェクション被害対応)や `model-api-key-rotation`(定期的なAPIキーローテーション)とは異なり、本手順はデータ漏洩発生後の封じ込め・認証情報失効・DLP強化に焦点を当てる。

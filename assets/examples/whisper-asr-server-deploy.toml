@@ -1,0 +1,9 @@
+repo_url = "https://github.com/ggerganov/whisper.cpp.git"
+build_dir = "/opt/whisper.cpp"
+model_name = "base.en"
+alt_model_name = "small.en"
+model_dir = "models"
+server_host = "127.0.0.1"
+server_port = 8080
+thread_count = 4
+test_audio_path = "/data/audio/sample.wav"

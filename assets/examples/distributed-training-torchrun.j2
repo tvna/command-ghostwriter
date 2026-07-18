@@ -1,0 +1,117 @@
+# torchrunによるマルチノード分散学習ジョブ管理
+
+`torchrun` のランデブー機能を使い、複数ノードにまたがる分散学習ジョブを起動します。起動前のノード間疎通・NCCL確認、ランデブーエンドポイントの決定、起動、進捗監視、停止・再開までを扱います。
+
+## 目的
+
+torchrunのランデブー(rendezvous)の仕組みと、`rdzv-id`・`rdzv-backend`・`rdzv-endpoint`の役割を理解し、複数ノードでの学習ジョブを安全に起動・監視・停止/再開できるようになることを目指します。
+
+## 用語解説
+
+- **torchrun**: PyTorchの分散学習起動コマンド。旧`torch.distributed.launch`の後継で、ノード障害時の再起動などElastic機能を含む
+- **ランデブー(rendezvous)**: 参加する全プロセスが集合し、rank・world_sizeなどの役割分担を決定する仕組み。`rdzv-id`・`rdzv-backend`・`rdzv-endpoint`の3要素で構成される
+- **rdzv-id**: 同一ジョブの参加プロセスを束ねる識別子。他ジョブと重複すると誤って同じランデブー集団に参加してしまうため、ジョブごとに一意にする
+- **rdzv-backend (c10d)**: 追加の外部インフラ(etcd等)を必要としない、torchrun標準のランデブーバックエンド
+- **NCCL (NVIDIA Collective Communications Library)**: GPU間のAllReduce等の集合通信を担うライブラリ。`NCCL_SOCKET_IFNAME`で通信に使うネットワークインターフェースを明示指定できる
+- **WORLD_SIZE / RANK / LOCAL_RANK**: 分散学習プロセスを識別する環境変数群。torchrunが各プロセス起動時に自動設定する
+
+## シナリオ設定
+
+学習ジョブ `{{ csv_rows[0]["rdzv_id"] }}` を、以下 {{ csv_rows | length }} ノード構成で起動します。
+
+| node_rank | node_name | node_ip | gpus_per_node | network_interface |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["node_rank"] }} | {{ r["node_name"] }} | {{ r["node_ip"] }} | {{ r["gpus_per_node"] }} | {{ r["network_interface"] }} |
+{% endfor %}
+
+学習スクリプトは `{{ csv_rows[0]["train_script"] }}`、チェックポイント保存先は `{{ csv_rows[0]["checkpoint_dir"] }}`、ログ出力先は `{{ csv_rows[0]["log_dir"] }}` です。ランデブーエンドポイントとなるノード(node_rank 0)は `{{ csv_rows[0]["node_name"] }}`(`{{ csv_rows[0]["node_ip"] }}`)です。
+
+## 手順
+
+### 1. ノード間疎通とNCCL環境の確認
+
+```bash
+{% for r in csv_rows %}echo "=== {{ r["node_name"] }} ({{ r["node_ip"] }}) ==="
+ssh {{ r["node_name"] }} nvidia-smi --query-gpu=index,name,memory.total --format=csv
+ssh {{ r["node_name"] }} ip link show {{ r["network_interface"] }}
+ssh {{ r["node_name"] }} python3 -c "import torch; print(torch.cuda.nccl.version())"
+{% endfor %}```
+
+各ノードでGPUが認識され、`network_interface`列で指定したインターフェースが`UP`状態であることを確認します。
+
+```bash
+{% for r in csv_rows %}ssh {{ csv_rows[0]["node_name"] }} ping -c 3 {{ r["node_ip"] }}
+{% endfor %}```
+
+ランデブーエンドポイントとなるノード(`{{ csv_rows[0]["node_name"] }}`)から全ノードへ`ping`が通ることを確認します。損失やタイムアウトがある場合、後続のtorchrun起動でランデブーがタイムアウトする原因になるため、ここで解消します。
+
+### 2. ランデブーエンドポイントの決定
+
+```bash
+export MASTER_ADDR={{ csv_rows[0]["node_ip"] }}
+export MASTER_PORT={{ csv_rows[0]["master_port"] }}
+ssh {{ csv_rows[0]["node_name"] }} ss -ltn
+```
+
+`ss -ltn`の出力に`{{ csv_rows[0]["master_port"] }}`番ポートが既に`LISTEN`として現れていないことを確認します(現れている場合は他プロセスと衝突するため、`master_port`列の値を変更します)。
+
+```bash
+{% for r in csv_rows %}echo "{{ r["node_name"] }} (rank {{ r["node_rank"] }}): rdzv-endpoint={{ csv_rows[0]["node_ip"] }}:{{ csv_rows[0]["master_port"] }} rdzv-id={{ csv_rows[0]["rdzv_id"] }}"
+{% endfor %}```
+
+### 3. 各ノードでのtorchrun起動
+
+```bash
+{% for r in csv_rows %}ssh {{ r["node_name"] }} "NCCL_SOCKET_IFNAME={{ r["network_interface"] }} NCCL_DEBUG=INFO nohup torchrun --nnodes={{ csv_rows | length }} --nproc-per-node={{ r["gpus_per_node"] }} --rdzv-id={{ r["rdzv_id"] }} --rdzv-backend=c10d --rdzv-endpoint={{ csv_rows[0]["node_ip"] }}:{{ r["master_port"] }} {{ r["train_script"] }} --checkpoint-dir {{ r["checkpoint_dir"] }} > {{ r["log_dir"] }}/{{ r["node_name"] }}.log 2>&1 &"
+{% endfor %}```
+
+`--rdzv-backend=c10d`の動的ランデブーでは各ノードの役割(rank)は接続順に自動割当されるため、`--node-rank`は明示指定しません。`node_rank`列は台帳上のノード管理・ログファイル対応付けのための番号です。
+
+### 4. 学習進捗とGPU使用率の監視
+
+```bash
+{% for r in csv_rows %}echo "=== {{ r["node_name"] }} ==="
+ssh {{ r["node_name"] }} tail -n 50 {{ r["log_dir"] }}/{{ r["node_name"] }}.log
+ssh {{ r["node_name"] }} nvidia-smi --query-gpu=index,utilization.gpu,utilization.memory,memory.used,temperature.gpu --format=csv
+{% endfor %}```
+
+継続的にGPU使用率を追う場合は、代表ノードで以下を実行します。
+
+```bash
+ssh {{ csv_rows[0]["node_name"] }} nvidia-smi dmon -s u -d 5 -c 12
+```
+
+### 5. ジョブの停止と再開
+
+```bash
+{% for r in csv_rows %}ssh {{ r["node_name"] }} pkill -f "torchrun.*{{ csv_rows[0]["rdzv_id"] }}"
+{% endfor %}```
+
+```bash
+{% for r in csv_rows %}ssh {{ r["node_name"] }} pgrep -af torchrun
+{% endfor %}```
+
+全ノードで`pgrep -af torchrun`の出力が空になったことを確認してから再開します。再開時は手順3と同じコマンドを再実行します。
+
+```bash
+{% for r in csv_rows %}ssh {{ r["node_name"] }} "NCCL_SOCKET_IFNAME={{ r["network_interface"] }} NCCL_DEBUG=INFO nohup torchrun --nnodes={{ csv_rows | length }} --nproc-per-node={{ r["gpus_per_node"] }} --rdzv-id={{ r["rdzv_id"] }} --rdzv-backend=c10d --rdzv-endpoint={{ csv_rows[0]["node_ip"] }}:{{ r["master_port"] }} {{ r["train_script"] }} --checkpoint-dir {{ r["checkpoint_dir"] }} > {{ r["log_dir"] }}/{{ r["node_name"] }}.log 2>&1 &"
+{% endfor %}```
+
+再開後の学習が`{{ csv_rows[0]["checkpoint_dir"] }}`配下の最新チェックポイントから再開されるかどうかは、`{{ csv_rows[0]["train_script"] }}`側のチェックポイント読み込みロジックに依存します。本手順は`--checkpoint-dir`の指定までを対象とし、スクリプト内部の再開ロジックの実装は対象外です。
+
+## 動作確認
+
+- 全{{ csv_rows | length }}ノードで`ip link show`の対象インターフェースが`UP`状態であること(手順1)
+- `{{ csv_rows[0]["node_name"] }}`から全ノードへの`ping`がloss 0%で通ること(手順1)
+- 手順3の起動後、各ノードの`{{ csv_rows[0]["log_dir"] }}`配下のログにエラーで終了した形跡がなく、学習が進行していること
+- `nvidia-smi --query-gpu=utilization.gpu --format=csv`で各ノードのGPU使用率が0%から上昇していること(手順4)
+- 手順5の停止後、全ノードで`pgrep -af torchrun`の出力が空であること
+- 再開後、ログのステップ数が停止直前の値から継続して増加していること
+
+## 注意事項
+
+- `rdzv-id`(`{{ csv_rows[0]["rdzv_id"] }}`)はジョブごとに一意にする。他ジョブと重複させると、意図せず同じランデブー集団に参加してしまう。
+- `NCCL_DEBUG=INFO`は通信デバッグ用の詳細ログを出力する。疎通確認後の本番学習では、ログ肥大化を避けるため`WARN`等に切り替えることを検討する。
+- `master_port`列のポートは全ノード間のファイアウォールで疎通している必要がある。ポート開放自体は本手順の対象外とする。
+- 手順5でジョブを停止する前に、`{{ csv_rows[0]["checkpoint_dir"] }}`に直近のチェックポイントが保存済みであることを確認する。未保存のまま停止すると、直前の学習内容が失われる。
+- `pkill -f`はプロセスのコマンドラインに対する部分一致で対象を選ぶため、同一ノードで`rdzv-id`の異なる別ジョブのtorchrunを誤って停止しないよう、実行前に`pgrep -af torchrun`で対象プロセスを必ず確認する。

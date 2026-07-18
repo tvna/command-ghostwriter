@@ -1,0 +1,101 @@
+# DCGMによるGPUヘルスチェックと常時監視
+
+NVIDIA DCGM(`dcgmi`)を使い、GPUグループ単位でのヘルスウォッチ設定とレベル別診断を行い、`dcgm-exporter` によるメトリクスの常時公開までを一気通貫で設定します。
+
+## 目的
+
+`dcgmi` によるGPUグループ管理とヘルスウォッチの仕組みを理解し、日常的な軽量監視(ヘルスウォッチ)と能動的な定期診断(diag)を使い分けながら、`dcgm-exporter` で継続的にメトリクスを可視化できるようになることを目指します。
+
+## 用語解説
+
+- **DCGM(Data Center GPU Manager)**: NVIDIAが提供するデータセンター向けGPU管理・監視ツール群
+- **dcgmi**: DCGMのホストエンジンに対してコマンドラインから操作を行うCLIクライアント
+- **GPUグループ**: 複数のGPUをまとめて監視・診断の対象とする論理的な単位。`dcgmi group` で作成する
+- **ヘルスウォッチ(Health Watch)**: PCIe・メモリ・Inforom等の特定サブシステムを継続的に監視する設定。`dcgmi health` で有効化する
+- **dcgm-exporter**: DCGMが収集したメトリクスをPrometheus形式のHTTPエンドポイントとして公開するエクスポーター
+
+## シナリオ設定
+
+GPUグループ `{{ gpu_group_name }}` にGPU {{ gpu_ids | join(", ") }} を登録し、ヘルスウォッチ(`{{ health_watch_flags }}`)を有効化します。診断はレベル{{ diag_level }}で実行し、`dcgm-exporter`(`{{ exporter_version }}`)はポート{{ exporter_listen_port }}でメトリクスを公開します。
+
+## 手順
+
+### 1. datacenter-gpu-managerを導入しnvidia-dcgmを起動する
+
+```bash
+sudo apt-get update
+sudo apt-get install -y datacenter-gpu-manager
+sudo systemctl --now enable nvidia-dcgm
+sudo systemctl status nvidia-dcgm --no-pager
+```
+
+### 2. dcgmi discoveryでGPUを確認する
+
+```bash
+dcgmi discovery -l
+```
+
+認識されているGPU数が {{ gpu_ids | length }} 基と一致することを確認します。
+
+### 3. GPUグループを作成しGPUを登録する
+
+```bash
+dcgmi group -c {{ gpu_group_name }} | tee /tmp/dcgm-group-create.log
+GROUP_ID=$(grep -oP 'group ID of \K[0-9]+' /tmp/dcgm-group-create.log)
+echo "GROUP_ID=$GROUP_ID"
+{% for gid in gpu_ids %}dcgmi group -g $GROUP_ID -a {{ gid }}
+{% endfor %}dcgmi group -g $GROUP_ID -i
+```
+
+`{{ gpu_group_name }}` という名前のグループが既に存在する場合は重複作成でエラーになるため、その場合は `dcgmi group -l` で既存のGroup IDを確認してから以降の手順に読み替えます。
+
+### 4. ヘルスウォッチを有効化し健全性を確認する
+
+```bash
+dcgmi health -g $GROUP_ID -s {{ health_watch_flags }}
+dcgmi health -g $GROUP_ID -c
+```
+
+結果が `Healthy` であることを確認します。`Warning` または `Critical` の場合は該当サブシステムの詳細出力を確認し、原因が解消するまで手順5の診断に進みません。
+
+### 5. dcgmi diagでレベル{{ diag_level }}の診断を実行する
+
+```bash
+dcgmi diag -g $GROUP_ID -r {{ diag_level }}
+```
+
+診断実行中は対象GPU上のワークロードが一時的に利用できなくなるため、実行前に対象グループのジョブが完了していることを確認します。
+
+### 6. dcgm-exporterを導入しメトリクスを公開する
+
+```bash
+sudo docker run -d --gpus all --restart unless-stopped \
+  -p {{ exporter_listen_port }}:{{ exporter_listen_port }} \
+  --name dcgm-exporter \
+  nvcr.io/nvidia/k8s/dcgm-exporter:{{ exporter_version }}
+curl -s http://localhost:{{ exporter_listen_port }}/metrics | grep DCGM_FI_DEV_GPU_UTIL
+```
+
+### 7. 公開範囲をファイアウォールで制限する
+
+```bash
+{% for ip in firewall_allow_from %}sudo ufw allow from {{ ip }} to any port {{ exporter_listen_port }} proto tcp
+{% endfor %}sudo ufw deny {{ exporter_listen_port }}/tcp
+sudo ufw status numbered
+```
+
+## 動作確認
+
+- `dcgmi discovery -l` に {{ gpu_ids | length }} 基のGPUが表示されること
+- `dcgmi group -g $GROUP_ID -i` の一覧にGPU {{ gpu_ids | join(", ") }} が含まれていること
+- `dcgmi health -g $GROUP_ID -c` の結果が `Healthy` であること
+- `dcgmi diag -g $GROUP_ID -r {{ diag_level }}` がエラーなく完了すること
+- `curl http://localhost:{{ exporter_listen_port }}/metrics` に `DCGM_FI_DEV_GPU_UTIL` を含むメトリクスが返ること
+- 許可元({{ firewall_allow_from | length }}件)以外からのアクセスがファイアウォールで拒否されること
+
+## 注意事項
+
+- ヘルスウォッチ(`{{ health_watch_flags }}`)は常時稼働する軽量な監視であり、故障の断定にはdcgmi diagによる能動的診断(手順5)を併用する。ヘルスウォッチだけで異常なしと判断しない。
+- diagのレベルは数字が大きいほど実行時間が長くGPUを占有する。レベル{{ diag_level }}より高いレベル(特に3・4)は稼働中ワークロードへの影響が大きいため、メンテナンスウィンドウ中に実行する。
+- `dcgm-exporter` のメトリクスエンドポイントは認証なしで公開されるため、手順7のファイアウォール制限を必ず適用し、`0.0.0.0` のまま外部ネットワークに晒さない。
+- GROUP_IDは `dcgmi group -c` 実行のたびに新しい番号が採番される。シェル変数 `$GROUP_ID` はセッションが切れると失われるため、恒常運用では作成したGroup IDを記録・共有しておく。

@@ -1,0 +1,87 @@
+# GPUノードの安全なドレインと保守復帰
+
+`kubectl cordon` / `kubectl drain` でGPUノードから安全にワークロードを退避させ、保守作業後に `kubectl uncordon` でクラスタへ復帰させます。
+
+## 目的
+
+cordon・drain・uncordonそれぞれの役割の違いを理解し、稼働中のGPUワークロードを壊さずに対象ノードを保守できるようになることを目指します。
+
+## 用語解説
+
+- **cordon**: ノードを `SchedulingDisabled` にし、新規Podの割当のみを停止する操作。既存Podはそのまま動き続ける
+- **drain**: cordonした上で、既存Podを退避(Evict)させる操作。DaemonSetのPodは対象外で、`--ignore-daemonsets` を付けない限りエラーで止まる
+- **uncordon**: `SchedulingDisabled` を解除し、ノードを再びスケジュール対象に戻す操作
+- **PodDisruptionBudget(PDB)**: 同時に停止できるPod数の下限を守る制約。これを超えるEvictionはdrainがブロックされる
+- **grace_period_sec**: Podへ送るSIGTERMからSIGKILLまでの猶予秒数。学習ジョブ等はチェックポイント保存のため長めに取る
+
+## シナリオ設定
+
+保守対象は次の {{ csv_rows | length }} 台のGPUノードです。
+
+| node_name | gpu_product | namespace | maintenance_task | owner |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["node_name"] }} | {{ r["gpu_product"] }} | {{ r["namespace"] }} | {{ r["maintenance_task"] }} | {{ r["owner"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 対象ノードをcordonで新規割当停止する
+
+```bash
+{% for r in csv_rows %}kubectl cordon {{ r["node_name"] }}
+{% endfor %}```
+
+cordon直後はまだ既存Podが動作中です。ここではまだPodを退避させません。
+
+### 2. 実行中Podを確認する
+
+```bash
+{% for r in csv_rows %}echo "=== {{ r["node_name"] }} ({{ r["gpu_product"] }}) ==="
+kubectl get pods --all-namespaces -o wide --field-selector spec.nodeName={{ r["node_name"] }}
+{% endfor %}```
+
+`namespace` 列と突き合わせ、想定外のワークロードが載っていないかを確認してから次に進みます。
+
+### 3. drainでワークロードを退避する
+
+```bash
+{% for r in csv_rows %}kubectl drain {{ r["node_name"] }} \
+  --ignore-daemonsets \
+  --delete-emptydir-data \
+  --grace-period={{ r["grace_period_sec"] }} \
+  --timeout={{ r["drain_timeout"] }}
+{% endfor %}```
+
+PodDisruptionBudgetにより退避がブロックされた場合は `--force` で強制せず、担当チーム(`owner`列)へ連絡し対象Podの状態を確認してから再実行します。
+
+### 4. 保守作業を実施する
+
+```bash
+{% for r in csv_rows %}kubectl get node {{ r["node_name"] }} -o wide
+# {{ r["node_name"] }}({{ r["gpu_product"] }}) 担当: {{ r["owner"] }}
+# 作業内容: {{ r["maintenance_task"] }}
+{% endfor %}```
+
+`STATUS` が `Ready,SchedulingDisabled` かつ実行中Podが残っていないことを確認したうえで、上記の作業内容をノード側で実施します。作業手順自体(ドライバ更新やハードウェア交換の具体的な操作)は本手順書の対象外です。
+
+### 5. uncordonで復帰しGPU Podのスケジュールを確認する
+
+```bash
+{% for r in csv_rows %}kubectl uncordon {{ r["node_name"] }}
+{% endfor %}sleep 30
+{% for r in csv_rows %}echo "=== {{ r["node_name"] }} ==="
+kubectl get pods -n {{ r["namespace"] }} -o wide --field-selector spec.nodeName={{ r["node_name"] }}
+{% endfor %}```
+
+## 動作確認
+
+{% for r in csv_rows %}- `kubectl get node {{ r["node_name"] }}` の `STATUS` が `Ready` のみで `SchedulingDisabled` が付いていないこと
+{% endfor %}{% for r in csv_rows %}- `{{ r["namespace"] }}` 名前空間のGPUワークロードPodが `{{ r["node_name"] }}` 上で `Running` として再スケジュールされていること
+{% endfor %}- `kubectl get pods --all-namespaces --field-selector status.phase=Pending` にGPU割当待ちのまま残っているPodがないこと
+
+## 注意事項
+
+- `kubectl drain` は既定で `PodDisruptionBudget` を尊重するため待機やブロックが発生し得る。`--force` や `--disable-eviction` での強制実行は、保護対象のPodを無条件に削除してしまうため原則使用しない。
+- `--grace-period` の値(`grace_period_sec`列)は学習ジョブのチェックポイント保存時間より短くしない。短すぎるとSIGKILLで異常終了し、直前の学習結果が失われる。
+- 保守作業(手順4)はcordon・drainが完了し対象ノード上にPodが残っていないことを確認してから着手する。稼働中のPodがある状態でのハードウェア作業は不可。
+- uncordon後は該当ノードへ即座に新規Podが割り当てられるため、保守作業の動作確認(ヘルスチェック等)が完了してからuncordonを実行する。

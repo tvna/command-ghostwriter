@@ -1,0 +1,6 @@
+file_name,doc_type,ocr_lang,expected_pages,purpose
+contract_2024.pdf,text,-,12,契約書(テキスト埋め込み済みPDF)
+report_annual_2025.pdf,text,-,48,年次報告書(表組みを含む)
+manual_ja.pdf,text,-,25,日本語操作マニュアル(環境依存文字を含む)
+invoice_202506_scan.pdf,scanned,jpn+eng,3,スキャン請求書(300dpiスキャン)
+receipt_009_scan.pdf,scanned,jpn,1,スキャン領収書(200dpi・文字かすれあり)

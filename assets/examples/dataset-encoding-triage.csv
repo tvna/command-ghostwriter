@@ -1,0 +1,5 @@
+file_id,file_path,symptom_desc,guessed_encoding,target_encoding,work_dir
+access_log,/var/log/app/access.log,ブラウザ経由のアクセスログで日本語URLパラメータが文字化けして表示される,-,UTF-8,/tmp/dataset-encoding-triage
+customer_csv,/data/import/customer_list.csv,取引先から受領したCSVをExcelで開くと氏名列が文字化けして表示される,SHIFT_JIS,UTF-8,/tmp/dataset-encoding-triage
+legacy_export,/data/legacy/export_20260101.csv,旧システムのエクスポートファイルで半角カナを含む列が崩れて表示される,CP932,UTF-8,/tmp/dataset-encoding-triage
+batch_result,/data/batch/result_2026w28.txt,夜間バッチ処理後の結果ファイルで一部の行だけ日本語が化けて表示される,EUC-JP,UTF-8,/tmp/dataset-encoding-triage

@@ -1,0 +1,4 @@
+dataset_name,target_dir,file_pattern,backup_dir,exclude_pattern,report_path
+ja_wiki_corpus,/data/training/ja_wiki_corpus,*.jsonl,/data/training-backup/ja_wiki_corpus,-,/var/log/dedup/ja_wiki_corpus_report.txt
+code_snippets,/data/training/code_snippets,*.jsonl,/data/training-backup/code_snippets,*_draft.jsonl,/var/log/dedup/code_snippets_report.txt
+chat_logs,/data/training/chat_logs,*.jsonl,/data/training-backup/chat_logs,-,/var/log/dedup/chat_logs_report.txt

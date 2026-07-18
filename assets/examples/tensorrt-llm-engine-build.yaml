@@ -1,0 +1,13 @@
+model_repo: Qwen/Qwen2.5-7B-Instruct
+model_family: qwen
+served_model_name: qwen2.5-7b
+hf_checkpoint_dir: /data/models/hf/qwen2.5-7b
+trtllm_repo_dir: /opt/TensorRT-LLM
+trtllm_checkpoint_dir: /data/trtllm/qwen2.5-7b/checkpoint
+engine_dir: /data/trtllm/qwen2.5-7b/engine
+dtype: float16
+tp_size: 1
+max_batch_size: 8
+max_input_len: 2048
+max_seq_len: 2560
+serve_port: 8000

@@ -1,0 +1,4 @@
+model_id,model_name,src_cloud,src_uri,dst_cloud,dst_uri,staging_dir,cleanup_policy,log_dir
+llm-embed-ja,日本語embeddingモデル,aws,s3://ml-artifacts-prod/models/llm-embed-ja/,gcp,gs://ml-artifacts-backup/models/llm-embed-ja/,/data/cloud-migration-staging/llm-embed-ja,delete,/var/log/cross-cloud-migration
+vision-classifier,画像分類モデル,gcp,gs://ml-artifacts-prod/models/vision-classifier/,azure,https://mlartifactsjp.blob.core.windows.net/models/vision-classifier/,/data/cloud-migration-staging/vision-classifier,keep,/var/log/cross-cloud-migration
+asr-whisper-ft,音声認識ファインチューニングモデル,azure,https://mlartifactsjp.blob.core.windows.net/models/asr-whisper-ft/,aws,s3://ml-artifacts-backup/models/asr-whisper-ft/,/data/cloud-migration-staging/asr-whisper-ft,delete,/var/log/cross-cloud-migration

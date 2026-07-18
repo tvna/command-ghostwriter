@@ -1,0 +1,167 @@
+# AWQ・GPTQによるLLM量子化とモデル保存 — {{ model_repo }}
+
+AutoAWQとauto-gptqを使い、`{{ model_repo }}` を4bit量子化して保存し、サイズ比較とvLLMでのロード確認まで行います。GPUメモリと計算時間を要する処理のため、量子化専用のホストまたは時間帯を確保したうえで実行してください。
+
+## 目的
+
+キャリブレーションデータを用いたAWQ量子化とGPTQ量子化をそれぞれ実施し、生成物のサイズを比較したうえで、vLLMから実際にロードできることを確認できるようになることを目指します。
+
+## 用語解説
+
+- **AWQ(Activation-aware Weight Quantization)**: 活性化値の分布を考慮して重要な重みを保護しながら量子化する手法。AutoAWQライブラリで実施する
+- **GPTQ(Generative Pre-trained Transformer Quantization)**: 層ごとに二次誤差を最小化しながら重みを量子化する手法。auto-gptqライブラリで実施する
+- **キャリブレーションデータ**: 量子化時の誤差評価に使うサンプルテキスト集合。量子化対象モデルの想定用途に近いデータが望ましい
+- **group_size**: 量子化の丸め誤差を抑えるため、重みをいくつ単位のグループでスケーリングするかを指定する値。小さいほど精度は上がるがサイズは大きくなる
+- **zero_point**: 非対称量子化のオフセットを使うかどうかの指定(AWQ)
+- **desc_act**: 活性化値の大きい順に量子化対象の重み列を並べ替えるかどうかの指定(GPTQ)。精度は上がるが推論速度が落ちる場合がある
+
+## シナリオ設定
+
+モデル `{{ model_repo }}` を作業ディレクトリ `{{ work_dir }}` で量子化します。キャリブレーションデータは `{{ calibration.dataset }}`(split: `{{ calibration.split }}`)からサンプル数 `{{ calibration.num_samples }}`、最大系列長 `{{ calibration.seq_len }}` で取得します。AWQは `{{ awq.bits }}` bit・group_size `{{ awq.group_size }}` で `{{ awq.output_dir }}` に、GPTQは `{{ gptq.bits }}` bit・group_size `{{ gptq.group_size }}` で `{{ gptq.output_dir }}` に保存し、サイズを比較したうえでAWQ量子化モデルをvLLM(served-model-name: `{{ vllm.served_model_name }}`, port: `{{ vllm.port }}`)からロード確認します。
+
+## 手順
+
+### 1. 量子化環境とキャリブレーションデータの準備
+
+```bash
+mkdir -p {{ work_dir }}
+cd {{ work_dir }}
+python3 -m venv .venv
+source .venv/bin/activate
+pip install autoawq auto-gptq transformers accelerate datasets safetensors
+python3 -c "
+from datasets import load_dataset
+ds = load_dataset('{{ calibration.dataset }}', split='{{ calibration.split }}')
+print(len(ds), 'rows available for calibration')
+"
+```
+
+### 2. AutoAWQによるAWQ量子化
+
+```bash
+cd {{ work_dir }}
+source .venv/bin/activate
+python3 <<'EOF'
+from awq import AutoAWQForCausalLM
+from transformers import AutoTokenizer
+
+model_path = "{{ model_repo }}"
+quant_path = "{{ awq.output_dir }}"
+
+quant_config = {
+    "zero_point": {{ awq.zero_point }},
+    "q_group_size": {{ awq.group_size }},
+    "w_bit": {{ awq.bits }},
+    "version": "GEMM",
+}
+
+model = AutoAWQForCausalLM.from_pretrained(model_path, safetensors=True)
+tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+
+model.quantize(
+    tokenizer,
+    quant_config=quant_config,
+    calib_data="{{ calibration.dataset }}",
+    split="{{ calibration.split }}",
+    n_samples={{ calibration.num_samples }},
+    max_calib_seq_len={{ calibration.seq_len }},
+)
+
+model.save_quantized(quant_path)
+tokenizer.save_pretrained(quant_path)
+print("AWQ quantization done:", quant_path)
+EOF
+```
+
+### 3. GPTQによる量子化と比較
+
+```bash
+cd {{ work_dir }}
+source .venv/bin/activate
+python3 <<'EOF'
+from auto_gptq import AutoGPTQForCausalLM, BaseQuantizeConfig
+from transformers import AutoTokenizer
+from datasets import load_dataset
+
+model_path = "{{ model_repo }}"
+quant_path = "{{ gptq.output_dir }}"
+
+tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+ds = load_dataset("{{ calibration.dataset }}", split="{{ calibration.split }}").select(range({{ calibration.num_samples }}))
+examples = [
+    tokenizer(row["text"], truncation=True, max_length={{ calibration.seq_len }})
+    for row in ds
+    if row["text"].strip()
+]
+
+quantize_config = BaseQuantizeConfig(
+    bits={{ gptq.bits }},
+    group_size={{ gptq.group_size }},
+    desc_act={{ gptq.desc_act }},
+)
+
+model = AutoGPTQForCausalLM.from_pretrained(model_path, quantize_config)
+model.quantize(examples)
+
+model.save_quantized(quant_path)
+tokenizer.save_pretrained(quant_path)
+print("GPTQ quantization done:", quant_path)
+EOF
+```
+
+AWQとGPTQは量子化アルゴリズムが異なるため、同じbit数でも生成物のサイズ・推論速度・精度が変わります。次の手順でサイズを比較します。
+
+### 4. 量子化モデルの保存とサイズ確認
+
+```bash
+echo "=== AWQ ({{ awq.output_dir }}) ==="
+du -sh {{ awq.output_dir }}
+ls -lh {{ awq.output_dir }}/*.safetensors
+
+echo "=== GPTQ ({{ gptq.output_dir }}) ==="
+du -sh {{ gptq.output_dir }}
+ls -lh {{ gptq.output_dir }}/*.safetensors
+
+python3 -c "
+from safetensors import safe_open
+import glob
+
+for path in sorted(glob.glob('{{ awq.output_dir }}/*.safetensors')) + sorted(glob.glob('{{ gptq.output_dir }}/*.safetensors')):
+    with safe_open(path, framework='pt') as sf:
+        print(path, len(sf.keys()), 'tensors')
+"
+```
+
+### 5. vLLMでのロード確認
+
+AWQ量子化モデルをvLLMサーバとして起動し、モデル一覧APIと簡単な生成リクエストで疎通を確認します。
+
+```bash
+source {{ work_dir }}/.venv/bin/activate
+pip install vllm
+vllm serve {{ awq.output_dir }} \
+  --served-model-name {{ vllm.served_model_name }} \
+  --quantization awq \
+  --port {{ vllm.port }} \
+  --gpu-memory-utilization {{ vllm.gpu_memory_utilization }} \
+  --max-model-len {{ vllm.max_model_len }} &
+sleep 10
+curl http://127.0.0.1:{{ vllm.port }}/v1/models
+curl http://127.0.0.1:{{ vllm.port }}/v1/completions \
+  -H "Content-Type: application/json" \
+  -d "{\"model\": \"{{ vllm.served_model_name }}\", \"prompt\": \"Hello,\", \"max_tokens\": 16}"
+```
+
+## 動作確認
+
+- `{{ awq.output_dir }}` と `{{ gptq.output_dir }}` の両方に `.safetensors` と設定ファイル一式(`config.json` 等)が生成されていること
+- `du -sh` で表示されるサイズが元モデルより十分小さくなっていること(4bit量子化ではおおむね1/4程度が目安)
+- `curl http://127.0.0.1:{{ vllm.port }}/v1/models` のレスポンスに `{{ vllm.served_model_name }}` が含まれること
+- `/v1/completions` へのリクエストがエラーなく応答を返すこと
+
+## 注意事項
+
+- 量子化処理はキャリブレーション用のフォワードパスを繰り返すため、モデルサイズに応じて数十分から数時間かかる場合がある。実行前に十分な時間枠を確保する。
+- AWQ・GPTQともに量子化中は元モデルの重みをGPUまたはCPUメモリに展開するため、量子化前のモデルサイズに見合ったメモリを確保する。
+- `{{ calibration.dataset }}` のライセンス・利用条件を確認したうえで使用する。ライセンス確認自体は本手順の対象外とする。
+- vLLMサーバはバックグラウンド起動(`&`)のままだと動作確認後も稼働し続けるため、確認が終わったら `kill %1` 等で停止する。

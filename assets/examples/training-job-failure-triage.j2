@@ -1,0 +1,114 @@
+# 分散学習ジョブ失敗の切り分けと復旧 — {{ csv_rows[0]["job_name"] }}
+
+`{{ csv_rows[0]["job_name"] }}` の複数rankが同時に異常終了しました。GPU・NCCL・OOM・ストレージのいずれが根本原因かを切り分け、道連れで終了しただけのrankと区別したうえで、安全に再実行する手順です。
+
+## 目的
+
+分散学習ジョブの異常終了ログとGPU・NCCL・ストレージの状態を突き合わせ、根本原因のrankと道連れ終了のrankを正しく区別し、原因分類ごとの対処を終えたうえで安全に再実行・記録できるようになることを目指します。
+
+## 用語解説
+
+- **rank / node_rank**: 分散学習に参加する各プロセスの識別番号。torchrunが起動時に割り当てる
+- **道連れ終了**: あるrankがOOM等で異常終了した際、torchrunのエレスティックエージェントが残りの正常なrankへSIGTERM等を送って停止させる現象。停止したrank自体には原因がない
+- **NCCL Watchdogタイムアウト**: GPU間の集合通信(AllReduce等)が一定時間応答しない場合にNCCLが検知し、プロセスをabort(SIGABRT)させる仕組み
+- **Xid**: NVIDIAドライバがGPUの異常を検出した際にカーネルログへ出力するエラーコード。ECCエラーやバス応答なしなどハードウェア起因の障害を示す
+- **CUDA OOM**: GPUメモリが確保できずに`torch.cuda.OutOfMemoryError`等の例外で終了する状態
+- **データローダーstall**: ストレージのI/O遅延や到達性の問題により、学習データの読み込みが進まなくなる状態
+
+## シナリオ設定
+
+`{{ csv_rows[0]["job_name"] }}` の異常終了直後、以下{{ csv_rows | length }}rankの状態を収集しました。データ供給元は `{{ csv_rows[0]["storage_mount"] }}`、チェックポイント保存先は `{{ csv_rows[0]["checkpoint_dir"] }}` です。
+
+| node_rank | hostname | gpu_id | exit_code | gpu_mem_used_gb / gpu_mem_total_gb | root_cause_category |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["node_rank"] }} | {{ r["hostname"] }} | {{ r["gpu_id"] }} | {{ r["exit_code"] }} | {{ r["gpu_mem_used_gb"] }} / {{ r["gpu_mem_total_gb"] }} | {{ r["root_cause_category"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 異常終了ログの収集
+
+```bash
+{% for r in csv_rows %}echo "=== {{ r["hostname"] }} (rank {{ r["node_rank"] }}) exit_code={{ r["exit_code"] }} ==="
+ssh {{ r["hostname"] }} "tail -n 100 /var/log/torchrun/{{ r["hostname"] }}.log"
+ssh {{ r["hostname"] }} "dmesg -T | tail -n 50"
+{% endfor %}```
+
+exit_codeは終了理由の一次判断材料になります。`1`はPython例外(CUDA OOMやCUDAエラー)、`134`はSIGABRT(NCCL Watchdogによるabort)、`137`はSIGKILL(監視プロセス等による強制終了)、`143`はSIGTERM(torchrunエレスティックエージェントによる道連れ停止)を示すことが多く、以降の手順でこの一次判断を裏付けます。
+
+### 2. GPUとメモリ状態の確認
+
+```bash
+{% for r in csv_rows %}ssh {{ r["hostname"] }} nvidia-smi -i {{ r["gpu_id"] }} --query-gpu=index,memory.used,memory.total,utilization.gpu --format=csv
+{% endfor %}```
+
+CSV記録時点の使用量(`{{ csv_rows[0]["gpu_mem_used_gb"] }}GB / {{ csv_rows[0]["gpu_mem_total_gb"] }}GB` のように上限に近いrankがOOM候補です)と、現在の`nvidia-smi`出力を突き合わせます。
+
+```bash
+{% for r in csv_rows %}{% if r["root_cause_category"] == "OOM" %}ssh {{ r["hostname"] }} "dmesg -T | grep -i 'out of memory'"
+{% elif r["root_cause_category"] == "GPU_ECC" %}ssh {{ r["hostname"] }} nvidia-smi -i {{ r["gpu_id"] }} -q -d ECC,ROW_REMAPPER
+ssh {{ r["hostname"] }} "dmesg -T | grep -i xid"
+{% endif %}{% endfor %}```
+
+`root_cause_category`が`OOM`のrankはカーネルログのOOM Killer記録を、`GPU_ECC`のrankはECCエラーカウントとXidログを確認し、ハードウェア起因かどうかを裏付けます。
+
+### 3. NCCL通信エラーの切り分け
+
+```bash
+{% for r in csv_rows %}ssh {{ r["hostname"] }} "grep -i nccl /var/log/torchrun/{{ r["hostname"] }}.log | tail -n 20"
+{% endfor %}```
+
+```bash
+{% for r in csv_rows %}{% if r["root_cause_category"] == "NCCL_TIMEOUT" %}ssh {{ r["hostname"] }} ip link show
+ssh {{ r["hostname"] }} python3 -c "import torch; print(torch.cuda.nccl.version())"
+{% elif r["root_cause_category"] == "HEALTHY" %}echo "{{ r["hostname"] }} rank{{ r["node_rank"] }}: NCCL abort受信ログのみで自プロセス側のエラーがないことを確認(道連れ終了の裏付け)"
+{% endif %}{% endfor %}```
+
+`NCCL_TIMEOUT`のrankはネットワークインターフェースの状態とNCCLバージョンの整合性を確認します。`HEALTHY`のrankはログ上で自らのエラーではなく他rank起因のabort通知のみを受けているかを確認し、根本原因ではないことを裏付けます。
+
+### 4. ストレージとデータ供給の確認
+
+```bash
+{% for r in csv_rows %}ssh {{ r["hostname"] }} "mount | grep {{ r["storage_mount"] }}"
+ssh {{ r["hostname"] }} "df -h {{ r["storage_mount"] }}"
+{% endfor %}```
+
+```bash
+{% for r in csv_rows %}{% if r["root_cause_category"] == "STORAGE_IO" %}ssh {{ r["hostname"] }} "dmesg -T | grep -i nfs"
+ssh {{ r["hostname"] }} iostat -x 1 3
+{% endif %}{% endfor %}```
+
+`STORAGE_IO`のrankについて、マウント状態とNFS関連のカーネルログ、I/O待ち時間(`iostat`の`%util`や`await`)を確認し、データローダーstallの裏付けを取ります。
+
+### 5. 再実行と再発防止策の記録
+
+```bash
+{% for r in csv_rows %}echo "{{ r["hostname"] }} rank{{ r["node_rank"] }} [{{ r["root_cause_category"] }}]: {{ r["recommended_action"] }}" >> /var/log/training-job-failure-triage.log
+{% endfor %}date -Iseconds >> /var/log/training-job-failure-triage.log
+```
+
+`root_cause_category`ごとの対処(手順2〜4で裏付けた原因への対応)がすべて完了したことを確認してから再実行します。
+
+```bash
+{% for r in csv_rows %}ssh {{ r["hostname"] }} pgrep -af torchrun
+{% endfor %}```
+
+全ホストで`pgrep -af torchrun`の出力が空であることを確認し、`{{ csv_rows[0]["checkpoint_dir"] }}`の最新チェックポイントから再開します。実際のtorchrun起動手順(rdzv-id・rdzv-endpointの指定等)は既存の`distributed-training-torchrun`手順に従います。本手順は障害の切り分けと記録までを対象とします。
+
+```bash
+ls -lt {{ csv_rows[0]["checkpoint_dir"] }} | head -n 5
+```
+
+## 動作確認
+
+- `/var/log/training-job-failure-triage.log`に{{ csv_rows | length }}rank全件の原因分類と対処内容が記録されていること
+- `root_cause_category`が`HEALTHY`以外の全rankについて、手順2〜4で確認した原因への対処が完了していること
+- 再実行前に全ホストで`pgrep -af torchrun`の出力が空であること
+- 再実行後、`{{ csv_rows[0]["checkpoint_dir"] }}`のタイムスタンプが更新され、学習が再開していること
+
+## 注意事項
+
+- 道連れ終了(`root_cause_category`が`HEALTHY`)のrankは根本原因ではないため、個別のハードウェア対応やネットワーク調査に時間を割かない。手順1のexit_code(SIGTERM系)と手順3のログで根本原因rankとの関係を確認したうえで判断する。
+- `GPU_ECC`のrankをリセットやドレインのみで運用継続すると、Xidが再発した際に予告なく停止(ジョブロスト)する可能性がある。保守窓口への連絡を省略しない。
+- `STORAGE_IO`の原因調査中は、同じマウントを他ジョブが共有している場合があるため、マウントの再作成やアンマウントを行う前に影響範囲を確認する。
+- 原因を解消しないまま再実行すると同じrankで同じ障害を繰り返す。手順5の再実行は、対象rankの対処完了を確認してから行う。

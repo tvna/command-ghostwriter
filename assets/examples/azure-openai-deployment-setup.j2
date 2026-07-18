@@ -1,0 +1,124 @@
+# Azure OpenAI Serviceのリソース作成とモデルデプロイ
+
+`az cognitiveservices` コマンドを使い、Azure OpenAIリソースの作成・モデルデプロイ・APIキーによる疎通確認と、キーローテーション/アクセス制御方針の設定を行います。
+
+## 目的
+
+Azure OpenAIの「アカウント(リソース)」と「デプロイ」の関係を理解し、`az` CLIだけでリソース作成からモデル利用開始までを再現できるようになることを目指します。あわせて、APIキーを安全に運用するためのローテーションとアクセス制御の考え方を身につけます。
+
+## 用語解説
+
+- **Cognitive Servicesアカウント(kind=OpenAI)**: Azure OpenAIリソースの実体。`{{ account_name }}` のように、サブスクリプション `{{ subscription_name }}` 内のリソースグループ `{{ resource_group }}` に作成される
+- **カスタムサブドメイン**: Azure ADトークン認証を使う場合に必須となる、アカウント固有のドメイン名。`account create` 時の `--custom-domain` で指定する
+- **デプロイ(deployment)**: アカウント内でモデルをAPI呼び出し可能な状態にする単位。`{{ deployment_name }}` はモデル `{{ model_name }}`(バージョン `{{ model_version }}`)を指す
+- **sku-capacity**: デプロイの割当容量。Standardデプロイでは1,000トークン/分単位で指定し、`{{ capacity }}` は `{{ capacity }}` × 1,000 TPMを意味する
+- **api-version**: Azure OpenAI REST APIのバージョン指定パラメータ。`{{ api_version }}` を使用する
+- **キーローテーション**: `key1`/`key2` の2本のキーを交互に再生成し、ダウンタイムなしで認証情報を更新する運用
+
+## シナリオ設定
+
+サブスクリプション `{{ subscription_name }}`(ID: `{{ subscription_id }}`)のリソースグループ `{{ resource_group }}`(リージョン: `{{ location }}`)に、Azure OpenAIアカウント `{{ account_name }}`(SKU: `{{ sku_name }}`)を作成します。そこにモデル `{{ model_name }}`(バージョン `{{ model_version }}`)をデプロイ名 `{{ deployment_name }}` でデプロイし、APIキーで疎通確認を行ったうえで、キーローテーションとアクセス制御方針「{{ access_control_note }}」を設定します。
+
+## 手順
+
+### 1. az loginとサブスクリプションを選択する
+
+```bash
+az login
+az account set --subscription "{{ subscription_id }}"
+az account show --query "{name:name, id:id}" --output table
+```
+
+対象サブスクリプションが `{{ subscription_name }}`(`{{ subscription_id }}`)であることを確認してから次の手順に進みます。
+
+### 2. cognitiveservices account createでリソースを作成する
+
+```bash
+az group show --name {{ resource_group }} --output table
+
+az cognitiveservices account create \
+  --name {{ account_name }} \
+  --resource-group {{ resource_group }} \
+  --location {{ location }} \
+  --kind OpenAI \
+  --sku {{ sku_name }} \
+  --custom-domain {{ account_name }} \
+  --yes
+```
+
+`--custom-domain` はAzure ADトークン認証に必要なカスタムサブドメインを有効化します。`--yes` はResponsible AI利用条件への同意を表します。
+
+### 3. account deployment createでモデルをデプロイする
+
+```bash
+az cognitiveservices account deployment create \
+  --name {{ account_name }} \
+  --resource-group {{ resource_group }} \
+  --deployment-name {{ deployment_name }} \
+  --model-name {{ model_name }} \
+  --model-version {{ model_version }} \
+  --model-format OpenAI \
+  --sku-name Standard \
+  --sku-capacity {{ capacity }}
+
+az cognitiveservices account deployment show \
+  --name {{ account_name }} \
+  --resource-group {{ resource_group }} \
+  --deployment-name {{ deployment_name }} \
+  --query "{name:name, state:properties.provisioningState}" \
+  --output table
+```
+
+### 4. keys listでAPIキーを取得し疎通確認する
+
+```bash
+AZURE_OPENAI_ENDPOINT=$(az cognitiveservices account show \
+  --name {{ account_name }} \
+  --resource-group {{ resource_group }} \
+  --query properties.endpoint --output tsv)
+
+AZURE_OPENAI_KEY=$(az cognitiveservices account keys list \
+  --name {{ account_name }} \
+  --resource-group {{ resource_group }} \
+  --query key1 --output tsv)
+
+curl "${AZURE_OPENAI_ENDPOINT}openai/deployments/{{ deployment_name }}/chat/completions?api-version={{ api_version }}" \
+  -H "Content-Type: application/json" \
+  -H "api-key: $AZURE_OPENAI_KEY" \
+  -d '{"messages": [{"role": "user", "content": "{{ test_prompt_text }}"}], "max_tokens": {{ max_tokens }}}'
+```
+
+取得したキーはコマンド履歴やファイルに残さず、環境変数としてのみ保持します。
+
+### 5. キーローテーションとアクセス制御方針を設定する
+
+```bash
+az cognitiveservices account keys regenerate \
+  --name {{ account_name }} \
+  --resource-group {{ resource_group }} \
+  --key-name key2
+
+az role assignment create \
+  --assignee {{ principal_object_id }} \
+  --role "{{ access_role_name }}" \
+  --scope "/subscriptions/{{ subscription_id }}/resourceGroups/{{ resource_group }}/providers/Microsoft.CognitiveServices/accounts/{{ account_name }}"
+
+az role assignment list \
+  --scope "/subscriptions/{{ subscription_id }}/resourceGroups/{{ resource_group }}/providers/Microsoft.CognitiveServices/accounts/{{ account_name }}" \
+  --output table
+```
+
+ローテーション方針: {{ key_rotation_policy_note }}。アクセス制御方針: {{ access_control_note }}。
+
+## 動作確認
+
+- `az cognitiveservices account deployment show` の `provisioningState` が `Succeeded` になっていること
+- 手順4のcurlレスポンスに `choices` を含む応答が返り、HTTPエラーが発生しないこと
+- `az role assignment list` に `{{ principal_object_id }}` への `{{ access_role_name }}` 割り当てが表示され、不要な高権限ロールが付与されていないこと
+
+## 注意事項
+
+- APIキー(`key1`/`key2`)は平文でコミットやログに残さない。取得後は環境変数またはシークレットストア経由でのみ扱う。
+- キーローテーションは「{{ key_rotation_policy_note }}」の方針に従い、切り替え後の旧キー失効を必ず確認してから完了とする。
+- アクセス制御は「{{ access_control_note }}」を守り、`--role` には必要最小限のロールのみを指定する。
+- モデルのリージョン提供状況やクォータはモデル・リージョンごとに異なるため、デプロイ前にAzureポータルまたは `az cognitiveservices account list-models` で提供可否を確認する。

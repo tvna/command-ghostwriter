@@ -1,0 +1,16 @@
+install_dir: "/opt/langfuse"
+repo_url: "https://github.com/langfuse/langfuse.git"
+web_url: "http://langfuse.internal.example.com:3000"
+admin_email: "admin@example.com"
+org_name: "acme-ai-team"
+project_name: "agent-tool-calls"
+app_dir: "/srv/agent-app"
+env_file_path: "/srv/agent-app/.env"
+sdk_package: "langfuse"
+sdk_min_version: "3.3.1"
+trace_name: "weather-agent-request"
+tool_span_name: "get_current_weather"
+test_trace_count: 10
+simulated_error_interval: 5
+error_rate_threshold_pct: 10
+dashboard_name: "Tool Call Error Monitoring"

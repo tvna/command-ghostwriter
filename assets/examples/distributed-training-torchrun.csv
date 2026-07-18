@@ -1,0 +1,4 @@
+node_rank,node_name,node_ip,gpus_per_node,network_interface,master_port,rdzv_id,train_script,checkpoint_dir,log_dir
+0,gpu-node01,10.20.1.11,8,eth0,29500,llama3-70b-sft-job42,/opt/train/finetune.py,/data/checkpoints/llama3-70b-sft,/var/log/torchrun
+1,gpu-node02,10.20.1.12,8,eth0,29500,llama3-70b-sft-job42,/opt/train/finetune.py,/data/checkpoints/llama3-70b-sft,/var/log/torchrun
+2,gpu-node03,10.20.1.13,8,eth0,29500,llama3-70b-sft-job42,/opt/train/finetune.py,/data/checkpoints/llama3-70b-sft,/var/log/torchrun

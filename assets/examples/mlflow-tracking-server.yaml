@@ -1,0 +1,15 @@
+tracking_uri: "http://mlflow-tracking.internal.example.com:5001"
+server_host: "0.0.0.0"
+server_port: 5001
+backend_db_host: "mlflow-db.internal.example.com"
+backend_db_port: 5432
+backend_db_name: "mlflow"
+backend_db_user: "mlflow_svc"
+backend_store_uri: "postgresql://mlflow_svc@mlflow-db.internal.example.com:5432/mlflow"
+artifact_root: "/data/mlflow/artifacts"
+experiment_name: "demand-forecast"
+mlflow_bin: "/opt/mlflow/venv/bin/mlflow"
+mlflow_user: "mlflow"
+mlflow_group: "mlflow"
+systemd_unit_name: "mlflow-tracking.service"
+credential_note: "バックエンドストアの接続パスワードはURIに埋め込まず、EnvironmentFile経由でsystemdサービスに渡す"

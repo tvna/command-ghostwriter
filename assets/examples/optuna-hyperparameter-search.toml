@@ -1,0 +1,14 @@
+study_name = "resnet50-lr-search"
+storage_db_host = "optuna-db.internal.example.com"
+storage_db_port = 5432
+storage_db_name = "optuna_db"
+storage_db_user = "optuna_svc"
+objective_metric = "validation_loss"
+direction = "minimize"
+n_trials = 50
+parallel_worker_count = 4
+search_script_path = "train_resnet.py"
+dashboard_host = "0.0.0.0"
+dashboard_port = 8080
+best_trial_output_path = "/data/optuna/resnet50-lr-search/best_trial.json"
+credential_note = "接続パスワードはstorage URLに埋め込まず、OPTUNA_DB_PASSWORD環境変数またはシークレットストア経由でワーカープロセスに渡す"

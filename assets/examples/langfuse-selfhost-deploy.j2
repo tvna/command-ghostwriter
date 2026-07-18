@@ -1,0 +1,150 @@
+# Langfuseセルフホスト構築とLLMトレース収集
+
+`docker compose` でLangfuseをセルフホストし、組織・プロジェクト・APIキーの発行から、アプリケーションへのSDK組み込み、トレースとプロンプト記録の可視化、データ保持・バックアップ設定までを一巡します。
+
+## 目的
+
+Langfuseの構成要素(Organization/Project/APIキー/Trace/Observation/Prompt)の関係を理解したうえで、`docker compose` によるセルフホスト環境を構築し、実アプリケーションからトレースとプロンプトを送信・可視化できる状態にすることを目指します。
+
+## 用語解説
+
+- **Organization**: 複数のProjectをまとめる最上位の管理単位。メンバー招待や課金設定はここに紐づく。ここでは `{{ org_name }}` を作成する
+- **Project**: APIキーとトレースデータが属する単位。Organization配下に複数作成できる。ここでは `{{ lf_project_name }}` を使用する
+- **APIキー(Public Key/Secret Key)**: SDKがLangfuseサーバへ認証するための鍵ペア。`pk-lf-` で始まるPublic Keyと `sk-lf-` で始まるSecret KeyをProject単位で発行する
+- **Trace/Observation**: 1回のアプリケーション処理を表す記録単位がTrace、その内部の個々の処理(spanやLLM呼び出しを表すgeneration)がObservation
+- **Prompt Management**: プロンプト文面をコードから切り離してLangfuse側でバージョン管理・配信する機能。`labels` でproduction/staging等の配信ラベルを付与する
+
+## シナリオ設定
+
+`{{ install_dir }}` にLangfuseのdocker compose構成を配置し、`{{ web_url }}` で公開します。管理画面でOrganization `{{ org_name }}` とProject `{{ lf_project_name }}` を作成し、初期管理者は `{{ admin_email }}` とします。アプリケーション `{{ app_dir }}` にSDK(`{{ sdk_package }}`)を組み込み、トレース `{{ trace_name }}` とプロンプト `{{ prompt_name }}`(ラベル: `{{ prompt_label }}`)を送信します。データ保持方針は「{{ ee_license_note }}」とし、バックアップ先は `{{ backup_dir }}` です。
+
+## 手順
+
+### 1. docker composeでLangfuseを起動する
+
+```bash
+sudo mkdir -p {{ install_dir }}
+sudo git clone --depth 1 {{ repo_url }} {{ install_dir }}
+cd {{ install_dir }}
+sudo docker compose up -d
+sudo docker compose ps
+```
+
+```bash
+curl -sf "{{ web_url }}/api/public/health?failIfDatabaseUnavailable=true"
+```
+
+`/api/public/health` が `200` を返し、`postgres` / `clickhouse` / `redis` / `minio` を含む全サービスが起動していれば次の手順に進みます。
+
+### 2. 管理画面で組織とAPIキーを作成する
+
+ブラウザで `{{ web_url }}` にアクセスし、初回サインアップ画面で `{{ admin_email }}` を使って最初のユーザーアカウントを作成します。作成したアカウントはOrganizationのOwner権限を持ちます。
+
+続けて次の順で作成します。
+
+1. 「New Organization」から Organization `{{ org_name }}` を作成する
+2. Organization内で「New Project」から Project `{{ lf_project_name }}` を作成する
+3. Project Settings の「API Keys」タブで「Create new API keys」を実行し、Public Key(`pk-lf-...`)とSecret Key(`sk-lf-...`)を発行する
+
+発行したSecret Keyは画面遷移後に再表示できないため、この時点で手順3の環境変数ファイルに転記します。
+
+### 3. アプリケーションにSDKを組み込んでトレースを送信する
+
+```bash
+pip install {{ sdk_package }}
+```
+
+```bash
+sudo mkdir -p {{ app_dir }}
+sudo tee {{ env_file_path }} > /dev/null <<'EOF'
+LANGFUSE_PUBLIC_KEY=<手順2で発行したpk-lf-...に置き換える>
+LANGFUSE_SECRET_KEY=<手順2で発行したsk-lf-...に置き換える>
+LANGFUSE_HOST={{ web_url }}
+EOF
+sudo chmod 600 {{ env_file_path }}
+```
+
+```bash
+cd {{ app_dir }}
+set -a
+source {{ env_file_path }}
+set +a
+python3 - <<'PY'
+from langfuse import get_client
+
+langfuse = get_client()
+
+langfuse.create_prompt(
+    name="{{ prompt_name }}",
+    prompt="ユーザーからの問い合わせ内容: {{ '{{' }}query{{ '}}' }} に、丁寧な日本語で回答してください。",
+    config={"model": "gpt-4o-mini", "temperature": 0},
+    labels=["{{ prompt_label }}"],
+)
+
+with langfuse.start_as_current_observation(as_type="span", name="{{ trace_name }}") as span:
+    prompt = langfuse.get_prompt("{{ prompt_name }}", label="{{ prompt_label }}")
+    compiled = prompt.compile(query="配送状況を確認したい")
+
+    with langfuse.start_as_current_observation(as_type="generation", name="llm-call", model="gpt-4o-mini") as generation:
+        generation.update(input=compiled, output="配送状況を確認いたします。")
+
+    span.update(output="trace completed")
+
+langfuse.flush()
+PY
+```
+
+`langfuse.flush()` はプロセス終了前にバッファ内のトレースを送信し切るための呼び出しで、短命なスクリプトやバッチ処理では省略しないようにします。
+
+### 4. トレースとプロンプト記録を画面で確認する
+
+ブラウザで `{{ web_url }}` の Project `{{ lf_project_name }}` を開き、次の2画面を確認します。
+
+- 「Tracing」→「Traces」タブに `{{ trace_name }}` という名前のTraceが表示され、展開すると `llm-call` のgenerationにinput/outputが記録されていること
+- 「Prompts」タブに `{{ prompt_name }}` が表示され、ラベル `{{ prompt_label }}` のバージョンが公開されていること
+
+### 5. データ保持とバックアップを設定する
+
+データ保持方針: 「{{ ee_license_note }}」。
+
+```bash
+sudo mkdir -p {{ backup_dir }}
+cd {{ install_dir }}
+sudo docker compose exec -T {{ db_service_name }} pg_dump -U {{ db_user }} {{ db_name }} > {{ backup_dir }}/postgres-$(date +%Y%m%d).sql
+```
+
+```bash
+sudo docker compose stop
+sudo docker run --rm \
+  -v {{ db_volume_name }}:/data/postgres \
+  -v {{ clickhouse_volume_name }}:/data/clickhouse \
+  -v {{ minio_volume_name }}:/data/minio \
+  -v {{ backup_dir }}:/backup \
+  alpine tar czf /backup/langfuse-volumes-$(date +%Y%m%d).tar.gz -C /data postgres clickhouse minio
+sudo docker compose up -d
+```
+
+定期実行はcronに登録します。
+
+```bash
+sudo tee /etc/cron.d/langfuse-backup > /dev/null <<EOF
+0 3 * * * root cd {{ install_dir }} && docker compose exec -T {{ db_service_name }} pg_dump -U {{ db_user }} {{ db_name }} > {{ backup_dir }}/postgres-\$(date +\%Y\%m\%d).sql
+EOF
+```
+
+保持期間 `{{ retention_days }}` 日を超えたバックアップファイルは、別途 `find {{ backup_dir }} -mtime +{{ retention_days }} -delete` 等で整理する運用を検討します。
+
+## 動作確認
+
+- `curl -sf "{{ web_url }}/api/public/health?failIfDatabaseUnavailable=true"` が `200` で応答すること
+- `{{ web_url }}` のTracesタブに `{{ trace_name }}` が表示され、`llm-call` generationのinput/outputが確認できること
+- Promptsタブに `{{ prompt_name }}`(ラベル `{{ prompt_label }}`)が表示されること
+- `{{ backup_dir }}` に当日日付のバックアップファイル(`postgres-*.sql` および `langfuse-volumes-*.tar.gz`)が生成されていること
+- `sudo docker compose ps` で全サービスが再び `Up` 状態に戻っていること
+
+## 注意事項
+
+- Secret Key(`sk-lf-...`)は発行画面を離れると再表示できないため、`{{ env_file_path }}` への転記を発行直後に行い、平文でのコミットやログ出力を避ける。
+- 手順5のボリュームバックアップは `docker compose stop` でサービスを一時停止するため、実行中はトレース送信が失敗する。業務影響の小さい時間帯に限定する。
+- 「{{ ee_license_note }}」という制約があるため、Project Settings画面上のData Retention設定に依存せず、手順5のバックアップと手動削除で保持期間 `{{ retention_days }}` 日を運用する。
+- `{{ web_url }}` を外部公開する場合は、minio(既定ポート9090)を含め、リバースプロキシとアクセス制御を別途構成する。本手順はLangfuse自体の構築に焦点を当て、外部公開時のネットワーク設計は対象外とする。

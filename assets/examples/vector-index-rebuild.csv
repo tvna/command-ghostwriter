@@ -1,0 +1,4 @@
+collection_name,vector_db_endpoint,points_count,segments_count,segments_threshold,indexing_threshold,vector_size,distance_metric,search_top_k,maintenance_window,priority
+product_docs_embeddings,http://localhost:6333,182340,18,8,20000,1024,Cosine,5,毎週日曜 02:00-04:00,高
+faq_embeddings,http://localhost:6333,42110,6,8,20000,1024,Cosine,5,毎週日曜 02:00-04:00,中
+support_tickets_embeddings,http://localhost:6333,98650,12,8,20000,1024,Cosine,5,毎週日曜 02:00-04:00,中

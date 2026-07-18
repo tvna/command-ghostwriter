@@ -1,0 +1,220 @@
+# ベクトル検索の精度評価とパラメータ調整
+
+評価クエリ {{ csv_rows | length }} 件と正解データ(正解文書ID)をもとに、ベクトル検索の結果からRecall@kとMRR(Mean Reciprocal Rank)を算出し、検索パラメータ(`hnsw_ef`)を変更した際の精度変化を比較する手順です。
+
+## 目的
+
+評価クエリと正解データを台帳で管理しながら検索を一括実行し、Recall@kとMRRという定量指標に基づいて検索パラメータの調整可否を判断できるようになることを目指します。
+
+## 用語解説
+
+- **評価クエリ(evaluation query)**: 検索精度を測るために用意する検索文字列。実際の利用シーンを想定した文言を使う
+- **正解データ(ground truth)**: 各評価クエリに対して「本来ヒットすべき」と定義した文書ID。人手または既存の正解ラベルから整備する
+- **Recall@k**: 上位k件の検索結果に正解文書が含まれていたクエリの割合。値が高いほど正解を取りこぼしていないことを示す
+- **MRR(Mean Reciprocal Rank)**: 各クエリで正解文書が現れた順位の逆数(1位なら1.0、3位なら0.333)を平均した指標。正解が上位に来ているかを評価する
+- **hnsw_ef**: HNSW方式のANN(近似最近傍)検索で、クエリ実行時に探索する候補数を指定するパラメータ。大きいほど精度(Recall)は上がるがレイテンシも増える
+
+## シナリオ設定
+
+コレクション `{{ csv_rows[0]["collection_name"] }}`(エンドポイント: `{{ csv_rows[0]["vector_db_endpoint"] }}`)に対し、以下 {{ csv_rows | length }} 件の評価クエリで検索を実行します。埋め込みモデルは `{{ csv_rows[0]["embedding_model"] }}`、取得件数は上位 `{{ csv_rows[0]["top_k"] }}` 件とし、baseline設定(`hnsw_ef = {{ csv_rows[0]["baseline_hnsw_ef"] }}`)とcandidate設定(`hnsw_ef = {{ csv_rows[0]["candidate_hnsw_ef"] }}`)の2通りで比較します。
+
+| query_id | query_text | expected_doc_id |
+|---|---|---|
+{% for r in csv_rows %}| {{ r["query_id"] }} | {{ r["query_text"] }} | {{ r["expected_doc_id"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 評価クエリと正解データを整備する
+
+```bash
+mkdir -p /data/eval/vector-search-quality
+cat <<'EOF' > /data/eval/vector-search-quality/ground_truth.csv
+query_id,query_text,expected_doc_id
+{% for r in csv_rows %}{{ r["query_id"] }},{{ r["query_text"] }},{{ r["expected_doc_id"] }}
+{% endfor %}EOF
+wc -l /data/eval/vector-search-quality/ground_truth.csv
+cut -d, -f1 /data/eval/vector-search-quality/ground_truth.csv | tail -n +2 | sort | uniq -d
+```
+
+`uniq -d` の出力が空であれば `query_id` に重複がないことを意味します。重複がある場合は正解データの整備からやり直します。
+
+### 2. 評価対象の検索設定を固定する
+
+```bash
+curl "{{ csv_rows[0]["vector_db_endpoint"] }}/collections/{{ csv_rows[0]["collection_name"] }}"
+cat <<'EOF' > /data/eval/vector-search-quality/eval_config.json
+{
+  "collection_name": "{{ csv_rows[0]["collection_name"] }}",
+  "vector_db_endpoint": "{{ csv_rows[0]["vector_db_endpoint"] }}",
+  "embedding_model": "{{ csv_rows[0]["embedding_model"] }}",
+  "top_k": {{ csv_rows[0]["top_k"] }},
+  "baseline_hnsw_ef": {{ csv_rows[0]["baseline_hnsw_ef"] }},
+  "candidate_hnsw_ef": {{ csv_rows[0]["candidate_hnsw_ef"] }}
+}
+EOF
+cat /data/eval/vector-search-quality/eval_config.json
+```
+
+`curl` の応答に含まれる `status` が `green` であることを確認してから、以降の評価を進めます。ここで固定した `top_k` と `baseline_hnsw_ef` を、手順3の基準検索で共通して使用します。
+
+### 3. 検索を一括実行し結果を記録する
+
+```bash
+{% for r in csv_rows %}python3 <<'EOF'
+import json
+import urllib.request
+from sentence_transformers import SentenceTransformer
+
+query_id = "{{ r["query_id"] }}"
+query_text = "{{ r["query_text"] }}"
+
+model = SentenceTransformer("{{ csv_rows[0]["embedding_model"] }}")
+vector = model.encode(query_text, normalize_embeddings=True).tolist()
+
+payload = json.dumps({
+    "vector": vector,
+    "limit": {{ csv_rows[0]["top_k"] }},
+    "params": {"hnsw_ef": {{ csv_rows[0]["baseline_hnsw_ef"] }}},
+    "with_payload": False,
+}).encode("utf-8")
+
+req = urllib.request.Request(
+    "{{ csv_rows[0]["vector_db_endpoint"] }}/collections/{{ csv_rows[0]["collection_name"] }}/points/search",
+    data=payload,
+    headers={"Content-Type": "application/json"},
+    method="POST",
+)
+with urllib.request.urlopen(req) as resp:
+    result = json.load(resp)
+
+with open(f"/data/eval/vector-search-quality/{query_id}_baseline.json", "w") as out:
+    json.dump(result, out)
+
+print(query_id, "baseline:", [p["id"] for p in result["result"]])
+EOF
+{% endfor %}```
+
+各クエリの検索結果(上位 `{{ csv_rows[0]["top_k"] }}` 件のポイントID)を `<query_id>_baseline.json` としてクエリごとに保存します。クエリの埋め込みには、登録済みベクトルの生成に使ったものと同じ `{{ csv_rows[0]["embedding_model"] }}` を使用します。
+
+### 4. Recall@kとMRRを算出する
+
+```bash
+python3 <<'EOF'
+import json
+
+ground_truth = {
+{% for r in csv_rows %}    "{{ r["query_id"] }}": {{ r["expected_doc_id"] }},
+{% endfor %}}
+
+hits = 0
+reciprocal_ranks = []
+for query_id, expected_doc_id in ground_truth.items():
+    with open(f"/data/eval/vector-search-quality/{query_id}_baseline.json") as f:
+        result = json.load(f)
+    ranked_ids = [p["id"] for p in result["result"]]
+    if expected_doc_id in ranked_ids:
+        hits += 1
+        rank = ranked_ids.index(expected_doc_id) + 1
+        reciprocal_ranks.append(1.0 / rank)
+    else:
+        reciprocal_ranks.append(0.0)
+
+recall_at_k = hits / len(ground_truth)
+mrr = sum(reciprocal_ranks) / len(reciprocal_ranks)
+
+print("baseline Recall@{{ csv_rows[0]["top_k"] }}:", recall_at_k)
+print("baseline MRR:", mrr)
+
+with open("/data/eval/vector-search-quality/baseline_metrics.json", "w") as out:
+    json.dump({"recall_at_k": recall_at_k, "mrr": mrr}, out)
+EOF
+```
+
+`expected_doc_id` が `ranked_ids` の何位に現れたかを `rank` として求め、その逆数を平均したものがMRRです。正解が1件も上位に現れなかったクエリは逆数を0として扱います。
+
+### 5. パラメータを変えて再評価し比較する
+
+```bash
+{% for r in csv_rows %}python3 <<'EOF'
+import json
+import urllib.request
+from sentence_transformers import SentenceTransformer
+
+query_id = "{{ r["query_id"] }}"
+query_text = "{{ r["query_text"] }}"
+
+model = SentenceTransformer("{{ csv_rows[0]["embedding_model"] }}")
+vector = model.encode(query_text, normalize_embeddings=True).tolist()
+
+payload = json.dumps({
+    "vector": vector,
+    "limit": {{ csv_rows[0]["top_k"] }},
+    "params": {"hnsw_ef": {{ csv_rows[0]["candidate_hnsw_ef"] }}},
+    "with_payload": False,
+}).encode("utf-8")
+
+req = urllib.request.Request(
+    "{{ csv_rows[0]["vector_db_endpoint"] }}/collections/{{ csv_rows[0]["collection_name"] }}/points/search",
+    data=payload,
+    headers={"Content-Type": "application/json"},
+    method="POST",
+)
+with urllib.request.urlopen(req) as resp:
+    result = json.load(resp)
+
+with open(f"/data/eval/vector-search-quality/{query_id}_candidate.json", "w") as out:
+    json.dump(result, out)
+
+print(query_id, "candidate:", [p["id"] for p in result["result"]])
+EOF
+{% endfor %}python3 <<'EOF'
+import json
+
+ground_truth = {
+{% for r in csv_rows %}    "{{ r["query_id"] }}": {{ r["expected_doc_id"] }},
+{% endfor %}}
+
+def evaluate(suffix):
+    hits = 0
+    reciprocal_ranks = []
+    for query_id, expected_doc_id in ground_truth.items():
+        with open(f"/data/eval/vector-search-quality/{query_id}_{suffix}.json") as f:
+            result = json.load(f)
+        ranked_ids = [p["id"] for p in result["result"]]
+        if expected_doc_id in ranked_ids:
+            hits += 1
+            rank = ranked_ids.index(expected_doc_id) + 1
+            reciprocal_ranks.append(1.0 / rank)
+        else:
+            reciprocal_ranks.append(0.0)
+    return hits / len(ground_truth), sum(reciprocal_ranks) / len(reciprocal_ranks)
+
+baseline_recall, baseline_mrr = evaluate("baseline")
+candidate_recall, candidate_mrr = evaluate("candidate")
+
+print("hnsw_ef={{ csv_rows[0]["baseline_hnsw_ef"] }} (baseline): Recall@{{ csv_rows[0]["top_k"] }}=", baseline_recall, "MRR=", baseline_mrr)
+print("hnsw_ef={{ csv_rows[0]["candidate_hnsw_ef"] }} (candidate): Recall@{{ csv_rows[0]["top_k"] }}=", candidate_recall, "MRR=", candidate_mrr)
+
+if candidate_recall > baseline_recall or (candidate_recall == baseline_recall and candidate_mrr > baseline_mrr):
+    print("判定: candidate設定への切り替えを推奨")
+else:
+    print("判定: baseline設定を維持")
+EOF
+```
+
+Recall@kが同点の場合はMRRの高さで比較し、いずれの指標も改善しない場合はbaseline設定を維持します。レイテンシの計測は本手順の対象外のため、切り替えを決定する前に別途確認します。
+
+## 動作確認
+
+- `/data/eval/vector-search-quality/` 配下に、評価クエリ {{ csv_rows | length }} 件それぞれについて `<query_id>_baseline.json` と `<query_id>_candidate.json` が生成されていること
+- `baseline_metrics.json` に `recall_at_k` と `mrr` が数値として出力されていること
+- 手順5の比較結果に、baseline設定(`hnsw_ef={{ csv_rows[0]["baseline_hnsw_ef"] }}`)とcandidate設定(`hnsw_ef={{ csv_rows[0]["candidate_hnsw_ef"] }}`)それぞれのRecall@kとMRRが表示され、末尾に「判定」行が出力されていること
+- `curl "{{ csv_rows[0]["vector_db_endpoint"] }}/collections/{{ csv_rows[0]["collection_name"] }}"` のレスポンスで `status` が `green` であること
+
+## 注意事項
+
+- `expected_doc_id` はコレクションに実際に登録済みの正解文書のIDを指定する。存在しないIDを指定するとそのクエリのRecallは常に0になり、指標が正しく評価できない。
+- 評価クエリの件数が少ないと指標の統計的な信頼性が低くなる。本手順の {{ csv_rows | length }} 件はサンプルであり、本番の判断に使う場合は十分な件数を確保する。
+- `hnsw_ef` を上げるとRecallは改善しやすいがレイテンシも増える。切り替えの判断はRecall@k・MRRの改善幅とレイテンシ悪化のトレードオフを踏まえて行う。
+- クエリの埋め込みと登録済みベクトルの埋め込みは同じ `embedding_model` で生成する。モデルが異なるとベクトル空間がずれ、検索結果自体が意味をなさなくなる。

@@ -1,0 +1,15 @@
+compose_dir: "/opt/milvus"
+milvus_version: "v2.4.15"
+milvus_grpc_port: 19530
+milvus_metrics_port: 9091
+pymilvus_version: "2.4.15"
+collection_name: "product_docs"
+vector_field_name: "embedding"
+vector_dim: 768
+text_field_name: "title"
+text_field_max_length: 256
+index_type: "IVF_FLAT"
+metric_type: "L2"
+index_nlist: 128
+insert_row_count: 20
+search_topk: 3

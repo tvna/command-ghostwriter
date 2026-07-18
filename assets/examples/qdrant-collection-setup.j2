@@ -1,0 +1,102 @@
+# Qdrantの導入とコレクション作成・検索の基本
+
+Dockerでベクトル検索エンジン Qdrant を起動し、コレクションの作成・ポイントの一括登録・類似検索/フィルタ検索までの基本操作を行います。
+
+## 目的
+
+Qdrantのコレクションと距離関数の役割を理解し、REST APIを使ってポイントの登録から検索までを一通り実行できるようになることを目指します。
+
+## 用語解説
+
+- **コレクション(collection)**: 同じ次元数・距離関数を共有するベクトルの集合。RDBのテーブルに相当する
+- **ポイント(point)**: コレクションに登録される1件のデータ。ID・ベクトル・任意のペイロード(メタデータ)から成る
+- **ペイロード(payload)**: ポイントに付与するJSON形式のメタデータ。フィルタ検索の条件として利用できる
+- **距離関数(distance)**: ベクトル間の類似度計算方式。`Cosine`(コサイン類似度)・`Euclid`(ユークリッド距離)・`Dot`(内積)・`Manhattan`(マンハッタン距離)から選択し、コレクション作成後は変更できない
+- **ベクトル次元数(vector size)**: 1ポイントが持つベクトルの要素数。埋め込みモデルの出力次元数と一致させる必要がある
+- **フィルタ検索**: ペイロードの条件を組み合わせて類似検索の対象を絞り込む機能
+
+## シナリオ設定
+
+コンテナ `{{ container_name }}`(イメージ: `{{ qdrant_image }}`)をREST APIポート `{{ host_port_rest }}`、gRPCポート `{{ host_port_grpc }}` で起動し、永続化先を `{{ storage_host_path }}` とします。作成するコレクションは `{{ collection_name }}`(次元数 `{{ vector_size }}`、距離関数 `{{ distance_metric }}`)で、ポイントは `{{ points_file_path }}` から一括登録します。
+
+## 手順
+
+### 1. Dockerでqdrantを起動する
+
+```bash
+mkdir -p {{ storage_host_path }}
+docker run -d --name {{ container_name }} \
+  -p {{ host_port_rest }}:6333 \
+  -p {{ host_port_grpc }}:6334 \
+  -v {{ storage_host_path }}:{{ storage_container_path }} \
+  {{ qdrant_image }}
+```
+
+起動確認:
+
+```bash
+docker ps --filter name={{ container_name }}
+curl "http://localhost:{{ host_port_rest }}/"
+```
+
+### 2. コレクションを作成し距離関数を設定する
+
+```bash
+curl -X PUT "http://localhost:{{ host_port_rest }}/collections/{{ collection_name }}" \
+  -H "Content-Type: application/json" \
+  --data-raw '{"vectors": {"size": {{ vector_size }}, "distance": "{{ distance_metric }}"}}'
+```
+
+距離関数はコレクション作成後には変更できないため、`{{ distance_metric }}` が埋め込みモデルの想定する類似度計算と一致しているかを事前に確認します。
+
+### 3. ポイントを一括登録する
+
+`{{ points_file_path }}` には `{"points": [{"id": 1, "vector": [...], "payload": {...}}, ...]}` の形式でポイントを用意しておきます。各ベクトルの要素数は `{{ vector_size }}` と一致させます。
+
+```bash
+curl -X PUT "http://localhost:{{ host_port_rest }}/collections/{{ collection_name }}/points?wait=true" \
+  -H "Content-Type: application/json" \
+  --data-binary @{{ points_file_path }}
+```
+
+### 4. 類似検索とフィルタ検索を実行する
+
+クエリベクトル(埋め込みモデルで生成した `{{ vector_size }}` 次元のベクトル)による類似検索:
+
+```bash
+curl -X POST "http://localhost:{{ host_port_rest }}/collections/{{ collection_name }}/points/search" \
+  -H "Content-Type: application/json" \
+  --data-raw '{"vector": [0.05, 0.10, 0.02], "limit": {{ search_top_k }}, "with_payload": true}'
+```
+
+ペイロード条件を付けたフィルタ検索(`{{ payload_filter_key }}` が `{{ payload_filter_value }}` のポイントに絞り込む):
+
+```bash
+curl -X POST "http://localhost:{{ host_port_rest }}/collections/{{ collection_name }}/points/search" \
+  -H "Content-Type: application/json" \
+  --data-raw '{"vector": [0.05, 0.10, 0.02], "limit": {{ search_top_k }}, "with_payload": true, "filter": {"must": [{"key": "{{ payload_filter_key }}", "match": {"value": "{{ payload_filter_value }}"}}]}}'
+```
+
+上記のクエリベクトルはあくまで例示であり、実運用では登録時と同じ埋め込みモデルで生成した `{{ vector_size }}` 次元のベクトルに置き換えます。
+
+### 5. コレクション情報と容量を確認する
+
+```bash
+curl "http://localhost:{{ host_port_rest }}/collections/{{ collection_name }}"
+docker exec {{ container_name }} du -sh {{ storage_container_path }}
+du -sh {{ storage_host_path }}
+```
+
+## 動作確認
+
+- `curl "http://localhost:{{ host_port_rest }}/collections/{{ collection_name }}"` のレスポンスで `status` が `green` であり、`points_count` が登録件数と一致すること
+- 距離関数が `{{ distance_metric }}`、ベクトル次元数が `{{ vector_size }}` で設定されていること
+- 類似検索・フィルタ検索の両方が `limit` 件数以内で結果を返すこと
+- `{{ storage_host_path }}` 配下にコンテナ再起動後もデータが保持されること
+
+## 注意事項
+
+- `-p {{ host_port_rest }}:6333` で待受ポートをホストに公開するため、認証を設定しないままインターネットに公開しない。社内ネットワークやVPN経由に限定するか、APIキー認証を別途構成する。
+- 距離関数(`{{ distance_metric }}`)はコレクション作成後には変更できないため、変更が必要な場合はコレクションを再作成し、ポイントを登録し直す。
+- 登録するベクトルの次元数が `{{ vector_size }}` と一致しない場合はエラーになるため、埋め込みモデルを変更した際は次元数も見直す。
+- `{{ storage_host_path }}` はコンテナのデータ永続化先であるため、削除や上書きを行う前にバックアップを取得する。

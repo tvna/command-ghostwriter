@@ -1,0 +1,110 @@
+# MinIOによる学習済みモデルの社内配布
+
+`mc`(MinIO Client)を使い、学習済みモデルをMinIOバケットへ配置し、ミラー同期と期限付きURL共有で社内の他チームへ安全に配布する手順です。
+
+## 目的
+
+`mc alias` によるMinIO接続設定から、最小権限のアクセスポリシー設計、`mc mirror` によるモデル配置、`mc share download` による期限付きURL発行までを一貫して実施し、取得側でのチェックサム検証まで含めた配布フローを実践できるようになることを目指します。
+
+## 用語解説
+
+- **mc(MinIO Client)**: MinIOおよびS3互換ストレージをCLIから操作するための公式クライアント
+- **alias**: `mc alias set` で登録する接続先エンドポイントの別名。以降のコマンドは `alias/bucket/object` の形式で対象を指定する
+- **anonymous設定**: バケット単位の匿名アクセス可否(`none`/`download`/`upload`/`public`)を制御する設定。配布用バケットは既定で `none`(非公開)とし、必要な範囲だけをIAMポリシーで許可する
+- **mc mirror**: ローカルディレクトリとバケットの内容を差分同期するコマンド。再実行しても変更分のみが転送される
+- **mc share download**: 対象オブジェクトに対して期限付きの署名付きURL(プリサインドURL)を発行するコマンド。URLを知る者だけが有効期限内に限りダウンロードできる
+
+## シナリオ設定
+
+接続先は alias `{{ minio_alias }}`(エンドポイント: `{{ minio_endpoint }}`)、配布先バケットは `{{ bucket_name }}` です。配布対象モデルは `{{ model_name }}`(バージョン: `{{ model_version }}`)で、ローカルの格納先は `{{ local_model_dir }}` です。バケットへの読み取り専用アクセスには最小権限ポリシー `{{ readonly_policy_name }}` を割り当て、社内共有には有効期限 `{{ share_expire }}` の期限付きURLを使用します。取得側の一時ダウンロード先は `{{ consumer_download_dir }}` です。
+
+## 手順
+
+### 1. mc aliasによる接続設定
+
+MinIOエンドポイントへの接続情報を登録します。アクセスキー・シークレットキーはシェル履歴やコミットに残さず、環境変数経由で渡します。
+
+```bash
+mc alias set {{ minio_alias }} {{ minio_endpoint }} "$MINIO_ACCESS_KEY" "$MINIO_SECRET_KEY"
+mc alias list {{ minio_alias }}
+```
+
+### 2. バケット作成とアクセスポリシー設定
+
+配布用バケットを作成し、匿名アクセスを無効化したうえで、読み取り専用の最小権限ポリシーを持つ専用アカウントを用意します。
+
+```bash
+mc mb {{ minio_alias }}/{{ bucket_name }}
+mc anonymous set none {{ minio_alias }}/{{ bucket_name }}
+
+cat > {{ policy_file_path }} <<'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:ListBucket"],
+      "Resource": [
+        "arn:aws:s3:::{{ bucket_name }}",
+        "arn:aws:s3:::{{ bucket_name }}/*"
+      ]
+    }
+  ]
+}
+EOF
+
+mc admin policy create {{ minio_alias }} {{ readonly_policy_name }} {{ policy_file_path }}
+mc admin user add {{ minio_alias }} "$MODEL_RO_ACCESS_KEY" "$MODEL_RO_SECRET_KEY"
+mc admin policy attach {{ minio_alias }} {{ readonly_policy_name }} --user "$MODEL_RO_ACCESS_KEY"
+```
+
+### 3. mc mirrorによるモデル配置
+
+配置前にローカル側でチェックサム台帳を作成し、モデル本体と一緒にバケットへ配置します。
+
+```bash
+cd {{ local_model_dir }}
+sha256sum * > {{ checksum_manifest }}
+cd -
+
+mc mirror --overwrite {{ local_model_dir }} {{ minio_alias }}/{{ bucket_name }}/{{ model_name }}/{{ model_version }}
+mc ls {{ minio_alias }}/{{ bucket_name }}/{{ model_name }}/{{ model_version }}
+```
+
+### 4. mc share downloadによる期限付きURL発行
+
+対象プレフィックス配下のオブジェクトに対し、有効期限 `{{ share_expire }}` の署名付きURLをまとめて発行します。
+
+```bash
+mc share download --recursive --expire {{ share_expire }} {{ minio_alias }}/{{ bucket_name }}/{{ model_name }}/{{ model_version }}/
+mc share list {{ minio_alias }}
+```
+
+出力された `Share:` 行のURLを、期限内にダウンロードする担当者へ社内チャット等の限定された経路で共有します。不要になった場合は `mc share revoke` で個別に失効できます。
+
+### 5. 取得側での整合性確認
+
+取得側は共有されたURLからモデル本体とチェックサム台帳をダウンロードし、`sha256sum -c` で整合性を確認します。
+
+```bash
+mkdir -p {{ consumer_download_dir }}
+cd {{ consumer_download_dir }}
+curl -o {{ checksum_manifest }} "$SHARED_CHECKSUM_URL"
+curl -o {{ model_name }}.bin "$SHARED_MODEL_URL"
+sha256sum -c {{ checksum_manifest }}
+```
+
+`$SHARED_CHECKSUM_URL` と `$SHARED_MODEL_URL` は、手順4で発行された `Share:` 行のURLをそのまま設定します。
+
+## 動作確認
+
+- 手順3の `mc ls {{ minio_alias }}/{{ bucket_name }}/{{ model_name }}/{{ model_version }}` に配布対象のファイルと `{{ checksum_manifest }}` が表示されること
+- 手順4の `mc share download` の出力に有効期限(`{{ share_expire }}` 相当)付きのURLが表示されること
+- 手順5の `sha256sum -c {{ checksum_manifest }}` がすべて `OK` と表示されること
+
+## 注意事項
+
+- バケット `{{ bucket_name }}` は `mc anonymous set none` により非公開のまま運用し、匿名での直接アクセスは許可しない。アクセスが必要な範囲は `{{ readonly_policy_name }}` のような最小権限ポリシーで個別に付与する。
+- `mc share download` の期限(`{{ share_expire }}`)は配布に必要な最短期間にとどめ、共有URLは限定された経路でのみ伝達する。期限前に不要になった場合は `mc share revoke` で失効させる。
+- `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` および `MODEL_RO_ACCESS_KEY` / `MODEL_RO_SECRET_KEY` は環境変数またはシークレットストア経由で渡し、スクリプトやコミットに平文で残さない。
+- チェックサム台帳(`{{ checksum_manifest }}`)を伴わない配布は改ざん・転送破損の検知ができないため、手順3・手順5を省略しない。

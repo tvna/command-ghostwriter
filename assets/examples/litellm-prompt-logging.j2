@@ -1,0 +1,100 @@
+# LiteLLM Proxyのプロンプト・応答ログ基盤への記録とマスキング方針
+
+LiteLLM Proxy のコールバック設定でプロンプトと応答をログ基盤へ記録し、記録開始後にマスキング方針と保持期間の方針を定めます。
+
+## 目的
+
+`litellm_settings` の `success_callback` によるログ送信の仕組みを理解したうえで、外部ログ基盤へリクエスト記録を送信できる状態を作り、個人情報を含む本文をマスキングする方針まで定めることを目指します。
+
+## 用語解説
+
+- **success_callback**: リクエスト成功時に呼び出す外部連携先をLiteLLM Proxyに指定する設定項目。ログ基盤・観測ツールへの送信に使う
+- **callback ID(`{{ callback_id }}`)**: LiteLLMが標準提供するログ送信先の識別子。ここでは `{{ log_backend_name }}` 連携を表す `{{ callback_id }}` を使用する
+- **os.environ/記法**: config.yaml内にAPIキー等のシークレット値を直書きせず、実行環境の環境変数を参照させるLiteLLMの記法
+- **turn_off_message_logging**: プロンプト・応答本文をログ送信対象から除外し、モデル名やレイテンシ等のメタデータのみを送るための `litellm_settings` 設定
+- **保持期間(retention)**: ログ基盤側でログデータを保持する期間。基盤のプラン・設定に依存し、LiteLLM側の設定ではない
+
+## シナリオ設定
+
+LiteLLM Proxy(設定ファイル `{{ config_path }}`、ポート `{{ proxy_port }}`)にモデル `{{ test_model_alias }}`(実体: `{{ actual_model }}`)を登録し、成功リクエストのログを `{{ log_backend_name }}`(`{{ callback_id }}` callback)へ送信します。認証情報は環境変数 `{{ dd_api_key_env }}` / `{{ dd_site_env }}` で渡し、マスキング方針は「{{ masking_policy_note }}」、保持方針は「{{ retention_policy_note }}」(目安 {{ retention_days }} 日)とします。
+
+## 手順
+
+### 1. config.yamlでsuccess_callbackを設定する
+
+```bash
+sudo mkdir -p $(dirname {{ config_path }})
+sudo tee {{ config_path }} <<'EOF'
+model_list:
+  - model_name: {{ test_model_alias }}
+    litellm_params:
+      model: {{ actual_model }}
+      api_key: os.environ/{{ actual_model_api_key_env }}
+
+litellm_settings:
+  success_callback: ["{{ callback_id }}"]
+EOF
+```
+
+この時点ではマスキング設定を入れず、まずログがそのまま送信されることを手順4で確認します。
+
+### 2. ログ送信先の認証情報を環境変数で渡す
+
+```bash
+export {{ dd_api_key_env }}="<{{ log_backend_name }}で発行したAPIキーに置き換える>"
+export {{ dd_site_env }}="{{ dd_site_value }}"
+export {{ actual_model_api_key_env }}="<{{ actual_model }}呼び出し用のAPIキーに置き換える>"
+```
+
+`{{ config_path }}` にはAPIキーを直書きせず、`os.environ/` 記法とこの環境変数経由で渡します。
+
+### 3. litellm --configでProxyを起動する
+
+```bash
+pip install 'litellm[proxy]'
+litellm --config {{ config_path }} --port {{ proxy_port }}
+```
+
+### 4. テストリクエストでログ記録を確認する
+
+```bash
+curl http://{{ proxy_host }}:{{ proxy_port }}/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "{{ test_model_alias }}", "messages": [{"role": "user", "content": "{{ test_request_marker }}"}]}'
+```
+
+ブラウザで `https://app.{{ dd_site_value }}/logs` を開き、Log Explorerの検索ボックスに `{{ test_request_marker }}` と入力して、該当リクエストのログが1件以上表示されることを確認します。
+
+### 5. マスキング・保持期間の方針を定める
+
+```bash
+sudo tee {{ config_path }} <<'EOF'
+model_list:
+  - model_name: {{ test_model_alias }}
+    litellm_params:
+      model: {{ actual_model }}
+      api_key: os.environ/{{ actual_model_api_key_env }}
+
+litellm_settings:
+  success_callback: ["{{ callback_id }}"]
+  turn_off_message_logging: true
+EOF
+litellm --config {{ config_path }} --port {{ proxy_port }}
+```
+
+マスキング方針: 「{{ masking_policy_note }}」。
+保持方針: 「{{ retention_policy_note }}」(目安 {{ retention_days }} 日)。
+
+## 動作確認
+
+- 手順4のcurlが200を返し、応答内容が返ってくること
+- `https://app.{{ dd_site_value }}/logs` で `{{ test_request_marker }}` を検索するとログが1件以上見つかること
+- 手順5適用後の新規リクエストでは、`{{ log_backend_name }}` 上のログ本文(input/output)がマスクされ、モデル名やレイテンシ等のメタデータのみが記録されること
+- `litellm --config {{ config_path }} --port {{ proxy_port }}` の起動時にエラーが出力されず、`model_list` の `{{ test_model_alias }}` がロードされること
+
+## 注意事項
+
+- `{{ dd_api_key_env }}` や `{{ actual_model_api_key_env }}` は `{{ config_path }}` に直書きせず、`os.environ/` 記法と環境変数経由で渡す。シェル履歴やコミットにも残さない。
+- `turn_off_message_logging: true` を有効にした後もリクエストメタデータ(モデル名・トークン数・レイテンシ等)は送信され続けるため、機密性が高い用途ではログ基盤側のアクセス制御も別途設定する。
+- 保持期間の目安 `{{ retention_days }}` 日は「{{ retention_policy_note }}」に基づく運用上の目安であり、実際の保持期間は `{{ log_backend_name }}` 側のプラン設定に従う。基盤側のプラン変更自体は本手順の対象外とする。
+- マスキング方針「{{ masking_policy_note }}」は個人情報保護方針の一部であるため、本番運用への適用前に法務・セキュリティ部門のレビューを経ること。

@@ -1,0 +1,16 @@
+aws_region = "us-east-1"
+aws_profile = "bedrock-ops"
+model_provider = "anthropic"
+model_id = "anthropic.claude-3-5-sonnet-20241022-v2:0"
+iam_principal_arn = "arn:aws:iam::123456789012:role/bedrock-invoke-role"
+iam_permission_note = "bedrock:InvokeModelとbedrock:InvokeModelWithResponseStreamのみを許可し、bedrock:*は付与しない"
+invoke_output_path = "/tmp/bedrock-invoke-response.json"
+converse_output_path = "/tmp/bedrock-converse-response.json"
+prompt_text = "AWS Bedrockの動作確認用テストプロンプトです。1文で自己紹介してください"
+max_tokens = 256
+metric_namespace = "AWS/Bedrock"
+metric_name = "Invocations"
+metric_statistic = "Sum"
+metric_period_seconds = 3600
+metric_start_time = "2026-07-17T00:00:00Z"
+metric_end_time = "2026-07-18T00:00:00Z"

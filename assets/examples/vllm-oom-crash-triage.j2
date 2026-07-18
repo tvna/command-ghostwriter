@@ -1,0 +1,91 @@
+# vLLMのCUDA OOM再発時のtensor-parallel-size見直し — {{ service_name }}
+
+`{{ service_name }}`(モデル: `{{ model_id }}`)が `{{ oom_error_pattern }}` で繰り返し停止しています。初動の切り分け（[推論サーバのGPUメモリ不足の切り分け](../inference-gpu-oom-triage)相当の手順）でメモリ利用率とコンテキスト長を引き下げても再発する場合に、`tensor-parallel-size` を引き上げてGPUあたりのメモリ消費そのものを減らす、恒久対策寄りの手順です。
+
+## 目的
+
+パラメータ引き下げだけでは解消しないvLLMのOOM再発に対し、空きGPUの有無を確認したうえで `tensor-parallel-size` を安全に引き上げ、変更後の安定性を検証できるようになることを目指します。
+
+## 用語解説
+
+- **CUDA out of memory**: GPUのVRAM割り当てに失敗した際にPyTorch/CUDAが送出するエラー
+- **tensor-parallel-size**: モデルの重みを複数GPUに分割して保持する並列度。引き上げるとGPU1台あたりのメモリ消費は減るが、GPU間通信のオーバーヘッドが増える
+- **初動切り分け**: `gpu-memory-utilization`/`max-model-len` の引き下げによる暫定復旧。本手順は、それでもOOMが再発する場合の後続対応にあたる
+- **空きGPU**: 現在このサービスの並列グループに含まれていない、他ワークロードが使用していないGPU
+
+## シナリオ設定
+
+推論サーバ `{{ service_name }}`(モデル: `{{ model_id }}`)は現在 `tensor-parallel-size={{ tensor_parallel_size }}`(GPU: `{{ gpu_device_id }}`)で稼働しており、初動対応後の設定(`gpu-memory-utilization={{ current_gpu_memory_utilization }}`、`max-model-len={{ current_max_model_len }}`)でも `{{ oom_error_pattern }}` が再発しています。空きGPUとして `{{ available_gpu_ids }}` が候補にあります。
+
+## 手順
+
+### 1. 初動対応後もOOMが再発していることを確認する
+
+```bash
+sudo journalctl -u {{ service_name }} --since "{{ log_since }}" | grep -ci "{{ oom_error_pattern }}"
+```
+
+→ 件数が1件以上あれば、初動のパラメータ引き下げだけでは不足しており、本手順(tensor-parallel-size見直し)の対象であることを確認します。0件の場合は初動対応のみで解消しているため本手順は不要です。
+
+### 2. 空きGPUの有無を確認する
+
+```bash
+nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=csv -i {{ available_gpu_ids }}
+```
+
+→ `{{ available_gpu_ids }}` の各GPUについて `memory.used` が十分小さく、他ワークロードに占有されていないことを確認します。占有されている場合は関係チームと調整するか、本手順ではなくモデルサイズ縮小を検討してください。
+
+### 3. tensor-parallel-sizeを引き上げて起動設定を更新する
+
+```bash
+sudo mkdir -p /etc/systemd/system/{{ service_name }}.service.d
+sudo tee /etc/systemd/system/{{ service_name }}.service.d/tensor-parallel-scaleup.conf <<EOF
+[Service]
+ExecStart=
+ExecStart={{ vllm_venv_path }}/bin/python3 -m vllm.entrypoints.openai.api_server \
+  --model {{ model_id }} \
+  --tensor-parallel-size {{ new_tensor_parallel_size }} \
+  --gpu-memory-utilization {{ current_gpu_memory_utilization }} \
+  --max-model-len {{ current_max_model_len }} \
+  --port {{ api_port }}
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart {{ service_name }}
+sleep {{ restart_wait_seconds }}
+```
+
+→ `tensor-parallel-size` を `{{ tensor_parallel_size }}` から `{{ new_tensor_parallel_size }}` へ引き上げ、GPU1台あたりのメモリ消費を減らします。ドロップイン設定の `ExecStart=` を一度空にしてから新しい起動コマンドを続けて記述するのは、systemdが差分をドロップインとして追記する仕様上、これをしないと元の `ExecStart` に新しい行が追記されてしまうためです。
+
+### 4. 変更後の安定性を確認する
+
+```bash
+sudo systemctl status {{ service_name }} --no-pager
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:{{ api_port }}/health
+timeout {{ stability_watch_minutes }}m journalctl -u {{ service_name }} -f | grep -i "{{ oom_error_pattern }}"
+```
+
+→ 起動成功とヘルスチェック応答(`200`)を確認したうえで、`{{ stability_watch_minutes }}` 分間 `{{ oom_error_pattern }}` が再出現しないことを監視します。
+
+### 5. 恒久対策を記録する
+
+```bash
+sudo tee -a {{ permanent_fix_log_path }} <<EOF
+$(date '+%Y-%m-%d %H:%M:%S') {{ service_name }}: 初動対応後も{{ oom_error_pattern }}が再発したため、tensor-parallel-sizeを{{ tensor_parallel_size }}から{{ new_tensor_parallel_size }}へ引き上げ。
+恒久対策メモ: {{ permanent_fix_note }}
+EOF
+```
+
+→ tensor-parallel-size変更の内容と、今後の恒久対策の検討事項を `{{ permanent_fix_log_path }}` に記録します。
+
+## 動作確認
+
+- `sudo systemctl status {{ service_name }} --no-pager` が `active (running)` であること
+- `curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:{{ api_port }}/health` が `200` を返すこと
+- 手順4の監視で `{{ stability_watch_minutes }}` 分間 `{{ oom_error_pattern }}` が再出現しないこと
+- `{{ permanent_fix_log_path }}` にtensor-parallel-size変更の記録が残っていること
+
+## 注意事項
+
+- 本手順は、`gpu-memory-utilization`/`max-model-len` の引き下げによる初動対応（[推論サーバのGPUメモリ不足の切り分け](../inference-gpu-oom-triage)）を実施済みで、なお `{{ oom_error_pattern }}` が再発する場合の後続手順です。まだ初動対応を試していない場合は、先にそちらを実施してください。
+- `tensor-parallel-size` の引き上げはGPU間通信オーバーヘッドを増やすため、スループットが低下する場合がある。手順4で必ず安定性とレイテンシへの影響を確認する。
+- 空きGPUがない場合、`tensor-parallel-size` は引き上げられない。モデルサイズの縮小や別ホストへの分散など、別の恒久対策を検討する。

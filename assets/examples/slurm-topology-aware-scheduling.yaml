@@ -1,0 +1,15 @@
+cluster_name: gpu-cluster01
+partition_name: gpu
+topology_conf_path: /etc/slurm/topology.conf
+slurm_conf_path: /etc/slurm/slurm.conf
+slurmctld_service_name: slurmctld
+switch_leaf1_name: sw-leaf1
+switch_leaf1_nodes: gpu-node[01-08]
+switch_leaf2_name: sw-leaf2
+switch_leaf2_nodes: gpu-node[09-16]
+switch_spine_name: sw-spine1
+test_job_script_path: /home/opsuser/topology-switch-test.sh
+test_job_name: topology-switch-test
+test_nodes_count: 4
+job_switches_count: 1
+job_switches_max_time: 10

@@ -1,0 +1,14 @@
+dataset_name: "user-interaction-training-set"
+duckdb_version: "1.1.3"
+etl_work_dir: "/data/etl"
+db_file_path: "/data/etl/training_etl.duckdb"
+source_csv_path: "/data/raw/interactions.csv"
+source_table_name: "raw_interactions"
+filtered_table_name: "training_dataset"
+filter_label_column: "label"
+filter_date_column: "event_date"
+filter_date_threshold: "2026-01-01"
+expected_min_row_count: 100000
+expected_column_count: 12
+output_parquet_dir: "/data/processed/training"
+output_parquet_filename: "training_dataset.parquet"

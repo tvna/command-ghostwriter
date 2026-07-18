@@ -1,0 +1,5 @@
+team_name,model_name,usage_log_path,lookback_days,anomaly_threshold_pct,daily_budget_usd,alert_channel
+ml-research,gpt-4o,/var/log/llm-usage/ml-research.csv,30,150,200,#llm-cost-alerts
+customer-support,claude-3-5-sonnet,/var/log/llm-usage/customer-support.csv,30,150,150,#llm-cost-alerts
+data-platform,llama-3.1-70b-instruct,/var/log/llm-usage/data-platform.csv,14,200,80,#llm-cost-alerts
+growth,gpt-4o-mini,/var/log/llm-usage/growth.csv,30,150,50,#llm-cost-alerts

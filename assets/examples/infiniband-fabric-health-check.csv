@@ -1,0 +1,7 @@
+node_name,node_type,ib_device,port_num,lid,expected_rate,expected_width,prev_symbol_errors
+gpu-node01,host,mlx5_0,1,4,200,4X,0
+gpu-node02,host,mlx5_0,1,6,200,4X,18
+gpu-node03,host,mlx5_0,1,8,200,4X,0
+gpu-node04,host,mlx5_0,1,10,200,4X,0
+ib-leaf-sw01,switch,-,-,2,200,4X,-
+ib-leaf-sw02,switch,-,-,3,200,4X,-

@@ -1,0 +1,27 @@
+container_name: weaviate
+weaviate_image: semitechnologies/weaviate:1.25.4
+host_port_rest: 8080
+host_port_grpc: 50051
+storage_host_path: /data/weaviate
+storage_container_path: /var/lib/weaviate
+cluster_hostname: node1
+collection_name: Article
+title_property: title
+content_property: content
+vector_dim: 4
+sample_objects:
+  - title: ノートPCの電源が入らないときの確認手順
+    content: 電源ボタンを長押ししても画面が反応しない場合は、ACアダプタの接続とバッテリー残量を確認します。
+    vector: [0.9, 0.1, 0.2, 0.0]
+  - title: Wi-Fiに接続できないときの対処法
+    content: ルーターを再起動しても改善しない場合は、SSIDとパスワードの入力ミスやドライバの更新状況を確認します。
+    vector: [0.1, 0.9, 0.2, 0.1]
+  - title: プリンタで印刷できないときのチェックリスト
+    content: 用紙づまりやインク残量、プリンタドライバのバージョンを順に確認し、スプーラを再起動します。
+    vector: [0.2, 0.1, 0.9, 0.3]
+query_text: ネットが繋がらない
+query_vector: [0.12, 0.85, 0.18, 0.09]
+alpha_keyword_leaning: 0.1
+alpha_balanced: 0.5
+alpha_vector_leaning: 0.9
+hybrid_limit: 5

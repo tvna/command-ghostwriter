@@ -1,0 +1,116 @@
+# vLLM推論APIのトークン使用量ダッシュボード構築
+
+vLLMが公開する`/metrics`をPrometheusで収集し、モデル別のトークン使用量(プロンプト・生成)をGrafanaダッシュボードで可視化できるようにします。
+
+## 目的
+
+複数のvLLMインスタンスから`vllm:prompt_tokens_total`・`vllm:generation_tokens_total`をPrometheusへ定期収集し、PromQLでモデル別・期間別に集計したうえで、Grafanaのデータソースとパネルとして常時参照できる状態を作ることを目指します。
+
+## 用語解説
+
+- **vLLM `/metrics`**: vLLMのOpenAI互換APIサーバが公開するPrometheus形式のメトリクスエンドポイント。APIサーバと同一ポートで待ち受ける
+- **`vllm:prompt_tokens_total` / `vllm:generation_tokens_total`**: vLLMが公開するCounter形式のメトリクス。それぞれ入力(プロンプト)・出力(生成)のトークン累積数を`model_name`ラベル付きで保持する
+- **スクレイプ設定(scrape_configs)**: Prometheusが`prometheus.yml`内で定義する、収集対象・間隔・パスの設定単位。`job_name`ごとに1エントリを持つ
+- **PromQL**: Prometheusのクエリ言語。`rate()`は単位時間あたりの増加量、`increase()`は指定期間内の総増加量を算出する関数
+- **Grafanaデータソース/パネル**: Grafanaが可視化元として参照するPrometheus等の接続設定(データソース)と、個々のグラフ表示単位(パネル)
+
+## シナリオ設定
+
+対象は{{ csv_rows | length }}件のvLLMインスタンスです。Prometheus設定ファイルは`{{ csv_rows[0]["prometheus_config_path"] }}`、Grafanaは`{{ csv_rows[0]["grafana_url"] }}`を使用します。
+
+| model_name | vllm_host:port | job_name | scrape_interval_s | token_alert_threshold_per_min |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["model_name"] }} | {{ r["vllm_host"] }}:{{ r["vllm_port"] }} | {{ r["job_name"] }} | {{ r["scrape_interval_s"] }} | {{ r["token_alert_threshold_per_min"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. vLLMの/metricsエンドポイントを確認する
+
+各インスタンスがトークン数メトリクスを公開しているかを確認します。
+
+```bash
+{% for r in csv_rows %}echo "=== {{ r["model_name"] }} ({{ r["vllm_host"] }}:{{ r["vllm_port"] }}) ==="
+curl -s http://{{ r["vllm_host"] }}:{{ r["vllm_port"] }}/metrics | grep -E "^vllm:(prompt_tokens_total|generation_tokens_total)"
+{% endfor %}
+```
+
+各行に`model_name="{{ csv_rows[0]["model_name"] }}"`のようなラベル付きの行が出力されていれば、対象メトリクスが公開されています。
+
+### 2. prometheus.ymlにスクレイプ設定を追加する
+
+既存設定をバックアップしたうえで、`yq`(mikefarah/yq)でインスタンスごとのスクレイプ設定を追加し、構文検証後にリロードします。
+
+```bash
+PROM_CONFIG="{{ csv_rows[0]["prometheus_config_path"] }}"
+sudo cp "$PROM_CONFIG" "$PROM_CONFIG.bak.$(date +%Y%m%d%H%M%S)"
+{% for r in csv_rows %}sudo yq -i '.scrape_configs += [{"job_name": "{{ r["job_name"] }}", "metrics_path": "/metrics", "scrape_interval": "{{ r["scrape_interval_s"] }}", "static_configs": [{"targets": ["{{ r["vllm_host"] }}:{{ r["vllm_port"] }}"]}]}]' "$PROM_CONFIG"
+{% endfor %}
+promtool check config "$PROM_CONFIG"
+curl -s -X POST http://localhost:9090/-/reload
+```
+
+`promtool check config`が正常終了しない場合はリロードを実行せず、直前に作成したバックアップへ戻します。
+
+### 3. PromQLでトークン使用量を集計する
+
+Prometheus HTTP APIへ直接クエリを投げ、モデルごとの直近の使用量(tokens/sec)を確認します。
+
+```bash
+PROM_URL="http://localhost:9090"
+{% for r in csv_rows %}echo "=== {{ r["model_name"] }} 直近5分のトークン使用量(tokens/sec) ==="
+curl -s --data-urlencode 'query=sum by (model_name) (rate(vllm:prompt_tokens_total{model_name="{{ r["model_name"] }}"}[5m]))' "$PROM_URL/api/v1/query" | jq -r '.data.result[0].value[1] // "0"'
+curl -s --data-urlencode 'query=sum by (model_name) (rate(vllm:generation_tokens_total{model_name="{{ r["model_name"] }}"}[5m]))' "$PROM_URL/api/v1/query" | jq -r '.data.result[0].value[1] // "0"'
+{% endfor %}
+```
+
+### 4. Grafanaにデータソースとパネルを作成する
+
+まずPrometheusデータソースを1件作成し、続けてモデルごとのトークン使用量パネルを持つダッシュボードをHTTP API経由で登録します。
+
+```bash
+GRAFANA_URL="{{ csv_rows[0]["grafana_url"] }}"
+{% if csv_rows[0]["grafana_api_token_env"] != "-" %}curl -s -X POST "$GRAFANA_URL/api/datasources" -H "Content-Type: application/json" -H "Authorization: Bearer ${{ csv_rows[0]["grafana_api_token_env"] }}" -d '{"name":"prometheus-vllm","type":"prometheus","url":"http://localhost:9090","access":"proxy","isDefault":false}'
+{% else %}curl -s -X POST "$GRAFANA_URL/api/datasources" -u "admin:$GRAFANA_ADMIN_PASSWORD" -H "Content-Type: application/json" -d '{"name":"prometheus-vllm","type":"prometheus","url":"http://localhost:9090","access":"proxy","isDefault":false}'
+{% endif %}
+PANEL_DIR=$(mktemp -d)
+{% for r in csv_rows %}jq -n --arg title "{{ r["model_name"] }} トークン使用量" --arg model "{{ r["model_name"] }}" --argjson y {{ loop.index0 }} '{"title": $title, "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 0, "y": ($y * 8)}, "targets": [{"expr": ("sum by (model_name) (rate(vllm:generation_tokens_total{model_name=\"" + $model + "\"}[5m]))")}]}' > "$PANEL_DIR/{{ loop.index }}.json"
+{% endfor %}jq -s '{"dashboard": {"title": "vLLM Token Usage per Model", "panels": ., "schemaVersion": 39, "refresh": "30s"}, "overwrite": true}' "$PANEL_DIR"/*.json > /tmp/vllm-dashboard.json
+{% if csv_rows[0]["grafana_api_token_env"] != "-" %}curl -s -X POST "$GRAFANA_URL/api/dashboards/db" -H "Content-Type: application/json" -H "Authorization: Bearer ${{ csv_rows[0]["grafana_api_token_env"] }}" -d @/tmp/vllm-dashboard.json
+{% else %}curl -s -X POST "$GRAFANA_URL/api/dashboards/db" -u "admin:$GRAFANA_ADMIN_PASSWORD" -H "Content-Type: application/json" -d @/tmp/vllm-dashboard.json
+{% endif %}
+```
+
+`grafana_api_token_env`が`-`の行はAPIトークンではなく、事前に`GRAFANA_ADMIN_PASSWORD`を環境変数へ設定したBasic認証にフォールバックします。
+
+### 5. モデル別・期間別の集計ビューを整備する
+
+複数の期間(1時間・24時間・7日)でモデルごとの合計トークン数を確認し、ダッシュボード側にはモデル切り替え用の変数を追加します。
+
+```bash
+PROM_URL="http://localhost:9090"
+{% for r in csv_rows %}echo "=== {{ r["model_name"] }}: 期間別トークン使用量 ==="
+for window in 1h 24h 7d; do
+    total=$(curl -s --data-urlencode "query=sum(increase(vllm:generation_tokens_total{model_name=\"{{ r["model_name"] }}\"}[$window]))" "$PROM_URL/api/v1/query" | jq -r '.data.result[0].value[1] // "0"')
+    echo "{{ r["model_name"] }} window=$window generation_tokens=$total"
+done
+{% endfor %}
+```
+
+Grafana側では、ダッシュボード設定でクエリ変数`model`を追加し、クエリに`label_values(vllm:generation_tokens_total, model_name)`を指定すると、画面上でモデルを切り替えながら同じパネルを参照できます。
+
+## 動作確認
+
+- 手順1で全{{ csv_rows | length }}件について`vllm:prompt_tokens_total`と`vllm:generation_tokens_total`の行が出力されること
+- 手順2で`promtool check config`が正常終了し、`{{ csv_rows[0]["prometheus_config_path"] }}`に{{ csv_rows | length }}件分の`job_name`が追加されていること
+- 手順3の各クエリが数値(エラーや`null`ではない)を返すこと
+- 手順4実行後、`$GRAFANA_URL/api/dashboards/db`のレスポンスに`"status":"success"`が含まれ、ダッシュボードに{{ csv_rows | length }}件のパネルが作成されていること
+- 手順5で3つの期間(1h/24h/7d)すべてについてエラーなく集計値が取得できること
+
+## 注意事項
+
+- `grafana_api_token_env`(`-`以外の行)で指定するトークンはダッシュボード作成に必要な最小権限(Editor以上)に留め、値自体をログやコミットに残さない。
+- `promtool check config`が失敗した場合はリロードを行わず、手順2で作成したバックアップへ戻してから原因を調査する。
+- `token_alert_threshold_per_min`はアラートルール設計の参考値であり、本手順ではPrometheusアラートルール(`alerting_rules`)の作成までは対象外とする。
+- `yq`はmikefarah/yq(v4系)のコマンド体系を前提とする。Python版`yq`など互換性のない実装が入っている環境では事前にバージョンを確認する。
+- PrometheusからvLLM各ホストの`{{ csv_rows[0]["vllm_port"] }}`番ポートへの到達性、およびGrafanaからPrometheusへの到達性がない場合、スクレイプやパネル表示が失敗するため、ネットワーク経路を先に確認する。

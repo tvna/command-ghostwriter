@@ -1,0 +1,92 @@
+# csvkitによるデータ品質の定期検査
+
+csvclean・csvstat・csvgrepを組み合わせ、複数のCSVデータセットについて構文エラー・欠損・異常値を定期的に点検し、結果を記録・共有する手順です。
+
+## 目的
+
+csvkitに含まれる各コマンドの役割の違いを理解し、複数データセットの構文エラー・欠損・型不整合を定期検査で洗い出したうえで、検査結果を記録・共有できるようになることを目指します。
+
+## 用語解説
+
+- **csvkit**: csvclean・csvstat・csvgrep等、CSVを扱うための小さなコマンド群をまとめたPython製ツールセット
+- **csvclean**: CSVの構文エラー(カラム数不一致等の不正な行)を検出するコマンド。`-n`(dry-run)指定時はファイルを生成せず検出結果のみ出力する
+- **csvstat**: 各列の型推定・統計情報・欠損数を表示するコマンド。`--nulls`指定時は欠損の有無に絞って表示する
+- **csvgrep**: `-c`で指定した列を`-r`の正規表現で検索し、一致した行を抽出するコマンド
+- **欠損(Null)**: セルに値が入っていない状態。`required_column`のような必須列で欠損があると後続処理に支障が出る
+- **型不整合**: 列の値が期待される型(数値・日付等)と異なる形式で入っていること。異常値として`anomaly_regex`で抽出する
+
+## シナリオ設定
+
+データ基盤チームは、以下 {{ csv_rows | length }} 件のデータセットについて週次でcsvkitによる品質検査を実施します。
+
+| dataset_name | csv_path | required_column | anomaly_regex |
+|---|---|---|---|
+{% for r in csv_rows %}| {{ r["dataset_name"] }} | {{ r["csv_path"] }} | {{ r["required_column"] }} | `{{ r["anomaly_regex"] }}` |
+{% endfor %}
+
+検査結果は `{{ csv_rows[0]["result_dir"] }}` に保存し、`{{ csv_rows[0]["report_channel"] }}` へ共有します。
+
+## 手順
+
+### 1. csvkitの導入と対象データの確認
+
+```bash
+pip install csvkit
+csvstat --version
+{% for r in csv_rows %}test -f {{ r["csv_path"] }} && echo "OK: {{ r["dataset_name"] }} ({{ r["csv_path"] }})"
+{% endfor %}```
+
+対象ファイルが存在しない場合、以降のcsvclean/csvstat/csvgrepはエラーで終了するため、先にこの確認で洗い出します。
+
+### 2. csvcleanによる構文エラー検出
+
+```bash
+{% for r in csv_rows %}echo "=== {{ r["dataset_name"] }} ({{ r["csv_path"] }}) ==="
+csvclean -n {{ r["csv_path"] }}
+{% endfor %}```
+
+`-n`(dry-run)により、ファイルを書き換えずに構文エラー(カラム数不一致等)のみを標準出力へ報告します。定期検査では本番データを書き換えないよう、常に`-n`付きで実行します。
+
+### 3. csvstatによる統計・欠損の把握
+
+```bash
+{% for r in csv_rows %}echo "=== {{ r["dataset_name"] }}: 全列統計 ==="
+csvstat {{ r["csv_path"] }}
+echo "=== {{ r["dataset_name"] }}: 欠損確認 ==="
+csvstat --nulls {{ r["csv_path"] }}
+{% endfor %}```
+
+`--nulls`の出力で必須列(`required_column`、例: `{{ csv_rows[0]["required_column"] }}`)の行に着目し、欠損が`True`になっていないかを確認します。
+
+### 4. csvgrepによる異常値の抽出
+
+```bash
+{% for r in csv_rows %}echo "=== {{ r["dataset_name"] }}: {{ r["required_column"] }}の異常値抽出 ==="
+csvgrep -c {{ r["required_column"] }} -r "{{ r["anomaly_regex"] }}" {{ r["csv_path"] }}
+{% endfor %}```
+
+`anomaly_regex`は、プレースホルダ値(例: `N/A`, `不明`)や負数など、業務上ありえない値のパターンを列ごとに定義したものです。ヒットした行が異常値の候補になります。
+
+### 5. 検査結果の記録と共有
+
+```bash
+{% for r in csv_rows %}mkdir -p {{ r["result_dir"] }}
+csvgrep -c {{ r["required_column"] }} -r "{{ r["anomaly_regex"] }}" {{ r["csv_path"] }} > {{ r["result_dir"] }}/{{ r["dataset_id"] }}_anomaly.csv
+csvstat --nulls {{ r["csv_path"] }} > {{ r["result_dir"] }}/{{ r["dataset_id"] }}_nullcheck.txt
+logger -t data-quality-check "{{ r["dataset_name"] }} 検査完了: {{ r["result_dir"] }}/{{ r["dataset_id"] }}_anomaly.csv と {{ r["result_dir"] }}/{{ r["dataset_id"] }}_nullcheck.txt を記録 (共有先: {{ r["report_channel"] }})"
+{% endfor %}ls -la {{ csv_rows[0]["result_dir"] }}
+```
+
+## 動作確認
+
+- 全 {{ csv_rows | length }} 件のデータセットで`csvclean -n`(Step 2)の実行が完了し、検出された構文エラーの有無が記録されていること
+- `csvstat --nulls`(Step 3)の結果で、各データセットの`required_column`列の欠損有無が確認できていること
+- `{{ csv_rows[0]["result_dir"] }}`配下に、データセットごとの`_anomaly.csv`と`_nullcheck.txt`が生成されていること
+- `journalctl -t data-quality-check`(または`/var/log/syslog`)に、Step 5の`logger`による検査完了記録が残っていること
+
+## 注意事項
+
+- `csvclean`は`-n`を付けない場合、実行元ディレクトリに`_out.csv`/`_err.csv`を新規作成する。定期検査では本番データ領域を汚さないよう、検出目的では常に`-n`を付ける。
+- `csvgrep`の正規表現は列の値を文字列として比較するため、数値列(`order_amount`や`stock_qty`等)であっても数値としての大小比較ではなく文字列パターンでの一致になる点に注意する。
+- `anomaly_regex`はデータセットの仕様変更(新しいプレースホルダ値の追加等)に合わせて定期的に見直す。固定したまま放置すると異常値の検知漏れにつながる。
+- 本手順は異常の検出・記録・共有までを範囲とし、データそのものの修正は各データセットの担当者が別途判断する。

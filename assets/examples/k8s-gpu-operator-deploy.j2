@@ -1,0 +1,115 @@
+# GPU OperatorによるGPUノードの自動管理
+
+Helmで NVIDIA GPU Operator を導入し、GPUノードへのドライバ・デバイスプラグインの自動展開と、`nvidia.com/gpu` を要求するPodの実行可否までを確認します。
+
+## 目的
+
+GPU Operatorがドライバ・Container Toolkit・デバイスプラグインを一括管理する仕組みを理解し、Kubernetesクラスタ上でGPUノードを追加設定なしに扱えるようになることを目指します。
+
+## 用語解説
+
+- **GPU Operator**: Kubernetes上でNVIDIAドライバ、Container Toolkit、デバイスプラグイン、DCGM Exporterなどを自動展開・管理するOperator
+- **Helm**: KubernetesアプリケーションをChart単位でパッケージ化し、インストール・更新・削除を管理するツール
+- **Operand**: Operatorが管理下に置いて自動展開するコンポーネント群（ドライバDaemonSet、デバイスプラグインなど）を指す
+- **nvidia.com/gpu**: Kubernetesのリソースモデル上でGPU 1基を表す拡張リソース名。Pod定義の `resources.limits` で要求する
+- **デバイスプラグイン(device plugin)**: kubeletに対してノード上のGPU数を申告し、Podへの割り当てを仲介するコンポーネント
+
+## シナリオ設定
+
+Helmリポジトリ `{{ helm_repo_name }}`(`{{ helm_repo_url }}`)を登録し、namespace `{{ namespace }}` に values設定ファイル `{{ values_file }}` を用いて GPU Operator(`{{ operator_version }}`)を リリース名 `{{ release_name }}` でインストールします。ドライババージョンは `{{ driver_version }}` を指定し、検証には `{{ test_image }}` を使ったテストPod `{{ test_pod_name }}` を用います。
+
+## 手順
+
+### 1. Helmリポジトリを登録する
+
+```bash
+helm repo add {{ helm_repo_name }} {{ helm_repo_url }}
+helm repo update
+helm search repo {{ helm_repo_name }}/gpu-operator
+```
+
+### 2. namespaceとvalues設定を準備する
+
+```bash
+kubectl create namespace {{ namespace }}
+```
+
+```yaml
+# {{ values_file }}
+driver:
+  enabled: true
+  version: "{{ driver_version }}"
+toolkit:
+  enabled: true
+devicePlugin:
+  enabled: true
+```
+
+### 3. gpu-operatorをインストールする
+
+```bash
+helm install {{ release_name }} {{ helm_repo_name }}/gpu-operator \
+  --namespace {{ namespace }} \
+  --version {{ operator_version }} \
+  -f {{ values_file }}
+```
+
+### 4. オペレータ各Podの起動を確認する
+
+```bash
+kubectl get pods -n {{ namespace }} -o wide
+kubectl get pods -n {{ namespace }} -w
+```
+
+`nvidia-driver-daemonset`、`nvidia-container-toolkit-daemonset`、`nvidia-device-plugin-daemonset` を含む各Podが `Running` になるまで待機します。
+
+### 5. GPUリソースがノードに公開されたことを確認する
+
+```bash
+kubectl get nodes -o json | jq '.items[].status.allocatable | select(has("nvidia.com/gpu"))'
+```
+
+### 6. nvidia.com/gpuを要求するテストPodで検証する
+
+```bash
+cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ test_pod_name }}
+  namespace: {{ namespace }}
+spec:
+  restartPolicy: Never
+  containers:
+    - name: smoke-test
+      image: {{ test_image }}
+      command: ["nvidia-smi"]
+      resources:
+        limits:
+          nvidia.com/gpu: 1
+EOF
+```
+
+```bash
+kubectl wait --for=condition=Ready pod/{{ test_pod_name }} -n {{ namespace }} --timeout=120s
+kubectl logs {{ test_pod_name }} -n {{ namespace }}
+```
+
+### 7. テストPodを削除する
+
+```bash
+kubectl delete pod {{ test_pod_name }} -n {{ namespace }}
+```
+
+## 動作確認
+
+- `kubectl get pods -n {{ namespace }}` でオペレータ配下の全Podが `Running` かつ `READY` 状態であること
+- 手順5の出力に `nvidia.com/gpu` が含まれ、GPU数がノードの実装数と一致すること
+- `kubectl logs {{ test_pod_name }} -n {{ namespace }}` に `nvidia-smi` の正常な出力（ドライババージョン `{{ driver_version }}` を含むGPU一覧）が表示されること
+- 手順7の削除後、`kubectl get pod {{ test_pod_name }} -n {{ namespace }}` がNotFoundになること
+
+## 注意事項
+
+- ノードに既存のNVIDIAドライバやContainer Toolkitが導入済みの場合、GPU Operatorの自動展開と競合するため、`driver.enabled` や `toolkit.enabled` をノードの状態に合わせて調整する。
+- `helm uninstall {{ release_name }} -n {{ namespace }}` はGPUノード上のドライバDaemonSetごと削除する破壊的操作であり、稼働中ワークロードへの影響を確認してから実施する。
+- 本手順はKubernetesクラスタ上でのGPU管理をOperator経由で自動化するものであり、単一Dockerホストでの `nvidia-container-toolkit`(既存)とは適用範囲が異なる。

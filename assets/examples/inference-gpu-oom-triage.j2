@@ -1,0 +1,99 @@
+# 推論サーバのGPUメモリ不足の切り分け
+
+`{{ oom_error_pattern }}` エラー発生時に、ログと `nvidia-smi` で原因を特定し、コンテキスト長・バッチ・メモリ利用率の設定を調整して復旧します。
+
+## 目的
+
+推論サーバでCUDA OOMが発生した際に、エラーログと `nvidia-smi` から発生箇所を切り分け、`max_model_len`・`max_num_seqs`・`gpu_memory_utilization` の調整によって安全に復旧し、再発を監視できるようになることを目指します。
+
+## 用語解説
+
+- **CUDA out of memory**: GPUのVRAM割り当てに失敗した際にPyTorch/CUDAが送出するエラー。KVキャッシュの増大や同時実行リクエスト数の増加で発生しやすい
+- **KVキャッシュ**: 推論中に各トークンのAttentionのKey/Valueを保持するGPUメモリ領域。`max_model_len` と同時リクエスト数に比例して消費量が増える
+- **gpu_memory_utilization**: 推論エンジンがKVキャッシュ用に確保するGPUメモリの割合(0〜1)。高いほどスループットは上がるが余裕が減りOOMしやすくなる
+- **max_num_seqs**: 同時にバッチ処理するシーケンス(リクエスト)数の上限。バッチが大きいほどKVキャッシュ消費が増える
+- **max_model_len**: 1リクエストあたりの最大トークン長(コンテキスト長)。大きいほどKVキャッシュ消費が増える
+
+## シナリオ設定
+
+推論サーバ `{{ service_name }}`(モデル: `{{ model_id }}`、GPU番号: `{{ gpu_device_id }}`)で `{{ oom_error_pattern }}` エラーが発生しています。現在の設定は `max_model_len={{ current_max_model_len }}`、`max_num_seqs={{ current_max_num_seqs }}`、`gpu_memory_utilization={{ current_gpu_memory_utilization }}` です。
+
+## 手順
+
+### 1. エラーログでOOMの発生箇所を特定する
+
+```bash
+sudo journalctl -u {{ service_name }} --since "1 hour ago" | grep -i "{{ oom_error_pattern }}"
+sudo journalctl -u {{ service_name }} --since "1 hour ago" | grep -i -A 5 "{{ oom_error_pattern }}" | grep -i "tried to allocate"
+```
+
+→ `{{ oom_error_pattern }}` の直後に出力される「tried to allocate」の行から、どの処理段階(プリフィル/デコード/バッチ生成)で割り当てに失敗したかを確認します。
+
+### 2. nvidia-smiでGPUメモリ使用状況を確認する
+
+```bash
+nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=csv -i {{ gpu_device_id }}
+nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv
+```
+
+→ GPU `{{ gpu_device_id }}` のメモリ使用量が上限に近いか、`{{ service_name }}` 以外のプロセスがVRAMを占有していないかを確認します。
+
+### 3. コンテキスト長とバッチ設定を見直す
+
+```bash
+systemctl cat {{ service_name }} | grep -E "max-model-len|max-num-seqs|gpu-memory-utilization"
+```
+
+→ 現在値(`max_model_len={{ current_max_model_len }}`、`max_num_seqs={{ current_max_num_seqs }}`、`gpu_memory_utilization={{ current_gpu_memory_utilization }}`)に対し、見直し後の値を `max_model_len={{ reduced_max_model_len }}`、`max_num_seqs={{ reduced_max_num_seqs }}` とします。まずコンテキスト長と同時バッチ数を下げ、それでも不足する場合のみ手順4で `gpu_memory_utilization` を下げます。
+
+### 4. メモリ利用率設定を調整して再起動する
+
+```bash
+sudo systemctl stop {{ service_name }}
+sudo mkdir -p /etc/systemd/system/{{ service_name }}.service.d
+sudo tee /etc/systemd/system/{{ service_name }}.service.d/oom-mitigation.conf <<EOF
+[Service]
+ExecStart=
+ExecStart={{ vllm_venv_path }}/bin/python3 -m vllm.entrypoints.openai.api_server \
+  --model {{ model_id }} \
+  --gpu-memory-utilization {{ reduced_gpu_memory_utilization }} \
+  --max-model-len {{ reduced_max_model_len }} \
+  --max-num-seqs {{ reduced_max_num_seqs }} \
+  --port {{ api_port }}
+EOF
+sudo systemctl daemon-reload
+sleep {{ restart_wait_seconds }}
+sudo systemctl start {{ service_name }}
+```
+
+→ 空の `ExecStart=` を挟むのは、systemdのドロップイン設定が元の `ExecStart` に追記されるのを防ぎ、新しい起動オプションで完全に置き換えるためです。
+
+### 5. 再発監視を設定する
+
+```bash
+sudo tee /usr/local/bin/gpu-oom-watch.sh <<'EOF'
+#!/bin/bash
+USAGE_PCT=$(nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits -i {{ gpu_device_id }} | awk -F', *' '{ printf "%.0f", $1 / $2 * 100 }')
+if [ "$USAGE_PCT" -gt {{ memory_alert_threshold_percent }} ]; then
+  echo "$(date '+%Y-%m-%d %H:%M:%S') ALERT: GPU {{ gpu_device_id }} memory ${USAGE_PCT}% used" >> {{ monitor_log_path }}
+fi
+EOF
+sudo chmod +x /usr/local/bin/gpu-oom-watch.sh
+(crontab -l 2>/dev/null; echo "*/{{ monitor_interval_minutes }} * * * * /usr/local/bin/gpu-oom-watch.sh") | crontab -
+```
+
+→ GPUメモリ使用率が `{{ memory_alert_threshold_percent }}%` を超えた場合に `{{ monitor_log_path }}` へ記録し、`{{ monitor_interval_minutes }}` 分間隔で監視します。
+
+## 動作確認
+
+- `sudo systemctl status {{ service_name }}` が `active (running)` であること
+- 手順4の再起動後、`curl http://127.0.0.1:{{ api_port }}/v1/chat/completions` へのリクエストが `{{ oom_error_pattern }}` を含まない正常なJSON応答を返すこと
+- `nvidia-smi --query-gpu=memory.used,memory.total --format=csv -i {{ gpu_device_id }}` の使用量が、見直し前より低下していること
+- `sudo journalctl -u {{ service_name }} --since "10 minutes ago"` に `{{ oom_error_pattern }}` が再出現しないこと
+
+## 注意事項
+
+- `max_num_seqs={{ reduced_max_num_seqs }}` まで下げるとスループットが低下するため、OOMが解消した後は同時リクエスト数の実態に応じて段階的な引き上げを検討する。
+- `gpu_memory_utilization={{ reduced_gpu_memory_utilization }}` を下げすぎると正常なリクエストまで拒否されるようになるため、手順2の `nvidia-smi` 結果を見ながら最小限の引き下げにとどめる。
+- 監視スクリプト(`/usr/local/bin/gpu-oom-watch.sh`)はアラート記録のみであり、自動復旧は行わない。しきい値超過を検知した場合は本手順を再実施する。
+- 本手順(コンテキスト長・バッチ・メモリ利用率の引き下げ)を実施してもOOMが再発する場合は、[vLLMのCUDA OOM再発時のtensor-parallel-size見直し](../vllm-oom-crash-triage)でGPU並列度の引き上げを検討する。

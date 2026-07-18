@@ -1,0 +1,9 @@
+helm_repo_name: nvidia
+helm_repo_url: "https://helm.ngc.nvidia.com/nvidia"
+namespace: gpu-operator
+release_name: gpu-operator
+values_file: gpu-operator-values.yaml
+driver_version: "550.90.07"
+operator_version: "v24.9.1"
+test_pod_name: gpu-operator-smoke-test
+test_image: "nvidia/cuda:12.4.1-base-ubuntu22.04"
