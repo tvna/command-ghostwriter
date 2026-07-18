@@ -96,3 +96,4 @@ sudo chmod +x /usr/local/bin/gpu-oom-watch.sh
 - `max_num_seqs={{ reduced_max_num_seqs }}` まで下げるとスループットが低下するため、OOMが解消した後は同時リクエスト数の実態に応じて段階的な引き上げを検討する。
 - `gpu_memory_utilization={{ reduced_gpu_memory_utilization }}` を下げすぎると正常なリクエストまで拒否されるようになるため、手順2の `nvidia-smi` 結果を見ながら最小限の引き下げにとどめる。
 - 監視スクリプト(`/usr/local/bin/gpu-oom-watch.sh`)はアラート記録のみであり、自動復旧は行わない。しきい値超過を検知した場合は本手順を再実施する。
+- 本手順(コンテキスト長・バッチ・メモリ利用率の引き下げ)を実施してもOOMが再発する場合は、[vLLMのCUDA OOM再発時のtensor-parallel-size見直し](../vllm-oom-crash-triage)でGPU並列度の引き上げを検討する。
