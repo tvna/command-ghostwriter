@@ -1,0 +1,104 @@
+# Zeek conn.log ベースライン逸脱レビュー訓練
+
+保存済みのベースライン（宛先・サービス・通信量）と、当月の `conn.log` 集計値を突き合わせ、逸脱を洗い出す月次レビュー訓練です。CSV に定義した {{ csv_rows | length }} 件の指標をもとに、逸脱項目をハンティング手順（横展開調査・ビーコン検知）へ引き渡す判断を行います。
+
+## 目的
+
+月次でベースラインと実績を突き合わせるレビュー訓練を実施し、新規外部宛先・新規サービス・通信量急増といった逸脱を機械的に洗い出したうえで、正当な構成変更や季節性による変動とセキュリティ上の異常を区別できるようになることを目指します。
+
+## 用語解説
+
+- **conn.log**: Zeek がすべての接続について記録するサマリログ（送信元/宛先IP、ポート、サービス、バイト数などを含む）
+- **ベースライン**: 過去の正常な通信パターン（宛先・サービス・通信量）を集計して保存した基準値
+- **逸脱(deviation)**: 当月実績とベースラインの差分。新規外部宛先・新規サービス・通信量急増などが該当
+- **disposition**: 逸脱項目に対する一次判定（normal=平常内／review=要確認／escalate=ハンティングへ引き渡し）
+- **ビーコニング**: マルウェアのC2通信に見られる、一定間隔で発生する規則的な通信パターン
+- **横展開(lateral movement)**: 侵入後に攻撃者が内部の他ホストへ移動する挙動。SMB(445)/RDP(3389)/WinRM(5985)宛の内部間通信増加が代表的な兆候
+- **RITA (Real Intelligence Threat Analytics)**: Zeek ログからビーコン候補を検出するOSSツール
+
+## シナリオ設定
+
+| metric | baseline | current | deviation | disposition |
+|--------|----------|---------|-----------|--------------|
+{% for r in csv_rows %}| {{ r["metric"] }} | {{ r["baseline"] }} | {{ r["current"] }} | {{ r["deviation"] }} | {{ r["disposition"] }} |
+{% endfor %}
+
+## 1. ベースラインを準備する
+
+前月までに確定させたベースライン（宛先・サービスの正常集合と通信量の目安）を確認します。ベースラインは正当な構成変更（新サービス投入、拠点追加等）を反映した際にのみ更新し、更新履歴を残します。
+
+```bash
+cat /opt/zeek/baseline/dest_service_baseline.txt | sort -u | head
+cat /opt/zeek/baseline/volume_baseline.csv
+```
+
+## 2. 当月の conn.log を集計する
+
+`zeek-cut` で当月分の `conn.log` から宛先・サービス・通信量を集計します。
+
+```bash
+# 宛先・サービスの現状集合
+zeek-cut id.resp_h service < /opt/zeek/logs/current/conn.log | sort -u > /tmp/current_dest_service.txt
+
+# 総通信量(GB)
+zeek-cut orig_bytes resp_bytes < /opt/zeek/logs/current/conn.log \
+  | awk '{sum += $1 + $2} END {printf "%.1f\n", sum / 1024 / 1024 / 1024}'
+
+# ホストごとの送信量トップ5(GB)
+zeek-cut id.orig_h orig_bytes resp_bytes < /opt/zeek/logs/current/conn.log \
+  | awk '{b[$1] += $2 + $3} END {for (h in b) printf "%.1f %s\n", b[h] / 1024 / 1024 / 1024, h}' \
+  | sort -rn | head -5
+
+# アクティブホスト数
+zeek-cut id.orig_h < /opt/zeek/logs/current/conn.log | sort -u | wc -l
+```
+
+## 3. ベースラインとの差分を算出する
+
+`comm` で宛先・サービスの新規分を、`aggregate_and_compare.sh` で通信量系の前月比をまとめて算出します。
+
+```bash
+# 新規外部宛先・新規サービスの抽出(ベースラインに存在しない行)
+comm -13 /opt/zeek/baseline/dest_service_baseline.txt /tmp/current_dest_service.txt \
+  | tee /tmp/new_dest_service.txt
+
+# 通信量系メトリクスの前月比を集計(標準出力に前月比%を表示)
+/opt/zeek/scripts/aggregate_and_compare.sh \
+  --baseline /opt/zeek/baseline/volume_baseline.csv \
+  --current /opt/zeek/logs/current/conn.log \
+  --month-over-month
+```
+
+集計結果を上表の `current` / `deviation` 列と突き合わせ、`disposition` を確定させます。
+
+## 4. 逸脱項目をハンティング手順へ回す
+
+`disposition` が `escalate` の項目は、内容に応じてハンティング手順へ引き渡します。
+
+{% for r in csv_rows %}{% if r["disposition"] == "escalate" %}- `{{ r["metric"] }}`（baseline={{ r["baseline"] }} → current={{ r["current"] }}, {{ r["deviation"] }}）: 横展開/ビーコン検知のハンティング手順へ引き渡し
+{% endif %}{% endfor %}
+```bash
+# ビーコン候補の検出(RITA)
+rita import /opt/zeek/logs/current rita-monthly-review
+rita show-beacons rita-monthly-review | head -20
+
+# 横展開兆候の抽出(内部間のSMB/RDP/WinRM宛通信)
+zeek-cut id.orig_h id.resp_h id.resp_p service < /opt/zeek/logs/current/conn.log \
+  | awk '$3 == 445 || $3 == 3389 || $3 == 5985'
+```
+
+`disposition` が `review` の項目は、担当者が業務イベント（棚卸し・繁忙期・新規プロジェクト等）の有無を確認したうえで、正常と判断できなければ `escalate` へ引き上げます。`normal` の項目は記録のみで対応不要です。
+
+## 動作確認
+
+- `aggregate_and_compare.sh --month-over-month` の実行結果として、通信量系メトリクスの前月比が標準出力に表示されること
+- 上表の `current` 列が、手順2・3で実際に集計した値と一致していること
+- `disposition` が `escalate` の項目すべてについて、手順4のハンティング手順（RITA / 横展開抽出）が実施され、結果が記録されていること
+- 訓練の実施記録（実行日時・担当者・集計結果・判定根拠）が証跡として保管されていること
+
+## 注意事項
+
+- ベースラインは正当な構成変更（新サービス投入、拠点追加、契約回線変更等）が確定した後にのみ更新する。逸脱が出たからといって安易にベースラインを書き換えると、実際の異常を「正常」として見逃す原因になる。
+- 棚卸しや期末処理、キャンペーンなど季節性・業務イベントに起因する通信量増加を、セキュリティ上の逸脱と誤認しないこと。`review` 判定の項目は業務カレンダーと突き合わせてから `escalate` するか判断する。
+- 本訓練はレビューであり是正作業ではない。`escalate` した項目の実際の是正（遮断・端末隔離等）は、別途定める対応手順に従うこと。
+- 訓練で使用した集計結果・判定根拠・実施記録は、監査証跡として保管する。

@@ -1,0 +1,87 @@
+# OpenZiti サービスの高可用性ターミネータ設計手順
+
+CSV で定義した {{ csv_rows | length }} 件の terminator 設定を基に、同一サービスへ
+複数の hosting identity を bind させて terminator を冗長化し、
+`service.terminatorStrategy` による分散・フェイルオーバーを構成します。
+`ziti` CLI で edge controller にログイン済みであることを前提とします。
+
+## 目的
+
+複数の hosting identity が同一サービスに bind して複数の terminator を作る構成を理解し、
+terminatorStrategy（smartrouting / weighted / random）と cost・precedence の組み合わせで、
+アクティブ/スタンバイやメンテナンス除外を安全に制御できるようになることを目指します。
+
+## 用語解説
+
+- **terminator**: hosting identity がサービスへ bind した際に edge controller 上に作られる、
+  「どの identity がどの経路でこのサービスをホストしているか」を表すレコード
+- **terminatorStrategy**: 複数 terminator がある場合の選択アルゴリズム。
+  `smartrouting`（レイテンシ・コストを考慮した自動分散、既定）、
+  `weighted`（cost の重みに応じた比率分散）、`random`（無作為選択）から選ぶ
+- **cost**: terminator ごとの「選ばれにくさ」を表す数値（小さいほど優先されやすい）。
+  smartrouting/weighted のいずれでも経路選択の重みに使われる
+- **precedence**: terminator の優先度区分。`default`（通常の選択対象）、
+  `required`（cost に関わらず最優先で常に選択される）、
+  `failed`（選択対象から実質的に除外される、フェイルオーバー待機や隔離に使う）の3種類
+- **dial**: クライアントがサービスへ接続要求を出し、edge controller が terminator を
+  選択してセッションを確立する動作
+
+## シナリオ設定
+
+| service | terminator_identity | binding | cost | precedence | 用途 |
+|---------|----------------------|---------|------|------------|------|
+{% for r in csv_rows %}| {{ r["service"] }} | {{ r["terminator_identity"] }} | {{ r["binding"] }} | {{ r["cost"] }} | {{ r["precedence"] }} | {{ r["note"] }} |
+{% endfor %}
+
+## 1. サービスに terminatorStrategy を設定する
+
+まず対象サービスに smartrouting 戦略を設定します（新規/既存どちらでも update で反映可能）。
+
+```bash
+ziti edge update service web-erp-svc --terminator-strategy smartrouting
+ziti edge update service db-proxy-svc --terminator-strategy smartrouting
+```
+
+## 2. 各 hosting identity から terminator を bind する
+
+CSV の各行に対応する identity 上で、対象サービスをホストする terminator を作成します。
+`cost` と `precedence` は bind 時、または後から `ziti edge update terminator` で調整できます。
+
+```bash
+{% for r in csv_rows %}ziti edge create terminator {{ r["service"] }} {{ r["terminator_identity"] }} {{ r["binding"] }} "tls:{{ r["terminator_identity"] }}:443" --cost {{ r["cost"] }} --precedence {{ r["precedence"] }}
+{% endfor %}```
+
+## 3. 既存 terminator の cost / precedence を後から調整する（blue/green・メンテナンス除外）
+
+新系統（例: gw-tokyo-02）を先に `required` で並行稼働させ、ダイヤルが継続することを
+確認できてから旧系統を `failed` に切り替える、という順序を必ず守ります。
+
+```bash
+# 新系統を先に required にして並行稼働させ、動作確認後に旧系統を除外する
+ziti edge update terminator <新系統のterminator-id> --precedence required
+# 動作確認が完了してから、旧系統をメンテナンス除外(failed)にする
+ziti edge update terminator <旧系統のterminator-id> --precedence failed
+```
+
+## 動作確認
+
+1. `ziti edge list terminators 'service.name="web-erp-svc"'` を実行し、CSV で bind した
+   複数の terminator（gw-tokyo-01 / gw-osaka-01 / gw-tokyo-02）が一覧に表示されることを確認する
+2. 1つの terminator を意図的に停止（identity をオフラインにする、またはホスト側プロセスを停止）し、
+   サービスへのダイヤルが他の terminator 経由で継続して成功することを確認する
+3. 手順3で新系統を `required` にした直後は、旧系統をまだ `failed` にせず、
+   新系統経由でダイヤルが成功することを確認してから旧系統の除外に進む
+
+## 注意事項
+
+- precedence を `required` に変更する前に、対象 terminator が実際に健全（ホスト側プロセス起動済み、
+  bind 済み）であることを確認すること。不健全な terminator を `required` にすると、
+  ダイヤル失敗（他に選択肢がない状況で不健全な terminator が優先されてしまう）につながる。
+- blue/green 切り替えやメンテナンス除外を行う際は、新系統を `required` にして
+  ダイヤル継続を確認する前に旧系統を `failed` にしないこと。順序を逆にすると、
+  新系統に問題があった場合にサービス全体が到達不能になる。
+- terminator の健全性（プロセス生存・bind 継続）と precedence/cost の設定は独立している。
+  設定上は `default` や `required` でも、実体が不健全であればダイヤルは失敗するため、
+  設定変更後は必ず本項目2の実疎通確認まで実施すること。
+- `ziti edge create terminator` の router 名・アドレスは環境に合わせて置き換えること。
+  本手順のコマンドはそのまま貼り付けられる形だが、identity 名やアドレスは実環境の値を使用する。

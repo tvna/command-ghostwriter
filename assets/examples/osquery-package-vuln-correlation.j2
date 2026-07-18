@@ -1,0 +1,86 @@
+# osqueryパッケージ情報の脆弱性照合
+
+osquery でホスト上の deb/rpm パッケージと OS バージョンを収集し、外部の CVE 情報（OVAL・ディストリのセキュリティ勧告）へ突き合わせて、脆弱性の疑いがある資産を洗い出す運用を手順化します。
+
+## 目的
+
+osquery による資産収集（インストール済みパッケージ・OS バージョンの棚卸し）と、外部 CVE 情報源による脆弱性判定を明確に分離した上で、両者を突き合わせて「バージョン不一致=要確認」の対象を機械的に抽出できるようになることを目指します。
+
+## 用語解説
+
+- **osquery**: OS の状態を SQL クエリで問い合わせるエージェント。ここでは「何がインストールされているか」を収集するためだけに使い、脆弱性の有無そのものは判定しません。
+- **deb_packages / rpm_packages**: osquery の仮想テーブル。それぞれ dpkg / rpm で管理されたパッケージの `name` と `version` を保持します。
+- **os_version**: osquery の仮想テーブルで、`platform`（ubuntu/rhel 等）と `platform_like`、`version` を保持します。ディストリ番数を判定するために使います。
+- **OVAL (Open Vulnerability and Assessment Language)**: RHEL/CentOS 系がパッケージのバージョン条件を機械可読な形式で公開する脆弱性定義。
+- **ディストリセキュリティ勧告 (USN/DSA)**: Ubuntu Security Notices・Debian Security Advisories など、ディストリごとのパッケージ修正情報。
+- **バックポート修正**: 上流のバージョン番号を上げずに、ディストリのパッケージメンテナが当該ディストリ向けのビルドにだけ修正パッチを当てること。単純な「upstreamバージョン比較」では見逃されたり誤検知されたりする原因になります。
+- **役割分担**: osquery は「資産収集（何がどのバージョンで入っているか）」のみを担当し、「そのバージョンに既知の CVE があるか」の判定は OVAL やディストリ勧告など外部の脆弱性情報源に委ねます。この手順書は両者を突き合わせる運用を扱い、実際のパッチ適用は別手順（`vuln-patch-triage`）で行います。
+
+## シナリオ設定
+
+| package | version | source_table | cve_lookup_source | severity | patch_status |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["package"] }} | {{ r["version"] }} | {{ r["source_table"] }} | {{ r["cve_lookup_source"] }} | {{ r["severity"] }} | {{ r["patch_status"] }} |
+{% endfor %}
+
+## 1. osqueryでインストール済みパッケージとOSバージョンを収集する
+
+deb 系・rpm 系・OS バージョンをそれぞれ SQL クエリで収集します（対象ホストにインストール済みの osqueryi を使用）。
+
+```bash
+# deb系パッケージ（Ubuntu/Debian）
+osqueryi --json "SELECT name, version, arch, source FROM deb_packages ORDER BY name;" > deb_packages.json
+
+# rpm系パッケージ（RHEL/CentOS/Rocky）
+osqueryi --json "SELECT name, version, arch, source FROM rpm_packages ORDER BY name;" > rpm_packages.json
+
+# OSバージョン（ディストリ番数の把握に使用）
+osqueryi --json "SELECT platform, platform_like, name, version, major, minor FROM os_version;" > os_version.json
+```
+
+## 2. シナリオの対象パッケージに絞って収集結果を確認する
+
+```bash
+{% for r in csv_rows %}{% if r["source_table"] == "deb_packages" %}jq '.[] | select(.name == "{{ r["package"] }}")' deb_packages.json
+{% elif r["source_table"] == "rpm_packages" %}jq '.[] | select(.name == "{{ r["package"] }}")' rpm_packages.json
+{% endif %}{% endfor %}```
+
+収集結果の `version` と、シナリオ設定表の `version` 列が一致することを確認してください。一致しない場合は収集後にパッケージが更新された可能性があるため、収集を再実行します。
+
+## 3. 外部CVE情報源(OVAL・ディストリセキュリティ勧告)へ突き合わせる
+
+`source_table` に応じて、突き合わせ先の情報源が異なります。
+
+```bash
+{% for r in csv_rows %}{% if r["source_table"] == "deb_packages" %}# {{ r["package"] }} ({{ r["version"] }}) を {{ r["cve_lookup_source"] }} で確認
+curl -s "https://ubuntu.com/security/cve?package={{ r["package"] }}&format=json"
+{% elif r["source_table"] == "rpm_packages" %}# {{ r["package"] }} ({{ r["version"] }}) を {{ r["cve_lookup_source"] }} で確認
+oscap oval eval --results {{ r["package"] }}-oval-results.xml /usr/share/xml/scap/ssg/content/rhel8-ds.xml
+{% endif %}{% endfor %}```
+
+`oscap oval eval` は RHEL/CentOS/Rocky 向けの OVAL 定義ファイル（`rhel8-ds.xml` 等、ディストリのマイナーバージョンに対応するもの）をローカルに用意している前提です。Ubuntu/Debian 側は USN/DSA のパッケージ検索 API・Web ページを人手または `curl` で確認します。
+
+## 4. バックポート修正を考慮して誤検知を判定する
+
+単純な upstream バージョン比較では、ディストリがバックポートで修正済みのパッケージを「脆弱」と誤検知します。`patch_status` にディストリ側の判定結果を記録し、それに基づいて分類します。
+
+```bash
+{% for r in csv_rows %}{% if r["patch_status"] == "vulnerable" %}echo "要対応: {{ r["package"] }} ({{ r["version"] }}) - {{ r["severity"] }} - {{ r["cve_lookup_source"] }} で未修正を確認"
+{% elif r["patch_status"] == "backport-fixed" %}echo "誤検知(バックポート済み): {{ r["package"] }} ({{ r["version"] }}) - upstreamバージョンは古いがディストリ側で修正パッチ適用済み"
+{% elif r["patch_status"] == "patched" %}echo "対応済み: {{ r["package"] }} ({{ r["version"] }}) - 修正版で稼働中"
+{% else %}echo "要確認(unknown): {{ r["package"] }} ({{ r["version"] }}) - {{ r["cve_lookup_source"] }} での判定待ち"
+{% endif %}{% endfor %}```
+
+## 動作確認
+
+1. Step 1 で `deb_packages.json` / `rpm_packages.json` / `os_version.json` が生成され、シナリオ設定表の全パッケージが収集結果に含まれていること
+2. Step 2 で収集結果の `version` がシナリオ設定表の `version` と一致していること（不一致があれば再収集して差分の原因を確認する）
+3. Step 3 で全パッケージについて突き合わせ先（OVAL / USN・DSA）の照会を実施したこと
+4. Step 4 の分類結果で `patch_status = unknown` の対象が残っていないこと（残っている場合は情報源側での判定待ちとして棚卸し台帳に記録する）
+
+## 注意事項
+
+- **バックポート修正の誤検知に注意する**: upstream のバージョン番号だけで「脆弱」と判定しないこと。ディストリのパッケージ管理者が当該ディストリ向けにのみ修正を当てている場合があるため、必ず `os_version` のディストリ番数（`platform`/`major`/`minor`）を踏まえて、ディストリ固有のセキュリティ勧告(USN/DSA)や OVAL 定義で最終判定する。
+- **照合データの鮮度を確認する**: OVAL 定義ファイルや USN/DSA の参照は取得日時が古いと新規 CVE を見逃す。Step 3 の突き合わせ実施日をシナリオ設定表または棚卸し台帳に記録し、定期的（例: 週次）に再取得・再突合する運用とする。
+- **パッチ適用はこの手順の対象外**: 本手順は資産収集と脆弱性照合（=どのパッケージが要対応かの洗い出し）までを扱う。実際のセキュリティ更新の適用・優先度判定・再起動要否の確認は別手順の `vuln-patch-triage` に引き継ぐこと。
+- **収集資産(JSON)の保管**: `deb_packages.json` / `rpm_packages.json` / `os_version.json` はホストの構成情報を含むため、アクセス制御されたディレクトリまたは資産管理システムに保管し、不要になった一時ファイルは削除する。

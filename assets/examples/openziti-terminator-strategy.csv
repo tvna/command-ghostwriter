@@ -1,0 +1,6 @@
+service,terminator_identity,binding,cost,precedence,note
+web-erp-svc,gw-tokyo-01,transport,10,default,東京DC一次系
+web-erp-svc,gw-osaka-01,transport,10,default,大阪DC一次系(smartroutingで自動分散)
+web-erp-svc,gw-tokyo-02,transport,50,required,メンテナンス除外用の緊急経路(通常は使わせない)
+db-proxy-svc,gw-tokyo-01,transport,20,default,DBプロキシ本番経路
+db-proxy-svc,gw-osaka-02,transport,80,failed,フェイルオーバー検証中のため一時除外

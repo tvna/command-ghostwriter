@@ -1,0 +1,5 @@
+outage_scope = "全テナントでLoki取り込みが停止し、直近15分のログがクエリで確認できない"
+promtail_buffer = true
+local_fallback_path = "/var/log/promtail-fallback"
+root_cause = "オブジェクトストレージ(S3互換)への書き込みタイムアウトによるingester WAL flush失敗"
+recovery_step = "ストレージ側の疎通回復を確認後、ingesterをローリング再起動しWALのflush完了を待ってから取り込みを再開する"

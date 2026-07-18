@@ -1,0 +1,16 @@
+snapshot_dir = "/backup/vault/snapshots"
+schedule = "0 * * * *"
+retention = 24
+encrypt = true
+restore_test = true
+
+[vault]
+addr = "https://vault.internal.example.com:8200"
+
+[secret_check]
+path = "secret/data/drill/canary"
+key = "value"
+expected = "drill-ok"
+
+[dr_cluster]
+addr = "https://vault-dr.internal.example.com:8200"
