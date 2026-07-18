@@ -8,7 +8,7 @@
   "output": "markdown",
   "name": "OPNsenseによるWANデフォルト拒否ポリシー構築",
   "desc": "WAN側を暗黙拒否とし必要最小限の許可ルールのみをOPNsenseに登録して、ログで遮断状況を検証する手順書を生成。",
-  "contentBrief": "OPNsenseのFirewall > Rules > WANでデフォルト拒否を前提に最小許可ルールを構成する手順を6セクション構成で書く。CSV列はrule_no,interface,action,proto,src,src_port,dst,dst_port,descriptionとし、ルール表をそのまま手順のGUI入力値として使う。APIによる登録例としてcurl -k -u key:secret https://fw.example.internal/api/firewall/filter/addRuleのJSONペイロードを併記する。既存の管理アクセス(anti-lockout rule)を無効化しないこと、新ルール適用前にFirewall > Log Files > Live Viewで既存正常通信を確認することをロックアウト防止順序として明記する。"
+  "contentBrief": "OPNsenseのFirewall > Rules > WANでデフォルト拒否を前提に最小許可ルールを構成する手順を6セクション構成で書く。CSV列はrule_no,interface,action,proto,src,src_port,dst,dst_port,descriptionとし、ルール表をそのまま手順のGUI入力値として使う。APIによる登録例としてcurl -k -u \"$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET\" https://fw.example.internal/api/firewall/filter/addRuleのJSONペイロードを併記する。既存の管理アクセス(anti-lockout rule)を無効化しないこと、新ルール適用前にFirewall > Log Files > Live Viewで既存正常通信を確認することをロックアウト防止順序として明記する。"
  },
  {
   "id": "opnsense-lan-segment-isolation",
@@ -30,7 +30,7 @@
   "output": "markdown",
   "name": "OPNsenseエイリアスによるルール集約管理",
   "desc": "ホスト・ネットワーク・ポートのエイリアスを定義してファイアウォールルールを集約し、変更を1箇所に閉じる手順書を生成。",
-  "contentBrief": "Firewall > Aliasesでhost/network/port/urltable型エイリアスを定義し、ルールをエイリアス参照に置き換える手順。CSV列はalias_name,alias_type,content,descriptionとする。API例としてcurl -k -u key:secret .../api/firewall/alias/addItemと.../api/firewall/alias/reconfigureの2段階呼び出しを示す。pfctl -t <alias> -T showでエイリアス展開結果をCLI確認する動作確認を含める。urltable型は更新周期(Refresh Frequency)の設定漏れで古いリストが残る点を注意事項に書く。"
+  "contentBrief": "Firewall > Aliasesでhost/network/port/urltable型エイリアスを定義し、ルールをエイリアス参照に置き換える手順。CSV列はalias_name,alias_type,content,descriptionとする。API例としてcurl -k -u \"$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET\" .../api/firewall/alias/addItemと.../api/firewall/alias/reconfigureの2段階呼び出しを示す。pfctl -t <alias> -T showでエイリアス展開結果をCLI確認する動作確認を含める。urltable型は更新周期(Refresh Frequency)の設定漏れで古いリストが残る点を注意事項に書く。"
  },
  {
   "id": "opnsense-nat-port-forward-dmz",
@@ -163,7 +163,7 @@
   "name": "OPNsense設定バックアップの取得と復元確認",
   "desc": "config.xmlの定期バックアップを取得し、復元手順と世代管理を含めて定型運用化する手順書を生成。",
   "activity": "routine",
-  "contentBrief": "System > Configuration > Backupsでの手動エクスポート、APIによる自動取得(curl -k -u key:secret https://fw/api/core/backup/download/this)、暗号化オプションの扱いを手順化する。TOMLキーはfw_host,backup_dir,retention_generations,encrypt_password_set(bool)。復元はSystem > Configuration > Backupsのリストアとインストーラーからのconfig.xmlインポートの2経路を説明し、復元後にインターフェース割当・証明書・ルール数を確認する動作確認を含める。バックアップにはAPIキーや証明書秘密鍵等の機微情報が含まれるため保管先のアクセス制御と暗号化を注意事項に書く。"
+  "contentBrief": "System > Configuration > Backupsでの手動エクスポート、APIによる自動取得(curl -k -u \"$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET\" https://fw/api/core/backup/download/this)、暗号化オプションの扱いを手順化する。TOMLキーはfw_host,backup_dir,retention_generations,encrypt_password_set(bool)。復元はSystem > Configuration > Backupsのリストアとインストーラーからのconfig.xmlインポートの2経路を説明し、復元後にインターフェース割当・証明書・ルール数を確認する動作確認を含める。バックアップにはAPIキーや証明書秘密鍵等の機微情報が含まれるため保管先のアクセス制御と暗号化を注意事項に書く。"
  },
  {
   "id": "opnsense-firmware-update-window",
@@ -199,7 +199,7 @@
   "name": "OPNsenseによる攻撃元IPの緊急遮断対応",
   "desc": "攻撃検知時に遮断用エイリアスへ攻撃元IPを即時投入し、遮断確認と記録・解除基準までを定めた初動対応手順書を生成。",
   "activity": "security-response",
-  "contentBrief": "事前に用意した遮断用エイリアス(blocklist_emergency)とWAN/Floating遮断ルールに対し、APIで攻撃元IPを投入する初動手順: curl -k -u key:secret .../api/firewall/alias_util/add/blocklist_emergencyへのaddress投入とalias_util/list確認。CSV列はsrc_ip,detected_at,evidence,reporter,unblock_criteria。遮断後はpfctl -k <ip>で既存ステートを強制切断し、ライブログで再アクセスの遮断を確認する。自組織の正規IP(監視元・VPN対向)を誤投入しないための照合手順と、遮断記録を証跡として残すことを注意事項に書く。"
+  "contentBrief": "事前に用意した遮断用エイリアス(blocklist_emergency)とWAN/Floating遮断ルールに対し、APIで攻撃元IPを投入する初動手順: curl -k -u \"$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET\" .../api/firewall/alias_util/add/blocklist_emergencyへのaddress投入とalias_util/list確認。CSV列はsrc_ip,detected_at,evidence,reporter,unblock_criteria。遮断後はpfctl -k <ip>で既存ステートを強制切断し、ライブログで再アクセスの遮断を確認する。自組織の正規IP(監視元・VPN対向)を誤投入しないための照合手順と、遮断記録を証跡として残すことを注意事項に書く。"
  },
  {
   "id": "opnsense-compromised-host-quarantine",

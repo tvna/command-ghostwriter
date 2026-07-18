@@ -71,7 +71,7 @@ ssh {{ node.host }} "sudo systemctl enable --now wazuh-indexer"
 ### 4. シャード・レプリカ数を設計しインデックステンプレートへ反映する
 
 ```bash
-curl -k -u admin:admin -X PUT "https://{{ cluster_nodes[0].host }}:9200/_index_template/wazuh-alerts-template" \
+curl -k -u "$OS_ADMIN_USER:$OS_ADMIN_PASS" -X PUT "https://{{ cluster_nodes[0].host }}:9200/_index_template/wazuh-alerts-template" \
   -H 'Content-Type: application/json' -d '{
     "index_patterns": ["wazuh-alerts-*"],
     "template": {
@@ -88,7 +88,7 @@ curl -k -u admin:admin -X PUT "https://{{ cluster_nodes[0].host }}:9200/_index_t
 ### 5. ISM（Index State Management）ポリシーでwazuh-alerts-*の保持を管理する
 
 ```bash
-curl -k -u admin:admin -X PUT "https://{{ cluster_nodes[0].host }}:9200/_plugins/_ism/policies/wazuh-alerts-retention" \
+curl -k -u "$OS_ADMIN_USER:$OS_ADMIN_PASS" -X PUT "https://{{ cluster_nodes[0].host }}:9200/_plugins/_ism/policies/wazuh-alerts-retention" \
   -H 'Content-Type: application/json' -d '{
     "policy": {
       "description": "wazuh-alerts rollover and retention policy",
@@ -121,7 +121,7 @@ curl -k -u admin:admin -X PUT "https://{{ cluster_nodes[0].host }}:9200/_plugins
 1. `_cluster/health`がgreenであることを確認する
 
 ```bash
-curl -k -u admin:admin "https://{{ cluster_nodes[0].host }}:9200/_cluster/health?pretty"
+curl -k -u "$OS_ADMIN_USER:$OS_ADMIN_PASS" "https://{{ cluster_nodes[0].host }}:9200/_cluster/health?pretty"
 ```
 
 `status`が`green`であること、`number_of_nodes`が設計したノード数と一致することを確認する。
@@ -129,7 +129,7 @@ curl -k -u admin:admin "https://{{ cluster_nodes[0].host }}:9200/_cluster/health
 2. インデックス配置（シャード分散）を確認する
 
 ```bash
-curl -k -u admin:admin "https://{{ cluster_nodes[0].host }}:9200/_cat/shards/wazuh-alerts-*?v"
+curl -k -u "$OS_ADMIN_USER:$OS_ADMIN_PASS" "https://{{ cluster_nodes[0].host }}:9200/_cat/shards/wazuh-alerts-*?v"
 ```
 
 シャードが複数のデータノードに分散配置され、単一ノードに偏っていないことを確認する。
@@ -137,13 +137,14 @@ curl -k -u admin:admin "https://{{ cluster_nodes[0].host }}:9200/_cat/shards/waz
 3. ISMポリシーの適用状況を確認する
 
 ```bash
-curl -k -u admin:admin "https://{{ cluster_nodes[0].host }}:9200/_plugins/_ism/explain/wazuh-alerts-*?pretty"
+curl -k -u "$OS_ADMIN_USER:$OS_ADMIN_PASS" "https://{{ cluster_nodes[0].host }}:9200/_plugins/_ism/explain/wazuh-alerts-*?pretty"
 ```
 
 対象インデックスに`wazuh-alerts-retention`ポリシーが紐づき、想定した`state`（hot/warm/delete）にあることを確認する。
 
 ## 注意事項
 
+- 上記コマンドの `$OS_ADMIN_USER` / `$OS_ADMIN_PASS` には、Wazuh Indexer（OpenSearch）の管理ユーザー認証情報を環境変数として設定すること。初期構築直後のデモ既定値（`admin`/`admin`相当）のまま運用してはならず、`internal_users.yml`のハッシュ更新で必ずローテーションする。
 - 新しいクラスタ構成・TLS証明書は、旧来の単一ノード構成を停止する前に、上記の`_cluster/health`確認とISM適用確認を新クラスタに対して完了させ、正常稼働を確認してから旧ノードを切り離すこと。旧経路と新経路を並行稼働させ、新経路の健全性を検証してから旧経路を廃止する。
 - ノード間TLSの証明書は全ノード共通のCAから発行し、相互信頼を確立する。証明書の不一致・期限切れはクラスタ分断（split-brain）の原因になる。
 - シャード数はデータノード数・ディスク容量・想定インデックスサイズから設計する。シャードが大きくなりすぎるとリカバリ時間が延び、小さすぎるとオーバーヘッドが増える。

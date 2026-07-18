@@ -106,17 +106,17 @@ Tunnel Addressを設定し、Peersで対向のPublicKey/AllowedIPs/Endpointを
 ## 5. WireGuardグループインターフェースへの許可ルールを追加する
 
 各ピアの `Allowed IPs` を送信元とした許可ルールを、WireGuardグループ
-インターフェース(既定の識別名 `wireguard`)に追加します。`key:secret` は
-`System > Access > Users` で発行したAPIキー/シークレットに置き換えて
-ください。
+インターフェース(既定の識別名 `wireguard`)に追加します。`$OPNSENSE_API_KEY` /
+`$OPNSENSE_API_SECRET` には、`System > Access > Users` で発行したAPIキー/
+シークレットをそれぞれ環境変数として設定してください。
 
 ```bash
 export FW_HOST="10.0.0.1"
-{% for p in peers %}curl -ks -u key:secret -X POST \
+{% for p in peers %}curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST \
   "https://${FW_HOST}/api/firewall/filter/addRule" \
   -H "Content-Type: application/json" \
   -d '{"rule":{"action":"pass","quick":"1","interface":"wireguard","direction":"in","ipprotocol":"inet","protocol":"any","source_net":"{{ p.allowed_ips }}","destination_net":"any","description":"{{ instance_name }}: allow {{ p.name }}","log":"1"}}'
-{% endfor %}curl -ks -u key:secret -X POST "https://${FW_HOST}/api/firewall/filter/apply"
+{% endfor %}curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST "https://${FW_HOST}/api/firewall/filter/apply"
 ```
 
 GUIから同じ内容を投入する場合は `Firewall > Rules > wireguard > Add` から、
@@ -130,11 +130,11 @@ GUIから同じ内容を投入する場合は `Firewall > Rules > wireguard > Ad
 既存のWANルールを変更・削除していないため、既存の通信には影響しません。
 
 ```bash
-curl -ks -u key:secret -X POST \
+curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST \
   "https://${FW_HOST}/api/firewall/filter/addRule" \
   -H "Content-Type: application/json" \
   -d '{"rule":{"action":"pass","quick":"1","interface":"wan","direction":"in","ipprotocol":"inet","protocol":"UDP","source_net":"any","destination_net":"(self)","destination_port":"{{ listen_port }}","description":"{{ instance_name }}: allow WireGuard UDP inbound","log":"1"}}'
-curl -ks -u key:secret -X POST "https://${FW_HOST}/api/firewall/filter/apply"
+curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST "https://${FW_HOST}/api/firewall/filter/apply"
 ```
 
 ## 7. Diagnosticsのハンドシェイクとpingで疎通を検証する

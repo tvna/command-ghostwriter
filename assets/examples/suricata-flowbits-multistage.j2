@@ -95,7 +95,8 @@ sudo suricatasc -c reload-rules
 curl -s -o /dev/null http://TARGET_HOST/admin/
 
 # (b) 前段(401 応答)のみ単体で発生させる -> noalert のため画面上は静か
-curl -s -o /dev/null -u wronguser:wrongpass http://TARGET_HOST/login
+# $WRONG_USER / $WRONG_PASS には、テスト用に存在しないダミー資格情報を設定する
+curl -s -o /dev/null -u "$WRONG_USER:$WRONG_PASS" http://TARGET_HOST/login
 
 # (c) 同一クライアントから直後に後段パスへアクセス -> ここで初めて sid 9100602 が発報するはず
 curl -s -o /dev/null http://TARGET_HOST/admin/

@@ -85,7 +85,7 @@ C2宛先の遮断は攻撃者に検知される可能性があるため、遮断
 ```bash
 # Suricata側: dropルールを追加（inline/IPSモードで有効）
 cat >> /etc/suricata/rules/local.rules <<'EOF'
-drop tcp any any -> {{ c2_dest }} (msg:"LOCAL C2 dest block - incident response"; sid:9000001; rev:1; classtype:trojan-activity;)
+drop tcp any any -> {{ c2_dest.split(':')[0] }} {{ c2_dest.split(':')[1] }} (msg:"LOCAL C2 dest block - incident response"; sid:9000001; rev:1; classtype:trojan-activity;)
 EOF
 suricatasc -c reload-rules
 

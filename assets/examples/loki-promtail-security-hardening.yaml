@@ -6,7 +6,7 @@ ca_file: "/etc/promtail/tls/ca.pem"
 cert_file: "/etc/promtail/tls/promtail-client.pem"
 key_file: "/etc/promtail/tls/promtail-client-key.pem"
 client_auth: "basic"
-basic_auth_user: "promtail-web01"
+basic_auth_user: "promtail"
 insecure_skip_verify: false
 proxy_auth: "nginx Basic認証 + mTLS検証"
 plaintext_backup_port: 3100

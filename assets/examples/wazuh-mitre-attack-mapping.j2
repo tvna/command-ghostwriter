@@ -65,7 +65,7 @@ sudo /var/ossec/bin/wazuh-control restart
 アラート発生後、ダッシュボードの `MITRE ATT&CK` モジュール（左メニュー > Threat Intelligence > MITRE ATT&CK）で戦術・技術別の集計が表示されることを確認します。CLIから同等の集計を確認する場合は、Wazuh Indexer（OpenSearch互換API）に対して集計クエリを投げます。
 
 ```bash
-curl -k -u admin:admin \
+curl -k -u "$OS_ADMIN_USER:$OS_ADMIN_PASS" \
   "https://localhost:9200/wazuh-alerts-*/_search" \
   -H 'Content-Type: application/json' \
   -d '{
@@ -96,6 +96,7 @@ curl -k -u admin:admin \
 
 ## 注意事項
 
+- 上記コマンドの `$OS_ADMIN_USER` / `$OS_ADMIN_PASS` には、Wazuh Indexer（OpenSearch）の管理ユーザー認証情報を環境変数として設定すること。初期構築直後のデモ既定値（`admin`/`admin`相当）のまま運用してはならない。
 - 事前に `local_rules.xml` をバックアップし（Step 1）、`wazuh-logtest` での構文チェック（Step 2）を経てから `wazuh-control restart` を行うこと。構文エラーのまま再起動するとルールセット全体が読み込まれず検知が全面停止するリスクがある。
 - 既存ルール（組込みマッピングや他のカスタムルール）と `rule_id` が重複しないよう、Step 1 で採番状況を必ず確認する。
 - カバレッジは「検知ルールが存在するかどうか」を示す指標であり、「その攻撃を実際に防御・阻止できるか」を保証するものではない。カバレッジがあっても検知精度（誤検知・見逃し）は別途評価すること。

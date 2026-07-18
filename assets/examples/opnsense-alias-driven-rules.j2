@@ -67,12 +67,12 @@ Type にはシナリオ設定の `alias_type` をそのまま選択します。
 ## 3. 同じエイリアスをAPI(curl)の2段階呼び出しで登録する
 
 GUI と同じ内容を、`/api/firewall/alias/addItem` へのPOSTで登録できます。
-`key:secret` は `System > Access > Users` で発行したAPIキー/シークレット
-に置き換えてください。urltable型のみ、取り込み間隔 `updatefreq`（単位:日）
-を明示的に指定します。
+`$OPNSENSE_API_KEY` / `$OPNSENSE_API_SECRET` には、`System > Access > Users`
+で発行したAPIキー/シークレットをそれぞれ環境変数として設定してください。
+urltable型のみ、取り込み間隔 `updatefreq`（単位:日）を明示的に指定します。
 
 ```bash
-{% for r in csv_rows %}curl -k -u key:secret https://fw.example.internal/api/firewall/alias/addItem \
+{% for r in csv_rows %}curl -k -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" https://fw.example.internal/api/firewall/alias/addItem \
   -H "Content-Type: application/json" \
   -d '{"alias":{"enabled":"1","name":"{{ r["alias_name"] }}","type":"{{ r["alias_type"] }}","content":"{{ r["content"] }}","description":"{{ r["description"] }}"{% if r["alias_type"] == "urltable" %},"updatefreq":"1"{% endif %}}}'
 {% endfor %}```
@@ -82,7 +82,7 @@ GUI と同じ内容を、`/api/firewall/alias/addItem` へのPOSTで登録でき
 まとめて反映します。
 
 ```bash
-curl -k -u key:secret -X POST https://fw.example.internal/api/firewall/alias/reconfigure
+curl -k -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST https://fw.example.internal/api/firewall/alias/reconfigure
 ```
 
 ## 4. pfctlでエイリアス展開結果を確認する
@@ -109,16 +109,16 @@ URLからのダウンロードが完了するまで一時的に空、または�
 無効化・削除しません。
 
 ```bash
-{% for r in csv_rows %}{% if r["alias_type"] == "host" %}curl -k -u key:secret https://fw.example.internal/api/firewall/filter/addRule \
+{% for r in csv_rows %}{% if r["alias_type"] == "host" %}curl -k -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" https://fw.example.internal/api/firewall/filter/addRule \
   -H "Content-Type: application/json" \
   -d '{"rule":{"interface":"wan","action":"pass","direction":"in","ipprotocol":"inet","protocol":"TCP","source_net":"any","destination_net":"{{ r["alias_name"] }}","destination_port":"443","description":"{{ r["description"] }}(alias参照化・並行稼働用)","log":"1"}}'
-{% elif r["alias_type"] == "network" %}curl -k -u key:secret https://fw.example.internal/api/firewall/filter/addRule \
+{% elif r["alias_type"] == "network" %}curl -k -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" https://fw.example.internal/api/firewall/filter/addRule \
   -H "Content-Type: application/json" \
   -d '{"rule":{"interface":"lan","action":"pass","direction":"in","ipprotocol":"inet","protocol":"TCP","source_net":"10.0.30.0/24","destination_net":"{{ r["alias_name"] }}","destination_port":"3306","description":"{{ r["description"] }}(alias参照化・並行稼働用)","log":"1"}}'
-{% elif r["alias_type"] == "port" %}curl -k -u key:secret https://fw.example.internal/api/firewall/filter/addRule \
+{% elif r["alias_type"] == "port" %}curl -k -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" https://fw.example.internal/api/firewall/filter/addRule \
   -H "Content-Type: application/json" \
   -d '{"rule":{"interface":"lan","action":"pass","direction":"in","ipprotocol":"inet","protocol":"TCP","source_net":"198.51.100.0/28","destination_net":"lannet","destination_port":"{{ r["alias_name"] }}","description":"{{ r["description"] }}(alias参照化・並行稼働用)","log":"1"}}'
-{% elif r["alias_type"] == "urltable" %}curl -k -u key:secret https://fw.example.internal/api/firewall/filter/addRule \
+{% elif r["alias_type"] == "urltable" %}curl -k -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" https://fw.example.internal/api/firewall/filter/addRule \
   -H "Content-Type: application/json" \
   -d '{"rule":{"interface":"wan","action":"block","direction":"in","ipprotocol":"inet","protocol":"any","source_net":"{{ r["alias_name"] }}","destination_net":"any","description":"{{ r["description"] }}(alias参照ブロックルール)","log":"1"}}'
 {% endif -%}
@@ -128,7 +128,7 @@ URLからのダウンロードが完了するまで一時的に空、または�
 で反映します。
 
 ```bash
-curl -k -u key:secret -X POST https://fw.example.internal/api/firewall/filter/apply
+curl -k -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST https://fw.example.internal/api/firewall/filter/apply
 ```
 
 反映後、`Firewall > Log Files > Live View` で、手順1の3本の通信が新ルール

@@ -19,7 +19,7 @@ WAN側を暗黙拒否(implicit deny)とした上で、業務上必要な通信�
 - **quick評価 (先勝ちルール)**: OPNsense (pf ベース) は上から順にルールを評価し、最初に一致したルールを適用する。以降のルールは評価されない
 - **anti-lockout rule**: OPNsense が自動生成する、GUI/SSH管理アクセス用の暗黙許可ルール。`Firewall > Settings > Advanced` の `Disable anti-lockout rule` を有効にしない限り常に有効
 - **Live View**: `Firewall > Log Files > Live View` で確認できる、フィルタルールの許可/遮断結果をリアルタイム表示するログ画面
-- **API key/secret**: `System > Access > Users` で発行する OPNsense REST API 認証情報。`curl -u key:secret` の Basic 認証として使う
+- **API key/secret**: `System > Access > Users` で発行する OPNsense REST API 認証情報。`curl -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET"` の Basic 認証として使う
 
 ## シナリオ設定
 
@@ -63,11 +63,11 @@ Destination port range(`dst_port`) / Description(`description`)。
 ### 3. 同じルールをAPI(curl)で登録する
 
 GUI と同じ内容を、`/api/firewall/filter/addRule` へのPOSTでも登録できます。
-`key:secret` は `System > Access > Users` で発行した API キー/シークレット
-に置き換えてください。
+`$OPNSENSE_API_KEY` / `$OPNSENSE_API_SECRET` には、`System > Access > Users`
+で発行した API キー/シークレットをそれぞれ環境変数として設定してください。
 
 ```bash
-{% for r in csv_rows %}curl -k -u key:secret https://fw.example.internal/api/firewall/filter/addRule \
+{% for r in csv_rows %}curl -k -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" https://fw.example.internal/api/firewall/filter/addRule \
   -H "Content-Type: application/json" \
   -d '{"rule":{"interface":"{{ r["interface"] }}","action":"{{ r["action"] }}","direction":"in","ipprotocol":"inet","protocol":"{{ r["proto"] | upper }}","source_net":"{{ r["src"] }}","source_port":"{% if r["src_port"] != "*" %}{{ r["src_port"] }}{% endif %}","destination_net":"{{ r["dst"] }}","destination_port":"{% if r["dst_port"] != "*" %}{{ r["dst_port"] }}{% endif %}","description":"{{ r["description"] }}","log":"1"}}'
 {% endfor %}```
@@ -82,7 +82,7 @@ action が `block` の行は、暗黙拒否と同じ効果を明示化してロ�
 GUIでは Log の項目にチェックを入れて保存します。APIでも同様に登録します。
 
 ```bash
-{% for r in csv_rows %}{% if r["action"] == "block" %}curl -k -u key:secret https://fw.example.internal/api/firewall/filter/addRule \
+{% for r in csv_rows %}{% if r["action"] == "block" %}curl -k -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" https://fw.example.internal/api/firewall/filter/addRule \
   -H "Content-Type: application/json" \
   -d '{"rule":{"interface":"{{ r["interface"] }}","action":"{{ r["action"] }}","direction":"in","ipprotocol":"inet","protocol":"{{ r["proto"] | upper }}","source_net":"{{ r["src"] }}","destination_net":"{{ r["dst"] }}","description":"{{ r["description"] }}","log":"1"}}'
 {% endif %}{% endfor %}```
@@ -93,7 +93,7 @@ GUIでは Log の項目にチェックを入れて保存します。APIでも同
 `/api/firewall/filter/apply` を呼び出します。
 
 ```bash
-curl -k -u key:secret -X POST https://fw.example.internal/api/firewall/filter/apply
+curl -k -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST https://fw.example.internal/api/firewall/filter/apply
 ```
 
 反映後、`Firewall > Log Files > Live View` を再度開き、次の順序で確認します。

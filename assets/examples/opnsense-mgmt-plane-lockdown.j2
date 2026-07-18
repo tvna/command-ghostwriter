@@ -52,12 +52,13 @@ OPNsense自身の管理プレーン(GUI/SSH)を、GUIのListen Interfaces限定�
 ## 1. 現状の設定をバックアップする
 
 新旧いずれの経路も失う事態に備え、変更前の `config.xml` をAPI経由で
-退避します。`key:secret` は `System > Access > Users` で発行した
-APIキー/シークレットに置き換えてください。
+退避します。`$OPNSENSE_API_KEY` / `$OPNSENSE_API_SECRET` には、
+`System > Access > Users` で発行したAPIキー/シークレットをそれぞれ
+環境変数として設定してください。
 
 ```bash
 export FW_HOST="10.0.0.1"
-curl -ks -u key:secret \
+curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" \
   "https://${FW_HOST}/api/core/backup/download/this" \
   -o "opnsense-config-backup-$(date +%Y%m%d%H%M).xml"
 ```
@@ -73,16 +74,16 @@ GUI/SSHの待受ポートを変更する**前**に、管理セグメントから
 はこの時点ではまだ変更しません。
 
 ```bash
-{% for net in mgmt_networks %}curl -ks -u key:secret -X POST \
+{% for net in mgmt_networks %}curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST \
   "https://${FW_HOST}/api/firewall/filter/addRule" \
   -H "Content-Type: application/json" \
   -d '{"rule":{"action":"pass","quick":"1","interface":"vlan_mgmt","direction":"in","ipprotocol":"inet","protocol":"TCP","source_net":"{{ net }}","destination_net":"(self)","destination_port":"{{ gui_port }}","description":"mgmt-plane-lockdown: new GUI port from {{ net }}","log":"1"}}'
-curl -ks -u key:secret -X POST \
+curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST \
   "https://${FW_HOST}/api/firewall/filter/addRule" \
   -H "Content-Type: application/json" \
   -d '{"rule":{"action":"pass","quick":"1","interface":"vlan_mgmt","direction":"in","ipprotocol":"inet","protocol":"TCP","source_net":"{{ net }}","destination_net":"(self)","destination_port":"{{ ssh_port }}","description":"mgmt-plane-lockdown: new SSH port from {{ net }}","log":"1"}}'
 {% endfor %}
-curl -ks -u key:secret -X POST "https://${FW_HOST}/api/firewall/filter/apply"
+curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST "https://${FW_HOST}/api/firewall/filter/apply"
 ```
 
 `interface` に指定した `vlan_mgmt` は、環境ごとの実際の管理VLAN

@@ -80,9 +80,9 @@ pfctl -vvsr > /tmp/pfctl-rules.txt
 `disposition`が`disable`の行を、削除ではなくまず無効化します。UUIDは`/api/firewall/filter/searchRule`の応答から`rule_id`に対応する行を特定して取得してください。
 
 ```bash
-{% for r in csv_rows %}{% if r["disposition"] == "disable" %}curl -k -u key:secret -X POST \
+{% for r in csv_rows %}{% if r["disposition"] == "disable" %}curl -k -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST \
   https://fw.example.internal/api/firewall/filter/toggleRule/CHANGE_ME_UUID_{{ r["rule_id"] }}/0
-{% endif %}{% endfor %}curl -k -u key:secret -X POST https://fw.example.internal/api/firewall/filter/apply
+{% endif %}{% endfor %}curl -k -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST https://fw.example.internal/api/firewall/filter/apply
 ```
 
 `CHANGE_ME_UUID_<rule_id>`は、手順内で取得した実際のUUIDに置き換えてください。無効化した日時を台帳の`last_review`に追記し、2週間後に手順7の削除判断を行う予定日として記録します。
@@ -92,9 +92,9 @@ pfctl -vvsr > /tmp/pfctl-rules.txt
 無効化から2週間経過し、業務影響の報告がないことを確認できたルールのみ、`disposition`を`delete`に更新して削除します。
 
 ```bash
-{% for r in csv_rows %}{% if r["disposition"] == "delete" %}curl -k -u key:secret -X POST \
+{% for r in csv_rows %}{% if r["disposition"] == "delete" %}curl -k -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST \
   https://fw.example.internal/api/firewall/filter/delRule/CHANGE_ME_UUID_{{ r["rule_id"] }}
-{% endif %}{% endfor %}curl -k -u key:secret -X POST https://fw.example.internal/api/firewall/filter/apply
+{% endif %}{% endfor %}curl -k -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST https://fw.example.internal/api/firewall/filter/apply
 ```
 
 ## 動作確認
