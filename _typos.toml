@@ -28,3 +28,7 @@ oif = "oif"
 # (`grep -iE "deprecat|breaking|removed"`) that matches both "deprecated"
 # and "deprecation"; not a misspelling.
 deprecat = "deprecat"
+# EDE = the middle segment of the real IANA TLS cipher suite name
+# `TLS_RSA_WITH_3DES_EDE_CBC_SHA` (Triple DES Encrypt-Decrypt-Encrypt);
+# not a misspelling of "EDGE".
+EDE = "EDE"

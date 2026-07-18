@@ -6,3 +6,51 @@
 # shell variable ($INVALID_KEY) instead; this entry suppresses the historical
 # finding so the PR range scan stays green. Refs #567.
 2e105f78f12910f1ed32de3d09f3673c70bbc5d0:assets/examples/inference-api-key-auth.j2:curl-auth-header:61
+
+# PR #580 (zero-trust template series, issue #574) originally hardcoded
+# example API credentials that are literally secret-shaped
+# (`curl -u key:secret`, `-u admin:admin`, a hex-looking MaxMind license
+# key, `-u wronguser:wrongpass` for an intentional 401 test) across the
+# OPNsense API-automation templates, the Wazuh/OpenSearch indexer
+# templates, and the planning doc's contentBrief text describing them.
+# All were rewritten in a follow-up commit on the same PR to use shell
+# env-var placeholders ($OPNSENSE_API_KEY/$OPNSENSE_API_SECRET,
+# $OS_ADMIN_USER/$OS_ADMIN_PASS, $WRONG_USER/$WRONG_PASS) or an
+# unambiguous YOUR_..._HERE placeholder, matching the fix approach
+# above; these entries suppress the historical findings from the
+# original generation commits so the PR range scan stays green.
+38e42260e56154481e13d1deafae93df7d5142bc:assets/examples/loki-promtail-security-hardening.yaml:generic-api-key:9
+dc3f2e5506116c16390a93f5d7e7ef7f87b02f5d:assets/examples/suricata-flowbits-multistage.j2:curl-auth-user:95
+5f086e4e032fe50942c35b4882401b1c0f582ee5:assets/examples/wazuh-indexer-cluster-scaling.j2:curl-auth-user:74
+5f086e4e032fe50942c35b4882401b1c0f582ee5:assets/examples/wazuh-indexer-cluster-scaling.j2:curl-auth-user:91
+5f086e4e032fe50942c35b4882401b1c0f582ee5:assets/examples/wazuh-indexer-cluster-scaling.j2:curl-auth-user:124
+5f086e4e032fe50942c35b4882401b1c0f582ee5:assets/examples/wazuh-indexer-cluster-scaling.j2:curl-auth-user:132
+5f086e4e032fe50942c35b4882401b1c0f582ee5:assets/examples/wazuh-indexer-cluster-scaling.j2:curl-auth-user:140
+5f086e4e032fe50942c35b4882401b1c0f582ee5:assets/examples/wazuh-mitre-attack-mapping.j2:curl-auth-user:68
+2729c5fe5d7a5b267a6f45ff7601e207d4f24de7:assets/examples/opnsense-alias-driven-rules.j2:curl-auth-user:75
+2729c5fe5d7a5b267a6f45ff7601e207d4f24de7:assets/examples/opnsense-alias-driven-rules.j2:curl-auth-user:85
+2729c5fe5d7a5b267a6f45ff7601e207d4f24de7:assets/examples/opnsense-alias-driven-rules.j2:curl-auth-user:112
+2729c5fe5d7a5b267a6f45ff7601e207d4f24de7:assets/examples/opnsense-alias-driven-rules.j2:curl-auth-user:115
+2729c5fe5d7a5b267a6f45ff7601e207d4f24de7:assets/examples/opnsense-alias-driven-rules.j2:curl-auth-user:118
+2729c5fe5d7a5b267a6f45ff7601e207d4f24de7:assets/examples/opnsense-alias-driven-rules.j2:curl-auth-user:121
+2729c5fe5d7a5b267a6f45ff7601e207d4f24de7:assets/examples/opnsense-alias-driven-rules.j2:curl-auth-user:131
+2729c5fe5d7a5b267a6f45ff7601e207d4f24de7:assets/examples/opnsense-mgmt-plane-lockdown.j2:curl-auth-user:60
+2729c5fe5d7a5b267a6f45ff7601e207d4f24de7:assets/examples/opnsense-mgmt-plane-lockdown.j2:curl-auth-user:76
+2729c5fe5d7a5b267a6f45ff7601e207d4f24de7:assets/examples/opnsense-mgmt-plane-lockdown.j2:curl-auth-user:80
+2729c5fe5d7a5b267a6f45ff7601e207d4f24de7:assets/examples/opnsense-mgmt-plane-lockdown.j2:curl-auth-user:85
+2729c5fe5d7a5b267a6f45ff7601e207d4f24de7:assets/examples/opnsense-rule-hygiene-audit.j2:curl-auth-user:83
+2729c5fe5d7a5b267a6f45ff7601e207d4f24de7:assets/examples/opnsense-rule-hygiene-audit.j2:curl-auth-user:85
+2729c5fe5d7a5b267a6f45ff7601e207d4f24de7:assets/examples/opnsense-rule-hygiene-audit.j2:curl-auth-user:95
+2729c5fe5d7a5b267a6f45ff7601e207d4f24de7:assets/examples/opnsense-rule-hygiene-audit.j2:curl-auth-user:97
+2729c5fe5d7a5b267a6f45ff7601e207d4f24de7:assets/examples/opnsense-wireguard-instance.j2:curl-auth-user:115
+2729c5fe5d7a5b267a6f45ff7601e207d4f24de7:assets/examples/opnsense-wireguard-instance.j2:curl-auth-user:119
+2729c5fe5d7a5b267a6f45ff7601e207d4f24de7:assets/examples/opnsense-wireguard-instance.j2:curl-auth-user:133
+2729c5fe5d7a5b267a6f45ff7601e207d4f24de7:assets/examples/opnsense-wireguard-instance.j2:curl-auth-user:137
+2729c5fe5d7a5b267a6f45ff7601e207d4f24de7:assets/examples/opnsense-default-deny-wan.j2:curl-auth-user:63
+2729c5fe5d7a5b267a6f45ff7601e207d4f24de7:assets/examples/opnsense-default-deny-wan.j2:curl-auth-user:85
+2729c5fe5d7a5b267a6f45ff7601e207d4f24de7:assets/examples/opnsense-default-deny-wan.j2:curl-auth-user:96
+2729c5fe5d7a5b267a6f45ff7601e207d4f24de7:assets/examples/opnsense-geoip-country-block.toml:generic-api-key:2
+0d2af55219ac53985aaf78e1927de8156b69fe62:docs/superpowers/plans/2026-07-17-zero-trust-oss-templates-plan.json:curl-auth-user:11
+0d2af55219ac53985aaf78e1927de8156b69fe62:docs/superpowers/plans/2026-07-17-zero-trust-oss-templates-plan.json:curl-auth-user:33
+0d2af55219ac53985aaf78e1927de8156b69fe62:docs/superpowers/plans/2026-07-17-zero-trust-oss-templates-plan.json:curl-auth-user:166
+0d2af55219ac53985aaf78e1927de8156b69fe62:docs/superpowers/plans/2026-07-17-zero-trust-oss-templates-plan.json:curl-auth-user:202
