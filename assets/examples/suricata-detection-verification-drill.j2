@@ -1,0 +1,107 @@
+# Suricata検知能力の定期検証訓練
+
+安全なテストトラフィックのみを用いて、Suricataが主要カテゴリの脅威を実際に検知できているかを四半期ごとに確認する検証訓練の手順書です。
+
+## 目的
+
+ルール更新・チューニング・環境変化によって「検知できるはずが実は検知できていない」状態を早期に発見し、検知パイプライン(センサー→ルール→アラート出力)が健全であることを継続的に保証します。
+
+## 用語解説
+
+- **sid(Signature ID)**: Suricataルールを一意に識別する番号。1,000,000未満は公式/コミュニティルールセット向けの予約領域、1,000,000以上は自組織で採番するローカルルール向けの領域です。
+- **testmynids.org**: IDS/IPSの動作確認のために公開されている無害なテストサイト。`/uid/index.html`へのアクセスはET OPENルールセットのsid:2100498で検知される既知の安全なテストです。
+- **expected_action**: そのテストで期待するSuricataの動作(`alert`など)。EVEログの`alert.action`と突合します。
+- **eve.json**: Suricataがアラートを含む各種イベントをJSON Lines形式で出力するログファイル(既定パスは`/var/log/suricata/eve.json`)。
+- **threshold.config**: 特定sidのアラート頻度を抑制・無効化するためのしきい値/抑制設定ファイル。不検知の原因調査で確認対象になります。
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 件を訓練台帳とし、四半期ごとに全件実行します。
+
+| test_id | category | command | expected_sid | expected_action | last_result | tested_at |
+|---|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["test_id"] }} | {{ r["category"] }} | `{{ r["command"] }}` | {{ r["expected_sid"] }} | {{ r["expected_action"] }} | {{ r["last_result"] }} | {{ r["tested_at"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 訓練実施前の準備と事前通知
+
+訓練で意図的にアラートを発生させるため、本番アラート対応チーム(SOC/インシデント対応担当)へ実施日時と対象sidを事前通知し、誤ってインシデント対応が起動しないようにします。
+
+```bash
+echo "[事前通知] $(date +%F) にSuricata検知検証訓練を実施します。対象sid: {% for r in csv_rows %}{{ r["expected_sid"] }} {% endfor %}" | mail -s "Suricata検知検証訓練の事前通知" soc-team@example.internal
+```
+
+センサーが正常稼働していることを確認してから開始します。
+
+```bash
+systemctl status suricata --no-pager
+tail -n 5 /var/log/suricata/eve.json
+```
+
+### 2. 台帳の全テストを実行する
+
+台帳の`command`列を、自組織が管理するネットワークセグメント内の検証端末から順に実行します。
+
+```bash
+{% for r in csv_rows %}echo "=== {{ r["test_id"] }}: {{ r["category"] }} ==="
+{{ r["command"] }}
+{% endfor %}```
+
+### 3. eve.jsonから検知結果を収集する
+
+各テストの`expected_sid`をキーに、直近のアラートをEVEログから抽出します。
+
+```bash
+{% for r in csv_rows %}echo "--- {{ r["test_id"] }} (sid:{{ r["expected_sid"] }}) ---"
+jq -c --arg sid "{{ r["expected_sid"] }}" 'select(.event_type=="alert" and (.alert.signature_id|tostring)==$sid)' /var/log/suricata/eve.json | tail -n 1
+{% endfor %}```
+
+### 4. 期待値と実結果を突合し台帳を更新する
+
+抽出できたアラートの`alert.action`が台帳の`expected_action`と一致するかを確認し、`last_result`(`detected`/`not_detected`)と`tested_at`(実施日)を台帳CSVに書き戻します。
+
+```bash
+{% for r in csv_rows %}# {{ r["test_id"] }}: 期待sid={{ r["expected_sid"] }} 期待action={{ r["expected_action"] }} -> 実結果を確認し last_result/tested_at を更新
+{% endfor %}```
+
+### 5. 不検知項目の原因調査へ振り分ける
+
+`last_result`が`not_detected`となった項目は、以下の順に原因を切り分けます。
+
+```bash
+{% for r in csv_rows %}# {{ r["test_id"] }}(sid:{{ r["expected_sid"] }}) が不検知だった場合の調査コマンド例
+# 1) ルールが無効化されていないか
+grep -R "sid:{{ r["expected_sid"] }};" /var/lib/suricata/rules/*.rules /etc/suricata/rules/*.rules 2>/dev/null
+suricata-update list-enabled-rulesets
+# 2) しきい値/抑制設定で握りつぶされていないか
+grep "{{ r["expected_sid"] }}" /etc/suricata/threshold.config
+# 3) トラフィックがセンサーに到達しているか
+tcpdump -ni any -c 20 host 10.0.9.50
+{% endfor %}```
+
+原因が「ルール無効化」「トラフィック未到達」「チューニング(閾値/抑制)による副作用」のいずれであるかを特定し、該当する是正(ルール再有効化、経路修正、しきい値見直し)を行った上で該当テストのみ再実行して検知を再確認します。
+
+### 6. 訓練結果を監査証跡として保管する
+
+```bash
+mkdir -p /var/log/suricata-drill-archive
+cp assets/examples/suricata-detection-verification-drill.csv "/var/log/suricata-drill-archive/drill-$(date +%Y%m%d).csv"
+echo "$(date +%F) Suricata検知検証訓練 実施完了。全{{ csv_rows | length }}件中の検知結果を記録。" >> /var/log/suricata-drill-archive/history.log
+```
+
+## 動作確認
+
+1. 台帳の{{ csv_rows | length }}件すべてについて、`last_result`が`detected`または`not_detected`のいずれかで埋まっていること(未実施の`-`が残っていないこと)。
+2. `detected`となった項目のEVEログ上の`alert.action`が台帳の`expected_action`と一致していること。
+3. `not_detected`となった項目について、原因(ルール無効化/トラフィック未到達/チューニング副作用)が特定され、是正後の再実行で検知に転じていること。
+4. `/var/log/suricata-drill-archive/`に当日分のCSVスナップショットと履歴ログの追記が残っていること。
+
+## 注意事項
+
+- テストは必ず自組織が管理するネットワークセグメント・検証端末からのみ実施してください。testmynids.org以外の外部ホストに対する模擬攻撃的な通信(ポートスキャン等)は、自組織が管理する検証対象ホスト(本手順では`10.0.9.50`)にのみ向け、第三者のホストやネットワークに対しては絶対に実施しないこと。
+- 訓練開始前に必ず本番アラート対応チーム(SOC/インシデント対応担当)へ実施日時と対象sidを通知し、意図しないインシデント対応の起動や誤報対応の工数発生を防ぐこと。通知なしでの実施は禁止です。
+- しきい値(threshold.config)の見直しを行った場合、対象sid以外のアラートにも影響が及ぶ可能性があるため、変更前の設定を退避し、変更後は他の重要sidが引き続き検知できることを別途確認してから運用を継続すること。
+- 訓練で収集したEVEログ抜粋や台帳CSVには内部IPアドレスや検知パターンの情報が含まれるため、保管場所へのアクセスを限定し、組織のログ保持ポリシーに従って保存期間を管理すること。
+- 台帳の`expected_sid`のうち、自組織カスタムルール分(1,000,000以上)は各組織のルールセットに合わせて実際のsidへ置き換えて運用すること。

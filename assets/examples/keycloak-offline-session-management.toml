@@ -1,0 +1,31 @@
+[realm]
+name = "corp"
+offline_idle_seconds = 2592000
+offline_max_lifespan = 5184000
+
+[client]
+id = "mobile-app"
+offline_scope_restricted = true
+
+[review]
+review_interval = "90日ごと"
+
+[[offline_sessions]]
+user = "sato"
+client_id = "mobile-app"
+session_id = "8f19c2e0-1a2b-4c3d-9e0f-a1b2c3d4e5f6"
+started_at = "2026-04-20"
+
+[[offline_sessions]]
+user = "suzuki"
+client_id = "mobile-app"
+session_id = "3c4d5e6f-7a8b-49c0-bd1e-2f3a4b5c6d7e"
+started_at = "2026-07-01"
+
+[[restricted_clients]]
+name = "mobile-app"
+
+[[revoked_devices]]
+user = "sato"
+session_id = "8f19c2e0-1a2b-4c3d-9e0f-a1b2c3d4e5f6"
+reason = "機種変更により旧端末を廃棄"
