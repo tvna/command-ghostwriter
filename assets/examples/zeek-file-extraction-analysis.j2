@@ -1,0 +1,128 @@
+# Zeekファイル抽出とハッシュ照合
+
+Zeekの File Analysis Framework を使い、`files.log`に記録される転送ファイルのハッシュ・種別情報を抽出し、条件に合致するファイルのみを実体としてディスクへ保存(抽出)した上で、既知のIoC/VirusTotalハッシュと突き合わせる分析手順を示します。
+
+## 目的
+
+`files.log`のfuid/source/mime_type/md5/sha256/filenameを`zeek-cut`で抽出できるようになり、`Files::ANALYZER_EXTRACT`を用いた実ファイル抽出を`mime_type`とサイズで絞った安全な設定で有効化し、抽出物のsha256をIoCフィードと突き合わせる運用を確立することを目指します。
+
+## 用語解説
+
+- **files.log**: Zeekが通信中に検出したファイル(HTTP/FTP/SMTP添付等)ごとに、fuid(ファイル一意ID)・転送元プロトコル・mime_type・md5/sha1/sha256・filenameなどを記録するログ
+- **File Analysis Framework**: Zeekがプロトコルを問わずファイルの内容を解析するための共通基盤。ハッシュ計算やアンチウイルス連携、ファイル抽出などの「アナライザ」をfuid単位で付与できる
+- **Files::ANALYZER_EXTRACT**: File Analysis Frameworkのアナライザの1つで、対象ファイルの内容をローカルディスクへ実体として書き出す
+- **fuid**: Zeekがファイルごとに払い出す一意識別子。`files.log`と抽出後のファイル名を突合するキーになる
+- **zeek-cut**: Zeekのログ(TSV形式)から指定フィールドのみを抽出するCLIツール
+
+## シナリオ設定
+
+| 設定項目 | 値 |
+| --- | --- |
+| Zeekログディレクトリ(log_dir) | `{{ log_dir }}` |
+| 抽出対象mime_type(extract_mime_types) | {% for m in extract_mime_types %}`{{ m }}`{% if not loop.last %}, {% endif %}{% endfor %} |
+| 抽出上限サイズ(max_extract_size) | {{ max_extract_size }} バイト |
+| 抽出保存先(extract_dir) | `{{ extract_dir }}` |
+
+## 手順
+
+### 1. files.logから主要フィールドをzeek-cutで抽出する
+
+```bash
+cd {{ log_dir }}
+zeek-cut fuid source mime_type md5 sha256 filename < files.log
+```
+
+特定のmime_typeのみに絞り込む場合は次のように`grep`と組み合わせます。
+
+```bash
+zeek-cut fuid source mime_type md5 sha256 filename < files.log \
+  | grep -F -e "application/x-dosexec" -e "application/zip"
+```
+
+### 2. ファイル抽出用のZeekスクリプトを作成する
+
+抽出は`mime_type`と`max_extract_size`で絞り込まないと、正常なダウンロードすべてがディスクへ実体化されてしまうため、抽出条件を明示的に定義します。`/opt/zeek/share/zeek/site/extract-files.zeek`として保存します。
+
+```zeek
+module FileExtraction;
+
+export {
+    ## 抽出対象とするmime_type一覧
+    const extract_mime_types: set[string] = {
+{% for m in extract_mime_types %}
+        "{{ m }}",
+{% endfor %}
+    } &redef;
+
+    ## 抽出対象とする最大サイズ(バイト)。これを超えるファイルは抽出しない
+    const max_extract_size: count = {{ max_extract_size }};
+
+    ## 抽出ファイルの保存先ディレクトリ(Zeekプロセスから見た相対/絶対パス)
+    const extract_dir: string = "{{ extract_dir }}";
+}
+
+event zeek_init() &priority=5
+{
+    mkdir(FileExtraction::extract_dir);
+}
+
+event file_sniff(f: fa_file, meta: fa_metadata)
+{
+    if ( ! meta?$mime_type )
+        return;
+
+    if ( meta$mime_type !in FileExtraction::extract_mime_types )
+        return;
+
+    if ( f?$total_bytes && f$total_bytes > FileExtraction::max_extract_size )
+        return;
+
+    local extraction_path = fmt("%s/%s_%s", FileExtraction::extract_dir, f$id, meta$mime_type);
+    Files::add_analyzer(f, Files::ANALYZER_EXTRACT,
+                         [$extract_filename = extraction_path]);
+}
+```
+
+### 3. スクリプトを読み込みZeekへ反映する
+
+```bash
+echo "@load site/extract-files" >> /opt/zeek/share/zeek/site/local.zeek
+zeek-cut -h > /dev/null
+zeekctl deploy
+```
+
+`zeekctl deploy`は構文チェック(`zeekctl check`)を内包しているため、構文エラーがあれば適用前に検知されます。
+
+### 4. 抽出結果と抽出元ハッシュを突合する
+
+```bash
+ls -la {{ extract_dir }}
+zeek-cut fuid mime_type sha256 filename < {{ log_dir }}/files.log > /tmp/files_hashes.tsv
+cat /tmp/files_hashes.tsv
+```
+
+### 5. sha256をIoC/VirusTotalのハッシュリストと突き合わせる
+
+事前に取得済みのIoCハッシュ一覧(1行1sha256、`/opt/ioc/known_bad_sha256.txt`)との一致を確認します。
+
+```bash
+cut -f3 /tmp/files_hashes.tsv | sort > /tmp/observed_sha256.txt
+sort /opt/ioc/known_bad_sha256.txt > /tmp/known_bad_sha256_sorted.txt
+comm -12 /tmp/observed_sha256.txt /tmp/known_bad_sha256_sorted.txt
+```
+
+一致するsha256が出力された場合は、対応するfuidを`/tmp/files_hashes.tsv`から特定し、`{{ extract_dir }}`内の該当ファイルを隔離・詳細解析(サンドボックスやVirusTotal API照会など)に回します。
+
+## 動作確認
+
+1. 監視対象ネットワークからHTTP経由で`extract_mime_types`に含まれる種別のファイルをダウンロードする(例: 実行ファイルやZIPファイル)。
+2. `{{ log_dir }}/files.log`に該当ファイルのエントリが記録され、`zeek-cut fuid source mime_type md5 sha256 filename`で行が確認できることを確認する。
+3. `mime_type`が`extract_mime_types`に含まれ、かつサイズが`max_extract_size`以下であれば、`{{ extract_dir }}`配下にfuidを含む名前でファイルが実体化されていることを確認する。
+4. `extract_mime_types`に含まれない種別(例: `text/plain`)をダウンロードした場合、`files.log`には記録されるが`{{ extract_dir }}`には実体化されないことを確認し、絞り込みが機能していることを検証する。
+
+## 注意事項
+
+- 実ファイル抽出はディスク使用量とプライバシーへの影響が大きい。必ず`extract_mime_types`と`max_extract_size`で対象を絞り、無制限にすべての転送ファイルを抽出しない。
+- 業務利用者の文書・添付ファイルが意図せず保存される可能性があるため、抽出対象mime_typeは実行ファイル・アーカイブ等の調査目的に必要な種別に限定し、個人情報を含み得るファイルの抽出範囲は事前に運用ポリシーで合意しておく。
+- `{{ extract_dir }}`は抽出済みマルウェア検体を含み得るため、ファイルシステムのパーミッションで許可された分析者アカウントのみに読み取りを制限し、実行権限を付与しない。
+- 抽出設定の変更(`local.zeek`への`@load`追加)は、まず既存の監視パイプラインを止めずに`zeekctl check`で構文検証してから`zeekctl deploy`を行い、反映後は既存のfiles.log記録が継続していることを確認したうえで、不要になった旧スクリプトの`@load`を取り除く。

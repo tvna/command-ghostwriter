@@ -1,0 +1,6 @@
+sid,signature,src_ip,dest_ip,count,verdict,tuning_action,reference
+2010935,ET POLICY curl User-Agent Outbound,10.0.20.15,203.0.113.50,842,fp,suppress,https://doc.emergingthreats.net/bin/view/Main/2010935
+2024897,ET SCAN Suspicious User-Agent (python-requests),10.0.20.22,198.51.100.10,317,fp,threshold,https://doc.emergingthreats.net/bin/view/Main/2024897
+2001219,ET SCAN Potential SSH Scan,203.0.113.99,10.0.10.5,54,tp,none,https://doc.emergingthreats.net/bin/view/Main/2001219
+2019401,ET POLICY Executable Served,10.0.30.8,10.0.30.200,12,unknown,rule-rev,https://doc.emergingthreats.net/bin/view/Main/2019401
+2013504,ET INFO STUN Binding Request,10.0.40.12,8.8.8.8,1204,fp,disable.conf,https://doc.emergingthreats.net/bin/view/Main/2013504

@@ -1,0 +1,192 @@
+# OPNsense内蔵UnboundのDoT転送と平文DNS遮断
+
+OPNsense内蔵のUnboundを、上位リゾルバへのDNS over TLS(DoT)転送に切り替えます。
+あわせてLAN(`{{ lan_net }}`)からWAN方向への平文DNS(UDP/TCP 53)の直接通信を
+ファイアウォールで遮断し、名前解決はすべてOPNsense自身のUnbound経由に
+統一します。GUI操作と、確認用のCLIコマンドを併記します。
+
+## 目的
+
+Services > Unbound DNS > DNS over TLSで上位DoTリゾルバを登録し、DoT転送が
+実際に機能していることを検証したうえで、LANからWAN宛ての平文DNS直抜けを
+ファイアウォールで遮断できるようになることを目指します。
+
+## 用語解説
+
+- **DoT(DNS over TLS)**: DNSクエリをTLSで暗号化して上位リゾルバへ送る方式。
+  平文の53/udp・53/tcpと異なり、経路上での盗聴・改ざんを防ぐ
+- **forward-tls-upstream**: Unboundの設定で、上位への転送(forward-addr)を
+  すべてTLS経由にするオプション。OPNsenseのDoT設定はこれを内部で有効化する
+- **Verify CN(証明書検証用ホスト名)**: 上位DoTサーバのTLS証明書のCommon
+  Name/SANを検証するために指定するホスト名。指定したホスト名と証明書が
+  一致しない場合、Unboundはその上位サーバへの接続を拒否する
+- **平文DNS直抜け**: クライアントがOPNsenseのUnboundを経由せず、WAN上の
+  パブリックDNS(8.8.8.8等)へ直接53番ポートで問い合わせてしまう状態。
+  DoT化してもこの経路が残っていると暗号化が意味を持たない
+- **sockstat**: FreeBSD/OPNsenseでプロセスごとのソケット状態を確認する
+  コマンド。853番ポートへの接続が実際に確立しているかを確認できる
+
+## シナリオ設定
+
+OPNsense本体(`{{ fw_ip }}`, `{{ lan_interface }}`インターフェース)配下の
+LAN(`{{ lan_net }}`)向けに、以下{{ dot_servers | length }}件の上位DoTリゾルバへ
+転送するようUnboundを設定します。
+
+| IPアドレス | ポート | 証明書検証用ホスト名(Verify CN) |
+|---|---|---|
+{% for s in dot_servers %}| {{ s["ip"] }} | {{ s["port"] }} | {{ s["hostname"] }} |
+{% endfor %}
+
+複数の上位サーバを登録することで、1件が応答不能になっても残りの上位サーバに
+フェイルオーバーできるようにします。OPNsense自身宛て(`{{ fw_ip }}`)の
+DNS問い合わせのみをLANから許可し(`allow_internal_dns_only`)、それ以外の
+WAN宛て53番ポートへの直接通信は遮断します。
+
+## 手順
+
+### 1. 現状のUnbound設定とLAN側ルールを確認する
+
+変更前に、現在の名前解決方式と既存のLANルールを確認しておきます。
+
+```bash
+# OPNsense本体で、現在のUnbound設定(転送先の有無)を確認
+cat /var/unbound/unbound.conf | grep -A5 'forward-zone'
+```
+
+GUIでは *Firewall > Rules > {{ lan_interface|upper }}* を開き、現状LANから
+WAN宛ての53番ポート通信を妨げるルールが存在しないこと(平文DNSが通っている
+状態であること)を確認します。
+
+### 2. 上位DoTリゾルバを登録する
+
+*Services > Unbound DNS > DNS over TLS* を開き、**Add** で以下
+{{ dot_servers | length }}件のエントリを登録します。
+
+{% for s in dot_servers %}#### 2-{{ loop.index }}. {{ s["hostname"] }}
+
+- Enabled: チェックする
+- IP Address: `{{ s["ip"] }}`
+- Port: `{{ s["port"] }}`
+- Verify CN: `{{ s["hostname"] }}`
+
+{% endfor %}
+登録後、画面上部の **Apply** を押して反映します。Verify CNを指定することで、
+証明書が一致しない不正な中継先への転送を防ぎます。
+
+### 3. Unboundを再起動し、DoT転送が機能していることを検証する
+
+ファイアウォールで平文DNSを遮断する**前に**、新しいDoT転送経路が実際に
+機能していることを必ず確認します。
+
+```bash
+# OPNsense本体で設定を反映
+configctl unbound restart
+```
+
+```bash
+# OPNsense本体で、生成されたforward-addrにDoT指定(@ポート#ホスト名)が
+# 反映されていることを確認
+cat /var/unbound/unbound.conf | grep -A10 'forward-zone'
+```
+
+```bash
+# 別セッション(既存の管理接続とは別のターミナル)から、
+# OPNsense自身への問い合わせが成功することを確認
+dig @{{ fw_ip }} {{ test_domain }}
+```
+
+```bash
+# OPNsense本体で、上位DoTサーバとの853番ポート接続が確立していることを確認
+sockstat -4 -c -p 853
+```
+
+`dig @{{ fw_ip }} {{ test_domain }}`が正常に応答を返し、`sockstat`の出力に
+{% for s in dot_servers %}`{{ s["ip"] }}:{{ s["port"] }}`{% if not loop.last %}・{% endif %}{% endfor %}
+への接続(いずれか、または両方)が表示されることを確認してから次に進みます。
+ここで失敗する場合は、平文DNSの遮断ルールを追加しないでください。
+
+{% if allow_internal_dns_only %}
+### 4. OPNsense自身宛ての名前解決のみを許可するルールを追加する
+
+*Firewall > Rules > {{ lan_interface|upper }}* で **Add** を押し、以下の
+内容でLANからOPNsense自身への DNS(53/udp・53/tcp) のみを許可するルールを
+作成します。次の遮断ルールより**上**(評価順で先)に置きます。
+
+- Action: Pass
+- Interface: `{{ lan_interface|upper }}`
+- Protocol: TCP/UDP
+- Source: `{{ lan_net }}`
+- Destination: `{{ lan_interface|upper }} address`({{ fw_ip }})
+- Destination port range: `DNS(53)`
+- Description: `ALLOW-LAN-TO-FW-DNS-53`
+
+保存し、**Apply changes** を押します。
+{% endif %}
+
+### 5. LANからWAN宛ての平文DNSを遮断するルールを追加する
+
+同じく *Firewall > Rules > {{ lan_interface|upper }}* で **Add** を押し、
+以下の内容でLANからWAN方向への53番ポート直接通信を遮断するルールを作成
+します。{% if allow_internal_dns_only %}手順4の許可ルールより**下**(評価順で後)に
+置いてください。{% endif %}
+
+- Action: Block
+- Interface: `{{ lan_interface|upper }}`
+- Protocol: TCP/UDP
+- Source: `{{ lan_net }}`
+- Destination: any
+- Destination port range: `DNS(53)`
+- Description: `BLOCK-LAN-DIRECT-DNS-53`
+
+OPNsenseのルール評価は上から順に最初に一致したルールが適用されるため、
+{% if allow_internal_dns_only %}この遮断ルールが手順4の許可ルールより後(下)に
+置かれていることを{% else %}このルールの並び順を{% endif %}必ず確認してから
+**Apply changes** を押します。
+
+### 6. 新しい経路の疎通と旧経路の遮断を確認する
+
+```bash
+# LAN側の端末から、OPNsense経由の名前解決が引き続き成功することを確認
+dig @{{ fw_ip }} {{ test_domain }}
+```
+
+```bash
+# LAN側の端末から、WAN上のパブリックDNSへの直接問い合わせが遮断されることを確認
+dig @{{ external_test_ip }} {{ test_domain }}
+```
+
+`dig @{{ external_test_ip }} {{ test_domain }}`が応答なし(timed out /
+connection timed out)になり、`dig @{{ fw_ip }} {{ test_domain }}`は
+引き続き正常に応答することを確認します。
+
+## 動作確認
+
+- `dig @{{ fw_ip }} {{ test_domain }}` がOPNsense経由で正常に応答すること
+- LAN端末から `dig @{{ external_test_ip }} {{ test_domain }}` を実行すると
+  応答なし(タイムアウト)になり、平文DNS直抜けが遮断されていること
+- `sockstat -4 -c -p 853` に、登録した上位DoTリゾルバ
+  ({% for s in dot_servers %}{{ s["ip"] }}{% if not loop.last %}、{% endif %}{% endfor %})との
+  853番ポート接続が表示されること
+- `Firewall > Rules > {{ lan_interface|upper }}` で、遮断ルール
+  `BLOCK-LAN-DIRECT-DNS-53`{% if allow_internal_dns_only %}が許可ルール
+  `ALLOW-LAN-TO-FW-DNS-53` より後(下)に{% endif %}配置されていること
+
+## 注意事項
+
+- **必ず手順3で新しいDoT転送経路が機能していることを検証してから、手順5で
+  平文DNSを遮断すること。** 先に遮断すると、DoT転送に不備があった場合に
+  名前解決が完全に停止し、OPNsense管理画面のFQDN解決や社内サービスにも
+  影響が及ぶおそれがある。
+- 上位DoTリゾルバは{{ dot_servers | length }}件登録しているが、登録した
+  上位が**すべて**応答不能になった場合、Unboundは名前解決を継続できず
+  LAN全体で名前解決が停止するリスクがある。異なる事業者・異なるネットワーク
+  経路上の上位サーバを複数登録し、単一障害点を避けること。
+- Verify CNを誤って設定する、または上位サーバの証明書が変更された場合、
+  Unboundは当該上位サーバへの転送を拒否し、名前解決が遅延・失敗すること
+  がある。証明書変更の通知がある事業者を選ぶか、定期的に疎通確認を行う。
+- 遮断ルール追加後にDNSが継続して機能しない場合は、まず手順5で追加した
+  `BLOCK-LAN-DIRECT-DNS-53`ルールを無効化(Disable)して平文DNSを一時的に
+  復旧させたうえで、Unbound側の設定を再確認すること。
+- 設定変更前に *System > Configuration > Backups* からconfig.xmlの
+  バックアップを取得し、意図しない名前解決停止が発生した場合に切り戻せる
+  ようにしておく。

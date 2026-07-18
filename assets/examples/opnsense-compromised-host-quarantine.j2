@@ -1,0 +1,165 @@
+# OPNsenseによる侵害疑いホストの検疫隔離 — {{ suspect_ip }}
+
+侵害が疑われる内部ホスト `{{ suspect_ip }}` ({{ suspect_mac }}) を検疫セグメント相当のルールで隔離し、調査用通信のみを許可した状態でC2(指令サーバ)向け通信を遮断する封じ込め手順です。
+
+## 目的
+
+侵害疑いホスト `{{ suspect_ip }}` を、電源断やNIC無効化ではなくOPNsenseのファイアウォールルールによるネットワーク隔離(検疫)で封じ込め、調査端末からのSSH/エージェント通信のみを許可した状態にすることを目指します。
+
+## 用語解説
+
+- **検疫(quarantine)エイリアス**: 隔離対象ホストのIPアドレスを登録するOPNsenseのFirewallエイリアス。ルール側はエイリアス名を参照するだけなので、対象ホストが増えてもルール自体は変更不要
+- **Floating Rules**: インターフェースを問わず全経路を対象に評価されるOPNsenseのルール群。評価順は上から下で、`quick`が付いたルールに最初にマッチした時点で以降のルール評価を打ち切る。検疫ルールを先頭付近に置くことで他のルールより優先して遮断できる
+- **pfctl -k (kill state)**: pfのステートテーブルから既存の確立済みセッションを強制切断するコマンド。ルールを追加しただけでは切断前から確立済みのセッション(C2との常時接続など)は継続してしまうため、ルール投入後に明示的に切る必要がある
+- **ネットワーク隔離を選ぶ理由(揮発情報の保全)**: 電源を落としたりNICを無効化すると、メモリ上のプロセス・ネットワーク接続・マルウェアの展開状態といった揮発性の高いフォレンジック情報が失われる。ネットワーク隔離であればホストを稼働させたまま外部との通信だけを遮断できるため、後続の調査(メモリダンプ取得やプロセス調査)のためにこれらの情報を保全できる
+- **調査端末通信**: 隔離中も調査担当者がSSHやEDR/フォレンジックエージェント経由でホストへアクセスし続けられるよう、限定した送信元・ポートだけを例外的に許可する通信
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 侵害疑いホストIP | {{ suspect_ip }} |
+| 侵害疑いホストMAC | {{ suspect_mac }} |
+| 検疫エイリアス名 | {{ quarantine_alias }} |
+| 調査端末からの許可IP | {% for ip in allowed_investigator_ips %}{{ ip }}{% if not loop.last %}, {% endif %}{% endfor %} |
+| 調査用許可ポート | {% for port in allowed_ports %}{{ port }}{% if not loop.last %}, {% endif %}{% endfor %} |
+
+## 手順
+
+### 1. 対象ホストを特定し検疫エイリアスへ登録する
+
+まずARPテーブルでIPとMACの対応を確認し、対象ホストの取り違えがないことを確認します。
+
+```bash
+arp -a | grep -i "{{ suspect_mac }}"
+```
+
+→ `{{ suspect_ip }}` が `{{ suspect_mac }}` と一致することを確認したうえで、OPNsenseのAPIで検疫エイリアスへIPを登録します(APIキー/シークレットは各自の管理台帳から取得し、平文でコマンド履歴に残さないよう注意してください)。
+
+```bash
+curl -k -u "<api_key>:<api_secret>" \
+  -X POST "https://opnsense.example.local/api/firewall/alias_util/add/{{ quarantine_alias }}" \
+  -H "Content-Type: application/json" \
+  -d '{"address": "{{ suspect_ip }}"}'
+
+curl -k -u "<api_key>:<api_secret>" \
+  -X POST "https://opnsense.example.local/api/firewall/alias/reconfigure"
+```
+
+### 2. 調査端末からの許可ルールを先に投入し、新しい通信経路が機能することを確認する
+
+全遮断ルールより先に、調査端末専用の許可ルールをFloating Rulesの先頭付近に投入します。全遮断より先に許可ルールを疎通確認しておくことで、隔離後に調査担当者がホストへアクセスできなくなる事態を避けます。
+
+```bash
+curl -k -u "<api_key>:<api_secret>" \
+  -X POST "https://opnsense.example.local/api/firewall/filter/addRule" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "rule": {
+      "action": "pass",
+      "quick": "1",
+      "floating": "1",
+      "direction": "in",
+      "ipprotocol": "inet",
+      "protocol": "tcp",
+{% for port in allowed_ports %}
+      "destination_port": "{{ port }}",
+{% endfor %}
+      "source_net": "{{ quarantine_alias }}_investigators",
+      "destination_net": "{{ quarantine_alias }}",
+      "description": "quarantine-investigator-access {{ suspect_ip }}"
+    }
+  }'
+
+curl -k -u "<api_key>:<api_secret>" \
+  -X POST "https://opnsense.example.local/api/firewall/filter/apply"
+```
+
+投入直後、実際に調査端末から新しい許可経路が機能することを確認してから次の遮断ルールへ進みます。
+
+```bash
+{% for ip in allowed_investigator_ips %}
+ssh -o ConnectTimeout=5 -o BatchMode=yes root@{{ suspect_ip }}  # {{ ip }} から実行して疎通を確認
+{% endfor %}
+```
+
+→ すべての調査端末IPから接続が確立できることを確認してください。ここで失敗する場合は次の遮断ルールを投入せず、ルール設定を見直します。
+
+### 3. 検疫エイリアス宛の全通信を遮断するルールを投入する
+
+調査端末許可ルールより後ろ(評価順としては下)、かつ他の一般ルールより先頭側にFloating Rulesとして全遮断ルールを投入します。
+
+```bash
+curl -k -u "<api_key>:<api_secret>" \
+  -X POST "https://opnsense.example.local/api/firewall/filter/addRule" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "rule": {
+      "action": "block",
+      "quick": "1",
+      "floating": "1",
+      "direction": "any",
+      "ipprotocol": "inet",
+      "protocol": "any",
+      "source_net": "{{ quarantine_alias }}",
+      "destination_net": "any",
+      "description": "quarantine-block-all {{ suspect_ip }}"
+    }
+  }'
+
+curl -k -u "<api_key>:<api_secret>" \
+  -X POST "https://opnsense.example.local/api/firewall/filter/apply"
+```
+
+config.xml上では、投入されたルールは以下のような形で `<filter>` セクションに反映されます(調査許可ルールが遮断ルールより上に並ぶことを確認してください)。
+
+```xml
+<filter>
+  <rule>
+    <floating>1</floating>
+    <quick>1</quick>
+    <type>pass</type>
+    <descr>quarantine-investigator-access {{ suspect_ip }}</descr>
+  </rule>
+  <rule>
+    <floating>1</floating>
+    <quick>1</quick>
+    <type>block</type>
+    <descr>quarantine-block-all {{ suspect_ip }}</descr>
+  </rule>
+</filter>
+```
+
+### 4. 既存の確立済みセッションを強制切断する
+
+ルール投入前から確立していたセッション(C2との常時接続など)はステートテーブルに残り続けるため、明示的に切断します。
+
+```bash
+pfctl -k {{ suspect_ip }}
+pfctl -ss | grep {{ suspect_ip }}
+```
+
+→ 2つ目のコマンドで `{{ suspect_ip }}` に関連するステートが調査端末向け(許可済みポート {% for port in allowed_ports %}{{ port }}{% if not loop.last %}, {% endif %}{% endfor %})以外に残っていないことを確認します。
+
+### 5. ライブログでC2向け通信が止まったことを確認する
+
+```bash
+tail -f /var/log/filter/latest.log | grep {{ suspect_ip }}
+```
+
+→ 遮断ルール(`quarantine-block-all {{ suspect_ip }}`)にマッチしたブロックログのみが記録され、外部宛ての新規セッション確立(pass側のログ)が発生していないことを数分間観察して確認します。
+
+## 動作確認
+
+- 手順2で投入した調査端末許可ルールにより、{% for ip in allowed_investigator_ips %}{{ ip }}{% if not loop.last %} / {% endif %}{% endfor %} から `{{ suspect_ip }}` へのSSH/エージェント通信が継続して成功すること
+- 手順4の `pfctl -ss` で、調査端末向け以外の確立済みセッションが残っていないこと
+- 手順5のライブログで、遮断ルール `quarantine-block-all {{ suspect_ip }}` へのマッチのみが記録され、外部宛ての新規通信(C2疑い含む)が発生していないこと
+- OPNsenseのGUI(Firewall > Diagnostics > States)で `{{ suspect_ip }}` を検索し、調査端末向け以外の通信経路が存在しないこと
+
+## 注意事項
+
+- 侵害疑いホストの電源を切ったりNICを無効化したりしないこと。メモリ上のプロセスやマルウェアの展開状態など揮発性の高いフォレンジック情報が失われるため、本手順のようにネットワークを稼働させたままの隔離を選択します。
+- 手順2の調査端末許可ルールは、手順3の全遮断ルールより先(Floating Rulesの評価順で上位)に投入し、必ず調査端末からの疎通を実機で確認してから遮断ルールへ進むこと。新しい通信経路(調査端末アクセス)が機能することを確認する前に既存の通信経路を全遮断すると、調査担当者自身がホストへアクセスできなくなり封じ込め作業自体が継続不能になります。
+- APIキー/シークレットをコマンド履歴やログに残さないこと。可能であれば環境変数や資格情報マネージャ経由で渡し、実行後はシェル履歴から該当行を削除します。
+- 隔離解除の判断基準: (1) フォレンジック調査でマルウェアの除去・侵害範囲の特定が完了していること、(2) 検疫エイリアス `{{ quarantine_alias }}` から `{{ suspect_ip }}` を除外した後の疎通試験で不審な外部通信が再発しないこと、(3) 資産管理・セキュリティ責任者の承認が得られていること。3点すべてを満たすまで隔離を解除しないこと。
+- 隔離開始・解除の日時、投入したルールのdescription、`pfctl -k` 実行結果、ライブログの抜粋を対応記録として保存し、事後のインシデントレポートに添付すること。

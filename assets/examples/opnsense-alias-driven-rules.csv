@@ -1,0 +1,5 @@
+alias_name,alias_type,content,description
+LAN_WEB_SERVER,host,10.0.10.11,公開Webサーバ1台を表すhostエイリアス
+LAN_DB_SUBNET,network,10.0.20.0/24,DB用サブネット全体を表すnetworkエイリアス
+MGMT_SSH_PORT,port,22,SSH管理アクセスで許可するportエイリアス
+THREAT_FEED_IPS,urltable,https://example.internal/feeds/malicious-ips.txt,外部脅威フィードから自動更新するurltableエイリアス

@@ -1,0 +1,107 @@
+# Zeek Signature フレームワーク運用手順
+
+CSV で定義した {{ csv_rows | length }} 件の payload シグネチャを Zeek の
+Signature フレームワーク（local.sig）に定義し、`@load-sigs` で読み込んで
+signatures.log による検知を確認する手順書です。Zeek 本体がインストール済みで
+`/opt/zeek` 配下に標準構成があることを前提とします。
+
+## 目的
+
+CSV で定義した payload シグネチャを Zeek の local.sig ファイルとして記述し、
+Zeek スクリプトへ読み込ませたうえで signatures.log に検知が記録されることを
+確認できるようになることを目指します。
+
+## 用語解説
+
+- **Zeek Signature フレームワーク**: `ip-proto` / `dst-port` / `payload` 等の
+  条件と正規表現でバイト列を照合し、一致時に `event` を発火できる Zeek 標準の
+  シグネチャ機構
+- **local.sig**: シグネチャ定義を記述する Zeek のシグネチャファイル（拡張子は
+  慣例で `.sig`）
+- **@load-sigs**: Zeek スクリプト（通常 `local.zeek`）からシグネチャファイルを
+  読み込むためのディレクティブ
+- **signatures.log**: シグネチャが一致した際に Zeek が記録する専用ログファイル
+- **Snort/Suricata ルールとの違い**: Snort/Suricata のルールはパケット単位の
+  マッチとアクション（alert/drop 等）が中心なのに対し、Zeek のシグネチャは
+  一致時に任意の Zeek イベントを発火できるため、後続の Zeek スクリプト
+  （Notice 発行、状態追跡、他プロトコルとの相関）と柔軟に連携できる点が強み
+
+## シナリオ設定
+
+| sig_id | proto | dst_port | payload_regex | event_msg | note |
+|--------|-------|----------|----------------|-----------|------|
+{% for r in csv_rows %}| {{ r["sig_id"] }} | {{ r["proto"] }} | {{ r["dst_port"] }} | `{{ r["payload_regex"] }}` | {{ r["event_msg"] }} | {{ r["note"] }} |
+{% endfor %}
+
+## 1. local.sig にシグネチャを記述する
+
+`/opt/zeek/share/zeek/site/local.sig` を作成し、CSV の各行に対応する
+シグネチャブロックを追加します（内容はコードブロック内のテキストとして
+そのまま貼り付けてください）。
+
+```
+{% for r in csv_rows %}signature {{ r["sig_id"] }} {
+    ip-proto == {{ r["proto"] }}
+    dst-port == {{ r["dst_port"] }}
+    payload {{ r["payload_regex"] }}
+    event "{{ r["event_msg"] }}"
+}
+
+{% endfor %}```
+
+## 2. local.zeek から @load-sigs で読み込む
+
+`/opt/zeek/share/zeek/site/local.zeek` の先頭付近に読み込みディレクティブを
+追加します。
+
+```
+@load-sigs ./local.sig
+```
+
+## 3. 構文チェックとデプロイ
+
+構文エラーがないことを確認してから、稼働中の Zeek 設定に反映します。
+
+```bash
+zeek -a /opt/zeek/share/zeek/site/local.sig
+zeekctl deploy
+```
+
+`zeek -a` は構文チェックのみを行うオプションで、実トラフィックへの影響は
+ありません。エラーが出た場合はここで必ず修正してから deploy してください。
+
+## 動作確認
+
+1. シグネチャに対応するペイロードを含むリクエストを実際に送信します（例:
+   `sig-http-malicious-token` の場合）。
+
+   ```bash
+   curl -s http://TARGET_HOST/?q=malicious-token
+   ```
+
+2. signatures.log に検知イベントが記録されていることを確認します。
+
+   ```bash
+   zeekctl exec "cat /opt/zeek/logs/current/signatures.log"
+   zeek-cut sig_id event_msg host_p < /opt/zeek/logs/current/signatures.log
+   ```
+
+3. 出力に該当する `sig_id` と `event_msg` の組が含まれていれば検知成功です。
+   含まれない場合は正規表現・dst-port・プロトコルの条件を CSV とログの実値
+   （`conn.log` の `id.resp_p` 等）で突き合わせて見直してください。
+
+## 注意事項
+
+- 正規表現の書き方によっては全パケットに対してバックトラッキングの多い
+  マッチングが走り、Zeek のパケット処理性能に影響することがある。可能な限り
+  アンカーや固定文字列を活用し、広すぎる `.*` の多用を避けること。
+- payload シグネチャは平文（クリアテキスト）のバイト列にのみ有効。TLS 化
+  された通信ではアプリケーション層ペイロードが暗号化されるため、この手法
+  では検知できない（TLS のメタデータ検査など別の手段が必要）。
+- シグネチャの `event` は単独では通知にならないため、実運用では対応する
+  Zeek イベントハンドラを用意し、`NOTICE()` を呼び出して Notice フレーム
+  ワーク（notice.log や既存の通知経路）に連携させること。
+- 新しいシグネチャを `local.sig` に追加する際は、まず `zeek -a` での構文
+  チェックと `zeekctl deploy` 後の signatures.log 出力を確認し、既存の
+  シグネチャ・検知経路に悪影響がないことを検証してから、不要になった旧
+  シグネチャを削除すること。

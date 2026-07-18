@@ -1,0 +1,7 @@
+https_port = "3130"
+proxy_cert_path = "/etc/squid/ssl/proxy-cert.pem"
+proxy_key_path = "/etc/squid/ssl/proxy-key.pem"
+auth_required = true
+proxy_fqdn = "proxy.internal.example.com"
+old_http_port = "3128"
+ca_bundle_path = "/etc/squid/ssl/internal-ca.pem"

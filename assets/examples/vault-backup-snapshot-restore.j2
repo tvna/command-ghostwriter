@@ -1,0 +1,89 @@
+# Vault raftスナップショットのバックアップと復元 — {{ vault.addr }}
+
+`{{ vault.addr }}` の Vault raftクラスタを対象に、スナップショットの定期取得・暗号化保管・別環境への復元・unseal・動作確認までを一巡する訓練です。「restore_test = {{ restore_test }}」の設定どおり、取得したスナップショットは本番クラスタへは復元せず、必ず別クラスタ（`{{ dr_cluster.addr }}`）へ復元して検証します。
+
+## 目的
+
+raftスナップショットを定期取得するだけでなく、実際に復元してunsealし、シークレットが正しく取り出せることまで確認できる状態を維持することを目指します。「取得できていること」と「復元できること」は別問題であるという前提に立ちます。
+
+## 用語解説
+
+- **raftスナップショット**: Vaultのintegrated storage（raft）が保持するデータ全体（シール済みでも復号可能な形の暗号化データ本体および設定）を1ファイルにまとめたもの
+- **vault operator raft snapshot save/restore**: スナップショットの取得・復元を行うVault CLIのサブコマンド
+- **シール(sealed)/アンシール(unseal)**: Vaultは起動直後は暗号鍵にアクセスできない「シール」状態にあり、Unseal Key（またはauto-unseal機構）で復号鍵を組み立てて初めてデータを扱える状態になる
+- **復元後のunseal必要性**: `snapshot restore` を実行した直後もVaultプロセス自体は稼働を継続するが、復元によってストレージ内容が丸ごと置き換わるため、対象ノードが再度シールされた場合は復元先クラスタのUnseal Key（またはauto-unseal）で改めてunsealしないとシークレットを取得できない
+- **auto-unseal**: クラウドKMS等の外部プロバイダにUnseal Key自体の保管・復号を委譲する仕組み。手動のUnseal Keyシェアが不要になる一方、復元先環境が同じプロバイダ・同じキーにアクセスできないとunsealできない
+- **スナップショットの機微性**: スナップショットファイルにはシール済み状態でも復号可能な暗号化データが含まれるため、平文のVaultデータそのものと同等に機微な情報として扱う必要がある
+
+## 1. スナップショットを定期取得する
+
+cron等で `{{ schedule }}`（cron形式）に従い、`{{ snapshot_dir }}` へ取得します。
+
+```bash
+mkdir -p {{ snapshot_dir }}
+export VAULT_ADDR={{ vault.addr }}
+TS=$(date +%Y%m%d%H%M%S)
+vault operator raft snapshot save {{ snapshot_dir }}/vault-${TS}.snap
+echo "取得完了: {{ snapshot_dir }}/vault-${TS}.snap"
+```
+
+## 2. スナップショットを暗号化して保管する
+
+`encrypt = {{ encrypt }}` の設定に従い、取得直後にGPGで暗号化してから元ファイルを削除します。
+
+```bash
+LATEST=$(ls -1t {{ snapshot_dir }}/vault-*.snap | head -1)
+gpg --batch --yes --output ${LATEST}.gpg --encrypt --recipient vault-backup-admin@example.com ${LATEST}
+shred -u ${LATEST}
+echo "暗号化完了: ${LATEST}.gpg"
+```
+
+## 3. 保持世代を整理する
+
+`retention = {{ retention }}`（世代数）を超える古い暗号化スナップショットを削除します。
+
+```bash
+ls -1t {{ snapshot_dir }}/*.snap.gpg | tail -n +{{ retention }} | xargs -r rm -f
+ls -1t {{ snapshot_dir }}/*.snap.gpg
+```
+
+## 4. 別環境（DRクラスタ）へ復元する
+
+`restore_test = {{ restore_test }}` の訓練として、本番クラスタではなく `{{ dr_cluster.addr }}` へ復元します。復元は選択したスナップショットの内容でraftストレージ全体を上書きするため、対象が本番クラスタでないことを必ず確認してから実行します。
+
+```bash
+LATEST_ENC=$(ls -1t {{ snapshot_dir }}/*.snap.gpg | head -1)
+gpg --batch --yes --output /tmp/restore-drill.snap --decrypt ${LATEST_ENC}
+export VAULT_ADDR={{ dr_cluster.addr }}
+vault operator raft snapshot restore /tmp/restore-drill.snap
+shred -u /tmp/restore-drill.snap
+```
+
+## 5. 復元後にunsealする
+
+復元によってDRクラスタのVaultが再度シール状態になっている場合、DRクラスタ自身のUnseal Key（またはDRクラスタに紐づくauto-unsealプロバイダ）でunsealします。本番クラスタのUnseal Keyでは復元先を開けません。
+
+```bash
+export VAULT_ADDR={{ dr_cluster.addr }}
+vault status
+vault operator unseal
+vault status
+```
+
+## 動作確認
+
+- `vault status` で `Sealed` が `false` になっていること
+- 復元先クラスタで `vault kv get {{ secret_check.path }}` を実行し、`{{ secret_check.key }}` の値が `{{ secret_check.expected }}` と一致し、シークレットが完全な状態で取得できること
+
+```bash
+export VAULT_ADDR={{ dr_cluster.addr }}
+vault kv get -field={{ secret_check.key }} {{ secret_check.path }}
+```
+
+## 注意事項
+
+- スナップショットには{{ secret_check.path }}のようなシークレットが復号可能な形で含まれるため、`{{ snapshot_dir }}` の暗号化ファイル・GPG秘密鍵ともにVaultデータ本体と同等のアクセス制御（最小権限のACLと保管場所の分離）を適用する。
+- 復元は必ず `{{ dr_cluster.addr }}`（DRクラスタ）に対して行い、`{{ vault.addr }}`（本番クラスタ）を訓練で上書きしない。復元前に `VAULT_ADDR` の値を必ず目視確認する。
+- 復元は対象クラスタのraftストレージ全体を上書きする操作であり、部分復元はできない。復元先のクラスタ構成・ノード数が想定と一致しているか事前に確認する。
+- auto-unseal環境では、復元先クラスタが本番と同じKMSプロバイダ・同じキーにアクセスできない構成だとunsealが失敗する。DRクラスタのauto-unseal設定（プロバイダ・リージョン・キーID）を事前に検証しておく。
+- 定期復元訓練（本手順）の実施日時・担当者・Step 5の結果・動作確認の合否は、監査証跡として別途記録簿に保管する。

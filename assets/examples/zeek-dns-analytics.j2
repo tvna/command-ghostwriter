@@ -1,0 +1,122 @@
+# Zeek dns.log による DNS 挙動分析手順書
+
+Zeek が出力する `dns.log` を `zeek-cut` で抽出し、NXDOMAIN多発・長大クエリ・稀少ドメインなどDNS異常の兆候を可視化します。
+
+## 目的
+
+`dns.log` から DGA(Domain Generation Algorithm)・DNSトンネリング・C2通信の兆候を定量的に検出し、送信元ホスト単位で優先度をつけて調査できるようにすることを目指します。
+
+## 用語解説
+
+- **Zeek**: ネットワークトラフィックを解析し `conn.log` / `dns.log` 等の構造化ログを出力するNSM(Network Security Monitoring)ツール
+- **zeek-cut**: Zeekのタブ区切りログから指定フィールドのみを抽出するユーティリティ
+- **rcode_name**: DNS応答コード名。`NOERROR` は正常応答、`NXDOMAIN` は該当ドメインが存在しないことを示す
+- **DGA (Domain Generation Algorithm)**: マルウェアがC2接続先を分散させるため、擬似乱数的なドメイン名を大量に生成するアルゴリズム。大量のNXDOMAINとして観測される
+- **DNSトンネリング**: DNSクエリ/応答にデータを埋め込みC2通信やデータ持ち出しを行う手法。クエリ長の増大やTXT/NULLレコードの多用として観測される
+- **qtype_name**: 問い合わせレコードタイプ。`A`/`AAAA` は通常の名前解決だが、`TXT`/`NULL` は本来の用途に加えトンネリングツール(iodine, dnscat2等)が好んで使うため偏りが疑わしい兆候になる
+- **稀少ドメイン(rare domain)**: 過去の観測実績がほとんどなく、初めて問い合わせが発生したドメイン。C2ドメインの新規利用で観測されうるが、CDNの動的サブドメインでも発生するため誤検知に注意が必要
+
+## シナリオ設定
+
+以下の5指標について、しきい値超過を調査対象とします。対象指標は {{ csv_rows | length }} 件です。
+
+| metric | query_pattern | threshold | investigation_note |
+|--------|---------------|-----------|---------------------|
+{% for r in csv_rows %}| {{ r["metric"] }} | {{ r["query_pattern"] }} | {{ r["threshold"] }} | {{ r["investigation_note"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. dns.log から必要フィールドを抽出する
+
+`zeek-cut` で以降の分析に使う列だけを取り出します。
+
+```bash
+zeek-cut ts id.orig_h query qtype_name rcode_name answers < dns.log > dns_extract.tsv
+head dns_extract.tsv
+```
+
+### 2. 送信元別のNXDOMAIN多発を集計する(DGA兆候)
+
+```bash
+zeek-cut id.orig_h rcode_name < dns.log \
+  | awk '$2=="NXDOMAIN"{c[$1]++} END{for (h in c) print c[h], h}' \
+  | sort -nr
+```
+
+{% for r in csv_rows %}{% if r["metric"] == "nxdomain_by_source" %}上位の送信元について、しきい値「{{ r["threshold"] }}」を超えていないか確認します。{{ r["investigation_note"] }}
+{% endif %}{% endfor %}
+
+### 3. 送信元別のNXDOMAIN比率を集計する
+
+件数だけでなく比率でも見ることで、クエリ総数が少ない送信元の見落としを防ぎます。
+
+```bash
+zeek-cut id.orig_h rcode_name < dns.log \
+  | awk '{total[$1]++; if ($2=="NXDOMAIN") nx[$1]++}
+         END{for (h in total) printf "%s %d/%d (%.1f%%)\n", h, nx[h]+0, total[h], (nx[h]+0)/total[h]*100}' \
+  | sort -t'(' -k2 -nr
+```
+
+{% for r in csv_rows %}{% if r["metric"] == "nxdomain_ratio_per_source" %}比率が「{{ r["threshold"] }}」を超える送信元は要注意です。{{ r["investigation_note"] }}
+{% endif %}{% endfor %}
+
+### 4. クエリ長で長大クエリを抽出する(DNSトンネリング兆候)
+
+```bash
+zeek-cut query < dns.log \
+  | awk '{ if (length($0) >= 50) print length($0), $0 }' \
+  | sort -nr | head -50
+```
+
+{% for r in csv_rows %}{% if r["query_pattern"] == "query の文字列長(FQDN全体)" %}しきい値は「{{ r["threshold"] }}」です。{{ r["investigation_note"] }}
+{% endif %}{% endfor %}
+
+### 5. qtype別集計でトンネリング兆候(TXT/NULL多用)を見る
+
+通常の名前解決は `A`/`AAAA` が大半を占めます。送信元ごとに `TXT`/`NULL` の比率が高い場合、DNSトンネリングツールの利用を疑います。
+
+```bash
+zeek-cut id.orig_h qtype_name < dns.log \
+  | awk '{total[$1]++; if ($2=="TXT" || $2=="NULL") tn[$1]++}
+         END{for (h in total) printf "%s %d/%d (%.1f%%)\n", h, tn[h]+0, total[h], (tn[h]+0)/total[h]*100}' \
+  | sort -t'(' -k2 -nr
+```
+
+{% for r in csv_rows %}{% if r["metric"] == "qtype_txt_null_ratio" %}しきい値「{{ r["threshold"] }}」を超えた送信元を抽出します。{{ r["investigation_note"] }}
+{% endif %}{% endfor %}
+
+### 6. 初出ドメイン(稀少ドメイン)を抽出する
+
+直近の観測期間で初めて問い合わせが発生したドメインを、既知ドメイン一覧との差分で抽出します。
+
+```bash
+zeek-cut query < dns.log | sort -u > today_domains.txt
+comm -23 today_domains.txt known_domains_30days.txt > new_domains_candidate.txt
+comm -23 new_domains_candidate.txt known_good_domains_allowlist.txt > new_domains_to_review.txt
+wc -l new_domains_to_review.txt
+```
+
+{% for r in csv_rows %}{% if r["metric"] == "first_seen_rare_domain" %}残ったドメインのうち出現回数がしきい値「{{ r["threshold"] }}」に該当するものを精査します。{{ r["investigation_note"] }}
+{% endif %}{% endfor %}
+
+## 動作確認
+
+1. 存在しないドメインへ問い合わせを行い、NXDOMAINが正しく`dns.log`に記録されることを確認します。
+
+   ```bash
+   dig "nonexistent-test-$(date +%s).invalid"
+   zeek-cut ts id.orig_h query rcode_name < dns.log | grep NXDOMAIN | tail -5
+   ```
+
+2. 上記のテストクエリの送信元ホストが、手順2・3の集計結果に反映されていることを確認します。
+3. 既知の正規ドメイン(例: 自組織のCDN配信ドメインや外形監視ドメイン)を問い合わせても、`new_domains_to_review.txt`に残らないこと(除外リストで正しく除外されていること)を確認します。
+4. 各集計コマンドがエラーなく完了し、`awk`の出力にゼロ除算(`nan%`表示)が出ていないことを確認します。
+
+## 注意事項
+
+- 本手順はログ分析のみでDNSサーバ設定やファイアウォールルールを変更するものではありませんが、`known_good_domains_allowlist.txt`(CDN・外形監視・SaaS連携先など既知の正規稀少ドメインの除外リスト)を必ず用意し、稀少ドメイン判定の誤検知(正規ドメインを不審ドメインと誤判定すること)を防ぐこと。
+- 除外リストを更新した際は、更新前後で `new_domains_to_review.txt` の件数がどう変化したかを比較し、意図せず不審ドメインまで除外していないか確認してから運用に反映すること。
+- `dns.log` は日次でローテーションされる前提のため、集計対象の期間(当日分か、直近N日分か)を明確にしてからコマンドを実行すること。
+- しきい値(件数・比率・文字数)は組織のトラフィック量に応じて調整が必要であり、シナリオ設定の値をそのまま鵜呑みにしないこと。
+- 実データにはユーザーが問い合わせた実ドメイン名が含まれるため、分析結果を共有する際は必要最小限の範囲に留め、無関係な第三者へ展開しないこと。

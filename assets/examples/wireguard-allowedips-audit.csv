@@ -1,0 +1,6 @@
+peer_name,allowed_ips,overlap_with,scope,disposition
+office-hq,10.0.0.0/24,-,minimal,keep
+branch-osaka,10.0.1.0/24,vendor-partner,minimal,tighten
+vendor-partner,10.0.1.0/24,branch-osaka,minimal,tighten
+remote-tanaka,10.0.2.5/32,-,minimal,keep
+legacy-allowall,0.0.0.0/0,-,broad,remove

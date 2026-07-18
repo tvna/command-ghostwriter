@@ -1,0 +1,5 @@
+rule_id,level,decoded_as,field_match,description,mitre_id
+100100,7,custom-app,action,SSHパスワード認証失敗を検知,T1110
+100101,10,custom-app,action,同一送信元からのSSHブルートフォース(頻度分析)を検知,T1110.001
+100102,3,custom-app,action,設定変更ログ(非アラート・監査用),-
+100103,12,custom-app,user,sudoによるroot昇格の疑いを検知,T1548.003

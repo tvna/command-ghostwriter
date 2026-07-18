@@ -1,0 +1,100 @@
+# fail2ban systemd journaldバックエンド構成
+
+ログファイルを廃止し journald のみでログを保持する環境向けに、fail2ban の監視バックエンドを `logpath` から `backend = systemd` に切り替え、`journalmatch` でユニット単位に絞り込みます。**既存のログファイル監視jailを無効化する前に、journaldバックエンドのjailが同じ攻撃を検知できることをdry-runで確認してください。**
+
+## 目的
+
+ログファイルを持たない(journaldのみの)環境で、fail2banがjournaldから直接ログを読み取り、SSHブルートフォースなどを検知・遮断できるようにします。`journalmatch`によるユニット単位の絞り込みと、切り替え時の安全な検証手順を理解します。
+
+## 用語解説
+
+- **backend = systemd**: fail2banがログファイルではなくjournald(systemd-journald)のジャーナルAPI経由でログを読み取る監視方式
+- **journalmatch**: 監視対象を`_SYSTEMD_UNIT`や`_COMM`などのjournaldフィールドで絞り込むフィルタ式(`+`はAND条件)
+- **python3-systemd**: fail2banがjournald backendを使うために必要な依存パッケージ(pythonバインディング)
+- **db_purge_age**: fail2banのSQLiteデータベース(`fail2ban.sqlite3`)に保持するban履歴の最大保存期間
+- **二重検知**: rsyslogでファイル出力も併用している場合に、同じログをlogpath監視とjournalmatch監視の両方が拾い、maxretryのカウントが実際の2倍速で進んでしまう現象
+
+## シナリオ設定
+
+| jail名 | journalmatch | maxretry |
+| --- | --- | --- |
+{% for jail in jails %}| {{ jail.name }} | `{{ jail.journalmatch }}` | {{ jail.maxretry }} |
+{% endfor %}
+- backend: `{{ backend }}`
+- db_purge_age: `{{ db_purge_age }}`
+
+## 1. 依存パッケージを確認し、journaldの絞り込みをdry-runで確認する
+
+`backend = systemd` を使うには `python3-systemd` が必要です。切り替え前に、想定した `journalmatch` が実際にどのログを拾うかを journalctl で確認します(既存のlogpath監視jailはまだ無効化しません)。
+
+```bash
+sudo apt-get install -y fail2ban python3-systemd
+{% for jail in jails %}sudo journalctl {{ jail.journalmatch | replace(" + ", " ") }} --since "10 min ago" --no-pager
+{% endfor %}```
+
+出力に想定したユニットのログ行だけが表示され、無関係なユニットの行が混ざっていないことを確認してください。混ざっている場合は `journalmatch` の絞り込み条件が不足しています。
+
+## 2. journald backendのjail.localを作成する(既存のlogpath jailは残したまま)
+
+```bash
+sudo tee /etc/fail2ban/jail.local <<'EOF'
+[DEFAULT]
+backend = {{ backend }}
+dbpurgeage = {{ db_purge_age }}
+
+{% for jail in jails %}[{{ jail.name }}]
+enabled = true
+backend = systemd
+journalmatch = {{ jail.journalmatch }}
+maxretry = {{ jail.maxretry }}
+
+{% endfor %}EOF
+```
+
+## 3. 設定を反映し、journalmatchが正しく登録されたかをfail2ban-client経由で確認する
+
+```bash
+sudo systemctl restart fail2ban
+{% for jail in jails %}sudo fail2ban-client get {{ jail.name }} journalmatch
+{% endfor %}```
+
+各jailについて、手順1で確認した `journalmatch` の内容がそのまま表示されることを確認します。表示されない場合は `jail.local` の記述誤りか、jail名の重複を疑ってください。
+
+## 4. 模擬失敗を発生させ、journald経由での検知とbanを確認する
+
+ここでは実際のログファイルを一切参照せず、journald経由のみで検知が成立することを確認します。
+
+```bash
+sudo apt-get install -y sshpass
+for i in $(seq 1 {{ jails[0].maxretry }}); do
+  sshpass -p wrongpass ssh -o StrictHostKeyChecking=no -o PubkeyAuthentication=no invaliduser@localhost -p 22 2>/dev/null
+done
+sudo journalctl _SYSTEMD_UNIT=sshd.service --since "5 min ago" --no-pager | grep -i "Failed password"
+sudo fail2ban-client status {{ jails[0].name }}
+```
+
+`journalctl`側に失敗ログが記録され、`fail2ban-client status`の`Currently failed`/`Total failed`が増加していれば、journald backendのみで検知が成立しています(`127.0.0.1`は既定のignoreipに保護されるため`Currently banned`は増えません)。
+
+## 5. logpath jailを無効化する前の最終切り替え確認
+
+新しいjournald backendのjailが手順4で検知に成功したことを確認できたら、初めて旧来のlogpath監視jail(存在する場合)を無効化します。無効化はコメントアウトではなく`enabled = false`にとどめ、即座には削除しません。
+
+```bash
+sudo fail2ban-client status
+sudo fail2ban-client reload
+```
+
+## 動作確認
+
+- 手順1のdry-runで、各jailの`journalmatch`が対象ユニットのログのみを抽出できていること(無関係なユニットの行が混入していないこと)
+- 手順3で`fail2ban-client get <jail> journalmatch`が設定値と一致すること
+- 手順4で、ログファイルを参照せずjournald経由のみで模擬失敗が検知され、`Total failed`が増加すること
+- `sudo fail2ban-client status`に全jailが`backend: systemd`として表示されること
+
+## 注意事項
+
+- `journalmatch`の絞り込みが不足していると(例: `_COMM`を指定せず`_SYSTEMD_UNIT`のみ)、同一ユニット配下の無関係なログまで読み取り対象になり、誤検知やCPU負荷増大につながる。手順1のdry-runで対象ログのみが抽出されることを必ず確認する。
+- rsyslogなどでファイルログ出力も併用している環境では、logpath監視jailとjournalmatch監視jailを同時に有効化すると同じ失敗試行を二重にカウントし、`maxretry`到達が想定より早まる。切り替え完了後は必ずlogpath側のjailを`enabled = false`にする。
+- journaldの`Storage=`設定が`volatile`または未永続化の場合、再起動でログが失われ検知が機能しなくなる。`/etc/systemd/journald.conf`で`Storage=persistent`とローテーション上限(`SystemMaxUse=`等)を確認する。
+- `backend = systemd`の利用には`python3-systemd`パッケージが必須であり、未導入の場合fail2banはjournald backendへ自動フォールバックせずエラー終了する。
+- 既存のlogpath監視jailを無効化する前に、必ず手順4のdry-run(journald経由での検知確認)を行うこと。確認前に旧jailを無効化すると、切り替え中の攻撃を検知できない空白期間が生じる。

@@ -1,0 +1,131 @@
+# Unboundブロックリスト自動更新の運用
+
+広告/マルウェアドメインの外部ブロックリストを定期取得し、Unboundの local-zone として反映する自動更新パイプラインを構築します。
+
+## 目的
+
+信頼できない外部ブロックリストを安全に取り込み、`always_nxdomain` 形式の local-zone へ変換して Unbound に反映し、`unbound-control reload` まで自動化することで、広告/マルウェアドメインへの問い合わせを継続的に遮断できるようになることを目指します。
+
+## 用語解説
+
+- **local-zone always_nxdomain**: 指定ドメインへの問い合わせに対し、権威応答としてNXDOMAIN(存在しない)を返すUnboundの設定。ブロックリスト適用の標準的な方式
+- **大量ゾーン登録とメモリ**: ブロックリストは数十万件規模になることがあり、`local-zone` エントリはUnboundのメモリ上に常駐するため、`msg-cache-size`/`rrset-cache-size` とは別にRSS(常駐メモリ)を圧迫する。反映前にメモリ余裕を確認すること
+- **whitelist(誤遮断回避)**: ブロックリストは正規CDNや計測ドメインを誤って含むことがあるため、業務に必要なドメインを除外リストとして維持し、ブロック対象から常に除く仕組みが必要
+- **unbound-control reload**: 設定ファイルを再読込し、プロセスを再起動せずに反映するUnboundの運用コマンド
+- **非信頼データとしての取得**: 外部ブロックリストは改ざん・誤登録のリスクがあるため、構文検証とdry-runなしに本番へ反映しないという前提を指す
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| ブロックリスト取得元 | {{ blocklist_sources | join(", ") }} |
+| 反映先include | `{{ output_include }}` |
+| 更新スケジュール(cron) | `{{ refresh_schedule }}` |
+| whitelistドメイン | {{ whitelist_domains | join(", ") }} |
+| 反映後リロード | {{ reload_after }} |
+
+## 手順
+
+### 1. 作業ディレクトリと取得先を用意する
+
+```bash
+mkdir -p /var/lib/unbound-blocklist/staging
+cd /var/lib/unbound-blocklist/staging
+```
+
+### 2. 外部ブロックリストを取得する(非信頼データとして扱う)
+
+```bash
+{% for src in blocklist_sources %}curl -fsSL --max-time 30 "{{ src }}" -o "source_{{ loop.index }}.raw"
+{% endfor %}
+# 取得failは即座に検知する。以降の変換ステップに空/壊れたファイルを渡さないこと
+for f in source_*.raw; do
+  [ -s "$f" ] || { echo "FATAL: $f is empty, aborting update" >&2; exit 1; }
+done
+```
+
+### 3. ドメイン名のみへ正規化する
+
+```bash
+# hosts形式(0.0.0.0 example.com)・wildcard形式(*.example.com)の両方から
+# ドメイン名だけを抽出し、コメント行・空行を除去して1ファイルへ統合する
+grep -hoE '([a-z0-9-]+\.)+[a-z]{2,}' source_*.raw | sort -u > merged_domains.txt
+```
+
+### 4. whitelistドメインを除外する
+
+```bash
+cat > whitelist.txt <<'EOF'
+{% for w in whitelist_domains %}{{ w }}
+{% endfor %}EOF
+grep -vFf whitelist.txt merged_domains.txt > merged_domains.filtered.txt
+```
+
+### 5. local-zone always_nxdomain 形式へ変換する
+
+```bash
+awk '{ print "local-zone: \"" $1 "\" always_nxdomain" }' merged_domains.filtered.txt > blocklist.conf.new
+sed -i '1i server:' blocklist.conf.new
+wc -l blocklist.conf.new
+```
+
+### 6. 反映前にdry-runで構文検証する(旧リストを止める前に新リストを検証)
+
+```bash
+# 一時ディレクトリに旧includeを退避したまま、新ファイルだけを別名で検証する。
+# 検証に通るまで本番の {{ output_include }} は書き換えない
+cp blocklist.conf.new /etc/unbound/unbound.conf.d/blocklist.conf.dryrun
+unbound-checkconf
+```
+
+### 7. 検証済みファイルを本番includeへ反映する
+
+```bash
+cp /etc/unbound/unbound.conf.d/blocklist.conf.dryrun "{{ output_include }}"
+rm -f /etc/unbound/unbound.conf.d/blocklist.conf.dryrun
+unbound-checkconf
+```
+
+{% if reload_after %}
+### 8. Unboundへ反映する(再起動なしでreload)
+
+```bash
+unbound-control reload
+```
+{% endif %}
+
+### 9. 自動更新をcronへ登録する
+
+```bash
+cat > /etc/cron.d/unbound-blocklist <<'EOF'
+{{ refresh_schedule }} root /usr/local/sbin/unbound-blocklist-update.sh >> /var/log/unbound-blocklist.log 2>&1
+EOF
+```
+
+## 動作確認
+
+- 更新後、ブロックリストに含まれるドメインへの問い合わせがNXDOMAINになること
+
+```bash
+dig @127.0.0.1 doubleclick.net A +short
+# 応答なし、かつステータスがNXDOMAINであることを確認する
+dig @127.0.0.1 doubleclick.net A | grep -i status
+```
+
+- whitelistドメインへの問い合わせは正常に名前解決されること
+
+```bash
+{% for w in whitelist_domains %}dig @127.0.0.1 {{ w }} A +short
+{% endfor %}
+```
+
+- `unbound-checkconf` が更新のたびにエラーなく完了すること
+{% if reload_after %}- `unbound-control reload` が正常終了し、`unbound-control status` で稼働継続を確認できること{% endif %}
+
+## 注意事項
+
+- 外部ブロックリストは非信頼データとして扱う。取得後は必ずステップ3〜6の正規化・whitelist除外・構文検証(dry-run)を経てから本番へ反映し、生データを直接includeへ書き込まないこと。
+- whitelistは正規CDNや外部計測サービスのドメインを継続的に洗い出して整備する。ブロックリスト更新のたびに業務影響が出ていないか確認し、whitelistへ追記する運用を定着させること。
+- local-zoneエントリは数十万件規模になり得るため、反映前に空きメモリを確認し、`msg-cache-size`/`rrset-cache-size` と合わせてメモリ超過による再起動を防ぐこと。
+- 取得や変換が失敗した場合(空ファイル・構文エラー)は、ステップ7を実行せず旧リストを継続稼働させる。新リストが検証を通過するまで {{ output_include }} を書き換えないことで、旧経路(既存の遮断設定)を止めずに新経路を検証してから切替える。
+- 誤遮断が発生した場合は、該当ドメインをwhitelistへ即時追加し、ステップ4以降を再実行して`unbound-control reload`まで行うことで迅速に解除できるようにしておくこと。

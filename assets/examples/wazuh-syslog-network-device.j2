@@ -1,0 +1,149 @@
+# Wazuhによるネットワーク機器syslog収集 — {{ manager_ip }}
+
+エージェントを導入できないルータ/ファイアウォール/スイッチのsyslogを、Wazuh managerが直接受信して検知する構成手順です。
+
+## 目的
+
+エージェントレス収集（syslog直接受信）とエージェント収集の使い分けを理解し、`ossec.conf` の `<remote>` 設定・機器別decoder・機器別ruleを作成して、ネットワーク機器のイベントをWazuhで検知できるようになることを目指します。
+
+## 用語解説
+
+- **エージェントレス収集**: Wazuh agentを導入できない機器（ルータ/FW/スイッチ等）から、syslogを直接managerで受信する方式。設定は容易だが送信元のなりすまし対策が別途必要。
+- **エージェント収集**: サーバ等にWazuh agentを導入し、ossec-logcollectorがログを収集してmanagerへ暗号化転送する方式。送信元は自機のagent鍵で認証される。
+- **allowed-ips**: `<remote>` のsyslog受信で、許可した送信元IPアドレス以外からのsyslogを破棄する設定。なりすましsyslog対策の基本。
+- **decoder(local_decoder.xml)**: 生ログから機器名・送信元IP・宛先ポート等のフィールドを抽出する定義。
+- **rule(local_rules.xml)**: decoderで抽出したフィールドを条件に、アラートレベルと説明を付与する定義。
+- **正規化**: ベンダーごとに異なるログ書式を、共通のフィールド名（srcip、dstport等）に統一して扱えるようにすること。
+- **wazuh-logtest**: 生ログを実際にdecoder/ruleに通し、マッチ結果とアラートレベルを確認できる検証ツール。
+
+## シナリオ設定
+
+Wazuh manager（{{ manager_ip }}）に、以下のネットワーク機器からsyslogをエージェントレスで直接受信します。
+
+| 機器 | 送信元IP |
+| --- | --- |
+{% for ip in allowed_ips %}| {{ ip.label }} | {{ ip.address }} |
+{% endfor %}
+
+## 1. ossec.confでsyslog受信を設定する
+
+`<remote>` ブロックをUDP/TCPそれぞれで定義し、`allowed-ips` で許可した送信元以外を受け付けないようにします。
+
+```bash
+sudo tee -a /var/ossec/etc/ossec.conf <<'EOF'
+<ossec_config>
+  <remote>
+    <connection>syslog</connection>
+    <port>{{ syslog_port }}</port>
+    <protocol>udp</protocol>
+{% for ip in allowed_ips %}    <allowed-ips>{{ ip.address }}/32</allowed-ips>
+{% endfor %}    <local_ip>0.0.0.0</local_ip>
+  </remote>
+  <remote>
+    <connection>syslog</connection>
+    <port>{{ syslog_port }}</port>
+    <protocol>tcp</protocol>
+{% for ip in allowed_ips %}    <allowed-ips>{{ ip.address }}/32</allowed-ips>
+{% endfor %}    <local_ip>0.0.0.0</local_ip>
+  </remote>
+</ossec_config>
+EOF
+sudo /var/ossec/bin/wazuh-control restart
+```
+
+対象機器側では、syslog宛先を{{ manager_ip }}:{{ syslog_port }}（UDPまたはTCP）に設定します。設定例（Cisco IOS）:
+
+```bash
+logging host {{ manager_ip }} transport udp port {{ syslog_port }}
+logging trap informational
+```
+
+## 2. 機器別decoder（local_decoder.xml）を作成する
+
+各ベンダーのログ書式からsrcip/dstip/dstportを抽出し、共通フィールドに正規化します。
+
+```bash
+sudo tee /var/ossec/etc/decoders/local_decoder.xml <<'EOF'
+<decoder name="network-device-deny">
+  <program_name>^%SEC-6-IPACCESSLOGP|^date=|^\d{4}/\d{2}/\d{2}</program_name>
+</decoder>
+
+<decoder name="network-device-deny-cisco">
+  <parent>network-device-deny</parent>
+  <prematch>denied \S+ \S+\(\d+\) -> \S+\(\d+\)</prematch>
+  <regex offset="after_prematch">denied \S+ (\S+)\(\d+\) -> (\S+)\((\d+)\)</regex>
+  <order>srcip, dstip, dstport</order>
+</decoder>
+
+<decoder name="network-device-deny-fortigate">
+  <parent>network-device-deny</parent>
+  <prematch>action=deny</prematch>
+  <regex offset="after_parent">srcip=(\S+) dstip=(\S+) dstport=(\d+)</regex>
+  <order>srcip, dstip, dstport</order>
+</decoder>
+
+<decoder name="network-device-deny-yamaha">
+  <parent>network-device-deny</parent>
+  <prematch>Filter\(\d+\) denied</prematch>
+  <regex offset="after_prematch">denied (\S+)\[\d+\] > (\S+)\[(\d+)\]</regex>
+  <order>srcip, dstip, dstport</order>
+</decoder>
+EOF
+```
+
+## 3. 機器別rule（local_rules.xml）を作成する
+
+decoderで抽出したフィールドをもとに、検知ルールを定義します。
+
+```bash
+sudo tee /var/ossec/etc/rules/local_rules.xml <<'EOF'
+<group name="network_device,syslog,">
+{% for r in target_rules %}  <rule id="{{ r.id }}" level="{{ r.level }}">
+    <decoded_as>network-device-deny</decoded_as>
+    <match>{{ r.match }}</match>
+    <description>{{ r.description }}</description>
+    <group>network_device_deny,</group>
+  </rule>
+{% endfor %}</group>
+EOF
+sudo /var/ossec/bin/wazuh-control restart
+```
+
+`frequency` ルール（{{ target_rules[1].id }}）は短時間の多発を検知するため、実運用では `<if_matched_sid>` と `<frequency>`/`<timeframe>` を併記して同一ruleの繰り返しマッチを条件にしますが、ここでは検知対象の考え方を示すため簡略化しています。
+
+## 4. wazuh-logtestでdecode/ruleマッチを検証する
+
+機器を実際に切り替える前に、想定ログがdecoder/ruleに正しくマッチするかをオフラインで検証します（{{ device_types[0].vendor }} / {{ device_types[1].vendor }} / {{ device_types[2].vendor }} の3ベンダー分）。
+
+```bash
+echo '%SEC-6-IPACCESSLOGP: list 101 denied tcp {{ device_types[0].srcip }}({{ device_types[0].srcport }}) -> {{ device_types[0].dstip }}({{ device_types[0].dstport }}), 1 packet' | sudo /var/ossec/bin/wazuh-logtest
+echo 'date=2026-07-18 time=10:15:00 devname={{ device_types[1].devname }} devid={{ device_types[1].devid }} logid=0000000013 type=traffic subtype=forward level=notice action=deny srcip={{ device_types[1].srcip }} dstip={{ device_types[1].dstip }} dstport={{ device_types[1].dstport }} proto=6' | sudo /var/ossec/bin/wazuh-logtest
+echo '2026/07/18 10:15:00: [IP] Filter(101) denied {{ device_types[2].srcip }}[{{ device_types[2].srcport }}] > {{ device_types[2].dstip }}[{{ device_types[2].dstport }}]' | sudo /var/ossec/bin/wazuh-logtest
+```
+
+各出力で `decoder: 'network-device-deny...'` と、`rule: '{{ target_rules[0].id }}' ... network_device_deny` が表示されることを確認します。
+
+## 動作確認
+
+1. 対象機器（{{ allowed_ips[0].label }}）から実際にsyslogを送信させ、Wazuh manager側の `/var/ossec/logs/archives/archives.log` に到達していることを確認します。
+
+```bash
+sudo tail -f /var/ossec/logs/archives/archives.log | grep {{ test_source_ip }}
+```
+
+2. Step 4のwazuh-logtestで、3ベンダー分のサンプルログがすべてdecode・ruleマッチすることを確認します。
+3. 機器で意図的に拒否イベント（未許可宛先へのアクセス試行等）を発生させ、Wazuh dashboardまたは以下のコマンドでアラートが記録されることを確認します。
+
+```bash
+sudo grep "{{ target_rules[0].id }}" /var/ossec/logs/alerts/alerts.log | tail -n 5
+```
+
+4. `{{ allowed_ips[0].address }}` 以外（許可外IP、例: {{ attacker_ip }}）から偽装したsyslogを送信してもmanagerが受信・decodeしないこと（`allowed-ips` の効果）を、manager側で試験的に一時許可するテスト環境等で確認します。
+
+## 注意事項
+
+- `allowed-ips` に許可対象機器のIPを漏れなく登録してから運用を開始します。登録漏れがあると正規機器のsyslogが破棄され、逆に未登録のまま広く許可すると送信元IPを偽装したなりすましsyslogを受理してしまいます。
+- syslog（UDP/TCP {{ syslog_port }}）は平文で暗号化されないため、管理ネットワークをユーザーセグメントから分離（VLAN分離やACLでの到達制限）した上で運用します。
+- 機器とWazuh manager双方の時刻同期（NTP）がずれていると、アラートの時系列相関やフォレンジック調査に支障が出るため、事前にNTP設定を確認します。
+- 本手順は新しいsyslog受信経路の追加であり、既存の監視・ログ収集経路を無効化するものではありません。新しい`<remote>`設定と機器別decoder/ruleが正しく動作すること（Step 4のwazuh-logtestおよび「動作確認」の1〜3）を確認してから、既存の代替収集経路（syslogサーバへの二重転送等）があれば段階的に廃止してください。
+- `ossec.conf` や `local_rules.xml` の編集後は必ず `wazuh-control restart` を実行し、`/var/ossec/logs/ossec.log` に設定エラーが出ていないことを確認します。

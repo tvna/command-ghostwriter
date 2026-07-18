@@ -1,0 +1,84 @@
+# Squid検査バイパス設定の定期棚卸し
+
+squid.confに設定されたSSL Bump除外(splice)・ICAP検査除外(adaptation)・always_directによる制御バイパスを洗い出し、検査の穴として残っていないかを棚卸しする定期監査手順です。
+
+## 目的
+
+`ssl_bump splice` によるSSL Bump除外、`adaptation_access` によるICAP(アンチウイルス連携)検査除外、`always_direct` によるプロキシ制御バイパスは、いずれも検査・制御が効かない「穴」になり得ることを理解し、証明書ピン留めアプリ等の正当な除外理由と、惰性で残った除外を区別した上で、期限切れ・理由不明の除外を安全に是正できるようになることを目指します。
+
+## 用語解説
+
+- **splice(スプライス)**: SSL Bumpにおいて復号を行わずTCP接続をそのまま中継すること。証明書ピン留め等でBumpすると通信が壊れるアプリのための正当な除外に使う
+- **ssl_bump**: squid.confでBump/Splice/Terminateの動作をACL単位で振り分けるディレクティブ。上から順にfirst matchで評価される
+- **adaptation_access**: ICAP(外部アンチウイルス連携等)による検査の適用/除外をACL単位で制御するディレクティブ
+- **always_direct**: 指定した宛先に対してプロキシ処理(キャッシュ・検査を含む)を経由させず直接接続させるディレクティブ
+- **still_needed(bool)**: 除外理由が現在も有効かどうかの判定。falseは理由が消滅済み・期限切れを意味する
+- **disposition(判定)**: 棚卸しの結果として下す keep（維持）/ review（要確認）/ remove（削除）の判定
+
+## シナリオ設定
+
+今回棚卸し対象は {{ csv_rows | length }} 件の検査/制御バイパス設定です。台帳には `bypass_type` / `target` / `reason` / `added_at` / `still_needed` / `disposition` を記録します。
+
+| bypass_type | target | reason | added_at | still_needed | disposition |
+|-------------|--------|--------|----------|--------------|-------------|
+{% for r in csv_rows %}| {{ r["bypass_type"] }} | {{ r["target"] }} | {{ r["reason"] }} | {{ r["added_at"] }} | {{ r["still_needed"] }} | {{ r["disposition"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. squid.confから現在のバイパス設定を洗い出す
+
+```bash
+cp /etc/squid/squid.conf /etc/squid/squid.conf.bak.$(date +%Y%m%d)
+grep -n "^ssl_bump splice" /etc/squid/squid.conf > /tmp/bypass_splice.txt
+grep -n "^adaptation_access" /etc/squid/squid.conf > /tmp/bypass_adaptation.txt
+grep -n "^always_direct" /etc/squid/squid.conf > /tmp/bypass_always_direct.txt
+cat /tmp/bypass_splice.txt /tmp/bypass_adaptation.txt /tmp/bypass_always_direct.txt
+```
+
+### 2. 台帳の全件を突き合わせて表示する
+
+```bash
+echo "棚卸し対象バイパス数: {{ csv_rows | length }}"
+{% for r in csv_rows %}echo "{{ r["bypass_type"] }}: {{ r["target"] }} (still_needed={{ r["still_needed"] }}, added_at={{ r["added_at"] }})"
+{% endfor %}```
+
+### 3. 正当なsplice除外と惰性で残った除外を区別する
+
+証明書ピン留め等で通信が壊れることが確認できているアプリ向けの除外（`still_needed=true` かつ具体的なドメイン・reasonが記載されているもの）は正当な除外として維持します。一方、`still_needed=false` のもの、または `reason` に「暫定」「移行」など一時的な文言があるにもかかわらず1年以上前の `added_at` のまま残っているものは、惰性で残った除外として是正対象にします。
+
+```bash
+{% for r in csv_rows %}{% if r["still_needed"] == "false" %}echo "是正対象(惰性除外の疑い): {{ r["bypass_type"] }} {{ r["target"] }} - {{ r["reason"] }} (added_at={{ r["added_at"] }})"
+{% endif %}{% endfor %}```
+
+### 4. dispositionに沿って段階的に是正する
+
+`remove` 判定のバイパスは、いきなり設定を削除せず、まず該当行をコメントアウトして`squid -k parse`で構文検証だけを行う段階を挟みます。除外解除で影響を受けるはずのアプリ(証明書ピン留めアプリ等)からの疎通を別セッションで確認してから、本番のreconfigureに進みます。
+
+```bash
+{% for r in csv_rows %}{% if r["disposition"] == "remove" %}echo "段階的是正対象(コメントアウトして検証): {{ r["bypass_type"] }} {{ r["target"] }} ({{ r["reason"] }})"
+{% elif r["disposition"] == "review" %}echo "要確認: {{ r["bypass_type"] }} {{ r["target"] }} ({{ r["reason"] }})"
+{% endif %}{% endfor %}```
+
+### 5. 台帳を更新し、構文検証後にreconfigureする
+
+```bash
+{% for r in csv_rows %}echo "{{ r["bypass_type"] }},{{ r["target"] }},{{ r["reason"] }},{{ r["added_at"] }},{{ r["still_needed"] }},{{ r["disposition"] }}" >> /tmp/squid-bypass-audit-updated.csv
+{% endfor %}squid -k parse
+squid -k reconfigure
+```
+
+## 動作確認
+
+- `squid -k parse` がエラーなく終了していること（構文検証OK）
+- 全 {{ csv_rows | length }} 件のバイパス設定について `disposition`（keep/review/remove）が確認できていること
+- `remove` 判定で除外を解除した対象について、該当アプリ(証明書ピン留めアプリ等)からの疎通が別セッションで正常に継続していること、または想定通り検査対象になっていること
+- `squid -k reconfigure` 実行後、正当な除外(`still_needed=true`のkeep判定)は引き続きsplice/ICAP除外/直接接続として機能していること
+
+## 注意事項
+
+- SSL Bump除外・ICAP検査除外・always_directはいずれも検査・制御が効かない穴になる。棚卸し時は必ず理由(reason)と登録日(added_at)を確認し、期限切れ・理由不明の除外を放置しない。
+- 変更前に必ず `squid.conf` をバックアップする（手順1でタイムスタンプ付きバックアップを取得済みであることを確認）。
+- 除外を新規追加する際は、必ず台帳に理由(reason)と有効期限相当の情報(added_atと定期的な見直し予定)を記録する運用を徹底する。記録のない除外は次回棚卸しで惰性除外の疑いとして扱う。
+- `remove` 判定の除外を無効化する際は、いきなり本番反映せず、コメントアウト後に`squid -k parse`で検証し、該当アプリの疎通を別セッションで確認してからreconfigureする。影響確認を怠ると、証明書ピン留めアプリ等の正当な通信を壊す可能性がある。
+- 棚卸しの実施記録（台帳の更新履歴、承認者、実施日）は監査証跡として保管し、次回棚卸し時に参照できるようにする。

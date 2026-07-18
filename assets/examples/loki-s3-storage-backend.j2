@@ -1,0 +1,146 @@
+# LokiのS3互換オブジェクトストレージ構成 — {{ hostname }}
+
+## 目的
+
+{{ hostname }} で稼働する Loki（v{{ loki_version }}）のチャンク/インデックス保管先を、ローカルファイルシステム（{{ old_storage_path }}）からS3互換オブジェクトストレージへ移行し、`storage_config` と `schema_config` を正しく設定して永続化することを目指します。
+
+## 用語解説
+
+- **storage_config**: Lokiがチャンク（ログ本体の圧縮ブロック）とインデックスの実データをどこに読み書きするかを定義する設定ブロック
+- **チャンク(chunk)**: 一定期間・サイズでまとめられた圧縮ログデータの単位。オブジェクトストレージにはこの単位でオブジェクトとして書き込まれる
+- **インデックス**: どのラベル・時間範囲のログがどのチャンクに含まれるかを示す検索用メタデータ
+- **schema_config / TSDBスキーマ**: どの日付からどのインデックス実装（boltdb-shipper/tsdb等）とオブジェクトストアを使うかを、日付境界で切り替える設定。tsdbは新しい高性能インデックス実装
+- **s3forcepathstyle(path style)**: バケット名をホスト名のサブドメインではなくURLパスに含める(`https://endpoint/bucket/...`)アクセス方式。MinIO等のS3互換ストレージで必要になることが多い
+- **IAMロール**: アクセスキーを発行せずに、実行環境（EC2/EKS/ECS等）に紐づく形で一時的なAWS権限を付与する仕組み
+
+## シナリオ設定
+
+{{ hostname }} の Loki 設定ファイル（{{ config_path }}）を以下の値でS3互換ストレージ構成に更新します。
+
+| 項目 | 値 |
+| --- | --- |
+| s3_endpoint | {{ s3_endpoint }} |
+| region | {{ s3_region }} |
+| path_style | {{ path_style }} |
+| schema_store | {{ schema_store }} |
+| schema適用開始日 | {{ schema_from_date }} |
+| 旧ストレージパス | {{ old_storage_path }} |
+
+対象バケット:
+
+| バケット名 | 用途 |
+| --- | --- |
+{% for b in buckets %}| {{ b.name }} | {{ b.purpose }} |
+{% endfor %}
+
+## 対応手順
+
+### 1. 現行構成をバックアップし現状を確認する
+
+```bash
+cp {{ config_path }} {{ config_path }}.bak.$(date +%Y%m%d)
+grep -A5 'storage_config' {{ config_path }}
+du -sh {{ old_storage_path }}
+```
+
+現行のファイルシステム保管（{{ old_storage_path }}）は移行完了・動作確認が終わるまで残したまま、設定ファイルの複製に対して以降の変更を加えます。
+
+### 2. storage_config にS3互換エンドポイントを設定する
+
+`{{ config_path }}` の `storage_config` を以下のように編集します。
+
+```yaml
+storage_config:
+  aws:
+    s3: s3://{{ s3_region }}/
+    endpoint: {{ s3_endpoint }}
+    bucketnames: {% for b in buckets %}{{ b.name }}{% if not loop.last %},{% endif %}{% endfor %}
+
+    s3forcepathstyle: {{ path_style }}
+    region: {{ s3_region }}
+```
+
+- `endpoint` にMinIO等のS3互換ストレージのURLを指定します。
+- `bucketnames` はカンマ区切りで複数バケットを指定できます（チャンク用/ルール用を分離する場合）。
+- `s3forcepathstyle` はエンドポイントがバーチャルホスト形式のDNSに対応していない場合に `true` にします。対応済みAWS S3を使う場合は `false` で問題ありません。
+
+### 3. schema_config にtsdbスキーマの新エントリを追加する
+
+既存の `schema_config.configs` に新しいエントリを **追記** します（既存エントリは削除しません）。
+
+```yaml
+schema_config:
+  configs:
+    # 既存のエントリはそのまま残す
+    - from: {{ schema_from_date }}
+      store: {{ schema_store }}
+      object_store: s3
+      schema: v12
+      index:
+        prefix: loki_index_
+        period: 24h
+```
+
+`from` に指定した {{ schema_from_date }} 以降に書き込まれるチャンク/インデックスのみ新しいS3バックエンドへ切り替わり、それ以前のデータは旧スキーマのまま読み出せます。
+
+### 4. S3認証情報を設定する（IAMロールを優先）
+
+| 方式 | 説明 |
+| --- | --- |
+{% for c in credentials_methods %}| {{ c.method }} | {{ c.detail }} |
+{% endfor %}
+
+IAMロールが使えない実行環境では、systemdユニットに環境変数として注入します。
+
+```bash
+sudo systemctl edit loki
+```
+
+```ini
+[Service]
+Environment="AWS_ACCESS_KEY_ID=<発行したキーID>"
+Environment="AWS_SECRET_ACCESS_KEY=<発行したシークレット>"
+```
+
+`{{ config_path }}` の `storage_config.aws` には `access_key_id` / `secret_access_key` キーを追加しないでください。環境変数またはIAMロールから自動的に解決されます。
+
+### 5. 設定を検証し反映する
+
+```bash
+/usr/bin/loki -config.file={{ config_path }} -verify-config
+sudo systemctl reload loki
+sudo systemctl status loki --no-pager
+```
+
+## 動作確認
+
+### 6. 新バックエンドへの書き込みとクエリ取得を確認する
+
+旧ストレージ（{{ old_storage_path }}）を無効化・削除する前に、必ず新しいS3バックエンドへの読み書きが成立することを確認します。
+
+```bash
+# テストログを1件投入
+curl -s -H "Content-Type: application/json" -XPOST http://localhost:3100/loki/api/v1/push \
+  -d '{"streams":[{"stream":{"job":"{{ log_job_label }}"},"values":[["'"$(date +%s%N)"'","s3 migration check"]]}]}'
+
+# 対象バケットにチャンクオブジェクトが書き込まれたことを確認
+aws --endpoint-url {{ s3_endpoint }} s3 ls s3://{{ buckets[0].name }}/ --recursive | tail -n 5
+
+# クエリで投入したログが取得できることを確認
+curl -s -G http://localhost:3100/loki/api/v1/query_range \
+  --data-urlencode 'query={job="{{ log_job_label }}"}' | grep -c 's3 migration check'
+```
+
+- バケット一覧にチャンクオブジェクトが出現すること
+- クエリ結果に投入したテストログが含まれること（件数1以上）
+- `{{ schema_from_date }}` 以降のログが `object_store: s3` 経由で保存されていること（Lokiログの `component=table-manager` または `msg="using schema"` 相当の出力で確認）
+
+これらすべてを確認できて初めて、旧ファイルシステム保管（{{ old_storage_path }}）の無効化・削除に進みます。
+
+## 注意事項
+
+- S3認証情報は機微情報です。IAMロールでの権限付与を最優先とし、やむを得ず環境変数を使う場合も `{{ config_path }}` への平文記載（access_key/secret_key直書き）は避けてください。
+- 対象バケット（{% for b in buckets %}{{ b.name }}{% if not loop.last %}, {% endif %}{% endfor %}）にはバケットポリシーで最小権限のアクセス制御を設定し、サーバーサイド暗号化を有効化してください。
+- `s3forcepathstyle`（path_style）はストレージ製品のDNS対応状況に合わせて要否を判断してください。誤って `false` のまま非対応エンドポイントに接続すると書き込み・読み出しの両方が失敗します。
+- schema移行は既存の `schema_config.configs` エントリを削除せず追記する形で行ってください。過去データの索引情報が失われるとクエリ不能になります。
+- 上記「動作確認」の手順で新しいS3バックエンドへの書き込み・クエリ取得を確認できるまでは、旧ストレージ（{{ old_storage_path }}）を無効化・削除しないでください。問題があれば `{{ config_path }}.bak.*` へ切り戻します。

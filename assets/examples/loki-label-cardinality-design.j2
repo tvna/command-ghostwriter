@@ -1,0 +1,135 @@
+# Lokiラベルカーディナリティ設計
+
+Lokiはラベルの組み合わせごとに「ストリーム」を作りインデックスします。request_idやuser_idのような高カーディナリティな値を安易にラベル化すると、ストリーム数が際限なく増え、チャンクの肥大化とインジェスタのメモリ逼迫、クエリ性能の悪化を招きます。低カーディナリティな値だけをラベルに残し、高カーディナリティな値はログ本文側で検索できるようにする設計手順を示します。
+
+## 目的
+
+対象の{{ csv_rows | length }}項目について、ラベルに残す値(低カーディナリティ)とログ本文に残す値(高カーディナリティ)を切り分け、promtailのpipeline_stagesとLokiのlimits_configでカーディナリティ爆発を予防できるようになることを目指します。
+
+## 用語解説
+
+- **カーディナリティ**: あるフィールドが取り得る値の種類数。値の種類が多いほど「高カーディナリティ」と呼ぶ
+- **ストリーム**: Lokiにおける「ラベルの組み合わせ1セット」ごとの論理的なログの流れ。ラベルの組み合わせ数がそのままストリーム数になる
+- **ストリーム数の爆発**: 高カーディナリティな値をラベル化すると、値の組み合わせパターン分だけストリームが生成され、インデックスとインジェスタのメモリを圧迫する現象
+- **チャンク肥大化**: ストリームが細分化されすぎることで1ストリームあたりのログ量が減り、圧縮効率の低い小さなチャンクが大量に生成される問題
+- **pipeline_stages**: promtailがログ行を取り込む際に、正規表現抽出・ラベル付与・ラベル除去などを行う処理段
+- **labels ステージ**: `regex` ステージ等で抽出したフィールドをストリームラベルに昇格させる pipeline_stages の設定
+- **labeldrop ステージ**: 既にラベルとして付与されている項目をラベル集合から除外する pipeline_stages の設定。誤って高カーディナリティな値を昇格させてしまった構成の是正に使う
+- **LogQLのラベルフィルタ vs 行フィルタ**: `{job="api"}` のようなストリームセレクタ内のラベル条件はインデックスを使って対象ストリームを絞り込むため低コストだが、`|= "error"` のような行フィルタはセレクタで絞られたログ本文を都度スキャンするため相対的に高コストになる。パーサ後の `| json | request_id="abc"` も行フィルタと同様にインデックスを使わない絞り込みである
+- **limits_config**: Loki側でユーザーごとの最大ストリーム数(`max_streams_per_user` / `max_global_streams_per_user`)や取り込みレートを制限する設定ブロック
+
+## シナリオ設定
+
+対象の{{ csv_rows | length }}フィールドについて、ラベル化の可否を次のとおり整理します。
+
+| field | as_label | cardinality | rationale | note |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["field"] }} | {{ r["as_label"] }} | {{ r["cardinality"] }} | {{ r["rationale"] }} | {{ r["note"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 現状のラベル運用を洗い出し高カーディナリティ項目を特定する
+
+既存のpromtail設定とLoki側のラベル一覧を突き合わせ、cardinalityがhighの項目が誤ってラベル化されていないかを確認します。
+
+```bash
+{% for r in csv_rows %}echo "{{ r["field"] }}: as_label={{ r["as_label"] }} cardinality={{ r["cardinality"] }}"
+{% endfor %}```
+
+### 2. 低カーディナリティ項目のみをlabelsステージで昇格させる
+
+promtailのpipeline_stagesで、job/host/env/levelのような低カーディナリティ項目だけをラベルに昇格させます。
+
+```yaml
+scrape_configs:
+  - job_name: app-logs
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: app
+          host: web01
+          env: prod
+    pipeline_stages:
+      - regex:
+          expression: '^(?P<ts>\S+) level=(?P<level>\w+) request_id=(?P<request_id>\S+) user_id=(?P<user_id>\S+) msg="(?P<msg>.*)"'
+      - labels:
+          level:
+```
+
+`labels` ステージには `level` のみを指定し、`request_id` や `user_id` は抽出結果(extracted map)に残したままラベルへは昇格させません。
+
+### 3. 高カーディナリティ項目はログ本文側に残す
+
+抽出した高カーディナリティ項目は、`labels` ステージで指定せずログ本文(structured metadataまたはmsg内)に留めます。
+
+```bash
+{% for r in csv_rows %}{% if r["as_label"] == "false" %}echo "{{ r["field"] }}: ラベル化せずログ本文側に保持 ({{ r["rationale"] }})"
+{% endif %}{% endfor %}```
+
+### 4. 既存の悪いラベルをlabeldropステージで是正する
+
+過去の設定で高カーディナリティ項目が誤ってラベル昇格されている場合は、`labeldrop` ステージで除去します。
+
+```yaml
+    pipeline_stages:
+      - regex:
+          expression: '^(?P<ts>\S+) level=(?P<level>\w+) request_id=(?P<request_id>\S+) user_id=(?P<user_id>\S+) pod_ip=(?P<pod_ip>\S+) msg="(?P<msg>.*)"'
+      - labels:
+          level:
+      - labeldrop:
+          - request_id
+          - user_id
+          - pod_ip
+```
+
+```bash
+{% for r in csv_rows %}{% if r["as_label"] == "false" %}echo "labeldrop対象: {{ r["field"] }} ({{ r["note"] }})"
+{% endif %}{% endfor %}```
+
+既存のダッシュボードやアラートルールが是正対象のラベルを参照していないかを事前に確認し、参照がある場合はLogQLをラベルセレクタから行フィルタ/パーサ後のラベルフィルタへ書き換えてから適用します。
+
+### 5. LogQLクエリをラベルセレクタ優先の書き方に揃える
+
+ラベル(低カーディナリティ)で対象ストリームを絞り込んでから、本文側の値(高カーディナリティ)を行フィルタ/パーサで絞り込む順序に統一します。
+
+```bash
+logcli query '{job="app", env="prod", level="error"} | json | request_id="req-00123"' --limit=100 --stats
+```
+
+`{job="app", env="prod", level="error"}` の部分はインデックスを使ったストリームセレクタ、`| json | request_id="req-00123"` の部分はパーサ後のラベルフィルタであり、両者のコストが異なることを関係者に共有します。
+
+### 6. limits_configでストリーム数上限を設定する
+
+Loki側でも上限値を設定し、想定外のラベル運用が復活してもストリーム数が無制限に増えないようにします。
+
+```yaml
+limits_config:
+  max_streams_per_user: 10000
+  max_global_streams_per_user: 10000
+  ingestion_rate_mb: 8
+  ingestion_burst_size_mb: 16
+```
+
+### 7. 段階的ロールアウトで新旧設定を並行稼働させる
+
+promtail設定の変更は、新設定を適用したレプリカと旧設定のレプリカを一時的に並行稼働させ、新設定側でストリーム数とクエリ結果が想定どおりであることを確認してから旧設定を停止します。
+
+```bash
+systemctl reload promtail
+logcli series '{job="app"}' --analyze-labels
+```
+
+## 動作確認
+
+1. `logcli series '{job="app"}' --analyze-labels` を実行し、request_id/user_id/trace_id/pod_ipがラベルの候補一覧に含まれていないこと
+2. Lokiの `loki_ingester_memory_streams` メトリクス(`curl -s http://localhost:3100/metrics | grep loki_ingester_memory_streams`)が設計適用前後で減少していること
+3. `logcli query '{job="app", env="prod", level="error"} | json | request_id="req-00123"' --stats` の実行統計で、スキャンしたバイト数・実行時間が設計適用前より悪化していないこと
+4. `limits_config` の `max_streams_per_user` に対してストリーム数が余裕を持って収まっていること
+
+## 注意事項
+
+- 高カーディナリティなフィールド(request_id/user_id/trace_id/pod_ip)は今後もラベルへ昇格させないこと。新しいログ出力を追加する際は、追加前にこのシナリオ設定の観点でカーディナリティを見積もる
+- `labeldrop` による是正は既存のダッシュボード・アラートルール・保存済みLogQLクエリに影響する。是正前に参照箇所を洗い出し、行フィルタ/パーサ後のラベルフィルタへの書き換えが完了してから適用する
+- 既存の悪いラベル運用を移行する際は、新設定(labeldrop適用後)と旧設定を一時的に並行稼働させ、新設定側でストリーム数減少とクエリ結果の一致を確認したうえで旧設定のpromtailインスタンスを停止する。確認前に旧設定を停止しない
+- `limits_config` の上限値はクラスタの実際のストリーム数実績を踏まえて設定し、低すぎる値は正常なログ取り込みの拒否(ingestion drop)を招く。変更後は監視でドロップ発生の有無を確認する

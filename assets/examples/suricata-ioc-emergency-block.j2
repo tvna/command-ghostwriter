@@ -1,0 +1,129 @@
+# Suricataによる脅威IoCの緊急遮断対応
+
+脅威情報として共有された IoC（IP / ドメイン / JA3）を、Suricata の dataset と
+drop ルールへ即時反映し、ヒット監視までを行う初動対応手順書です。CSV には
+{{ csv_rows | length }} 件の IoC が登録されています。root 権限、または
+suricatasc / suricata-update を実行できる権限で作業してください。
+
+## 目的
+
+受領した IoC を Suricata の dataset・drop ルールへ無停止で反映し、遮断（IPS
+モードの場合）またはアラート（IDS モードの場合）が機能していることを
+eve.json のドロップ/アラートイベントで確認し、内部ホストのヒットを隔離対応へ
+エスカレーションできる状態を作ることを目的とします。
+
+## 用語解説
+
+- **dataset**: IP アドレスや文字列（ドメイン・ハッシュ等）の集合を外部ファイルとして保持し、ルールから `dataset` キーワードで参照する仕組み。`suricatasc` 経由で無停止追加できる
+- **suricatasc**: Suricata のユニックスソケット経由で稼働中のインスタンスを制御するツール。`dataset-add` や `reload-rules` を無停止で実行できる
+- **IDS/IPSモード**: IDS はパケットを複製して検知のみ行い遮断はできない。IPS（インライン）はパケット経路上に入り drop アクションで実際に遮断する
+- **TLP (Traffic Light Protocol)**: 情報共有範囲を示すラベル。RED/AMBER は社外・場合により社内共有範囲も制限される
+
+## シナリオ設定
+
+| ioc_value | ioc_type | source | tlp | added_at | expire_at |
+|-----------|----------|--------|-----|----------|-----------|
+{% for r in csv_rows %}| {{ r["ioc_value"] }} | {{ r["ioc_type"] }} | {{ r["source"] }} | {{ r["tlp"] }} | {{ r["added_at"] }} | {{ r["expire_at"] }} |
+{% endfor %}
+
+## 1. IDS/IPSモードを確認する
+
+drop ルールは **インライン(IPS)構成でなければ実際には遮断されず、アラートの
+み記録されます。** 先に自環境の動作モードを必ず確認してください。
+
+```bash
+grep -A5 "^af-packet:" /etc/suricata/suricata.yaml | grep -E "copy-mode|interface"
+ps aux | grep '[s]uricata'
+```
+
+- `copy-mode: ips` が設定されている、または `nfq`/`netmap` inline 構成の場合 → IPS（遮断が有効）
+- `copy-mode: tap` や `ids-only`、af-packet に copy-mode の記載がない場合 → IDS（アラートのみ、遮断されない）
+
+IDS モードの場合は、本手順の drop ルールだけでは通信は止まりません。同一
+IoC を FW（firewalld/iptables 等）側の遮断ルールにも並行投入し、遮断は FW
+側で行う運用にしてください。
+
+## 2. IoCをdatasetへ無停止で反映する（suricatasc dataset-add）
+
+IP 種別はそのまま、ドメイン・JA3 等の文字列種別は `dataset-add` の仕様上
+base64 エンコードした値で登録します。既存の稼働プロセスを止めずに反映され
+ます。
+
+```bash
+# IP種別のIoCをdatasetへ追加
+{% for r in csv_rows %}{% if r["ioc_type"] == "ip" %}suricatasc -c "dataset-add ioc_block_ips ip {{ r["ioc_value"] }}"
+{% endif %}{% endfor %}
+# ドメイン種別のIoCをdatasetへ追加（値はbase64化して渡す）
+{% for r in csv_rows %}{% if r["ioc_type"] == "domain" %}suricatasc -c "dataset-add ioc_block_domains string $(echo -n '{{ r["ioc_value"] }}' | base64 -w0)"
+{% endif %}{% endfor %}
+# JA3種別のIoCをdatasetへ追加（値はbase64化して渡す）
+{% for r in csv_rows %}{% if r["ioc_type"] == "ja3" %}suricatasc -c "dataset-add ioc_block_ja3 string $(echo -n '{{ r["ioc_value"] }}' | base64 -w0)"
+{% endif %}{% endfor %}
+```
+
+## 3. dropルールを投入する（sid:9200001帯）
+
+`/etc/suricata/rules/ioc-emergency.rules` に、dataset を参照する汎用の
+drop ルールを用意します。個々の IoC はステップ2の dataset 側で管理するた
+め、ルール自体は種別ごとに1本ずつです。
+
+```bash
+cat <<'EOF' >> /etc/suricata/rules/ioc-emergency.rules
+drop ip [$IOC_IPS] any <> $HOME_NET any (msg:"IOC-EMERGENCY IP block (dataset match)"; dataset:isset,ioc_block_ips,type ip,state /var/lib/suricata/data/ioc_block_ips.lst; classtype:trojan-activity; sid:9200001; rev:1;)
+drop dns any any -> any any (msg:"IOC-EMERGENCY domain block (dns.query dataset match)"; dns.query; dataset:isset,ioc_block_domains,type string,state /var/lib/suricata/data/ioc_block_domains.lst; classtype:trojan-activity; sid:9200002; rev:1;)
+drop tls any any -> any any (msg:"IOC-EMERGENCY domain block (tls.sni dataset match)"; tls.sni; dataset:isset,ioc_block_domains,type string,state /var/lib/suricata/data/ioc_block_domains.lst; classtype:trojan-activity; sid:9200003; rev:1;)
+drop tls any any -> any any (msg:"IOC-EMERGENCY JA3 block (dataset match)"; ja3.hash; dataset:isset,ioc_block_ja3,type string,state /var/lib/suricata/data/ioc_block_ja3.lst; classtype:trojan-activity; sid:9200004; rev:1;)
+EOF
+suricata -T -c /etc/suricata/suricata.yaml -v
+suricatasc -c "reload-rules"
+```
+
+`[$IOC_IPS]` は suricata.yaml の `vars.address-groups` にステップ2で使った
+IP 群を割り当てておくか、暫定運用では `any` に置き換えても構いません。
+`suricata -T` の構文チェックが通ってから `reload-rules` してください。
+
+## 4. eve.jsonでヒットを監視し、内部ホストヒットは隔離へエスカレーションする
+
+```bash
+tail -F /var/log/suricata/eve.json | jq -c 'select(.event_type=="drop" or (.event_type=="alert" and (.alert.signature_id==9200001 or .alert.signature_id==9200002 or .alert.signature_id==9200003 or .alert.signature_id==9200004)))'
+```
+
+- `src_ip` が自組織の内部セグメント（社内 IP 帯）に該当する場合、そのホス
+  トは IoC 該当先へ実際に通信した=感染疑いとして、ネットワーク隔離手順
+  （該当ポートの shutdown、DHCP除外、資産持ち出し）へただちにエスカレー
+  ションしてください。
+- `src_ip` が外部からの着信（内向きスキャン等）である場合は、遮断ログを
+  保全した上で通常のインシデント記録に留めます。
+
+## 動作確認
+
+1. `suricatasc -c "dataset-lookup ioc_block_ips ip <登録したIoC>"` で
+   dataset に反映されていることを確認する
+2. IPSモードの環境では、テスト用に許可された通信元から登録済みIoC宛てへ
+   到達性確認を行い、実際に破棄されること（応答なし/接続失敗）を確認する。
+   IDSモードの環境では、同じ通信に対して eve.json にアラートが記録される
+   ことを確認する
+3. ステップ4の `jq` フィルタで、投入した sid（9200001〜9200004）のイベン
+   トが記録されることを確認する
+4. `suricata -T -c /etc/suricata/suricata.yaml -v` の構文チェックがエラー
+   なく完了していることを確認する
+
+## 注意事項
+
+- **本手順の drop ルールはインライン(IPS)構成でなければ遮断効果がない。**
+  ステップ1でモードを確認し、IDS環境では FW 側の並行遮断ルールを必ず投入
+  すること。Suricata側のみで遮断が完了したと誤認しないこと。
+- FW側にも同一IoCの遮断ルールを追加する場合は、いずれか一方を無効化・撤
+  去する前に、動作確認セクションの手順で新ルール（dataset/drop ルール）
+  側が単独でも遮断（またはIDSならアラート）できることを確認してから、重
+  複していた旧ルールを外すこと。両方が有効な間に片方だけを外して無防備な
+  時間を作らない。
+- TLP:RED/AMBER の IoC を含む場合、共有範囲外（社外・無関係部署）へログや
+  IoC値を転記・共有しないこと。dataset ファイルやルールファイルの配布範囲
+  にも注意する。
+- `expire_at` を過ぎたIoCは `suricatasc -c "dataset-remove <name> <type> <value>"`
+  で個別に、またはdatasetファイルの再生成で棚卸し・削除すること。放置す
+  ると正当な通信再開後も誤遮断が続く。
+- ルール追加前に `/etc/suricata/rules/ioc-emergency.rules` のバックアップ
+  を取得し、`suricata -T` の構文チェックに失敗した場合はロールバックでき
+  るようにしておくこと。

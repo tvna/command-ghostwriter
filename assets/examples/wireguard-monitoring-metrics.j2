@@ -1,0 +1,142 @@
+# WireGuardトンネル状態の監視構築
+
+`wg show all dump`の出力を定期取得し、ハンドシェイク鮮度と転送量を監視できる状態を構築します。
+
+## 目的
+
+`wg show all dump`のフィールド構造を理解した上で、ハンドシェイクが更新されなくなったPeerを検知する集計スクリプトを作成し、定期実行とアラート通知まで組み込めるようになることを目指します。
+
+## 用語解説
+
+- **latest-handshake**: 直近でハンドシェイク(鍵交換)が成立したUNIXタイムスタンプ(秒)。WireGuardは通信がある限り約120秒間隔で再ハンドシェイクするため、この値の陳腐化はトンネル断の強い兆候になる
+- **preshared-key(PSK)**: 公開鍵暗号に加える追加の共有鍵。`wg show`の出力に含まれるが、この値自体がPeer間の追加認証情報であり、ログ等へ残すと漏えいリスクになる
+- **transfer-rx / transfer-tx**: Peerごとの受信・送信累積バイト数。カウンタ値であり、2時点の差分を取得間隔で割ることでスループットに換算できる
+- **persistent-keepalive**: NAT越え等のためにPeerが一定間隔で送る無通信時キープアライブパケットの間隔(秒)。0は無効を意味する
+- **handshake_stale_seconds**: 本手順書内で、latest-handshakeからの経過秒がこの値を超えたPeerを「ダウン」とみなす閾値として使う呼称
+
+## シナリオ設定
+
+以下のインターフェースを監視対象とし、ハンドシェイク陳腐化の閾値は `{{ handshake_stale_seconds }}` 秒、アラート通知先は `{{ alert_channel }}` とします。
+
+対象インターフェース:
+
+{% for iface in interfaces %}- `{{ iface }}`
+{% endfor %}
+
+期待されるPeer一覧:
+
+| name | public_key | allowed_ips |
+|---|---|---|
+{% for p in peers_expected %}| {{ p["name"] }} | {{ p["public_key"] }} | {{ p["allowed_ips"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. `wg show all dump`の出力形式を確認する
+
+対象インターフェースそれぞれで、Peer行がタブ区切りで以下の順に出力されることを確認します。
+
+```
+interface  public-key  preshared-key  endpoint  allowed-ips  latest-handshake  transfer-rx  transfer-tx  persistent-keepalive
+```
+
+```bash
+sudo wg show all dump | column -t -s $'\t'
+```
+
+1列目がinterface名、以降がPeer情報です。インターフェース行自体(private-keyを含む1行目)は`wg show all dump`には現れず、Peer行のみが列挙されます。
+
+### 2. ハンドシェイク経過秒を集計するスクリプトを作成する
+
+PSK列(3列目)を出力に含めないよう、明示的に読み飛ばして集計するスクリプトを用意します。
+
+```bash
+cat <<'SCRIPT' > /usr/local/bin/wg-handshake-check.sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+STALE_SECONDS="{{ handshake_stale_seconds }}"
+NOW="$(date +%s)"
+
+sudo wg show all dump | while IFS=$'\t' read -r iface pubkey psk endpoint allowed_ips latest_hs rx tx keepalive; do
+  # psk は集計・出力のいずれにも使わない(意図的に破棄)
+  if [ "${latest_hs}" = "0" ]; then
+    elapsed="never"
+    status="DOWN"
+  else
+    elapsed=$(( NOW - latest_hs ))
+    if [ "${elapsed}" -gt "${STALE_SECONDS}" ]; then
+      status="DOWN"
+    else
+      status="UP"
+    fi
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "${iface}" "${pubkey}" "${elapsed}" "${status}" "${rx}" "${tx}"
+done
+SCRIPT
+chmod 750 /usr/local/bin/wg-handshake-check.sh
+```
+
+### 3. 集計スクリプトを実行し、Peer別の経過秒を確認する
+
+```bash
+sudo /usr/local/bin/wg-handshake-check.sh | column -t
+```
+
+出力は `interface  public_key  elapsed_seconds  status  rx_bytes  tx_bytes` の6列です。`elapsed_seconds`が `{{ handshake_stale_seconds }}` を超えているPeerが`DOWN`と判定されます。
+
+### 4. 期待されるPeerが全て応答しているか突合する
+
+```bash
+comm -23 \
+  <(sudo wg show all dump | cut -f2 | sort -u) \
+  <(printf '%s\n'{% for p in peers_expected %} "{{ p["public_key"] }}"{% endfor %} | sort -u)
+```
+
+差分が出力された場合、期待Peer一覧に対して`wg show`側で確認できない公開鍵があることを意味します。逆方向(想定外のPeerが接続している)も同様に確認します。
+
+### 5. 定期実行とアラート通知を組み込む
+
+```bash
+cat <<'EOF' > /etc/cron.d/wg-handshake-check
+*/2 * * * * root /usr/local/bin/wg-handshake-check.sh > /var/log/wg-handshake-check.tsv 2>> /var/log/wg-handshake-check.err
+EOF
+```
+
+DOWN判定を検知したら通知先へ送るチェックを追加します。
+
+```bash
+cat <<'SCRIPT' >> /usr/local/bin/wg-handshake-check.sh
+
+if grep -q "DOWN" /var/log/wg-handshake-check.tsv 2>/dev/null; then
+  curl -sf -X POST -H "Content-Type: application/json" \
+    -d '{"text":"WireGuard peer handshake stale detected"}' \
+    "{{ alert_channel }}"
+fi
+SCRIPT
+```
+
+### 6. Prometheus連携を行う場合(任意)
+
+数値としての取得間隔を短く保ちたい場合は、`wireguard_exporter`を導入してPrometheusから直接スクレイプする方法もあります。
+
+```bash
+wireguard_exporter --wg.interfaces={% for iface in interfaces %}{{ iface }}{% if not loop.last %},{% endif %}{% endfor %} --web.listen-address=:9586
+```
+
+`wireguard_exporter`は`wireguard_latest_handshake_seconds`と`wireguard_peer_transfer_bytes`をPeer単位のラベル付きメトリクスとして公開するため、Prometheusの`prometheus.yml`にスクレイプターゲットとして`localhost:9586`を追加し、`(time() - wireguard_latest_handshake_seconds) > {{ handshake_stale_seconds }}`をアラートルールに設定します。
+
+## 動作確認
+
+- 集計スクリプト(`/usr/local/bin/wg-handshake-check.sh`)が、監視対象の全Peerについて `interface / public_key / elapsed_seconds / status / rx_bytes / tx_bytes` を1行ずつ出力すること
+- `elapsed_seconds`が `{{ handshake_stale_seconds }}` 秒を超えるPeerに`DOWN`が付与されること
+- 期待Peer一覧(`peers_expected`)と`wg show`の実際の出力を突合し、差分がないこと
+- cronによる定期実行(`/etc/cron.d/wg-handshake-check`)が動作し、`/var/log/wg-handshake-check.tsv`が更新され続けること
+- 意図的にPeerの接続を止めた場合に、`{{ handshake_stale_seconds }}`秒経過後`{{ alert_channel }}`へ通知が届くこと
+
+## 注意事項
+
+- `wg show all dump`の出力にはPeerのpublic-keyだけでなくpreshared-key(PSK)の値も含まれる。集計スクリプトはPSK列を変数に読み込んだ上で一切出力・ログに書き込まないこと。cronの標準出力やエラー出力をファイルへリダイレクトする際も、元の`wg show`生出力そのものを保存先に含めない。
+- 監視の主指標は`latest-handshake`の鮮度であり、rx/txバイト数の推移は補助的な参考値とする。バイト数は通信が少ない待機系Peerでも長期間変化しないことがあり、それ単独ではダウン判定の根拠にならない。
+- `elapsed_seconds`が"never"(ハンドシェイク未実施)のPeerは、鍵設定ミスやエンドポイント未到達など初回接続前の状態である可能性があるため、鮮度切れとは別に扱って調査する。
+- アラート通知先(`{{ alert_channel }}`)のURLは秘密情報に準ずる値になり得るため、スクリプトやcron定義に平文で残す場合はファイルのパーミッション(root専用readなど)を必ず絞る。

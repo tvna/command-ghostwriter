@@ -1,0 +1,126 @@
+# Keycloak Token Exchangeによる委譲認可
+
+マイクロサービス間でトークンを安全に委譲・変換するため、Keycloakのtoken exchange機能を最小権限で構成する手順です。`source_client`が持つトークンを、`target_audience`向けのトークンへ交換できる範囲を`permission_policy`と`allowed_subjects`で厳密に絞り込みます。
+
+## 目的
+
+サービス間呼び出しのたびに個別クレデンシャルを配布するのではなく、token exchangeによって「誰の代理として」「どのaudience向けに」トークンを変換できるかを許可リスト化し、委譲の乱用を防ぎつつマイクロサービス間認可を成立させることを目指します。
+
+## 用語解説
+
+- **Token Exchange**: OAuth 2.0の拡張仕様(RFC 8693)。`grant_type=urn:ietf:params:oauth:grant-type:token-exchange`を用いて、あるトークン(`subject_token`)を別のクライアントやaudience向けのトークンに変換する
+- **委譲(delegation)**: サービスAがサービスBの代理としてサービスCを呼び出す際、Bの本来のトークンではなく、Aが変換した(Bの権限を保持した)トークンを使う構成
+- **audience制限**: 変換後トークンの`aud`クレームを`target_audience`に限定し、意図しないサービスへトークンが流用されるのを防ぐ仕組み
+- **client permission / policy**: Keycloakの認可サービス機能を使い、「どのクライアント(`source_client`)がこのクライアントへのexchangeを許可されるか」をリソース・ポリシー・パーミッションとして定義するもの
+- **exchange監査ログ**: token exchangeの成功・拒否をrealmのイベントログ(`TOKEN_EXCHANGE`)に記録し、誰が誰のトークンを変換したかを追跡できるようにする仕組み
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 件のexchange許可を構成します。
+
+| source_client | target_audience | permission_policy | allowed_subjects | scope |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["source_client"] }} | {{ r["target_audience"] }} | {{ r["permission_policy"] }} | {{ r["allowed_subjects"] }} | {{ r["scope"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. realmでtoken-exchange機能(preview)を有効化する
+
+Token exchangeはKeycloakのpreview機能であり、バージョンごとに有効化方法と成熟度が異なります。導入前に対象バージョンのリリースノートで`token-exchange`のステータス(preview/deprecated)を必ず確認してください。
+
+```bash
+# Quarkus版 Keycloak(起動時にfeatureを有効化)
+bin/kc.sh start --features=token-exchange
+
+# 稼働確認
+bin/kcadm.sh config credentials --server https://keycloak.example.internal --realm master --user admin --password "$KEYCLOAK_ADMIN_PASSWORD"
+bin/kcadm.sh get serverinfo --fields 'profileInfo(disabledFeatures,enabledFeatures)'
+```
+
+`enabledFeatures`に`TOKEN_EXCHANGE`が含まれることを確認してから次へ進みます。
+
+### 2. 対象クライアントでpermissionsを有効化する
+
+`target_audience`のクライアントに対して、認可サービスによるパーミッション管理を有効化します。これによりrealm-managementクライアント配下に`client.resource.<target_audienceのID>`リソースが自動生成されます。
+
+```bash
+{% for r in csv_rows %}TARGET_ID_{{ loop.index }}=$(bin/kcadm.sh get clients -r zero-trust --query "clientId={{ r["target_audience"] }}" --fields id --format csv --noquotes)
+bin/kcadm.sh update clients/$TARGET_ID_{{ loop.index }}/management/permissions -r zero-trust -s enabled=true
+{% endfor %}```
+
+### 3. 委譲元クライアントを許可するclientポリシーを作成する
+
+`allowed_subjects`(委譲元のサービスアカウント)だけがexchangeできるよう、クライアントベースのポリシーをrealm-managementクライアント上に作成します。
+
+```bash
+{% for r in csv_rows %}bin/kcadm.sh create clients/$(bin/kcadm.sh get clients -r zero-trust --query "clientId=realm-management" --fields id --format csv --noquotes)/authz/resource-server/policy/client -r zero-trust \
+  -s name="{{ r["permission_policy"] }}-client-policy" \
+  -s logic=POSITIVE \
+  -s 'clients=["{{ r["source_client"] }}"]'
+{% endfor %}```
+
+### 4. token-exchangeスコープの権限(permission)を作成する
+
+手順2で生成された`client.resource.<target_audience>`リソースに対し、スコープ`token-exchange`を許可するパーミッションを、手順3のポリシーに紐づけて作成します。
+
+```bash
+{% for r in csv_rows %}bin/kcadm.sh create clients/$(bin/kcadm.sh get clients -r zero-trust --query "clientId=realm-management" --fields id --format csv --noquotes)/authz/resource-server/permission/scope -r zero-trust \
+  -s name="{{ r["permission_policy"] }}" \
+  -s 'resources=["client.resource.'$TARGET_ID_{{ loop.index }}'"]' \
+  -s 'scopes=["token-exchange"]' \
+  -s 'policies=["{{ r["permission_policy"] }}-client-policy"]' \
+  -s decisionStrategy=UNANIMOUS
+{% endfor %}```
+
+`allowed_subjects`列のサービスアカウントは、`{{ csv_rows[0]["source_client"] }}`のようなクライアントのサービスアカウントであることを前提とします。個人ユーザーではなくサービスアカウント単位で委譲範囲を管理してください。
+
+### 5. トークン変換(exchange)を要求する
+
+`source_client`のクライアントクレデンシャルで取得した`subject_token`を、`target_audience`向けに変換します。`scope`列は変換後トークンに要求するスコープです。
+
+```bash
+{% for r in csv_rows %}# {{ r["source_client"] }} -> {{ r["target_audience"] }}
+SUBJECT_TOKEN_{{ loop.index }}=$(curl -s -X POST "https://keycloak.example.internal/realms/zero-trust/protocol/openid-connect/token" \
+  -d "grant_type=client_credentials" \
+  -d "client_id={{ r["source_client"] }}" \
+  -d "client_secret=$SOURCE_CLIENT_SECRET_{{ loop.index }}" \
+  | python3 -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
+
+curl -s -X POST "https://keycloak.example.internal/realms/zero-trust/protocol/openid-connect/token" \
+  -d "grant_type=urn:ietf:params:oauth:grant-type:token-exchange" \
+  -d "client_id={{ r["source_client"] }}" \
+  -d "client_secret=$SOURCE_CLIENT_SECRET_{{ loop.index }}" \
+  -d "subject_token=$SUBJECT_TOKEN_{{ loop.index }}" \
+  -d "subject_token_type=urn:ietf:params:oauth:token-type:access_token" \
+  -d "requested_token_type=urn:ietf:params:oauth:token-type:access_token" \
+  -d "audience={{ r["target_audience"] }}" \
+  -d "scope={{ r["scope"] }}"
+{% endfor %}```
+
+## 動作確認
+
+1. 上記exchange要求のレスポンスに含まれる`access_token`をデコードし(`jwt.io`または`kcadm.sh`不要でCLI上は`cut -d. -f2 | base64 -d`)、`aud`クレームが要求した`target_audience`と一致することを確認します。
+2. `allowed_subjects`に含まれないクライアント(例: 未許可のサービスアカウント)で同じexchange要求を送り、`403 Forbidden`または`invalid_client`相当のエラーで拒否されることを確認します。
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -X POST "https://keycloak.example.internal/realms/zero-trust/protocol/openid-connect/token" \
+  -d "grant_type=urn:ietf:params:oauth:grant-type:token-exchange" \
+  -d "client_id=unauthorized-client" \
+  -d "client_secret=$UNAUTHORIZED_CLIENT_SECRET" \
+  -d "subject_token=$SUBJECT_TOKEN_1" \
+  -d "subject_token_type=urn:ietf:params:oauth:token-type:access_token" \
+  -d "audience={{ csv_rows[0]["target_audience"] }}"
+```
+
+`403`が返ることを確認できたら、権限外exchangeが拒否されている証拠として記録してください。
+
+3. Admin ConsoleまたはREST APIから`realms/zero-trust/events?type=TOKEN_EXCHANGE`を取得し、成功・拒否それぞれのイベントが監査ログに記録されていることを確認します。
+
+## 注意事項
+
+- **preview機能であることの明示**: token exchangeはKeycloakのpreview API扱いであり、バージョン間で挙動・パラメータ名が変わる可能性がある。導入前に対象バージョンのアップグレードノートを必ず確認し、メジャーバージョンアップ時は再検証すること。
+- **委譲権限の最小化**: `allowed_subjects`は「誰が誰のトークンをexchangeできるか」を明示的に許可リスト化したものであり、ワイルドカードや全クライアント許可のポリシーを作らないこと。新しい委譲経路を追加する際は都度専用の`permission_policy`を発行する。
+- **audience制限の徹底**: `target_audience`を限定しないパーミッションを作ると、意図しないサービスへトークンが横流しされる恐れがある。1パーミッション1audienceを原則とする。
+- **旧来の認可経路との並行運用**: 既存のサービス間通信(サービスアカウント個別クレデンシャル等)からtoken exchangeへ切り替える際は、手順5の変換要求と動作確認の1・2を先に完了させ、新しい経路で正しく認可・拒否されることを確認したうえで、旧来のクレデンシャル配布や直接呼び出し経路を無効化・削除すること。検証前に旧経路を止めない。
+- **監査ログの保全**: `TOKEN_EXCHANGE`イベントは委譲の追跡に必須のため、イベントログの保持期間・エクスポート先を通常の認証イベントと同様に運用し、誰の代理でどのaudience向けに変換されたかを事後に追跡できる状態を維持すること。

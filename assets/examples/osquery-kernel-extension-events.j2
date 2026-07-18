@@ -1,0 +1,127 @@
+# osquery監査イベント(process/socket)収集構成 — {{ osqueryd_service }}
+
+Linux監査サブシステム(audit)とosqueryを連携させ、`process_events`（execve捕捉）と`socket_events`（connect捕捉）を継続収集する構成を、`{{ osqueryd_flags_path }}` と `{{ osquery_conf_path }}` の設定を通じて手順化します。
+
+## 目的
+
+osqueryのaudit publisherがLinux監査ネットリンク経由でexecve/connectをどう捕捉するか、そしてauditd（既存の監査デーモン）との競合をどう回避するかを理解し、`process_events`/`socket_events`スケジュールを安全に有効化・検証できるようになることを目指します。
+
+## 用語解説
+
+- **audit publisher**: osqueryd内部でLinux監査ネットリンク(netlink)を購読し、カーネルが発するexecve/connect等のイベントを`process_events`/`socket_events`テーブルへ変換する仕組み
+- **--disable_audit**: osqueryのaudit publisherそのものを無効化するフラグ。`false`にすると有効化される
+- **--audit_allow_config**: audit publisherがカーネル監査ルール（ウォッチ対象システムコール等）を自ら設定することを許可するフラグ
+- **--audit_persist**: osqueryd再起動時に監査ルールを保持し、ルール消失による収集の空白期間を防ぐフラグ
+- **audit_backlog_limit**: カーネル監査バックログキュー（イベントが監査デーモンに届くまで滞留するリングバッファ）のサイズ。小さすぎるとイベント消失(backlog overflow)が起きる
+- **auditdとの排他**: Linux監査ネットリンクは単一プロセスしか購読できないため、auditdとosqueryのaudit publisherを同時に有効化すると、後から起動した側が購読を奪い、他方は監査イベントを受け取れなくなる
+- **process_events/socket_events**: osqueryの仮想テーブル。前者はプロセス実行(execve)、後者はソケット接続(connect/bind)をカーネルイベントとして記録する
+
+## シナリオ設定
+
+| 設定項目 | 値 |
+| --- | --- |
+| audit_enabled | {{ audit_enabled }} |
+| process_events | {{ process_events }} |
+| socket_events | {{ socket_events }} |
+| audit_backlog_limit | {{ audit_backlog_limit }} |
+| osqueryd flags path | {{ osqueryd_flags_path }} |
+| osquery.conf path | {{ osquery_conf_path }} |
+| osqueryd service | {{ osqueryd_service }} |
+| auditd service | {{ auditd_service }} |
+| schedule interval (秒) | {{ schedule_interval }} |
+
+## 1. auditdとの排他を確認する
+
+監査ネットリンクは単一購読のため、まずauditdが購読中かどうかを確認します。auditdを止めずに両方を有効化すると、どちらか一方しかイベントを受け取れません。
+
+```bash
+sudo systemctl status {{ auditd_service }} --no-pager
+sudo auditctl -s
+```
+
+`auditctl -s`の出力にある`enabled`が`1`（有効）の場合、auditdが監査ネットリンクを購読しています。osqueryのaudit publisherに切り替える場合は、次の手順で新しい経路（osquery側）が実際にイベントを捕捉できることを確認してから、auditdへの依存を外します。
+
+## 2. カーネル監査バックログを設定する
+
+イベント消失を防ぐため、osqueryが監査ルールを設定する前にバックログサイズを引き上げます。
+
+```bash
+sudo auditctl -b {{ audit_backlog_limit }}
+sudo auditctl -s | grep backlog_limit
+```
+
+## 3. osqueryd起動フラグでaudit publisherを有効化する
+
+```bash
+sudo tee {{ osqueryd_flags_path }} <<'EOF'
+--disable_audit=false
+--audit_allow_config=true
+--audit_persist=true
+--audit_backlog_limit={{ audit_backlog_limit }}
+EOF
+```
+
+`--audit_allow_config=true`により、osqueryd自身がexecve/connectを対象とする監査ルールをカーネルへ投入します。`--audit_persist=true`は、osqueryd再起動時にもルールを保持し、再起動直後の収集空白を防ぎます。
+
+## 4. process_events/socket_eventsをスケジュールに登録する
+
+```bash
+sudo tee {{ osquery_conf_path }} <<'EOF'
+{
+  "options": {
+    "flagfile": "{{ osqueryd_flags_path }}"
+  },
+  "schedule": {
+    "process_events": {
+      "query": "SELECT pid, path, cmdline, cwd, mode, auid, uid, gid, time FROM process_events;",
+      "interval": {{ schedule_interval }}
+    },
+    "socket_events": {
+      "query": "SELECT action, pid, path, fd, auid, success, family, protocol, local_address, remote_address, remote_port, time FROM socket_events;",
+      "interval": {{ schedule_interval }}
+    }
+  }
+}
+EOF
+sudo systemctl restart {{ osqueryd_service }}
+```
+
+## 5. auditdとの共存方針を確定する
+
+排他の性質上、恒常運用では次のいずれかを選びます。
+
+```bash
+# 選択肢A: osqueryのaudit publisherに一本化し、auditdを停止する
+sudo systemctl stop {{ auditd_service }}
+sudo systemctl disable {{ auditd_service }}
+
+# 選択肢B: auditdを主とし、osquery側は --disable_audit=true に戻して監査ネットリンクの購読をauditdへ返す
+```
+
+いずれを選ぶ場合も、Step 6の動作確認で新しい経路（選択肢Aならosquery、選択肢Bならauditd）が実際にイベントを記録できることを確認してから、もう一方の停止・無効化を行います。
+
+## 6. 動作確認
+
+コマンド実行と外部接続を発生させ、`process_events`/`socket_events`が実際に記録されることを確認します。
+
+```bash
+# process_eventsの確認: 適当なコマンドを実行してから照会する
+/usr/bin/id
+sudo osqueryi --json "SELECT pid, path, cmdline FROM process_events ORDER BY time DESC LIMIT 5;"
+
+# socket_eventsの確認: 外部接続を発生させてから照会する
+curl -sS -o /dev/null https://example.com
+sudo osqueryi --json "SELECT pid, path, remote_address, remote_port FROM socket_events ORDER BY time DESC LIMIT 5;"
+```
+
+- `process_events`に直前に実行した`/usr/bin/id`のcmdlineが記録されていること
+- `socket_events`に直前の`curl`の接続先(remote_address)が記録されていること
+- `sudo auditctl -s`のbacklog関連カウンタ（lost等）が増加していないこと
+
+## 注意事項
+
+- 監査ネットリンクは単一購読のため、auditdとosqueryのaudit publisherを同時稼働させても両方が完全にイベントを受け取れるわけではない。Step 5で共存方針を確定する前に、必ずStep 6で新しい経路の動作を確認し、確認が取れるまで既存の経路（auditdまたはosquery側）を止めないこと。
+- `process_events`/`socket_events`の全採取は、execve/connectが多いホストではCPU・I/Oへの負荷が大きい。まずは対象ホストの一部で試験導入し、負荷を確認してから展開範囲を広げること。
+- `audit_backlog_limit`が小さいと、バーストするイベントがカーネル側でドロップ(backlog overflow)される。`auditctl -s`のlost系カウンタを監視し、必要に応じて値を引き上げること。
+- 収集されるcmdline（コマンド引数）やremote_address（接続先）は機微情報を含みうる（パスワードを引数で渡すコマンドや、内部インフラのアドレス等）。ログの保存先・アクセス権限・保持期間を限定し、必要な範囲のみを収集するフィルタ（監査ルールのスコープや、収集後のクエリでの除外条件）を設計すること。
+- `--audit_allow_config=true`はosqueryd自身が監査ルールを追加・変更する。他チームが管理する監査ルールと競合しないか、導入前に既存の`auditctl -l`を確認すること。

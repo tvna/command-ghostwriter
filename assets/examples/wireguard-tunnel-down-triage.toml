@@ -1,0 +1,8 @@
+[scenario]
+interface = "wg0"
+listen_port = 51820
+peer_endpoint = "203.0.113.10:51820"
+expected_allowed_ips = "10.10.0.0/24"
+local_allowed_ips = "10.10.0.2/32"
+local_public_key = "LOCALKEYqR3s7ZxQb1kQ9tE0oV2wC4mN6pJ8hF1uT0="
+peer_public_key = "PEERKEYmB8xW2nL5vD9sA1qZ4rY7cH0jK3eU6fT2gI="

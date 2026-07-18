@@ -1,0 +1,125 @@
+# OpenZiti 接続不可の切り分け調査 — {{ scenario.identity }} → {{ scenario.service }}
+
+対象アイデンティティ **{{ scenario.identity }}** がサービス **{{ scenario.service }}** に到達できない事象を、`ziti edge policy-advisor` を起点にエンロール・ポリシー・ポスチャ・回線の順で切り分けます。
+
+## 目的
+
+OpenZiti の ZTNA オーバーレイでサービスへ到達できない障害を、identity のエンロール状態→ service/dial-bind ポリシーの role 一致→ posture-check の充足→ edge-router のオンライン状態と回線→トンネラーログの順に切り分けられるようになることを目指します。
+
+## 用語解説
+
+- **policy-advisor**: 指定した identity と service の間の到達可否と、ブロック要因（ポリシー欠如・ロール不一致・ポスチャ未達など）を診断する `ziti` CLI のサブコマンド
+- **エンロール（enroll）**: identity が発行された登録トークンを使って controller に自身の鍵ペアを登録し、有効な証明書を得るプロセス。未完了だと接続できない
+- **service policy（Dial/Bind）**: どの identity がサービスへ「Dial（接続開始）」または「Bind（サービス提供側として待受）」できるかを role attribute で定義するポリシー
+- **role attribute**: identity・service・edge-router に付与するタグ（例: `#erp-clients`）。ポリシーはこのロールの一致で適用対象を決めるため、綴り誤りがあると静かに不一致になる
+- **posture check**: OS種別・MFA・プロセス起動・ドメイン参加など、接続前に満たすべき端末状態の検証項目
+- **edge-router**: identity とサービス間のトラフィックを中継するオーバーレイ上のルータ。オンラインでないと回線（circuit）が張れない
+- **circuit（回線）**: dial 元から bind 先までデータプレーンで実際に張られる経路。`ziti edge list circuits` で現在確立中の経路を確認できる
+- **ziti-edge-tunnel**: エンドポイントに常駐し、上記すべてを内部で解決してトンネルを張るクライアント。`-v` で詳細ログを標準出力に出せる
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| controller | `{{ scenario.controller }}` |
+| identity | `{{ scenario.identity }}` |
+| service | `{{ scenario.service }}` |
+| 期待される dial role | `{{ scenario.expected_dial_role }}` |
+| posture check 必須 | {{ scenario.posture_required }} |
+| edge-router | `{{ scenario.edge_router }}` |
+
+## 1. policy-advisor で到達可否とブロック要因を診断する
+
+まず controller にログインし、identity とサービスを指定して policy-advisor を実行します。ここで報告される内容が以降どの段を深掘りすべきかの起点になります。
+
+```bash
+ziti edge login {{ scenario.controller }}
+ziti edge policy-advisor identities {{ scenario.identity }} {{ scenario.service }} -q
+```
+
+出力例と読み方:
+
+- `ERROR: Missing identity policy` → 該当 identity にどの Dial/Bind ポリシーも当たっていない（3節へ）
+- `ERROR: Missing service policy` → service 側に当たるポリシーがない、または role 不一致（3節へ）
+- `ERROR: identity is not authorized to dial/bind` → ロール自体は当たるが Dial/Bind の向きを取り違えている（3節へ）
+- `ERROR: posture check(s) failing` → ポリシーは成立しているがポスチャ未達（4節へ）
+- `ERROR: no edge routers online` → identity・サービス双方が使える edge-router が1つもオンラインでない（5節へ）
+- すべて `OK` なのに接続できない → トンネラー側の問題（6節へ）
+
+## 2. identity のエンロール状態を確認する
+
+policy-advisor が identity 未検出やエンロール未完了を示唆した場合、まずエンロール状態そのものを確認します。
+
+```bash
+ziti edge list identities 'name="{{ scenario.identity }}"'
+ziti edge list enrollments 'identity.name="{{ scenario.identity }}"'
+```
+
+- 1つ目のコマンドの `Enrolled` 列が `false` の場合、identity はまだエンロールを完了していません。
+- 2つ目のコマンドに未使用のエンロールトークンが残っている場合、そのトークンをエンドポイントで消費（`ziti-edge-tunnel enroll -j <jwt>` 等）する必要があります。
+
+## 3. service/dial-bind ポリシーの role 一致を確認する
+
+identity・service それぞれに付与されている role attribute と、ポリシーが要求する role を突き合わせます。Dial と Bind の取り違えが最頻の原因です。
+
+```bash
+ziti edge list identities 'name="{{ scenario.identity }}"' -j | grep -A5 roleAttributes
+ziti edge list services 'name="{{ scenario.service }}"' -j | grep -A5 roleAttributes
+ziti edge list service-policies 'service.name="{{ scenario.service }}"'
+```
+
+- 3つ目のコマンドの `Type` 列が `Dial` になっているポリシーの `IdentityRoles` に、identity が持つ role（期待値 `{{ scenario.expected_dial_role }}`）が含まれているかを確認します。
+- role attribute の綴り違い（例: `#erp-client` と `#erp-clients`）は完全一致でしか当たらないため、目視だけでなく `grep` などで文字列を突き合わせてください。
+- 該当ポリシーの `Type` が `Bind` しかない場合、そのポリシーは identity を「待受側」としてしか許可しておらず、接続開始（Dial）はできません。
+
+## 4. posture-check の充足状況を確認する
+
+ポリシーは成立していても posture-check が未達だと接続は静かに切断されます。ポリシーに紐付く posture-check の定義と、identity 側の直近のポスチャデータを確認します。
+
+```bash
+ziti edge list posture-checks
+ziti edge policy-advisor identities {{ scenario.identity }} {{ scenario.service }} -o full
+```
+
+- `-o full` を付けることで、各 posture-check 項目ごとの合否が個別に表示されます。
+- `posture_required = {{ scenario.posture_required }}` のとおり本サービスでは posture-check が必須のため、OS バージョンや MFA 未実施などで1項目でも不合格だと dial 自体が拒否されます。
+
+## 5. edge-router のオンライン状態と回線を確認する
+
+ポリシー・ポスチャに問題がなければ、実際に経路を構成する edge-router と circuit の状態を確認します。
+
+```bash
+ziti edge list edge-routers 'name="{{ scenario.edge_router }}"'
+ziti edge list circuits
+```
+
+- 1つ目のコマンドの `Is Online` 列が `false` の場合、その edge-router 経由の経路は使えません。identity・service 双方の edge-router-policy で他にオンラインな候補があるかも確認します。
+- 2つ目のコマンドに対象 identity/service の circuit が現れない場合、dial 自体が edge-router まで到達していません。
+
+## 6. トンネラーログで最終確認する
+
+上記すべてで問題が見当たらない場合は、エンドポイント側のトンネラーを詳細ログで起動し、実際の dial リクエストとエラーを確認します。
+
+```bash
+sudo ziti-edge-tunnel run -v
+```
+
+- 起動直後に service リストへ `{{ scenario.service }}` が現れない場合、クライアント側の identity ファイルが古い（ポリシー変更後に再取得していない）可能性があります。
+- `dial failed` や `authentication failed` 等のログが出力される場合は、そのメッセージ文言を1〜5節の該当箇所に照らして再確認してください。
+
+## 動作確認
+
+- 1節の `ziti edge policy-advisor` 実行結果がすべて `OK` になっていること
+- 2節で対象 identity の `Enrolled` が `true` であること
+- 3節で対象 service に対する `Dial` ポリシーの `IdentityRoles` に identity の role が含まれていること
+- 4節の `-o full` 出力で posture-check 項目がすべて合格していること
+- 5節で対象 edge-router の `Is Online` が `true` であり、`ziti edge list circuits` に対象の circuit が表示されること
+- 6節の `ziti-edge-tunnel run -v` ログにエラーが出力されず、対象サービスへの dial が成功すること
+
+## 注意事項
+
+- role attribute は完全一致でのみ評価されるため、`#erp-clients` と `#erp-client` のような綴り違いは診断コマンドの出力を見ても一見ポリシーが「存在する」ように見え、原因特定が遅れやすい。3節では目視だけでなく文字列を突き合わせること。
+- Dial と Bind の取り違えは最頻の原因であり、`Type` 列を必ず確認する。Bind ポリシーしかない identity には Dial 権限がない。
+- posture-check 未達は明示的なエラーダイアログが出ず、接続がタイムアウトまたは静かに切断されるだけに見えることが多い。「ポリシーはあるのに繋がらない」場合は必ず4節を確認する。
+- 既存の到達経路（現在稼働中の edge-router やポリシー）を無効化・削除する前に、新しい経路や修正後のポリシーで実際に dial が成功することを本手順の1〜6節で確認してから、旧ポリシーや旧 edge-router 設定を撤去すること。
+- controller への `ziti edge login` はセッショントークンを発行する操作であり、認証情報をコマンド履歴やログに平文で残さないよう注意する。

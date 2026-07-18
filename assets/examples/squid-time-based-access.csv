@@ -1,0 +1,6 @@
+acl_name,acl_type,parameter,combined_policy,note
+worktime,time,MTWHF 09:00-18:00,dept_a + worktime + allowed_sites,平日09:00-18:00の営業時間帯を表すtime ACL
+offhours,time,MTWHFAS 00:00-23:59,oncall_host + offhours + allowed_sites,曜日を問わず終日有効なtime ACL(オンコール例外用)
+dept_a,src,10.0.10.0/24,dept_a + worktime + allowed_sites,営業部サブネットのsrc ACL
+dept_b,src,10.0.20.0/24,dept_b + worktime + allowed_sites,開発部サブネットのsrc ACL
+oncall_host,src,10.0.99.5/32,oncall_host + offhours + allowed_sites,オンコール担当端末のsrc ACL(時間帯制限の例外)

@@ -1,0 +1,12 @@
+wg_interface: wg0
+peer_public_key: "AbCdEf1234567890abcdef1234567890ABCDEF1234="
+allowed_ips: "10.30.0.0/16"
+persistent_keepalive_seconds: 25
+primary_endpoint: "vpn-primary.example.jp:51820"
+backup_endpoint: "vpn-backup.example.jp:51820"
+failover_script: "/usr/local/bin/wg-failover.sh"
+target_switch_seconds: 30
+test_targets:
+  - "10.30.0.1"
+  - "10.30.10.5"
+  - "monitoring.internal.example.jp"

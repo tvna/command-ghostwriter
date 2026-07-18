@@ -1,0 +1,150 @@
+# Loki/Promtail経路のTLS・認証ハードニング
+
+promtailからLokiへ送信するログ経路は、既定では平文HTTPかつ無認証になりがちです。経路上の盗聴・改ざん・なりすましを防ぐため、TLSと認証を有効化し、旧来の平文・無認証経路を安全に閉塞する手順です。
+
+## 目的
+
+promtail→Loki間の通信をTLS化し、Loki側にリバースプロキシ認証を導入した上で、片側ずつ検証してから旧経路を閉じられるようになることを目指します。
+
+## 用語解説
+
+- **tls_config**: promtailのclientsブロックで、送信先への接続にTLSを使うための設定群
+- **insecure_skip_verify**: TLS証明書検証を省略するオプション。中間者攻撃を許すため本手順では禁止する
+- **ca_file / client_auth**: caファイルパス、および認証方式（basic認証またはbearerトークン）を表すキー
+- **リバースプロキシ認証**: Loki自体は認証機能を持たないため、前段にnginx等を置きBasic認証やmTLSでアクセスを制限する構成
+- **ログ経路のセグメント分離**: promtailとLoki間の通信を専用ネットワークセグメントに隔離し、経路の露出を最小化すること
+- **片側検証**: TLS/認証を有効化した新経路が正常に機能することを確認してから、旧経路を閉じる進め方
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| Lokiホスト | `{{ loki_host }}` |
+| Loki待受ポート（平文/一時併存） | `{{ plaintext_backup_port }}` |
+| Loki待受ポート（TLS） | `{{ tls_port }}` |
+| promtail送信元ホスト | `{{ promtail_host }}` |
+| tls_enabled | `{{ tls_enabled }}` |
+| ca_file | `{{ ca_file }}` |
+| cert_file | `{{ cert_file }}` |
+| key_file | `{{ key_file }}` |
+| client_auth | `{{ client_auth }}` |
+| insecure_skip_verify | `{{ insecure_skip_verify }}` |
+| proxy_auth | `{{ proxy_auth }}` |
+
+## 手順
+
+### 1. Loki側にTLSサーバー設定を追加する
+
+Loki本体の設定ファイル（config.yaml）にserver.tls_config を追加し、平文ポートと併存させたまま起動します。
+
+```yaml
+server:
+  http_listen_port: {{ plaintext_backup_port }}
+  http_tls_listen_port: {{ tls_port }}
+  tls_config:
+    cert_file: /etc/loki/tls/loki-server.pem
+    key_file: /etc/loki/tls/loki-server-key.pem
+    client_auth_type: RequireAndVerifyClientCert
+    client_ca_file: {{ ca_file }}
+```
+
+```bash
+ssh {{ loki_host }} "sudo systemctl reload loki"
+ssh {{ loki_host }} "sudo ss -tlnp | grep -E ':({{ plaintext_backup_port }}|{{ tls_port }})'"
+```
+
+### 2. リバースプロキシ認証を設定する
+
+Loki手前のnginxにBasic認証（またはmTLS検証）を設定し、認証なしのアクセスを拒否します。
+
+```nginx
+location /loki/api/v1/push {
+    auth_basic "loki-push";
+    auth_basic_user_file /etc/nginx/loki.htpasswd;
+    proxy_pass https://127.0.0.1:{{ tls_port }};
+}
+```
+
+```bash
+ssh {{ loki_host }} "sudo htpasswd -c /etc/nginx/loki.htpasswd {{ basic_auth_user }}"
+ssh {{ loki_host }} "sudo nginx -t && sudo systemctl reload nginx"
+```
+
+現在のproxy_authは `{{ proxy_auth }}` です。
+
+### 3. promtail側にtls_configとclient_authを設定する
+
+promtail.yamlのclientsブロックにtls_configと認証を追加します。insecure_skip_verifyは必ずfalseに設定します。
+
+{% if client_auth == "basic" %}
+```yaml
+clients:
+  - url: https://{{ loki_host }}:{{ tls_port }}/loki/api/v1/push
+    tls_config:
+      ca_file: {{ ca_file }}
+      cert_file: {{ cert_file }}
+      key_file: {{ key_file }}
+      insecure_skip_verify: {{ insecure_skip_verify }}
+    basic_auth:
+      username: {{ basic_auth_user }}
+      password_file: /etc/promtail/tls/basic-auth-password
+```
+{% else %}
+```yaml
+clients:
+  - url: https://{{ loki_host }}:{{ tls_port }}/loki/api/v1/push
+    tls_config:
+      ca_file: {{ ca_file }}
+      cert_file: {{ cert_file }}
+      key_file: {{ key_file }}
+      insecure_skip_verify: {{ insecure_skip_verify }}
+    bearer_token_file: /etc/promtail/tls/bearer-token
+```
+{% endif %}
+
+```bash
+ssh {{ promtail_host }} "sudo systemctl restart promtail"
+```
+
+### 4. 新経路（TLS＋認証）の送信成功を検証する
+
+旧平文経路を閉じる前に、新経路単独でログ送信が成功することを確認します。
+
+```bash
+ssh {{ promtail_host }} "curl -sS --cacert {{ ca_file }} --cert {{ cert_file }} --key {{ key_file }} -u {{ basic_auth_user }}:REDACTED -X POST https://{{ loki_host }}:{{ tls_port }}/loki/api/v1/push -H 'Content-Type: application/json' -d '{\"streams\":[{\"stream\":{\"job\":\"tls-check\"},\"values\":[[\"'$(date +%s%N)'\",\"tls handshake test\"]]}]}'"
+ssh {{ promtail_host }} "sudo journalctl -u promtail --since '-5 min' | grep -i 'level=info' | tail -5"
+```
+
+### 5. 旧平文・無認証経路を閉塞する
+
+新経路での送信成功と認証必須化を確認できたら、Loki側の平文ポートとnginxの無認証locationを閉じます。
+
+```yaml
+server:
+  http_listen_port: 0
+```
+
+```bash
+ssh {{ loki_host }} "sudo systemctl reload loki"
+ssh {{ loki_host }} "sudo ss -tlnp | grep ':{{ plaintext_backup_port }}' || echo '平文ポート停止済み'"
+```
+
+## 動作確認
+
+1. TLS経路（ポート`{{ tls_port }}`）へのログ送信が200を返すこと（手順4のcurl結果を確認）
+2. `insecure_skip_verify: true` に一時的に変更したテスト用promtailプロセスを起動し、正規CA以外の自己署名証明書を提示するLokiに対しては接続失敗（証明書検証エラー）になることを確認し、確認後は`false`に戻す
+3. Basic認証なしでのpush APIリクエストが401/403で拒否されること
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' https://{{ loki_host }}:{{ tls_port }}/loki/api/v1/push -X POST -H 'Content-Type: application/json' -d '{"streams":[]}'
+```
+
+4. 旧平文ポート`{{ plaintext_backup_port }}`が閉塞後にListenしていないこと（手順5のss結果を確認）
+
+## 注意事項
+
+- `insecure_skip_verify: true` は本番環境で使用しない。中間者攻撃によるログ改ざん・盗聴を許すため常に`false`を維持する。
+- Basic認証のパスワードやbearerトークンは機微情報であり、Gitやログに平文で残さない。専用のシークレット管理（password_file/bearer_token_file）で配布・ローテーションする。
+- サーバー証明書・クライアント証明書には有効期限がある。更新手順と更新時期のアラートを事前に整備しておく。
+- ロックアウト防止のため、TLS/認証の有効化は必ず片側ずつ（Loki→promtailの順、または並行稼働で確認）行い、`{{ promtail_host }}` からの新経路での送信成功を確認してから旧平文経路を閉じること。切り戻しが必要な場合は手順1・3のTLS設定をコメントアウトし平文ポートを再度開放する。
+- promtailとLoki間の通信は可能な限り専用のログ収集用ネットワークセグメントに分離し、他システムからの到達性を制限する。

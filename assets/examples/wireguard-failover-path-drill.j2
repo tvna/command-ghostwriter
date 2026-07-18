@@ -1,0 +1,127 @@
+# WireGuard冗長経路のフェイルオーバー訓練 — {{ wg_interface }}
+
+プライマリ回線（`{{ primary_endpoint }}`）とバックアップ回線（`{{ backup_endpoint }}`）でEndpointを切り替えるマルチホーミング構成を対象に、プライマリ回線を意図的に遮断して切替時間（目標 {{ target_switch_seconds }} 秒以内）と疎通復帰を測定する訓練です。この訓練は本番環境の通信に一時的な影響を与えるため、事前の関係者告知が必須です。
+
+## 目的
+
+プライマリ回線障害時に、フェイルオーバースクリプト（`{{ failover_script }}`）がバックアップEndpointへ正しく切り替え、WireGuardのハンドシェイクが再確立して疎通が復旧することを、実測の切替時間つきで検証できるようになることを目指します。
+
+## 用語解説
+
+- **Endpoint**: WireGuardのピアが接続を試みる、対向側の「IPアドレス（またはホスト名）:UDPポート」の組。`wg set peer <pubkey> endpoint <host:port>` で動的に更新できる
+- **PersistentKeepalive**: NATやファイアウォール越しにセッションを維持するため、指定秒間隔（本シナリオでは {{ persistent_keepalive_seconds }} 秒）で空パケットを送り続ける設定。Endpoint切替後も自動的に再送が続き、ハンドシェイクの再試行契機になる
+- **ハンドシェイク（Handshake）**: WireGuardが約120秒ごとに行う鍵交換。`wg show <if> latest-handshakes` の時刻が更新されていれば、その時点のEndpointで暗号セッションが確立している証拠になる
+- **マルチホーミング（multihoming）**: 1つの拠点が複数の回線・Endpointを持ち、片方の障害時にもう片方へ切り替えられる構成
+- **フェイルオーバースクリプト**: 疎通監視結果に応じて `wg set` でpeerのendpointを自動的に書き換える運用スクリプト。本訓練ではこのスクリプトの信頼性そのものを検証する
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 対象インターフェース | `{{ wg_interface }}` |
+| 対向ピア公開鍵 | `{{ peer_public_key }}` |
+| AllowedIPs | `{{ allowed_ips }}` |
+| PersistentKeepalive | {{ persistent_keepalive_seconds }} 秒 |
+| プライマリEndpoint | `{{ primary_endpoint }}` |
+| バックアップEndpoint | `{{ backup_endpoint }}` |
+| フェイルオーバースクリプト | `{{ failover_script }}` |
+| 目標切替時間 | {{ target_switch_seconds }} 秒以内 |
+| 疎通確認対象 | {% for target in test_targets %}`{{ target }}`{% if not loop.last %}, {% endif %}{% endfor %} |
+
+## 1. 訓練の事前告知と現在の状態確認
+
+訓練実施前に、影響を受ける利用者・運用チームへ実施時間帯を告知してください。告知後、切替前の状態を記録します。
+
+```bash
+sudo wg show {{ wg_interface }}
+sudo wg show {{ wg_interface }} latest-handshakes
+sudo wg show {{ wg_interface }} endpoints
+```
+
+## 2. プライマリ回線を意図的に遮断する
+
+プライマリEndpointのホスト名からIPアドレスを解決し、そのIP・ポート宛のUDP通信のみを遮断します（他のEndpointへの通信には影響しません）。
+
+```bash
+PRIMARY_HOST=$(echo "{{ primary_endpoint }}" | cut -d: -f1)
+PRIMARY_PORT=$(echo "{{ primary_endpoint }}" | cut -d: -f2)
+PRIMARY_IP=$(getent hosts "$PRIMARY_HOST" | awk '{print $1}')
+sudo iptables -I OUTPUT -d "$PRIMARY_IP" -p udp --dport "$PRIMARY_PORT" -j DROP -m comment --comment "wireguard-failover-drill"
+echo "遮断開始: $(date +%s) ($PRIMARY_HOST / $PRIMARY_IP:$PRIMARY_PORT)"
+```
+
+## 3. フェイルオーバースクリプトを実行し、切替時間の計測を開始する
+
+```bash
+START=$(date +%s)
+sudo {{ failover_script }} --interface {{ wg_interface }} --peer {{ peer_public_key }} --backup-endpoint {{ backup_endpoint }}
+```
+
+スクリプトが正常終了しない、またはEndpointが切り替わらない場合は、以下の手動コマンドで切り替えます（スクリプトの信頼性を評価するため、手動介入が必要になったこと自体を記録してください）。
+
+```bash
+sudo wg set {{ wg_interface }} peer {{ peer_public_key }} endpoint {{ backup_endpoint }} persistent-keepalive {{ persistent_keepalive_seconds }} allowed-ips {{ allowed_ips }}
+```
+
+## 4. バックアップEndpointでのハンドシェイク再確立を待つ
+
+```bash
+while true; do
+  HANDSHAKE=$(sudo wg show {{ wg_interface }} latest-handshakes | awk '{print $2}')
+  if [ -n "$HANDSHAKE" ] && [ "$HANDSHAKE" -gt "$START" ]; then
+    END=$(date +%s)
+    echo "ハンドシェイク再確立: $((END - START)) 秒 (Endpoint: $(sudo wg show {{ wg_interface }} endpoints | awk '{print $2}'))"
+    break
+  fi
+  if [ $(( $(date +%s) - START )) -gt $(( {{ target_switch_seconds }} * 3 )) ]; then
+    echo "タイムアウト: {{ target_switch_seconds }} 秒の3倍を超えてもハンドシェイクが再確立していません。手動介入が必要です。"
+    break
+  fi
+  sleep 1
+done
+```
+
+## 5. 疎通復帰を確認する
+
+{% for target in test_targets %}
+```bash
+ping -c 3 -W 2 {{ target }} && echo "{{ target }}: OK" || echo "{{ target }}: NG"
+```
+{% endfor %}
+
+## 6. 目標切替時間との比較を記録する
+
+```bash
+if [ $((END - START)) -le {{ target_switch_seconds }} ]; then
+  echo "目標切替時間 {{ target_switch_seconds }} 秒以内に復旧: 合格 ($((END - START)) 秒)"
+else
+  echo "目標切替時間 {{ target_switch_seconds }} 秒を超過: 要改善 ($((END - START)) 秒)"
+fi
+```
+
+## 7. プライマリ回線への復帰
+
+訓練終了後は、必ずプライマリ回線へ戻します。バックアップ回線を運用系のまま放置しないでください。
+
+```bash
+sudo iptables -D OUTPUT -d "$PRIMARY_IP" -p udp --dport "$PRIMARY_PORT" -j DROP -m comment --comment "wireguard-failover-drill"
+sudo {{ failover_script }} --interface {{ wg_interface }} --peer {{ peer_public_key }} --backup-endpoint {{ primary_endpoint }}
+sudo wg show {{ wg_interface }} latest-handshakes
+```
+
+プライマリEndpoint（`{{ primary_endpoint }}`）でハンドシェイクが再確立し、疎通確認対象への通信が復旧していることを確認してから訓練終了とします。
+
+## 動作確認
+
+- 手順4で、バックアップEndpoint（`{{ backup_endpoint }}`）宛にハンドシェイクが再確立し、`wg show {{ wg_interface }} endpoints` の表示が新Endpointに更新されていること
+- 手順5で、疎通確認対象（{% for target in test_targets %}`{{ target }}`{% if not loop.last %}, {% endif %}{% endfor %}）すべてに疎通が戻っていること
+- 手順6で記録した切替時間が、目標である {{ target_switch_seconds }} 秒以内、または超過した場合はその要因が特定されていること
+- 手順7で、プライマリEndpoint（`{{ primary_endpoint }}`）へ戻した後にもハンドシェイクが再確立していること
+
+## 注意事項
+
+- 本訓練はプライマリ回線への実通信を意図的に遮断するため、本番影響が発生します。実施前に必ず関係者・利用者へ告知し、影響許容時間帯に実施してください。
+- 手順3・7でフェイルオーバースクリプト（`{{ failover_script }}`）の自動切替が失敗した場合に備え、必ず手動での `wg set` コマンドを事前に確認しておくこと。スクリプトの自動判定ロジックが誤検知・誤動作しないかは、本訓練そのもので信頼性を確認する対象である。
+- 手順4でバックアップEndpointへのハンドシェイク再確立と疎通復帰を確認できてから、手順2の遮断ルールを解除すること。新しい経路の疎通を確認する前に旧経路（プライマリ）の遮断解除やロールバックを行わない。
+- 訓練終了後は手順7で必ずプライマリ回線へ復帰させ、`iptables` に投入したDROPルールが残存していないことを `sudo iptables -L OUTPUT -n --line-numbers` で確認する。
+- `wg show` の出力は対向ピアの公開鍵・Endpoint情報を含むため、記録・共有する際は必要最小限の範囲に留める。

@@ -1,0 +1,110 @@
+# osquery TLSサーバ連携による集中管理
+
+osqueryd(エンドポイント側エージェント)をTLSプラグインで集中管理サーバに接続し、設定配布・ログ集約・分散クエリを一元運用できるようにします。
+
+## 目的
+
+`--config_plugin=tls` / `--logger_plugin=tls` / `--distributed_plugin=tls` によるTLS集中管理の仕組みを理解し、enroll secretを用いたホストの登録(enrollment)から、設定取得・ログ送信・分散クエリの応答までを一巡で構成・検証できるようになることを目指します。
+
+## 用語解説
+
+- **TLS集中管理**: osqueryd自身に設定ファイルやクエリパックを個別配置せず、HTTPS経由でサーバ側から設定・ログ収集・クエリ指示を一元的に配布・回収する運用方式
+- **enrollment(登録)**: osquerydが初回起動時にenroll secretをサーバへ提示し、その代わりにホスト固有の`node_key`を払い出してもらう手続き。以後の全通信は`node_key`で認証される
+- **enroll secret**: enrollment時にホストの正当性を証明する共有シークレット。漏洩するとなりすましホストを登録されるため、配布・保管を厳格に管理する対象
+- **node_key**: enrollment完了時にサーバから発行される、ホストごとの一意な認証トークン。以後のconfig取得・ログ送信・分散クエリ応答はこの`node_key`を用いて認証される
+- **distributed_tls(分散クエリ)**: 管理者がサーバ側からアドホックなSQLクエリを配布し、対象ホストが定期ポーリングでクエリを取得・実行し、結果をサーバへ返送する仕組み
+
+## シナリオ設定
+
+TLSサーバのホスト名は `{{ tls_hostname }}`、ポートは `{{ tls_port }}` です。設定配布エンドポイントは `{{ config_endpoint }}`、ログ送信エンドポイントは `{{ logger_endpoint }}` を使用します。enroll secretは `{{ enroll_secret_path }}` に配置済みで{% if enroll_secret_set %}、既に発行・配布が完了しています{% else %}、まだ発行されていません{% endif %}。分散クエリは{% if distributed_enabled %}有効化し、読み出しエンドポイント `{{ distributed_read_endpoint }}` と書き込みエンドポイント `{{ distributed_write_endpoint }}` を使用します{% else %}今回は無効のままとします{% endif %}。サーバ証明書の検証にはCA証明書 `{{ tls_server_certs_path }}` を使用します。
+
+## 手順
+
+### 1. TLSサーバ証明書とenroll secretを配置する
+
+```bash
+sudo mkdir -p $(dirname {{ tls_server_certs_path }}) $(dirname {{ enroll_secret_path }})
+sudo cp fleet-ca.pem {{ tls_server_certs_path }}
+sudo chmod 644 {{ tls_server_certs_path }}
+
+# enroll secretはosqueryユーザーのみ読み取り可能にする
+sudo install -m 600 -o osquery -g osquery /dev/stdin {{ enroll_secret_path }} <<'EOF'
+REPLACE_WITH_ISSUED_ENROLL_SECRET
+EOF
+```
+
+`{{ enroll_secret_path }}` の内容はサーバ側の`--enroll_secret`と一致する秘密情報であり、平文で長期間放置しないよう発行・保管の運用ルールを別途定めます。
+
+### 2. osquery.flagsにTLSプラグインを設定する
+
+```bash
+sudo tee /etc/osquery/osquery.flags <<EOF
+--tls_hostname={{ tls_hostname }}:{{ tls_port }}
+--tls_server_certs={{ tls_server_certs_path }}
+--config_plugin=tls
+--config_tls_endpoint={{ config_endpoint }}
+--config_tls_refresh=60
+--logger_plugin=tls
+--logger_tls_endpoint={{ logger_endpoint }}
+--logger_tls_period=10
+--enroll_secret_path={{ enroll_secret_path }}
+--enroll_tls_endpoint={{ enroll_endpoint }}
+--disable_reenrollment=false
+EOF
+```
+
+`--tls_hostname`にはポート込みのホスト名を指定し、`--tls_server_certs`で指定したCA証明書に対してのみサーバ証明書の検証を行います。自己署名や社内CAの証明書チェーンでない場合、osqueryd起動時にTLSハンドシェイクが失敗します。
+
+### 3. 分散クエリプラグインを設定する
+
+```bash
+{% if distributed_enabled %}sudo tee -a /etc/osquery/osquery.flags <<EOF
+--distributed_plugin=tls
+--distributed_interval=10
+--distributed_tls_max_attempts=3
+--distributed_tls_read_endpoint={{ distributed_read_endpoint }}
+--distributed_tls_write_endpoint={{ distributed_write_endpoint }}
+EOF
+{% else %}# distributed_enabled: false のため、本手順では分散クエリプラグインは追加しません
+# 有効化する場合は distributed_plugin=tls と distributed_tls_read_endpoint / distributed_tls_write_endpoint を追記します
+{% endif %}
+```
+
+### 4. osquerydを起動しenrollmentを実行する
+
+```bash
+sudo systemctl enable --now osqueryd
+sudo systemctl status osqueryd --no-pager
+
+# node_keyが発行され、以下に保存されたことを確認する
+sudo cat /var/osquery/osquery.node_key
+```
+
+初回起動時にosqueryd自身が `{{ enroll_secret_path }}` の内容を `{{ enroll_endpoint }}` へ提示してenrollmentを行い、以後の通信に使う`node_key`をローカルに保存します。`node_key`はホストごとに一意であり、他ホストへの使い回しはできません。
+
+### 5. 配布された設定が反映されていることを確認する
+
+```bash
+sudo osqueryi --config_plugin=tls \
+  --tls_hostname={{ tls_hostname }}:{{ tls_port }} \
+  --tls_server_certs={{ tls_server_certs_path }} \
+  "SELECT * FROM osquery_flags WHERE name = 'config_plugin';"
+
+sudo journalctl -u osqueryd -n 50 --no-pager | grep -i "config"
+```
+
+## 動作確認
+
+1. enrollmentが成功し `/var/osquery/osquery.node_key` に非空のトークンが保存されていること
+2. `{{ config_endpoint }}` からの設定取得ログ(`journalctl -u osqueryd`)にエラーが出ておらず、サーバ側で配布したクエリパックがosqueryd側に反映されていること
+3. `{{ logger_endpoint }}` へのログ送信が定期的に成功しており、サーバ側でホストからの結果ログを受信できていること
+4. {% if distributed_enabled %}サーバ側から分散クエリを1件発行し、対象ホストが`{{ distributed_read_endpoint }}`から取得・実行し、`{{ distributed_write_endpoint }}`へ結果を返送していること{% else %}分散クエリは無効化されているため、`SELECT * FROM osquery_flags WHERE name = 'distributed_plugin';`で無効設定のままであることを確認すること{% endif %}
+5. TLSサーバ証明書を意図的に不正なものへ差し替えた場合、osqueryd起動時にハンドシェイクが失敗し設定取得・ログ送信が行われないこと(証明書検証が機能していることの裏付け)
+
+## 注意事項
+
+- enroll secret(`{{ enroll_secret_path }}`)はホストなりすましを許す機微情報である。発行はサーバ管理者のみが行い、配布はホストごとに個別チャネル(構成管理ツールのシークレット機能など)で行い、平文メールやチャット添付での共有は禁止する。権限は`osquery`実行ユーザーのみの読み取り(600)に限定し、定期的なローテーション(再発行・旧シークレットの失効)を運用に組み込む。
+- TLSサーバ証明書の検証(`{{ tls_server_certs_path }}`)を省略・無効化しない。検証を無効にすると中間者攻撃によって設定配布・ログ収集・分散クエリの通信路を乗っ取られる恐れがある。
+- ログ経路(`{{ logger_endpoint }}`)・設定配布経路(`{{ config_endpoint }}`){% if distributed_enabled %}・分散クエリ経路(`{{ distributed_read_endpoint }}` / `{{ distributed_write_endpoint }}`){% endif %}はいずれもTLSで暗号化された通信のみを許可し、平文HTTPへのフォールバックを設定しない。
+- `node_key`はホスト固有の認証情報であり、他ホストへの複製や使い回しは行わない。ホスト退役時はサーバ側で該当`node_key`を失効させ、再enrollmentが必要な場合は新しいenroll secretを発行してから実施する。
+- 新しいTLS設定(`osquery.flags`)へ切り替える際は、旧設定を無効化する前に新しいエンドポイントでenrollment・config取得・ログ送信・(有効な場合は)分散クエリ応答が成功することを本手順の「動作確認」で確認してから、旧osqueryd構成や旧enroll secretを無効化・削除すること。

@@ -1,0 +1,118 @@
+# CrowdSecシナリオとwhitelistの調整
+
+誤検知（False Positive）が疑われる検知結果（CSV）をもとに、`cscli` での事実確認 → シナリオ閾値の理解 → `whitelists.yaml` によるソース限定の除外 → 誤ってBANされた決定の解除、までを一気通貫で行います。
+
+## 目的
+
+CrowdSecのシナリオが誤検知（FP）を出している状況で、`cscli alerts/decisions` による事実確認、leaky bucketモデルに基づくシナリオ閾値の理解、`whitelists.yaml` による送信元限定の除外設定、`cscli decisions delete` による誤BAN解除までを、実攻撃を見逃さずに実施できるようになることを目指します。
+
+## 用語解説
+
+- **leaky bucket(漏れバケツ)モデル**: シナリオの検知ロジック。イベントが発生するたびにバケツに水(カウント)が溜まり、一定速度(`leakspeed`)で漏れていく。バケツが`capacity`を超えて溢れる(overflow)と、そのシナリオのアラート・決定(BAN)が生成される
+- **capacity**: バケツの容量。この回数分のイベントが`leakspeed`の期間内に発生すると溢れる(閾値を上げると誤検知が減るが検知は遅くなる)
+- **leakspeed**: バケツから水が漏れる速度(例: `10s`なら10秒に1回分減る)。閾値の緩急を決めるもう一方のパラメータ
+- **post-overflow段階のwhitelist**: シナリオが一度overflow(閾値超過)した後、アラート・決定の生成だけを抑制する除外。バケツのカウント自体は行われる
+- **parse段階のwhitelist**: イベントの取り込み(パース)時点で除外し、シナリオのバケツに一切カウントさせない除外。誤検知の原因ソースを根本から除外したい場合に用いる
+- **cscli explain**: 生ログ1行がどのパーサ・シナリオでどう判定されたかを追跡するデバッグコマンド
+
+## シナリオ設定
+
+| scenario | trigger_source | verdict | whitelist_target | action |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["scenario"] }} | {{ r["trigger_source"] }} | {{ r["verdict"] }} | {{ r["whitelist_target"] }} | {{ r["action"] }} |
+{% endfor %}
+
+## 1. cscli alerts/decisions で誤検知を確認する
+
+対象シナリオが実際に発報したアラートと、現在有効なBAN(decisions)の一覧を確認します。
+
+```bash
+{% for r in csv_rows %}cscli alerts list -s {{ r["scenario"] }}
+cscli decisions list --ip {{ r["trigger_source"] }}
+{% endfor %}```
+
+`verdict` が `fp`(誤検知)の行は、後続の手順でwhitelist登録とBAN解除を行います。`tp`(実攻撃/真陽性)の行はBANを維持し、除外対象には含めません。
+
+## 2. cscli explain でシナリオの判定過程を追跡する
+
+whitelistを追加する前に、該当ソースの生ログがどのパーサ・シナリオを通って判定に至ったかを確認し、判断の裏付けを取ります。
+
+```bash
+{% for r in csv_rows %}{% if r["verdict"] == "fp" %}cscli explain --log "$(grep {{ r["trigger_source"] }} /var/log/auth.log | tail -n 1)" --type syslog
+{% endif %}{% endfor %}```
+
+## 3. シナリオのleaky bucket閾値(capacity/leakspeed)を確認する
+
+現在の閾値設定を確認します。閾値そのものを緩めるのは最終手段とし、まずは個別ソースのwhitelistを優先します。
+
+```bash
+{% for r in csv_rows %}cscli scenarios inspect {{ r["scenario"] }}
+{% endfor %}```
+
+出力中の `capacity` と `leakspeed` が調整対象です。閾値を緩める場合は `/etc/crowdsec/scenarios/` 配下の該当YAMLで `capacity` を引き上げる、または `leakspeed` を長くします(例: `capacity: 5` → `capacity: 10`)。
+
+## 4. whitelists.yaml で誤検知ソースを送信元限定で除外する
+
+`whitelist_target` の種別(`ip:`/`cidr:`/`expression:`)に応じて、`/etc/crowdsec/parsers/s02-enrich/whitelists.yaml` に個別に追記します。ここは parse段階 の除外であり、対象ソースのイベントはシナリオのバケツに一切カウントされなくなります。
+
+```yaml
+name: crowdsecurity/local-whitelists
+description: "誤検知として確認済みの送信元を除外する"
+whitelist:
+  reason: "誤検知確認済み(cscli explainで裏付け済み)"
+  ip:
+{% for r in csv_rows %}{% if r["action"] == "whitelist_ip" %}    - "{{ r["whitelist_target"] }}"
+{% endif %}{% endfor %}
+  cidr:
+{% for r in csv_rows %}{% if r["action"] == "whitelist_cidr" %}    - "{{ r["whitelist_target"] }}"
+{% endif %}{% endfor %}
+  expression:
+{% for r in csv_rows %}{% if r["action"] == "whitelist_expr" %}    - "evt.Parsed.source_ip == '{{ r["whitelist_target"] }}'"
+{% endif %}{% endfor %}
+```
+
+設定ファイルの文法を検証してから反映します。
+
+```bash
+cscli parsers inspect crowdsecurity/local-whitelists --no-metrics
+sudo systemctl reload crowdsec
+```
+
+## 5. 誤って課されたBANを解除する
+
+whitelist登録後も、既に発行済みの決定(decision)は自動では消えないため、`fp` 行のみ個別に解除します。`tp` 行(実攻撃)は解除しません。
+
+```bash
+{% for r in csv_rows %}{% if r["verdict"] == "fp" %}cscli decisions delete --ip {{ r["trigger_source"] }}
+{% endif %}{% endfor %}```
+
+## 動作確認
+
+1. `cscli hub list` で `local-whitelists` パーサが有効(installed/enabled)状態になっていることを確認する
+
+   ```bash
+   cscli hub list
+   ```
+
+2. whitelist登録済みソースについて、擬似的に同じ挙動(例: SSHログイン失敗を数回)を再現しても新規decisionが発報しない(非発火)ことを確認する
+
+   ```bash
+   {% for r in csv_rows %}{% if r["verdict"] == "fp" %}cscli decisions list --ip {{ r["trigger_source"] }}
+{% endif %}{% endfor %}```
+
+3. 実攻撃(`tp`)側のソースは従来どおりBANが維持されており、whitelistが誤って実攻撃まで見逃していないことを確認する
+
+   ```bash
+   {% for r in csv_rows %}{% if r["verdict"] == "tp" %}cscli decisions list --ip {{ r["trigger_source"] }}
+{% endif %}{% endfor %}```
+
+4. whitelist対象ソースからの正規通信(例: 監視サーバからのSSH接続)が引き続き到達・成功することを確認する(遮断されていないことの確認)
+
+## 注意事項
+
+- whitelistは可能な限り `ip`/`cidr`/`expression` で送信元を厳密に限定すること。シナリオ自体を緩める・無効化すると、対象ソース以外からの実攻撃まで見逃す可能性がある。
+- `capacity`/`leakspeed` を緩めすぎると誤検知は減るが、実際のブルートフォース攻撃の検知が遅れる、または見逃す原因になる。まずは個別whitelistで対応し、閾値変更は最終手段とする。
+- whitelistやBAN解除を適用する前に、`cscli explain` で「本当に誤検知である」ことを裏付けてから実施すること。裏付けなしに `cscli decisions delete` を行わない。
+- BAN解除(手順5)は、対象ソースからの正規通信を実際に再現できる別セッション(監視端末や別IPからのSSH接続など)で新しい経路(whitelist反映後の通過)が機能することを確認してから行う。既存のBAN(古い経路)を先に外し、後から確認する順序にはしない。
+- 調整内容(対象・理由・日時・実施者)は変更管理台帳やコミット履歴に記録し、後から `cscli explain` で追跡できるようにしておく。
+- `cscli decisions delete` は該当IPの決定を即時に取り消す操作であり取り消せないため、対象IPを取り違えないよう `--ip` オプションの値を実行前に必ず読み合わせる。

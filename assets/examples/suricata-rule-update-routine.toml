@@ -1,0 +1,5 @@
+update_schedule = "毎週日曜 03:00(トラフィック閑散帯)"
+backup_dir = "/var/lib/suricata/rules/backup"
+verify_command = "suricata -T -c /etc/suricata/suricata.yaml -v"
+notify_channel = "#network-ids-alerts"
+max_rule_delta_percent = 15

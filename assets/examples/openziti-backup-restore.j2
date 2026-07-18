@@ -1,0 +1,142 @@
+# OpenZitiコントローラDBのバックアップと復元 — {{ controller_name }}
+
+コントローラ `{{ controller_name }}` の bolt DB（`{{ db_path }}`）と PKI（`{{ pki_path }}`）をバックアップし、復元手順が実際に機能することを検証するための保全運用手順書です。
+
+## 目的
+
+OpenZiti コントローラが保持する DB と PKI の役割を理解し、定期バックアップと復元訓練（DBの差し替え・サービス再起動・動作確認）を安全に実施できるようになることを目指します。
+
+## 用語解説
+
+- **bolt DB（ctrl.db）**: コントローラが使う組み込みKVS。アイデンティティ、ポリシー（サービス/エッジルータのアクセス制御）、エンロール状態など、ネットワークの構成情報をすべて保持する。破損・消失するとコントローラは再構築が必要になる。
+- **PKI（ca / intermediate / 鍵）**: コントローラが発行する証明書チェーンの根。ルートCA・中間CA・秘密鍵一式であり、これが漏洩するとネットワーク全体の信頼を偽装できてしまうため、DB以上に機微な資産として扱う。
+- **snapshot-db**: `ziti agent controller snapshot-db` によるオンラインスナップショット取得コマンド。コントローラを停止せずに一貫性のあるDBコピーを作れる。
+- **エンロール状態**: アイデンティティやエッジルータが証明書を受け取り、ネットワークに参加済みかどうかの状態。DB内に保持される。
+- **世代管理（retention_generations）**: バックアップを何世代分保持するか。古い世代は削除して容量を抑える。
+- **raftスナップショット（HA構成時）**: 複数コントローラのHA（raftクラスタ）構成では、各ノードがraftログの状態機械スナップショットを個別に持つ。本手順の「単一コントローラのbolt DBバックアップ」とは別物であり、HA環境では代わりにraftのスナップショット/コンパクション機構を使う。
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| コントローラ名 | {{ controller_name }} |
+| コントローラサービス名 | {{ controller_service }} |
+| DBパス | {{ db_path }} |
+| PKIパス | {{ pki_path }} |
+| バックアップ先 | {{ backup_dir }} |
+| 保持世代数 | {{ retention_generations }} |
+| 暗号化保管 | {{ encrypt }} |
+| Edge API URL | {{ edge_api_url }} |
+| 管理者アイデンティティ | {{ admin_identity }} |
+| 復元検証用アイデンティティ | {{ verify_identity_name }} |
+| 復元検証用サービス | {{ verify_service_name }} |
+| 復元検証用エッジルータ | {{ edge_router_name }} |
+
+## 1. バックアップ先ディレクトリを準備する
+
+```bash
+DATE=$(date +%Y%m%d-%H%M%S)
+sudo mkdir -p {{ backup_dir }}/${DATE}/db
+sudo mkdir -p {{ backup_dir }}/${DATE}/pki
+sudo chmod 700 {{ backup_dir }}/${DATE}
+```
+
+## 2. DBスナップショットを取得する（オンライン）
+
+コントローラを止めずに一貫性のあるスナップショットを取得します。`ziti agent controller` はコントローラの管理ソケットに接続して実行するエージェントコマンドです。
+
+```bash
+sudo ziti agent controller snapshot-db {{ backup_dir }}/${DATE}/db/ctrl.db.snapshot
+sudo ls -l {{ backup_dir }}/${DATE}/db/ctrl.db.snapshot
+```
+
+オンラインスナップショットが取得できない場合のフォールバック（コントローラ停止コピー）は次のとおりです。
+
+```bash
+sudo systemctl stop {{ controller_service }}
+sudo cp -p {{ db_path }} {{ backup_dir }}/${DATE}/db/ctrl.db.snapshot
+sudo systemctl start {{ controller_service }}
+sudo systemctl is-active {{ controller_service }}
+```
+
+## 3. PKIをバックアップする
+
+PKIはネットワーク全体の信頼の根です。ca・intermediate・鍵一式をまとめて保全します。
+
+```bash
+sudo tar czf {{ backup_dir }}/${DATE}/pki/pki-backup.tar.gz -C {{ pki_path }} .
+sudo chmod 600 {{ backup_dir }}/${DATE}/pki/pki-backup.tar.gz
+```
+
+## 4. バックアップを暗号化する
+
+{% if encrypt %}
+DBスナップショットとPKIアーカイブは機微情報のため、保管前に暗号化します。
+
+```bash
+sudo gpg --output {{ backup_dir }}/${DATE}/db/ctrl.db.snapshot.gpg \
+  --recipient {{ gpg_recipient }} --encrypt {{ backup_dir }}/${DATE}/db/ctrl.db.snapshot
+sudo gpg --output {{ backup_dir }}/${DATE}/pki/pki-backup.tar.gz.gpg \
+  --recipient {{ gpg_recipient }} --encrypt {{ backup_dir }}/${DATE}/pki/pki-backup.tar.gz
+sudo rm -f {{ backup_dir }}/${DATE}/db/ctrl.db.snapshot {{ backup_dir }}/${DATE}/pki/pki-backup.tar.gz
+```
+{% endif %}
+
+## 5. 保持世代を確認する
+
+保持世代数は `{{ retention_generations }}` 世代です。これを超える古い世代ディレクトリを一覧し、確認のうえ削除します。
+
+```bash
+ls -1dt {{ backup_dir }}/*/ | tail -n +{{ retention_generations }}
+# 内容を確認したうえで、必要な分だけ削除する
+# ls -1dt {{ backup_dir }}/*/ | tail -n +{{ retention_generations }} | xargs -r sudo rm -rf
+```
+
+## 6. 復元手順（別ホストまたは検証環境で実施）
+
+復元は必ず本番から切り離した検証環境（別ホスト、または本番停止済みの計画メンテナンス枠）で実施し、いきなり本番のDBを上書きしないこと。
+
+```bash
+RESTORE_DATE=<復元対象の世代ディレクトリ名>
+sudo systemctl stop {{ controller_service }}
+sudo cp -p {{ db_path }} {{ db_path }}.pre-restore.bak
+{% if encrypt %}
+sudo gpg --output /tmp/ctrl.db.restore --decrypt {{ backup_dir }}/${RESTORE_DATE}/db/ctrl.db.snapshot.gpg
+sudo cp /tmp/ctrl.db.restore {{ db_path }}
+sudo shred -u /tmp/ctrl.db.restore
+sudo gpg --output /tmp/pki-restore.tar.gz --decrypt {{ backup_dir }}/${RESTORE_DATE}/pki/pki-backup.tar.gz.gpg
+sudo tar xzf /tmp/pki-restore.tar.gz -C {{ pki_path }}
+sudo shred -u /tmp/pki-restore.tar.gz
+{% else %}
+sudo cp {{ backup_dir }}/${RESTORE_DATE}/db/ctrl.db.snapshot {{ db_path }}
+sudo tar xzf {{ backup_dir }}/${RESTORE_DATE}/pki/pki-backup.tar.gz -C {{ pki_path }}
+{% endif %}
+sudo chown -R ziti:ziti {{ pki_path }}
+sudo systemctl start {{ controller_service }}
+sudo systemctl status {{ controller_service }} --no-pager
+```
+
+## 動作確認
+
+復元後は、DBが正しく復元され、PKIの信頼チェーンが機能していることを、以下の順で確認します。旧DB（`{{ db_path }}.pre-restore.bak`）は動作確認が完了するまで残しておき、問題があれば即座に戻せる状態を維持します。
+
+```bash
+ziti edge login {{ edge_api_url }} -u {{ admin_identity }} -y
+ziti edge list identities | grep {{ verify_identity_name }}
+ziti edge list services | grep {{ verify_service_name }}
+ziti edge list edge-routers | grep {{ edge_router_name }}
+```
+
+- `ziti edge login` が証明書エラーなく成功すること（PKIの信頼チェーンが復元されている証拠）
+- `list identities` に `{{ verify_identity_name }}` が表示されること（DBのアイデンティティが復元されている証拠）
+- `list services` に `{{ verify_service_name }}` が表示されること
+- `list edge-routers` で `{{ edge_router_name }}` が `online` として復帰していること（エッジルータがPKIで再接続できている証拠）
+- 上記すべてが確認できて初めて `{{ db_path }}.pre-restore.bak` を削除し、旧DBへのロールバック経路を閉じる
+
+## 注意事項
+
+- PKI（ca / intermediate / 鍵）はネットワーク全体の信頼の根であり、DB以上に機微な資産である。バックアップは暗号化（本手順では `{{ gpg_recipient }}` 宛のGPG暗号化）し、`{{ backup_dir }}` へのアクセスは管理者に限定する（パーミッション 700/600 を維持する）。
+- 復元は必ず検証環境または計画済みメンテナンス枠で実施し、DBを上書きする前に `{{ db_path }}.pre-restore.bak` として旧DBを退避する。動作確認（edge login・identity/service一覧・エッジルータonline復帰）が全て成功するまで、旧DBを削除・上書きせず、いつでも旧DBへ戻せる状態を維持する。
+- HA構成（複数コントローラのraftクラスタ）では、本手順の単一コントローラbolt DBバックアップは適用できない。raftクラスタは各ノードが個別にraftログの状態機械スナップショットを保持するため、HA環境ではraftのスナップショット/コンパクション機構と、そのクラスタ全体としての復元手順を別途検討すること。
+- `snapshot-db` によるオンラインスナップショットが失敗する、またはコントローラのバージョンで未対応の場合のみ、フォールバックとしてサービス停止後のファイルコピーを使う。停止コピーは復元対象時刻のトランザクションが失われる可能性があるため、可能な限りオンラインスナップショットを優先する。
+- 保持世代（`{{ retention_generations }}` 世代）を超える古い世代の削除は、`ls` で対象を確認してから実行し、誤って直近世代を削除しないこと。

@@ -1,0 +1,5 @@
+ioc_value,ioc_type,source,tlp,added_at,expire_at
+203.0.113.45,ip,internal-feed,TLP:AMBER,2026-07-10,2026-08-10
+198.51.100.23,ip,osint-feed,TLP:CLEAR,2026-07-12,2026-08-12
+malicious-c2.example,domain,internal-feed,TLP:AMBER,2026-07-10,2026-08-10
+44d88612fea8a8f36de82e1278abb02f,md5,osint-feed,TLP:CLEAR,2026-07-14,2026-08-14

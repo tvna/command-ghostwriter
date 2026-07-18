@@ -1,0 +1,5 @@
+service_name: internal-api
+host_address: 127.0.0.1
+host_port: 8080
+bind_identity: internal-api-server
+dial_identity: internal-api-client

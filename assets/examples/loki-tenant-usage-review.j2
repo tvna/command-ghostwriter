@@ -1,0 +1,140 @@
+# Lokiテナント別ログ使用量の定期レビュー
+
+テナント別の取り込み量・ストリーム数・コストを定期レビューし、異常や高カーディナリティを是正する運用手順です。
+
+## 目的
+
+Grafana Loki + Promtailのマルチテナント環境で、テナント別のingestion量・ストリーム数・クエリ負荷を定期的に集計し、取り込み急増（デバッグログ放置やラベル誤設計）や高カーディナリティテナントを早期に発見して、`runtime-config.yaml`のlimits調整で是正できるようになることを目指します。
+
+## 用語解説
+
+- **テナント(tenant)**: `X-Scope-OrgID`ヘッダで識別されるLokiのマルチテナント境界。テナントごとに取り込み・クエリのlimitsを個別設定できる
+- **ストリーム(stream)**: ラベルの組み合わせ1セットに対応するログの系列。ラベルの値が多様なほどストリーム数（カーディナリティ）が増える
+- **高カーディナリティ**: `trace_id`や`request_id`などラベル値が実質無限に近いラベルをインデックスに使い、ストリーム数が爆発的に増える状態
+- **runtime-config.yaml**: Lokiが起動中に再読込する外部設定ファイル。`overrides`配下にテナント別limitsを記述する
+- **ingestion_rate_mb / max_global_streams_per_user**: テナント別に設定できる取り込み速度上限・最大ストリーム数上限
+
+## シナリオ設定
+
+今回のレビュー対象は{{ csv_rows | length }}テナントです。各テナントについて `ingest_gb`(当月取り込み量GB) / `stream_count`(アクティブストリーム数) / `top_label`(ストリーム数に最も寄与しているラベル) を集計し、`anomaly`欄に異常種別、`disposition`欄に是正方針を記録します。
+
+| tenant | ingest_gb | stream_count | top_label | anomaly | disposition |
+| --- | --- | --- | --- | --- | --- |
+{% for r in csv_rows %}| {{ r["tenant"] }} | {{ r["ingest_gb"] }} | {{ r["stream_count"] }} | {{ r["top_label"] }} | {{ r["anomaly"] }} | {{ r["disposition"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. レビュー対象テナントと集計期間を確認する
+
+```bash
+echo "レビュー対象テナント数: {{ csv_rows | length }}"
+{% for r in csv_rows %}echo "- {{ r["tenant"] }}"
+{% endfor %}```
+
+### 2. Prometheus経由でテナント別の取り込み量を集計する
+
+LokiはCortex由来のメトリクスを`/metrics`で公開しており、Prometheusでテナント別に集計できます。
+
+```bash
+{% for r in csv_rows %}curl -G -s "http://prometheus:9090/api/v1/query" \
+  --data-urlencode 'query=sum by (tenant) (rate(loki_distributor_bytes_received_total{tenant="{{ r["tenant"] }}"}[24h])) * 86400 / (1024*1024*1024)'
+{% endfor %}```
+
+### 3. テナント別のアクティブストリーム数を確認する
+
+```bash
+{% for r in csv_rows %}curl -G -s "http://prometheus:9090/api/v1/query" \
+  --data-urlencode 'query=sum by (tenant) (loki_ingester_memory_streams{tenant="{{ r["tenant"] }}"})'
+{% endfor %}```
+
+### 4. logcliで高カーディナリティラベルを特定する
+
+`logcli series --analyze-labels`でテナントごとのラベル別カーディナリティを確認します。
+
+```bash
+{% for r in csv_rows %}logcli series '{tenant="{{ r["tenant"] }}"}' \
+  --addr=http://loki:3100 --org-id="{{ r["tenant"] }}" --analyze-labels
+{% endfor %}```
+
+### 5. 異常テナントの原因を切り分ける
+
+`anomaly`欄が`-`のテナントは対応不要です。それ以外は以下の観点で原因を確認します。
+
+```bash
+{% for r in csv_rows %}{% if r["anomaly"] != "-" %}echo "{{ r["tenant"] }}: 異常種別 -> {{ r["anomaly"] }} (top_label={{ r["top_label"] }})"
+{% endif %}{% endfor %}```
+
+- 取り込み急増: Promtailの`pipeline_stages`にデバッグレベルのログを弾く`drop`ステージが外れていないか、アプリ側のログレベルが誤って`DEBUG`のまま本番投入されていないかを確認する
+- 高カーディナリティ: `top_label`が`trace_id`や`request_id`など実質一意な値になっていないか確認し、当該ラベルをインデックスラベルから外す（構造化メタデータや`| json`パースでのフィールド抽出に切り替える）
+
+### 6. Promtailのラベル設計を是正する
+
+誤ラベル・高カーディナリティが確認できたテナントは、Promtailの`scrape_configs`を修正します。
+
+```yaml
+# promtail-config.yaml (該当テナントのjobのみ抜粋)
+scrape_configs:
+  - job_name: team-batch-app
+    pipeline_stages:
+      - match:
+          selector: '{job="team-batch-app"} |~ "level=debug"'
+          action: drop
+      - json:
+          expressions:
+            trace_id: trace_id
+    relabel_configs:
+      - action: labeldrop
+        regex: trace_id
+```
+
+```bash
+promtail -config.file=/etc/promtail/promtail-config.yaml -dry-run -config.expand-env=true
+```
+
+### 7. runtime-config.yamlでテナント別limitsを調整する
+
+```yaml
+# /etc/loki/runtime-config.yaml
+overrides:
+{% for r in csv_rows %}{% if r["anomaly"] != "-" %}  {{ r["tenant"] }}:
+    ingestion_rate_mb: 4
+    ingestion_burst_size_mb: 6
+    max_global_streams_per_user: 20000
+    max_label_names_per_series: 15
+{% endif %}{% endfor %}```
+
+`runtime_config.period`(既定10秒程度)ごとにLokiが自動で再読込するため、プロセス再起動は不要です。反映は次の手順で確認します。
+
+```bash
+curl -s http://loki:3100/runtime_config | grep -A5 "team-batch:"
+```
+
+### 8. コスト配賦とレビュー記録を保存する
+
+`ingest_gb`を基準にストレージ・転送コストをテナント別に配賦し、レビュー結果を記録として保存します。
+
+```bash
+cat <<'EOF' > /tmp/loki-tenant-review-$(date '+%Y%m').md
+# Lokiテナント別ログ使用量レビュー結果
+対象テナント数: {{ csv_rows | length }}
+{% for r in csv_rows %}- {{ r["tenant"] }}: ingest_gb={{ r["ingest_gb"] }} stream_count={{ r["stream_count"] }} anomaly={{ r["anomaly"] }} disposition={{ r["disposition"] }}
+{% endfor %}
+EOF
+```
+
+## 動作確認
+
+- 全{{ csv_rows | length }}テナントについて、Prometheus経由で`ingest_gb`相当のメトリクスと`stream_count`が取得できていること
+- `logcli series --analyze-labels`でテナント別のラベル内訳が取得でき、`top_label`欄の値と実測が一致していること
+- `anomaly`欄が`-`以外のテナントすべてに`disposition`欄の是正方針が記録されていること
+- `runtime-config.yaml`調整後、`curl http://loki:3100/runtime_config`で該当テナントのoverridesが反映されていること
+- レビュー結果ファイル(`/tmp/loki-tenant-review-*.md`)が作成され、次回レビューへの引き継ぎ事項として保管されていること
+
+## 注意事項
+
+- 取り込み急増の主因は「デバッグログの本番放置」と「高カーディナリティラベル」の2つに大別されるため、`anomaly`欄には必ずどちらに該当するかを明記する。原因を特定せずlimitsだけを引き上げると根本原因が温存される。
+- `max_global_streams_per_user`やラベル設計の変更はテナントのログ欠落に直結するため、変更後は必ず該当テナントの直近クエリ（`logcli query`等）で新しいラベル構成でもログが正常に取り込まれていることを確認してから、旧ラベル運用を前提としたダッシュボードやアラートルールを更新すること。
+- `runtime-config.yaml`は自動再読込されるが、誤った値を入れるとテナント全体の取り込みが即座に絞られるため、変更前に必ず現在の値をバックアップし、反映後は`stream_count`とingestion成功率を数分監視してから撤収する。
+- コスト配賦は`ingest_gb`ベースの目安であり、実際の課金・原価計算ロジックとは乖離しうるため、確定値は経理・FinOps側の集計と突き合わせる。
+- レビュー記録は次回レビューとの差分比較に使うため、`disposition`の実施結果（limits変更日時、担当者）を追記のうえ、恒久的に参照可能な場所（Wiki等）へ保管する。

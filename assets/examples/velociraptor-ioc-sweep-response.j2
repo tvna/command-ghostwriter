@@ -1,0 +1,152 @@
+# VelociraptorによるIoCスイープ対応
+
+受領したIoC(ハッシュ/ファイル名/ドメイン/IP)を、カスタムVQLアーティファクトを使って全ホストへHunt(スイープ)し、感染範囲(blast radius)を特定して初動対応(隔離・フォレンジック連携)につなげる手順です。
+
+## 目的
+
+受領IoCの型(hash/filename/domain/ip)ごとに適切な照合方法を選び、Velociraptorのfan-out Hunt機能で全ホストへ横断照合し、一致ホストの抽出から隔離・証跡保全までの初動対応フローを実施できるようになることを目指します。
+
+## 用語解説
+
+- **IoC(Indicator of Compromise)**: 侵害の痕跡を示す具体的な値(ハッシュ・ファイル名・ドメイン・IPなど)
+- **Hunt**: Velociraptorサーバーから接続中の全クライアント(ホスト)へ同一アーティファクトを一斉配布・実行するfan-out照合の仕組み
+- **感染範囲(blast radius)の特定**: スイープ結果から一致したホスト群を洗い出し、被害がどこまで広がっているかを確定する作業
+- **VQL(Velociraptor Query Language)**: Velociraptorのクライアント/サーバーで実行するSQL風のクエリ言語
+- **カスタムアーティファクト**: 組織固有の検知ロジックをYAMLで定義し、標準アーティファクトと同様にHuntへ投入できる仕組み
+- **quarantine(隔離)**: 一致ホストをネットワーク的に分離し、被害拡大とIoCの持ち出しを防ぐ措置
+- **triage**: 隔離後にメモリ・プロセス・永続化設定などを優先順位付けして採取するフォレンジック初動
+
+## シナリオ設定
+
+| ioc_value | ioc_type | detection_artifact | scope | hit_hosts | followup |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["ioc_value"] }} | {{ r["ioc_type"] }} | {{ r["detection_artifact"] }} | {{ r["scope"] }} | {{ r["hit_hosts"] }} | {{ r["followup"] }} |
+{% endfor %}
+
+## 1. IoCの型ごとに照合方法を対応させたカスタムVQLアーティファクトを作成する
+
+IoCの型(hash/filename/domain/ip)によって照合方法が異なるため、型ごとに検知ロジックを分けたVQLをアーティファクトYAMLとして定義します。`custom_artifacts/Custom.IOC.Sweep.yaml` として保存してください。
+
+```yaml
+name: Custom.IOC.Sweep
+type: CLIENT
+parameters:
+  - name: SearchGlob
+    default: C:/Users/**;C:/ProgramData/**
+sources:
+  - name: Hash
+    query: |
+{% for r in csv_rows %}{% if r["ioc_type"] == "hash" %}      SELECT FullPath, hash(path=FullPath).MD5 AS MD5, hash(path=FullPath).SHA256 AS SHA256
+      FROM glob(globs=split(string=SearchGlob, sep_string=";"))
+      WHERE MD5 = "{{ r["ioc_value"] }}" OR SHA256 = "{{ r["ioc_value"] }}"
+{% endif %}{% endfor %}
+  - name: Filename
+    query: |
+{% for r in csv_rows %}{% if r["ioc_type"] == "filename" %}      SELECT FullPath, Size, Mtime
+      FROM glob(globs=split(string=SearchGlob, sep_string=";"))
+      WHERE Name = "{{ r["ioc_value"] }}"
+{% endif %}{% endfor %}
+  - name: Network
+    query: |
+      SELECT Pid, Laddr, Raddr, Status
+      FROM netstat()
+{% for r in csv_rows %}{% if r["ioc_type"] == "ip" %}      WHERE Raddr = "{{ r["ioc_value"] }}"
+{% endif %}{% endfor %}
+  - name: DnsHosts
+    query: |
+{% for r in csv_rows %}{% if r["ioc_type"] == "domain" %}      SELECT FullPath, Line
+      FROM parse_lines(filename="C:/Windows/System32/drivers/etc/hosts")
+      WHERE Line =~ "{{ r["ioc_value"] }}"
+{% endif %}{% endfor %}
+```
+
+`split()`・`glob()`・`hash()`・`netstat()`・`parse_lines()` はいずれもVelociraptorのVQL組み込みプラグイン/関数です。ドメインIoCは名前解決結果を直接得るプラグインがないため、まずhostsファイルの汚染有無を確認し、必要に応じてプロキシ/DNSログとの突合を別途行います(下記「注意事項」参照)。
+
+## 2. カスタムアーティファクトをサーバーへ登録し、単一ホストでdry-run検証する
+
+fleet全台へ展開する前に、まず1台(検証端末)でVQLの構文と挙動を確認します。
+
+```bash
+velociraptor --config server.config.yaml artifacts collect Custom.IOC.Sweep \
+  --definitions ./custom_artifacts/ \
+  --output ./sweep_dryrun.json
+cat ./sweep_dryrun.json
+```
+
+## 3. Huntを作成しfleet全台へIoCスイープを展開する
+
+dry-runで構文エラーがないことを確認できたら、GUI(`Hunt Manager` > `New Hunt`)からCustom.IOC.Sweepを選択し、対象スコープ(fleet全台)を指定してHuntを開始するか、pyvelociraptor経由のAPIスクリプトで作成します。
+
+```bash
+python3 - <<'PYEOF'
+import pyvelociraptor
+from pyvelociraptor import api_pb2, api_pb2_grpc
+
+config = pyvelociraptor.LoadConfigFile("api.config.yaml")
+channel = pyvelociraptor.GetChannel(config)
+stub = api_pb2_grpc.APIStub(channel)
+
+request = api_pb2.CreateHuntRequest(
+    hunt_description="IoCスイープ対応 - 受領IoC横断照合",
+    start_request=api_pb2.VQLCollectorArgs(
+        artifacts=["Custom.IOC.Sweep"],
+    ),
+)
+response = stub.CreateHunt(request)
+print("hunt_id:", response.hunt_id)
+PYEOF
+```
+
+Hunt IDが払い出されたら、進捗をGUIまたは以下のVQLで確認します。
+
+```bash
+velociraptor --config api.config.yaml query \
+  "SELECT hunt_id, state, total_clients_scheduled, total_clients_with_results FROM hunts() WHERE hunt_id = 'H.XXXXXXXX'"
+```
+
+## 4. スイープ完了後、一致ホストを抽出し感染範囲を確定する
+
+Hunt完了(`state = 'FINISHED'`)を確認後、一致結果を集計します。
+
+```bash
+velociraptor --config api.config.yaml query \
+  "SELECT client_id, Fqdn FROM hunt_results(hunt_id='H.XXXXXXXX', artifact='Custom.IOC.Sweep/Hash') GROUP BY client_id"
+```
+
+抽出したホスト一覧を、シナリオ設定の `hit_hosts` 列(既知の想定一致ホスト)と突き合わせ、想定外の一致がないかを確認してください。
+
+## 5. 一致ホストを隔離し、フォレンジック証跡を保全する
+
+`followup` が `quarantine` または `triage` のIoCで一致したホストは、拡散防止のためネットワーク隔離を行った上で証跡を採取します。
+
+```bash
+{% for r in csv_rows %}{% if r["followup"] == "quarantine" %}velociraptor --config api.config.yaml query \
+  "SELECT * FROM clients(search='host:{{ r["ioc_value"] }}') LIMIT 0"
+velociraptor --config api.config.yaml artifacts collect Windows.Remediation.Quarantine \
+  --client "$(cat client_id_for_{{ r["detection_artifact"] }}.txt)"
+{% endif %}{% if r["followup"] == "triage" %}velociraptor --config api.config.yaml artifacts collect Windows.KapeFiles.Targets \
+  --client "$(cat client_id_for_{{ r["detection_artifact"] }}.txt)" \
+  --output "triage_{{ r["detection_artifact"] }}.zip"
+{% endif %}{% endfor %}```
+
+隔離・採取が完了したら、収集物(triageのzip、隔離実施ログ)をハッシュ台帳に記録し、改ざん検知できる形で保全します。
+
+```bash
+sha256sum triage_*.zip > triage_manifest.sha256
+```
+
+## 動作確認
+
+1. HuntのstateがFINISHEDになっていること(Step 3のVQLで確認)。
+2. スイープ結果から抽出した一致ホスト一覧が、シナリオ設定の `hit_hosts` 列と整合していること(Step 4)。
+3. `hit_hosts` が `-` (一致なしの想定)であるIoCについて、実際の一致件数が0件であること(未感染確認)。
+4. `followup` が `quarantine`/`triage` の一致ホストについて、隔離コマンドまたはtriage採取コマンドの実行ログが残っていること(Step 5)。
+5. `triage_manifest.sha256` が生成され、採取物のハッシュが記録されていること。
+
+## 注意事項
+
+- IoCの型(hash/filename/domain/ip)ごとに照合方法が異なるため、Custom.IOC.Sweepの `Hash`/`Filename`/`Network`/`DnsHosts` の各ソースを混同しないこと。特にdomain型はhostsファイル汚染の確認に留まり、実際の名前解決結果は得られないため、DNSサーバーやプロキシのログとの突合を別途行う必要がある。
+- fleet全台へのHuntは対象ホスト数に比例してI/O・CPU負荷がかかるため、業務影響を避けるスケジュール(夜間・分散展開)と対象範囲(全台か特定セグメントか)を事前に決めてから実行すること。
+- 受領したIoC自体の出所(脅威インテル提供元、信頼性)を確認せずに全台へ展開すると、誤検知や過剰対応につながる。IoCの出所と信頼度を記録した上でスイープを開始すること。
+- 一致ホストへの隔離(Windows.Remediation.Quarantine)はネットワークアクセスを遮断する不可逆に近い操作であるため、Step 2のdry-run検証と、隔離対象ホストがVelociraptorサーバーとの通信(隔離解除用の制御チャネル)を維持できることを確認してから実施すること。誤って隔離した場合に備え、解除コマンドと解除条件を事前に手順化しておく。
+- スイープ結果・Hunt ID・隔離ログ・triage採取物は、インシデント対応の証跡として改ざん検知(ハッシュ台帳)つきで保全し、対応完了後も一定期間保持すること。

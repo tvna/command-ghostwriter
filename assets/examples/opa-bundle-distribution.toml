@@ -1,0 +1,12 @@
+bundle_name = "authz-policies"
+bundle_service_url = "https://bundle.internal.example.com"
+bundle_resource_path = "bundles/authz-policies/bundle.tar.gz"
+polling_interval_min = 20
+polling_interval_max = 40
+signing_keyid = "authz_bundle_signing_key"
+signing_public_key_path = "/etc/opa/keys/authz_bundle_pub.pem"
+signing_private_key_path = "/etc/opa/keys/authz_bundle_priv.pem"
+decision_log_endpoint = "https://decisionlogs.internal.example.com"
+opa_node_count = 18
+canary_node = "opa-node-03"
+oci_registry_ref = "registry.internal.example.com/opa-bundles/authz-policies:2026.07.17"

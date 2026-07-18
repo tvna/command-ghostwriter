@@ -1,0 +1,4 @@
+monitor_interface = "ens224"
+expected_sid = 2100498
+test_command = "curl -s http://testmynids.org/uid/index.html"
+checksum_checks = "no"

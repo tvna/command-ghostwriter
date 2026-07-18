@@ -1,0 +1,25 @@
+[server]
+config_path = "/etc/unbound/unbound.conf.d/serve-expired.conf"
+serve_expired = true
+serve_expired_ttl = 86400
+client_timeout_ms = 1800
+reply_ttl = 30
+cache_max_ttl = 86400
+
+[forward_zone]
+domain = "example.com."
+addrs = ["203.0.113.53", "203.0.113.54"]
+
+[rollout]
+canary_ttl = 60
+staging_ttl = 3600
+production_ttl = 86400
+
+[verification]
+query_domain = "www.example.com"
+query_type = "A"
+block_comment = "serve-expired-outage-test"
+
+[monitoring]
+verbosity = 2
+stats_cmd = "unbound-control stats_noreset"

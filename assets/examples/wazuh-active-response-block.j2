@@ -1,0 +1,146 @@
+# WazuhアクティブレスポンスによるIP自動遮断
+
+高レベルアラート発生時に、Wazuhのactive responseで攻撃元IPをエージェント側のローカルファイアウォールで自動遮断する構成を作ります。**自組織の監視元・管理元IPをホワイトリストへ登録してから有効化し**、低リスクトリガーで誤遮断がないことを確認したうえで本番トリガーを有効化します。
+
+## 目的
+
+Wazuhのactive response機構（`<command>`と`<active-response>`）を理解し、高レベルアラート発生時にfirewall-dropで攻撃元IPを一時遮断する構成を、自己ロックアウトを起こさずに構築できるようになることを目指します。
+
+## 用語解説
+
+- **active response**: Wazuhマネージャがルールマッチ時にエージェント側でスクリプトを実行させる仕組み
+- **firewall-drop**: エージェントOS付属のactive responseスクリプトで、ローカルのiptables/ipsetにDROPルールを追加する
+- **location = local**: active responseをアラート発生元のエージェント自身でのみ実行する指定（他ホストには波及しない）
+- **timeout付き一時遮断**: `timeout`秒が経過すると同じスクリプトが`delete`引数付きで再実行され、遮断が自動解除される仕組み
+- **repeated_offenders**: 同一IPが遮断→解除を繰り返すたびに、次回のtimeoutをカンマ区切りの値へ順に延長する累進ペナルティ設定
+- **CDBリスト（allowlist）**: `/var/ossec/etc/lists`配下に置く、ルール条件から参照するキー:値形式の一覧ファイル
+- **ar.log**: `/var/ossec/logs/active-responses.log`。active responseの実行・遮断・解除の記録
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| command_name | {{ command_name }} |
+| trigger_level | {{ trigger_level }} |
+| trigger_rules | {% for rid in trigger_rules %}{{ rid }}{% if not loop.last %}, {% endif %}{% endfor %} |
+| timeout_seconds | {{ timeout_seconds }} |
+| repeated_offenders | {{ repeated_offenders }} |
+| 対象エージェント | {{ agent.name }} ({{ agent.platform }}) |
+| 低リスク検証用ルールID | {{ test.low_risk_rule_id }} |
+| 検証用攻撃元IP | {{ test.attacker_ip }} |
+
+## 1. ホワイトリストを登録してから有効化準備をする（ロックアウト防止の最優先手順）
+
+まず、監視元・管理元IPを`/var/ossec/etc/lists`のCDBリストに登録します。**この登録が完了するまでactive responseは有効化しません。**
+
+```bash
+sudo tee /var/ossec/etc/lists/whitelist-ips <<'EOF'
+{% for w in whitelist %}{{ w.address }}:{{ w.label }}
+{% endfor %}EOF
+sudo /var/ossec/bin/wazuh-cdblist-build /var/ossec/etc/lists/whitelist-ips /var/ossec/etc/lists/whitelist-ips.cdb
+sudo chown wazuh:wazuh /var/ossec/etc/lists/whitelist-ips.cdb
+```
+
+続けて、マネージャの`ossec.conf`にリスト参照とホワイトリスト除外ルールを追加します（ルールIDはローカル用に予約された範囲を使用）。
+
+```bash
+sudo tee -a /var/ossec/etc/ossec.conf <<'EOF'
+<ossec_config>
+  <rules>
+    <list>etc/lists/whitelist-ips</list>
+  </rules>
+</ossec_config>
+EOF
+
+sudo tee /var/ossec/etc/rules/local_rules.xml <<'EOF'
+<group name="local,">
+  <rule id="100100" level="0">
+    <list field="srcip" lookup="address_match_key">etc/lists/whitelist-ips</list>
+    <description>監視元・管理元IPからのアクセスはactive response対象から除外</description>
+  </rule>
+</group>
+EOF
+```
+
+## 2. active responseコマンドを定義する
+
+`/var/ossec/etc/ossec.conf`に`<command>`ブロックを追加し、firewall-dropスクリプトを`{{ command_name }}`という名前で登録します。
+
+```bash
+sudo tee -a /var/ossec/etc/ossec.conf <<'EOF'
+<ossec_config>
+  <command>
+    <name>{{ command_name }}</name>
+    <executable>firewall-drop</executable>
+    <timeout_allowed>yes</timeout_allowed>
+  </command>
+</ossec_config>
+EOF
+```
+
+## 3. active responseをトリガーに紐付ける
+
+`<active-response>`ブロックで、遮断対象ルールID・レベル・エージェント・timeout・累進延長を設定します。**`level`はホワイトリスト除外ルール（レベル0）より高い値なので、ホワイトリストIPは自動的に対象外になりますが、有効化前に必ずStep 1が完了していることを確認してください。**
+
+```bash
+sudo tee -a /var/ossec/etc/ossec.conf <<'EOF'
+<ossec_config>
+  <active-response>
+    <disabled>no</disabled>
+    <command>{{ command_name }}</command>
+    <location>local</location>
+    <rules_id>{% for rid in trigger_rules %}{{ rid }}{% if not loop.last %},{% endif %}{% endfor %}</rules_id>
+    <level>{{ trigger_level }}</level>
+    <timeout>{{ timeout_seconds }}</timeout>
+    <repeated_offenders>{{ repeated_offenders }}</repeated_offenders>
+  </active-response>
+EOF
+sed -i '$ s#</ossec_config>#  </ossec_config>#' /var/ossec/etc/ossec.conf
+sudo /var/ossec/bin/wazuh-control restart
+```
+
+## 4. 低リスクトリガーで誤遮断がないことを確認する
+
+本番トリガー（レベル{{ trigger_level }}、ルール{% for rid in trigger_rules %}{{ rid }}{% if not loop.last %}/{% endif %}{% endfor %}）を有効化する前に、まず低リスクなテストルール（ID {{ test.low_risk_rule_id }}）でactive response全体の配線を確認します。
+
+```bash
+sudo /var/ossec/bin/agent_control -j -a {{ agent.name }} | grep -A2 '"id"'
+echo "test alert" | sudo /var/ossec/bin/wazuh-logtest -a {{ test.low_risk_rule_id }} 2>/dev/null || true
+sudo tail -n 20 /var/ossec/logs/active-responses.log
+```
+
+このステップでは、ホワイトリストIP（{% for w in whitelist %}{{ w.address }}{% if not loop.last %}, {% endif %}{% endfor %}）からのイベントに対しては`ar.log`にfirewall-dropの実行記録が現れないこと、また本番の高レベルトリガーはまだ有効化していないことを確認します。
+
+## 5. 動作確認: テストアラートによる自動遮断とtimeout後の自動解除
+
+検証用攻撃元IP（`{{ test.attacker_ip }}`、ホワイトリストには含まれていません）からのイベントを模してテストアラートを発火させ、自動遮断・自動解除・ログ記録を確認します。
+
+```bash
+sudo /var/ossec/bin/wazuh-logtest <<EOF
+type=syslog
+Failed password for invalid user root from {{ test.attacker_ip }} port 22 ssh2
+EOF
+
+sleep 5
+sudo grep "{{ test.attacker_ip }}" /var/ossec/logs/active-responses.log
+sudo iptables -L -n | grep {{ test.attacker_ip }}
+
+sleep {{ timeout_seconds }}
+sudo grep "{{ test.attacker_ip }}" /var/ossec/logs/active-responses.log | tail -n 5
+sudo iptables -L -n | grep {{ test.attacker_ip }} || echo "OK: {{ timeout_seconds }}秒経過後に自動解除された"
+```
+
+確認する点は次のとおりです。
+
+- `active-responses.log`に`add`（遮断）と、`{{ timeout_seconds }}`秒後の`delete`（解除）の両方が記録されること
+- 遮断中は`iptables -L -n`に`{{ test.attacker_ip }}`宛のDROPルールが存在すること
+- timeout経過後は同ルールが消えていること
+- 同一IPが再度遮断された場合、次のtimeoutが`{{ repeated_offenders }}`の順で延長されること（`active-responses.log`の`repeated offenders`表記で確認）
+- ホワイトリストIP（{% for w in whitelist %}{{ w.address }}{% if not loop.last %}, {% endif %}{% endfor %}）からのイベントでは遮断記録が一切現れないこと
+
+## 注意事項
+
+- **自IP誤遮断のリスク**: ホワイトリスト登録（Step 1）を飛ばして有効化すると、監視サーバや管理端末自身が遮断され、マネージャ・エージェント双方への接続経路を失う可能性があります。必ずStep 1完了 → Step 4の低リスク検証 → Step 3以降の本番有効化、の順序を守ってください。
+- **遮断はエージェントローカルのファイアウォールで行われる**: `location`を`local`にしているため、firewall-dropはアラートが発生したエージェント（{{ agent.name }}）上のiptables/ipsetのみを変更します。マネージャや他のエージェントのファイアウォールには影響しません。
+- **無限ループ防止**: active response自身の実行ログ（firewall-drop実行イベント）を新たなトリガー条件に含めないでください。遮断イベントが新たな高レベルアラートを生み、再度遮断を呼ぶ自己増殖ループになります。ルール{% for rid in trigger_rules %}{{ rid }}{% if not loop.last %}, {% endif %}{% endfor %}はいずれもactive response自体のログではなく、認証失敗等の一次イベントのみを指すことを確認してください。
+- 本番のトリガールール・レベルを有効化する前に、必ずStep 4の低リスクトリガーでの検証を先に完了させ、誤遮断がないことを確かめてから進めてください。

@@ -1,0 +1,6 @@
+policy,bundle_version,exemptions,decision_trend,disposition,reviewed_at
+kubernetes.admission.require-non-root,v2026.07.10-3fa8c1,ns:legacy-batch(期限2026-05-01失効),allow512/deny9(直近7日),例外失効のため是正,2026-07-18
+api.gateway.rate-limit-bypass,v2026.06.02-9e21ab,-,allow12000/deny3(直近7日),問題なし,2026-07-18
+terraform.iam.deny-wildcard-action,v2026.03.15-77bcd0,repo:legacy-infra(期限未設定・要期限化),allow40/deny410(直近7日),過剰拒否傾向の要因調査,2026-07-18
+envoy.authz.legacy-basic-auth,v2025.11.20-0a1f44,-,allow0/deny0(直近90日:決定ログなし),未使用のため廃止候補,2026-07-18
+kubernetes.admission.default-deny-baseline,v2026.07.10-3fa8c1,-,allow0/deny0(default_deny基準),default_deny維持を確認,2026-07-18

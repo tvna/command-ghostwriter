@@ -1,0 +1,152 @@
+# Wazuhインデクサクラスタのスケーリング
+
+Wazuh Indexer（OpenSearchベース）を複数ノードでクラスタ化し、シャード/レプリカ設計とインデックス保持（ISM）を構築します。すべてWazuh Indexerノードのroot権限相当の作業ユーザーで実施してください。
+
+## 目的
+
+`opensearch.yml`のノードロール分離（`cluster_manager`/`data`）とシード探索、ノード間TLS相互認証、ISM（Index State Management）による`wazuh-alerts-*`インデックスのローテーション・削除を構築し、`_cluster/health`がgreenであることと保持ポリシーの適用を検証できるようになることを目指します。
+
+## 用語解説
+
+- **node.roles（ノードロール）**: 各ノードが担う役割。`cluster_manager`はクラスタ状態管理、`data`はインデックスデータの保持と検索実行を担当する。役割を分離することでクラスタ管理の安定性とデータノードのスケールアウトを両立できる
+- **discovery.seed_hosts**: クラスタ結成時に他ノードを発見するための初期接続先ホスト一覧
+- **shard（シャード）**: インデックスを分割した単位。ノード間に分散配置することで書き込み・検索を並列化する
+- **replica（レプリカ）**: シャードの複製。ノード障害時の可用性確保と読み取りスループット向上のために保持する
+- **ISM（Index State Management）**: インデックスのライフサイクル（hot/warm/delete等）をポリシーとして自動管理する仕組み。`wazuh-alerts-*`の日次ローテーションと保持期限超過後の削除を自動化する
+- **ノード間TLS相互信頼**: Wazuh Indexerのtransport層通信で、各ノードが証明書を用いて相互に認証し合う仕組み。未信頼ノードのクラスタ参加を防ぐ
+
+## シナリオ設定
+
+クラスタ名 `{{ cluster_name }}` を、シャード数 `{{ shard_count }}`・レプリカ数 `{{ replica_count }}`・保持日数 `{{ retention_days }}` 日の設計で構築します。
+
+| ノード名 | ロール | ホスト |
+| --- | --- | --- |
+{% for node in cluster_nodes %}| {{ node.name }} | {{ node.roles }} | {{ node.host }} |
+{% endfor %}
+
+## 手順
+
+### 1. 各ノードでopensearch.ymlを設定する
+
+{% for node in cluster_nodes %}
+`{{ node.name }}`（{{ node.host }}）向け設定:
+
+```bash
+ssh {{ node.host }} "sudo tee -a /etc/wazuh-indexer/opensearch.yml <<'EOF'
+cluster.name: {{ cluster_name }}
+node.name: {{ node.name }}
+node.roles: [{{ node.roles }}]
+network.host: {{ node.host }}
+discovery.seed_hosts: [\"10.0.1.11\", \"10.0.1.12\", \"10.0.1.13\"]
+cluster.initial_cluster_manager_nodes: [\"wazuh-idx-01\", \"wazuh-idx-02\"]
+EOF"
+```
+{% endfor %}
+
+各ノードの`node.roles`は用途に応じて`cluster_manager`または`data`のいずれかを設定し、両方を全ノードに割り当てないこと。
+
+### 2. ノード間TLS相互信頼を設定する
+
+```bash
+{% for node in cluster_nodes %}
+ssh {{ node.host }} "sudo tee -a /etc/wazuh-indexer/opensearch.yml <<'EOF'
+plugins.security.ssl.transport.pemcert_filepath: /etc/wazuh-indexer/certs/{{ node.name }}.pem
+plugins.security.ssl.transport.pemkey_filepath: /etc/wazuh-indexer/certs/{{ node.name }}-key.pem
+plugins.security.ssl.transport.pemtrustedcas_filepath: /etc/wazuh-indexer/certs/root-ca.pem
+plugins.security.ssl.transport.enforce_hostname_verification: true
+EOF"
+{% endfor %}
+```
+
+`root-ca.pem`は全ノード共通の同一CAから発行し、各ノード固有の証明書はそのCAで署名する。証明書が不一致のノードはハンドシェイクに失敗しクラスタに参加できない。
+
+### 3. 全ノードを起動しクラスタを結成する
+
+```bash
+{% for node in cluster_nodes %}
+ssh {{ node.host }} "sudo systemctl enable --now wazuh-indexer"
+{% endfor %}
+```
+
+### 4. シャード・レプリカ数を設計しインデックステンプレートへ反映する
+
+```bash
+curl -k -u "$OS_ADMIN_USER:$OS_ADMIN_PASS" -X PUT "https://{{ cluster_nodes[0].host }}:9200/_index_template/wazuh-alerts-template" \
+  -H 'Content-Type: application/json' -d '{
+    "index_patterns": ["wazuh-alerts-*"],
+    "template": {
+      "settings": {
+        "number_of_shards": {{ shard_count }},
+        "number_of_replicas": {{ replica_count }}
+      }
+    }
+  }'
+```
+
+シャード数 `{{ shard_count }}` はデータノード数とディスク容量に応じて設計し、単一シャードサイズが肥大化しないよう調整する。レプリカ数 `{{ replica_count }}` はデータノード障害時の可用性要件に応じて設定する。
+
+### 5. ISM（Index State Management）ポリシーでwazuh-alerts-*の保持を管理する
+
+```bash
+curl -k -u "$OS_ADMIN_USER:$OS_ADMIN_PASS" -X PUT "https://{{ cluster_nodes[0].host }}:9200/_plugins/_ism/policies/wazuh-alerts-retention" \
+  -H 'Content-Type: application/json' -d '{
+    "policy": {
+      "description": "wazuh-alerts rollover and retention policy",
+      "default_state": "hot",
+      "states": [
+        {
+          "name": "hot",
+          "actions": [{ "rollover": { "min_index_age": "1d" } }],
+          "transitions": [{ "state_name": "warm", "conditions": { "min_index_age": "7d" } }]
+        },
+        {
+          "name": "warm",
+          "actions": [{ "replica_count": { "number_of_replicas": 0 } }],
+          "transitions": [{ "state_name": "delete", "conditions": { "min_index_age": "{{ retention_days }}d" } }]
+        },
+        {
+          "name": "delete",
+          "actions": [{ "delete": {} }]
+        }
+      ],
+      "ism_template": [{ "index_patterns": ["wazuh-alerts-*"], "priority": 100 }]
+    }
+  }'
+```
+
+保持日数 `{{ retention_days }}` 日は組織のコンプライアンス要件（監査ログ保持義務等）を満たす日数以上に設定する。
+
+## 動作確認
+
+1. `_cluster/health`がgreenであることを確認する
+
+```bash
+curl -k -u "$OS_ADMIN_USER:$OS_ADMIN_PASS" "https://{{ cluster_nodes[0].host }}:9200/_cluster/health?pretty"
+```
+
+`status`が`green`であること、`number_of_nodes`が設計したノード数と一致することを確認する。
+
+2. インデックス配置（シャード分散）を確認する
+
+```bash
+curl -k -u "$OS_ADMIN_USER:$OS_ADMIN_PASS" "https://{{ cluster_nodes[0].host }}:9200/_cat/shards/wazuh-alerts-*?v"
+```
+
+シャードが複数のデータノードに分散配置され、単一ノードに偏っていないことを確認する。
+
+3. ISMポリシーの適用状況を確認する
+
+```bash
+curl -k -u "$OS_ADMIN_USER:$OS_ADMIN_PASS" "https://{{ cluster_nodes[0].host }}:9200/_plugins/_ism/explain/wazuh-alerts-*?pretty"
+```
+
+対象インデックスに`wazuh-alerts-retention`ポリシーが紐づき、想定した`state`（hot/warm/delete）にあることを確認する。
+
+## 注意事項
+
+- 上記コマンドの `$OS_ADMIN_USER` / `$OS_ADMIN_PASS` には、Wazuh Indexer（OpenSearch）の管理ユーザー認証情報を環境変数として設定すること。初期構築直後のデモ既定値（`admin`/`admin`相当）のまま運用してはならず、`internal_users.yml`のハッシュ更新で必ずローテーションする。
+- 新しいクラスタ構成・TLS証明書は、旧来の単一ノード構成を停止する前に、上記の`_cluster/health`確認とISM適用確認を新クラスタに対して完了させ、正常稼働を確認してから旧ノードを切り離すこと。旧経路と新経路を並行稼働させ、新経路の健全性を検証してから旧経路を廃止する。
+- ノード間TLSの証明書は全ノード共通のCAから発行し、相互信頼を確立する。証明書の不一致・期限切れはクラスタ分断（split-brain）の原因になる。
+- シャード数はデータノード数・ディスク容量・想定インデックスサイズから設計する。シャードが大きくなりすぎるとリカバリ時間が延び、小さすぎるとオーバーヘッドが増える。
+- ディスク容量はシャード数×レプリカ数×想定データ量と保持日数`{{ retention_days }}`日分のログ量から逆算し、`cluster.routing.allocation.disk.watermark`の閾値に余裕を持たせる。
+- 保持ポリシー（ISM）による自動削除は、組織のログ保持コンプライアンス要件（監査要件・法定保持期間等）と整合していることを事前に確認してから適用する。要件と食い違う保持日数を設定すると、必要なログが早期削除されるリスクがある。

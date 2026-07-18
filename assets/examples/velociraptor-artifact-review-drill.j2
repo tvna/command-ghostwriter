@@ -1,0 +1,109 @@
+# Velociraptorアーティファクト台帳の棚卸し訓練
+
+配備済みの全アーティファクト(組込み/カスタム)とclient monitoring配布状況を定期的に棚卸しし、過不足・安全性を点検する訓練手順書です。
+
+## 目的
+
+台帳(CSV)に記録した想定と、サーバに実際に登録されているアーティファクト・monitoring配布設定を突合し、未レビューのカスタムアーティファクトの排除、必要なアーティファクトの欠落防止、権限が広いアーティファクトの管理を徹底することを目指します。
+
+## 用語解説
+
+- **アーティファクト(Artifact)**: Velociraptorが収集・監視の単位として実行するVQLベースの定義(YAML)。組込み(builtin)とカスタム(custom)がある
+- **client monitoring**: サーバがクライアントに常時配布し、イベント発生時に自動収集させるアーティファクト集合。GUIの「Server Artifacts」→「Client Events」で管理する
+- **VQL(Velociraptor Query Language)**: アーティファクトの収集ロジックを記述するクエリ言語。`execve()`などの一部プラグインは任意コマンド実行が可能なため注意が必要
+- **required_permissions**: アーティファクト定義に付与できるACL要求フィールド。`EXECVE`や`FILESYSTEM_WRITE`など広い権限を要求するアーティファクトを明示する
+- **disposition**: 棚卸し結果に基づく処置区分。本手順では `keep`(維持)/`review`(要再レビュー)/`remove`(削除)の3値を扱う
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 件を棚卸し対象とします。
+
+| artifact_name | type | monitoring | last_reviewed | safety_check | disposition |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["artifact_name"] }} | {{ r["type"] }} | {{ r["monitoring"] }} | {{ r["last_reviewed"] }} | {{ r["safety_check"] }} | {{ r["disposition"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. サーバに登録された全アーティファクト定義を取得する
+
+`artifact_definitions()` VQLプラグインで、組込み・カスタムを問わずサーバが認識している全定義を列挙します。
+
+```bash
+velociraptor --config server.config.yaml query \
+  "SELECT name, description FROM artifact_definitions() ORDER BY name"
+```
+
+台帳上のカスタムアーティファクトが実際に登録されているかも個別に確認します。
+
+```bash
+{% for r in csv_rows %}{% if r["type"] == "custom" %}velociraptor --config server.config.yaml artifacts show {{ r["artifact_name"] }} > /tmp/{{ r["artifact_name"] }}.yaml
+{% endif %}{% endfor %}```
+
+### 2. client monitoringの配布状況を確認する
+
+GUIの「Server Artifacts」→「Client Events」画面でエクスポートした現在の配布設定(YAML)を取得し、台帳の `monitoring` 列(true/false)と突き合わせます。
+
+```bash
+velociraptor --config server.config.yaml query \
+  "SELECT Artifact FROM source(artifact='Server.Monitor.Health') LIMIT 1" \
+  > /tmp/monitoring_probe.json
+```
+
+配布中であるべきアーティファクトを台帳から抽出します。
+
+```bash
+{% for r in csv_rows %}{% if r["monitoring"] == "true" %}echo "monitoring配布対象: {{ r["artifact_name"] }}"
+{% endif %}{% endfor %}```
+
+### 3. 台帳とサーバ実態を突合する
+
+手順1・2の出力(`/tmp/*.yaml`, `/tmp/monitoring_probe.json` およびGUIエクスポートのClient Events一覧)を台帳の全 {{ csv_rows | length }} 件と1件ずつ突き合わせ、次の3種の不一致がないか確認します。
+
+- 台帳にあるがサーバに未登録(欠落)
+- サーバにあるが台帳に未記載(棚卸し漏れ)
+- `monitoring` 列とClient Events配布設定の不一致
+
+### 4. カスタムアーティファクトのVQLを安全性レビューする
+
+`safety_check` が `reviewed` でないカスタムアーティファクトを対象に、危険なプラグイン呼び出しの有無を確認します。
+
+```bash
+{% for r in csv_rows %}{% if r["type"] == "custom" and r["safety_check"] != "reviewed" %}grep -nE "execve\(|http_client\(|SELECT \* FROM pipe\(" /tmp/{{ r["artifact_name"] }}.yaml || echo "危険プラグインなし: {{ r["artifact_name"] }}"
+{% endif %}{% endfor %}```
+
+### 5. 権限が広いアーティファクトを洗い出す
+
+`required_permissions` にEXECVEやFILESYSTEM_WRITEなど広い権限を要求している定義を抽出し、要求権限が用途に対して過大でないか確認します。
+
+```bash
+velociraptor --config server.config.yaml query \
+  "SELECT name, required_permissions FROM artifact_definitions() WHERE required_permissions =~ 'EXECVE|FILESYSTEM_WRITE'"
+```
+
+### 6. dispositionに応じた是正措置を実行する
+
+`review` は再レビュー待ちキューに登録、`remove` は配布停止・定義削除を行います。
+
+```bash
+{% for r in csv_rows %}{% if r["disposition"] == "review" %}echo "再レビューキューへ登録: {{ r["artifact_name"] }} (前回レビュー: {{ r["last_reviewed"] }})"
+{% elif r["disposition"] == "remove" %}velociraptor --config server.config.yaml artifacts delete {{ r["artifact_name"] }}
+echo "削除実施: {{ r["artifact_name"] }}"
+{% endif %}{% endfor %}```
+
+`remove` 対象がclient monitoringに配布中だった場合は、GUIのClient Events設定から先に配布を外し、全クライアントへの新設定反映(次回チェックイン)を確認してから定義削除に進みます。
+
+## 動作確認
+
+- 手順1・2で取得したサーバ実態が、台帳の {{ csv_rows | length }} 件全てと項目単位(artifact_name / type / monitoring)で一致すること
+- `safety_check` が `reviewed` でなかったカスタムアーティファクトについて、手順4のVQLレビュー結果(危険プラグインの有無)を台帳に反映済みであること
+- `disposition` が `remove` の {{ csv_rows | selectattr("disposition", "equalto", "remove") | list | length }} 件について、client monitoring配布から外れ、かつ `artifact_definitions()` の結果からも消えていること
+- `disposition` が `review` の {{ csv_rows | selectattr("disposition", "equalto", "review") | list | length }} 件が再レビューキューに登録され、期限が設定されていること
+
+## 注意事項
+
+- untrusted/未レビュー(`safety_check` が `pending` または `unreviewed`)のカスタムアーティファクトは、レビュー完了までclient monitoringへの配布対象から外す。既存の配布を止める前に、代替または後継のアーティファクトが必要な監視を満たすことを、削除対象を配布から外した後の一時的な並行運用またはテスト環境での事前収集実行で確認してから、恒久的な定義削除に進む。
+- client monitoringへ常時配布するアーティファクトを増やしすぎると、全クライアントでの継続実行によりCPU・ネットワーク負荷が過大になる。追加前に対象クライアント数×実行頻度で負荷試算を行う。
+- インシデント対応で必要になるアーティファクト(ブラウザ履歴・レジストリ・タイムライン等)が棚卸しの結果誤って削除・配布停止されていないか、`disposition = keep` の項目を中心に再確認する。
+- `required_permissions` にEXECVEやFILESYSTEM_WRITEなど広い権限を要求するアーティファクトは、実行できるユーザー・ロールをGUIのACL設定で最小権限に絞り、棚卸しのたびに要求権限の妥当性を再確認する。
+- 棚卸し記録(本台帳と突合結果)は改ざん検知のため、実施日・実施者とともにバージョン管理下または監査ログ保管先に保存し、次回棚卸しの差分比較に使えるようにする。

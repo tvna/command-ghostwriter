@@ -1,0 +1,7 @@
+inventory_item,osquery_table,query,interval,consumer
+installed_packages,deb_packages,"SELECT name, version, arch, source FROM deb_packages",86400,inventory_packages
+local_accounts,users,"SELECT username, uid, gid, shell, directory FROM users",86400,inventory_users
+listening_ports,listening_ports,"SELECT pid, port, protocol, address, family FROM listening_ports",3600,inventory_ports
+kernel_version,kernel_info,"SELECT version, arguments, path FROM kernel_info",86400,inventory_kernel
+system_identity,system_info,"SELECT hostname, uuid, cpu_brand, physical_memory FROM system_info",86400,inventory_system
+network_interfaces,interface_addresses,"SELECT interface, address, mask, broadcast FROM interface_addresses",3600,inventory_network

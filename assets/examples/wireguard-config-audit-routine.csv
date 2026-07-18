@@ -1,0 +1,5 @@
+peer_name,pubkey,last_handshake_days,allowed_ips,owner,disposition
+peer-tanaka-laptop,AbCdEfGh1234567890abcdefghijklmnopqrstuvwx=,2,10.10.0.2/32,インフラ課 田中,keep
+peer-suzuki-mobile,IjKlMnOp2345678901bcdefghijklmnopqrstuvwxy=,132,10.10.0.3/32,退職済み 鈴木,disable
+peer-branch-fileserver,QrStUvWx3456789012cdefghijklmnopqrstuvwxyz=,7,10.20.0.0/16,支店ネットワーク課,tighten
+peer-legacy-vpn-gw,YzAbCdEf4567890123defghijklmnopqrstuvwxyza=,410,0.0.0.0/0,不明,remove

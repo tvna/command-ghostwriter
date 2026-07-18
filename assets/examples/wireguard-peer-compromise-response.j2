@@ -1,0 +1,111 @@
+# WireGuard端末紛失・鍵漏洩時の失効対応
+
+端末紛失や秘密鍵漏洩の疑いが発生した際に、該当Peerを迅速に失効させつつロックアウトを防ぎ、影響範囲を確認するための初動対応手順です。
+
+## 目的
+
+WireGuardの秘密鍵は端末側から一切送信されないため、サーバ側の`[Peer]`定義（公開鍵）を無効化することでのみ失効できることを理解し、ロックアウト（管理経路そのものを失うこと）を避けながら迅速にPeerを失効させ、影響範囲を確認できるようになることを目指します。
+
+## 用語解説
+
+- **Peer**: WireGuardのトンネル相手を表す単位。サーバの`wg0.conf`に`[Peer]`ブロック（PublicKey・AllowedIPs等）として定義される
+- **PublicKey（pubkey）**: Peerを一意に識別する公開鍵。`wg set wg0 peer <pubkey> remove`で該当Peerのみを即時に失効できる
+- **AllowedIPs**: そのPeer経由で許可される通信先CIDR。漏洩した端末が到達できた範囲を把握する手がかりになる
+- **latest handshake / transfer**: `wg show`で確認できる、直近のハンドシェイク時刻と送受信バイト数。侵害後の不審な通信有無の判断材料
+- **PSK（Pre-Shared Key）**: `[Peer]`に任意で併用される事前共有鍵。量子耐性を補強する目的で使われ、Peerを完全削除すればPSKも同時に無効化される
+- **アウトオブバンド（OOB）アクセス**: WireGuardトンネルに依存しない、コンソールやシリアル等の別経路での管理アクセス
+
+## シナリオ設定
+
+今回失効対象は {{ csv_rows | length }} 件のPeerです。台帳には `peer_name` / `pubkey` / `reason` / `revoked_at` / `evidence` / `followup` を記録します。
+
+| peer_name | pubkey | reason | revoked_at | evidence | followup |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["peer_name"] }} | {{ r["pubkey"] }} | {{ r["reason"] }} | {{ r["revoked_at"] }} | {{ r["evidence"] }} | {{ r["followup"] }} |
+{% endfor %}
+
+## 1. 代替アクセス経路を確認する（ロックアウト防止・失効実施前に必須）
+
+失効対象Peerがサーバ管理用のトンネルを兼ねている場合、そのまま削除すると管理者自身がサーバへ到達できなくなります。失効を実行する前に、WireGuardに依存しないOOB経路（コンソール・シリアル・別回線の管理VPN等）から`wg0`サーバへ到達できることを確認します。
+
+```bash
+# OOB経路（例: シリアルコンソール/踏み台経由のSSH）でサーバに到達できるか確認する
+ssh -o ConnectTimeout=5 oob-console-user@wg-server-oob.example.internal 'echo "OOBアクセス経路: OK"'
+
+# 失効対象以外の管理者Peerが直近で疎通していることも確認しておく
+sudo wg show wg0 latest-handshakes
+```
+
+OOB経路が確認できない場合は、失効前に必ず現地担当者または別の管理者に確保を依頼してください。確認が取れるまでは、次の手順2以降（失効の実施）に進んではいけません。
+
+## 2. 失効前に直近の通信状況を記録する（証跡保全）
+
+Peerを削除すると`wg show`の統計はリセットされるため、失効を実行する前に現状を記録します。
+
+```bash
+{% for r in csv_rows %}echo "=== {{ r["peer_name"] }} ({{ r["pubkey"] }}) ==="
+sudo wg show wg0 transfer | grep {{ r["pubkey"] }}
+sudo wg show wg0 latest-handshakes | grep {{ r["pubkey"] }}
+sudo wg show wg0 allowed-ips | grep {{ r["pubkey"] }}
+{% endfor %}```
+
+記録した内容は、台帳の`evidence`列（例: `{{ csv_rows[0]["evidence"] }}`）と突き合わせ、`/var/log/wireguard/incident-evidence.log`にタイムスタンプ付きで保存してください。
+
+```bash
+{% for r in csv_rows %}echo "$(date -Iseconds) {{ r["peer_name"] }} {{ r["pubkey"] }} reason={{ r["reason"] }} evidence={{ r["evidence"] }}" | sudo tee -a /var/log/wireguard/incident-evidence.log
+{% endfor %}```
+
+## 3. 該当Peerを即時失効する
+
+`wg set`はカーネルの実行中インターフェースに直接作用するため、設定ファイルの反映を待たずにその場でPeerを切断・拒否できます。判断基準として、`reason`が`key_leak_suspected`（鍵漏洩の疑い）の場合は調査完了を待たず即座に失効し、`device_lost`（端末紛失のみで漏洩の確証がない場合）でも発見から失効までを可能な限り短縮します。
+
+```bash
+sudo cp /etc/wireguard/wg0.conf /etc/wireguard/wg0.conf.bak.$(date +%Y%m%d%H%M%S)
+{% for r in csv_rows %}sudo wg set wg0 peer {{ r["pubkey"] }} remove
+echo "{{ r["peer_name"] }} ({{ r["pubkey"] }}) を失効しました。理由: {{ r["reason"] }} / 実施時刻: {{ r["revoked_at"] }}"
+{% endfor %}```
+
+## 4. 設定ファイルへ永続化する
+
+`wg set ... remove`はカーネル上の状態のみを変更するため、再起動やサービス再起動で復活しないよう`wg0.conf`へ書き戻します。
+
+```bash
+sudo wg-quick save wg0
+sudo grep -c '^\[Peer\]' /etc/wireguard/wg0.conf
+```
+
+## 5. AllowedIPs宛ての通信を調査する（影響範囲確認）
+
+失効対象Peerに割り当てられていたAllowedIPs宛て・発の通信が、失効前にどこまで到達していたかをファイアウォールログやconntrackで確認します。
+
+```bash
+{% for r in csv_rows %}echo "=== {{ r["peer_name"] }} の割当CIDRに関連する通信を確認 ==="
+sudo conntrack -L | grep -F "{{ r["pubkey"] }}" 2>/dev/null
+sudo journalctl -u wg-quick@wg0 --since "2026-07-16" | grep -i "{{ r["peer_name"] }}"
+{% endfor %}```
+
+`followup`列に記載された対応（例: `{{ csv_rows[0]["followup"] }}`）は、影響範囲確認の結果を踏まえてチケット化し、担当者へ引き継いでください。
+
+## 6. 同一秘密鍵の使い回しがないか確認する
+
+漏洩したPeerの秘密鍵が他端末や他インターフェースで再利用されていないかを確認します。同一の公開鍵が別Peerとして登録されている場合、そちらも同時に失効対象とします。
+
+```bash
+{% for r in csv_rows %}echo "=== {{ r["pubkey"] }} の使い回し確認 ==="
+sudo grep -rn "{{ r["pubkey"] }}" /etc/wireguard/*.conf
+{% endfor %}```
+
+## 動作確認
+
+- 失効対象の全 {{ csv_rows | length }} 件のPeerが `sudo wg show wg0` の出力（Peer一覧）から消えていること
+- 失効対象端末から再接続を試み、ハンドシェイクが成立しない（`wg show wg0 latest-handshakes`に新しい時刻が現れない）こと
+- `sudo wg-quick save wg0` 後、`/etc/wireguard/wg0.conf` に該当`pubkey`の`[Peer]`ブロックが残っていないこと
+- 失効対象以外の正規Peer（手順1で確認した管理者Peer等）が引き続き疎通できていること
+
+## 注意事項
+
+- **失効前に代替アクセス経路（OOB）を必ず確認する**: 手順1のOOB到達確認、または他の正規Peerの疎通確認が取れるまでは、`wg set ... remove`（手順3）を実行しない。特に管理用Peerを誤って失効すると、リモートから復旧できなくなる。
+- **PSK併用時はPSKも同時に失効する**: 台帳の対象Peerが`[Peer]`にPresharedKeyを設定していた場合、Peerブロックごと削除する本手順で自動的にPSKも無効化されるが、別インターフェースで同じPSKを流用していないかも合わせて確認する。
+- **同一秘密鍵の使い回しを必ず確認する（手順6）**: 使い回しが見つかった場合は、それらのPeerも本手順と同じ判断基準で速やかに失効する。
+- **失効記録を証跡として保存する**: 手順2で記録した通信状況・実施時刻・理由（`/var/log/wireguard/incident-evidence.log`）は、インシデント対応の証跡としてハッシュ付きで別媒体にも保全し、事後報告に用いる。
+- 本手順は初動対応であり、根本原因（端末側の鍵管理不備、盗難経路等）の調査・再発防止は別途実施すること。

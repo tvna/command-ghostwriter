@@ -1,0 +1,123 @@
+# Unbound serve-expired による解決継続性強化手順
+
+キャッシュ DNS サーバー（Unbound）に **serve-expired** 機能を導入し、上流（フォワード先）の障害時にも期限切れキャッシュを暫定応答として返すことで、名前解決の可用性を高めます。
+
+## 目的
+
+Unbound の `serve-expired` 系設定（RFC 8767）を理解し、上流障害時に期限切れキャッシュで暫定応答しつつ裏で正規の再検証を行う挙動を、構文検証・段階適用・障害シミュレーションによる動作確認まで含めて実施できるようになることを目指します。
+
+## 用語解説
+
+- **serve-expired**: RFC 8767 で定義される、キャッシュの TTL が切れたレコードでも上流からの正常な応答が得られない間は暫定的にクライアントへ返す仕組み。応答を返すのと並行してバックグラウンドで正規の再検証（リフレッシュ）を試みる。
+- **serve-expired-ttl**: 期限切れレコードをどれだけの期間（秒）まで暫定応答に使い続けてよいかの上限。無制限にすると古すぎる情報を返し続けるリスクがあるため上限を設ける。
+- **serve-expired-client-timeout**: クライアントへの応答を、上流への問い合わせ完了を待たずに期限切れキャッシュで返すまでの待機時間（ミリ秒）。この時間内に上流から正常応答が来ればそちらを優先する。
+- **serve-expired-reply-ttl**: 期限切れキャッシュを暫定応答として返す際に、その応答に付与する TTL（秒）。極端に長い値を設定するとクライアント側・下流キャッシュ側にも古い情報が長く残るため小さめに設定する。
+- **フォワードゾーン (forward-zone)**: Unbound が自前で再帰解決せず、指定した上流サーバーへ問い合わせを委譲する設定。
+- **unbound-checkconf**: 設定ファイルの構文を反映前に検証するコマンド。
+- **unbound-control**: 稼働中の unbound プロセスを制御・照会するコマンド（reload、stats_noreset など）。
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 設定ファイル | `{{ server.config_path }}` |
+| serve-expired | {{ server.serve_expired }} |
+| serve-expired-ttl（上限） | {{ server.serve_expired_ttl }} 秒 |
+| serve-expired-client-timeout | {{ server.client_timeout_ms }} ミリ秒 |
+| serve-expired-reply-ttl | {{ server.reply_ttl }} 秒 |
+| cache-max-ttl | {{ server.cache_max_ttl }} 秒 |
+| フォワード先ゾーン | {{ forward_zone.domain }} |
+| フォワード先アドレス | {% for addr in forward_zone.addrs %}{{ addr }}{% if not loop.last %}, {% endif %}{% endfor %} |
+| 動作確認対象ドメイン | {{ verification.query_domain }}（{{ verification.query_type }}） |
+
+## 1. serve-expired 設定ファイルを作成する（まず小さい TTL で段階投入）
+
+いきなり本番の TTL 上限を適用せず、まずカナリア用の短い TTL（{{ rollout.canary_ttl }} 秒）で影響範囲を確認します。
+
+```bash
+mkdir -p "$(dirname {{ server.config_path }})"
+cat > {{ server.config_path }} <<'EOF'
+server:
+    serve-expired: yes
+    serve-expired-ttl: {{ rollout.canary_ttl }}
+    serve-expired-client-timeout: {{ server.client_timeout_ms }}
+    serve-expired-reply-ttl: {{ server.reply_ttl }}
+    cache-max-ttl: {{ server.cache_max_ttl }}
+
+forward-zone:
+    name: "{{ forward_zone.domain }}"
+{% for addr in forward_zone.addrs %}    forward-addr: {{ addr }}
+{% endfor %}EOF
+```
+
+## 2. 構文検証（反映前に必ず実施）
+
+```bash
+unbound-checkconf {{ server.config_path }}
+```
+
+エラーが出力された場合は反映せず、設定内容を見直してください。
+
+## 3. 設定を反映する
+
+```bash
+unbound-control reload
+```
+
+## 4. カナリア期間後に段階的に TTL 上限を引き上げる
+
+カナリア（{{ rollout.canary_ttl }} 秒）で問題がなければステージング相当の {{ rollout.staging_ttl }} 秒、最終的に本番想定の {{ rollout.production_ttl }} 秒まで段階的に引き上げます。各段階で `unbound-checkconf` と手順 5 の動作確認を必ず再実施してください。
+
+```bash
+sed -i "s/serve-expired-ttl: .*/serve-expired-ttl: {{ rollout.staging_ttl }}/" {{ server.config_path }}
+unbound-checkconf {{ server.config_path }} && unbound-control reload
+
+# 問題がなければ最終値へ
+sed -i "s/serve-expired-ttl: .*/serve-expired-ttl: {{ rollout.production_ttl }}/" {{ server.config_path }}
+unbound-checkconf {{ server.config_path }} && unbound-control reload
+```
+
+## 動作確認
+
+新しい経路（serve-expired による暫定応答）が実際に機能することを、上流を意図的に落とした状態で確認してから本番トラフィックに委ねます。
+
+1. 平常時にキャッシュへレコードを載せておく。
+
+   ```bash
+   unbound-control lookup {{ verification.query_domain }}
+   dig @127.0.0.1 {{ verification.query_domain }} {{ verification.query_type }} +short
+   ```
+
+2. フォワード先への通信のみを一時遮断し、上流障害を模擬する（ホスト全体を止めず、既存経路と並行して検証できるよう出力ルールに識別コメントを付けておく）。
+
+   ```bash
+{% for addr in forward_zone.addrs %}   iptables -A OUTPUT -d {{ addr }} -j DROP -m comment --comment "{{ verification.block_comment }}"
+{% endfor %}   ```
+
+3. キャッシュの TTL が切れるのを待つか、テスト用に短い TTL のレコードで再度問い合わせ、期限切れ後も応答が継続することを確認する。
+
+   ```bash
+   dig @127.0.0.1 {{ verification.query_domain }} {{ verification.query_type }} +short
+   ```
+
+   - 上流が遮断されているにもかかわらず名前解決が成功し続けることを確認する（期限切れキャッシュによる暫定応答）。
+   - `{{ monitoring.stats_cmd }}` で応答が継続していること（SERVFAIL が急増していないこと）を確認する。
+
+4. 遮断ルールを解除して上流障害からの復旧を模擬し、バックグラウンドでの再検証によりキャッシュが正規の値へ更新されることを確認する。
+
+   ```bash
+{% for addr in forward_zone.addrs %}   iptables -D OUTPUT -d {{ addr }} -j DROP -m comment --comment "{{ verification.block_comment }}"
+{% endfor %}   sleep 5
+   unbound-control lookup {{ verification.query_domain }}
+   ```
+
+   - 復旧後の再問い合わせで、遮断中に暫定応答した値が正規の最新値に更新されていることを確認する。
+
+## 注意事項
+
+- serve-expired による暫定応答は、既に移転・変更されたサービスに対して古い IP アドレスを返し続ける可能性がある。`serve-expired-ttl`（上限）と `serve-expired-reply-ttl`（暫定応答自体の TTL）は必要以上に大きくせず、業務影響の許容範囲に収まる値に設定すること。
+- `serve-expired-ttl` に極端に大きい値（無制限に近い値）を設定しない。上流障害が長期化した場合に古い情報を返し続けるリスクが増大する。
+- DNSSEC 検証を有効にしている場合、期限切れキャッシュの暫定応答は再検証で失敗する可能性があるレコードを一時的に返すことになる点に留意し、DNSSEC 検証結果と serve-expired の挙動の整合性を運用ドキュメントに明記すること。
+- 監視では期限切れ応答（暫定応答）の発生率を継続的に追跡し、恒常的に高い比率が続く場合は上流の可用性そのものに問題がある兆候として扱うこと。
+- 上流遮断による動作確認は、必ず既存の正常経路と切り離した検証用ルール（識別コメント付き）で実施し、確認後は速やかに遮断ルールを解除してから本番トラフィックへ適用すること。
+- 設定変更は必ずカナリア TTL から始め、段階ごとに `unbound-checkconf` と動作確認を再実施してから次の段階に進むこと。

@@ -1,0 +1,159 @@
+# WireGuardハンドシェイク断続時の調査 — {{ wireguard.interface }}
+
+WireGuardインターフェース **{{ wireguard.interface }}** で、複数のPeerとのハンドシェイクが確立してはしばらくして失われる、という不定期な断続が報告されています。本手順書では `wg show` の観測結果をもとに、NAT越え・PersistentKeepalive未設定・動的Endpoint・回線品質のどこに原因があるかを切り分けます。
+
+## 目的
+
+{{ wireguard.interface }}（Listenポート {{ wireguard.listen_port }}）配下の各Peerについて、`latest handshake` の経過時間と `transfer` の増加が停滞していないかを観測し、断続の原因をNAT背後でのKeepalive未設定・モバイル回線でのEndpoint変動・UDPパケットロス・MTU起因のいずれかに切り分けられるようになることを目指します。
+
+## 用語解説
+
+- **ハンドシェイク(Handshake)**: WireGuardがPeer間で新しい暗号鍵を確立する処理。`rekey_interval_seconds`（既定 {{ wireguard.rekey_interval_seconds }} 秒、約2分）ごとに自動的に再実行される。
+- **NATホールパンチング / NATバインディング**: NAT配下の端末が外部と通信すると、NAT機器は一定時間だけ「穴(binding)」を開けたままにする。既定のNATバインディングタイムアウトの目安は {{ wireguard.nat_binding_timeout_seconds }} 秒程度で、これより長く無通信が続くと穴が閉じ、外部からの応答パケットが届かなくなる。
+- **PersistentKeepalive**: WireGuardが一定間隔でダミーのUDPパケットを送信し、NATの穴を維持し続ける設定。rekeyの間隔（約2分）よりも短い周期でNATの穴が閉じる環境では、これを設定しないとrekeyのたびにハンドシェイクが失敗しやすくなる。
+- **動的Endpoint(endpoint_dynamic)**: モバイル回線やDHCPなど、Peer側のグローバルIPアドレスが変動する接続形態。WireGuardサーバー側は最後に受信した送信元IP:ポートをEndpointとして自動更新するが、Peer側からの発信が一定時間なく穴が閉じた状態でIPも変わっていると、サーバー側は古いEndpointに送り続けてしまい復旧しない。
+- **latest handshake / transfer**: `wg show` が表示する、直近のハンドシェイク時刻と送受信バイト数の累積値。`transfer` が増え続けていてもハンドシェイクだけ古い、あるいはその逆といった組み合わせから障害の性質を読み取る。
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| インターフェース | {{ wireguard.interface }} |
+| Listenポート | {{ wireguard.listen_port }} |
+| Rekey間隔 | {{ wireguard.rekey_interval_seconds }} 秒 |
+| NATバインディングタイムアウト目安 | {{ wireguard.nat_binding_timeout_seconds }} 秒 |
+
+調査対象のPeer一覧:
+
+| Peer名 | 現在のKeepalive設定(秒) | 動的Endpoint | 回線品質チェック実施済み |
+| --- | --- | --- | --- |
+{% for peer in peers %}
+| {{ peer.peer_name }} | {{ peer.keepalive_current }} | {{ peer.endpoint_dynamic }} | {{ peer.loss_check }} |
+{% endfor %}
+
+## 1. 現状のハンドシェイク状況を観測する
+
+まず全Peerの状態を一覧し、どのPeerで断続が起きているかを特定します。
+
+```bash
+sudo wg show {{ wireguard.interface }}
+sudo wg show {{ wireguard.interface }} latest-handshakes
+sudo wg show {{ wireguard.interface }} transfer
+```
+
+→ `latest handshake` が {{ wireguard.rekey_interval_seconds }} 秒を大きく超えて古いまま更新されないPeerは、断続中である可能性が高いです。`transfer` のrx/tx双方が一定時間増えていないPeerも合わせて確認します。
+
+継続的に監視したい場合はwatchで定点観測します。
+
+```bash
+watch -n 10 'sudo wg show {{ wireguard.interface }} latest-handshakes'
+```
+
+## 2. PersistentKeepalive未設定のPeerを特定する
+
+現在の設定値を確認し、Keepalive未設定（0または未指定）のままNAT配下にいるPeerを洗い出します。
+
+```bash
+sudo wg show {{ wireguard.interface }} persistent-keepalive
+```
+
+対象Peerの一覧（データ上の記録値）:
+
+{% for peer in peers %}
+{% if peer.keepalive_current == 0 %}
+- {{ peer.peer_name }}: 現在のKeepalive設定は {{ peer.keepalive_current }} 秒（未設定）。NAT配下であればNATバインディング（目安 {{ wireguard.nat_binding_timeout_seconds }} 秒）がRekey間隔（{{ wireguard.rekey_interval_seconds }} 秒）より先に切れ、rekeyのたびにハンドシェイクが失敗する典型パターンです。
+{% endif %}
+{% endfor %}
+
+該当Peerに対してKeepaliveを設定します（`<PEER_PUBLIC_KEY>` は対象Peerの公開鍵に置き換えてください）。
+
+```bash
+sudo wg set {{ wireguard.interface }} peer <PEER_PUBLIC_KEY> persistent-keepalive 25
+```
+
+再起動後も反映されるよう、`/etc/wireguard/{{ wireguard.interface }}.conf` の該当 `[Peer]` セクションにも追記します。
+
+```bash
+sudo tee -a /etc/wireguard/{{ wireguard.interface }}.conf > /dev/null <<'EOF'
+PersistentKeepalive = 25
+EOF
+```
+
+## 3. 動的Endpointのモバイル回線Peerを切り分ける
+
+Endpointが変動するPeerでは、サーバー側が保持しているEndpointが古いままになっていないか確認します。
+
+{% for peer in peers %}
+{% if peer.endpoint_dynamic %}
+- {{ peer.peer_name }}: 動的Endpoint対象。回線切替（Wi-Fi⇔モバイル網、基地局ハンドオーバー等）でグローバルIPが変わると、Keepaliveを設定していてもサーバー側のEndpointが古いまま残り、応答パケットが届かなくなることがあります。
+{% endif %}
+{% endfor %}
+
+サーバー側に記録されている現在のEndpointを確認します。
+
+```bash
+sudo wg show {{ wireguard.interface }} endpoints
+```
+
+クライアント側からのKeepalive送信によってEndpointは自動更新されるため、まずは手順2のPersistentKeepalive設定を先に適用し、それでも断続が続く場合はクライアント側で明示的な再送信を発生させて更新を促します。
+
+```bash
+sudo wg-quick down {{ wireguard.interface }} && sudo wg-quick up {{ wireguard.interface }}
+```
+
+## 4. UDPパケットロス・回線品質を確認する
+
+回線品質チェックが未実施のPeerについて、UDPの往復そのものが失われていないかを確認します。
+
+{% for peer in peers %}
+{% if not peer.loss_check %}
+- {{ peer.peer_name }}: 回線品質チェック未実施。ハンドシェイクのUDPパケット自体がロストしている可能性を切り分ける必要があります。
+{% endif %}
+{% endfor %}
+
+サーバー側・クライアント側の双方でListenポート{{ wireguard.listen_port }}のUDPパケットを同時にキャプチャします。
+
+```bash
+sudo tcpdump -ni any udp port {{ wireguard.listen_port }} -c 20
+```
+
+→ 送信(egress)のみ記録され応答(ingress)が一切観測されない場合は、経路上のファイアウォールやNATでのUDPロス、あるいは回線品質そのものの劣化を疑います。
+
+回線品質(パケットロス・揺らぎ)を定量化します。
+
+```bash
+mtr -r -c 50 --udp --port {{ wireguard.listen_port }} <PEER_ENDPOINT_HOST>
+```
+
+→ Loss%が高い区間が特定できれば、WireGuard設定ではなく回線・経路側の問題として切り分けます。
+
+## 動作確認
+
+1. 手順2でPersistentKeepaliveを設定したPeerについて、Rekey間隔（{{ wireguard.rekey_interval_seconds }} 秒）を2周期以上またいでハンドシェイクが更新され続けることを確認します。
+
+```bash
+watch -n 10 'sudo wg show {{ wireguard.interface }} latest-handshakes'
+```
+
+→ `latest handshake` が毎回{{ wireguard.rekey_interval_seconds }}秒前後で更新され、放置されたままにならないこと。
+
+2. `tcpdump` でUDPの往復が発生していることを確認します。
+
+```bash
+sudo tcpdump -ni any udp port {{ wireguard.listen_port }} -c 10
+```
+
+→ 送信・応答の双方が観測され、片方向のみになっていないこと。
+
+3. `transfer` のrx/txが継続的に増加していることを確認します。
+
+```bash
+sudo wg show {{ wireguard.interface }} transfer
+```
+
+## 注意事項
+
+- PersistentKeepaliveの目安は25秒です。NATバインディングタイムアウト（目安 {{ wireguard.nat_binding_timeout_seconds }} 秒）より十分短い値を設定してください。値を極端に短くするとバッテリー消費やトラフィック増加につながるため、25秒から始めて必要に応じて調整します。
+- Keepalive設定を`wg set`で即時適用した直後は、既存のハンドシェイクが安定するまで数分（Rekey間隔の2周期程度）様子を見てから設定ファイルへの反映や現行設定の削除を行ってください。設定ファイル変更後は必ず `sudo wg-quick down` → `up` で反映を確認し、対象Peerとのハンドシェイクが実際に再確立できることを確認してから、旧設定（Keepalive未設定の状態）には戻さないでください。
+- 動的Endpointを持つモバイル回線Peerは、Keepaliveを設定してもハンドオーバー直後の一時的な断続は起こり得ます。数分待ってもEndpointが更新されない場合のみ、明示的な`wg-quick`再起動やクライアント側アプリの再接続を行ってください。
+- `tcpdump`でUDPの送受信そのものが往復しているにもかかわらず断続が解消しない場合は、WireGuardの設定ではなく回線品質（パケットロス、揺らぎ、経路上のQoS）そのものの問題である可能性が高く、`mtr`の結果を添えてネットワーク部門・回線事業者への切り分け依頼に進んでください。

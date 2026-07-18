@@ -1,0 +1,120 @@
+# Zeekログのローテーションと転送設計
+
+Zeekが出力する `conn.log` / `dns.log` / `http.log` などのログについて、ローテーション周期・保存期間・圧縮・JSON化を`zeekctl.cfg`で設計し、Promtail/FilebeatによるSIEMへの転送までを手順化します。長期保全(容量とディスクI/O)とSIEM連携(取り込みやすさ)を両立させることが目的です。
+
+## 目的
+
+`zeekctl.cfg`のログローテーション関連設定を理解し、アーカイブディレクトリ構造を把握したうえで、ログ出力形式をJSON化してログシッパーで転送する一連の設計を手順書として実行できるようになることを目指します。
+
+## 用語解説
+
+- **LogRotationInterval**: `zeekctl.cfg`で指定する、稼働中ログ(`current/`配下)を切り出してアーカイブする周期(秒)。値を小さくするほど1ファイルは小さくなるが切り出し回数が増える
+- **LogExpireInterval**: アーカイブ済みログを保持する日数。この日数を超えたログはzeekctlのログローテーションプロセスにより自動削除される
+- **CompressLogs**: アーカイブ時にログをgzip圧縮するかどうかの設定。長期保全時のディスク使用量を抑える
+- **json-logs.zeek**: Zeekの標準ログ出力形式(タブ区切りのASCII)をJSON Lines形式に切り替えるスクリプト。`local.zeek`から`@load`することで有効化する
+- **zeek-cutとjqの使い分け**: 標準のタブ区切りログは`zeek-cut`でカラム抽出できるが、JSON化すると`zeek-cut`は使えなくなり、`jq`でのフィールド抽出に切り替える必要がある
+- **アーカイブディレクトリ構造**: ローテーション後のログは`logs/YYYY-MM-DD/`配下に`<ログ名>.<開始時刻>-<終了時刻>.log.gz`のようなファイル名で格納される
+
+## シナリオ設定
+
+| 項目 | 値 |
+|---|---|
+| ローテーション周期 | {{ rotation_interval_sec }} 秒 |
+| 保持期間 | {{ expire_days }} 日 |
+| 圧縮 | {{ compress }} |
+| JSON出力 | {{ json_output }} |
+| ログシッパー | {{ shipper }} |
+| Zeekログディレクトリ | {{ zeek_log_dir }} |
+| アーカイブルート | {{ archive_root }} |
+| 転送先エンドポイント | {{ shipper_endpoint }} |
+| 転送先CA証明書 | {{ shipper_tls_ca }} |
+
+転送対象ログは以下の {{ target_logs | length }} 種類です。
+
+{% for l in target_logs %}- `{{ l.name }}`: {{ l.contains }}
+{% endfor %}
+
+## 手順
+
+### 1. zeekctl.cfgでローテーションと保持期間を設定する
+
+```bash
+sudo test -f /opt/zeek/etc/zeekctl.cfg && sudo cp /opt/zeek/etc/zeekctl.cfg /opt/zeek/etc/zeekctl.cfg.bak
+sudo tee -a /opt/zeek/etc/zeekctl.cfg <<'EOF'
+LogRotationInterval = {{ rotation_interval_sec }}
+LogExpireInterval = {{ expire_days }}day
+CompressLogs = 1
+EOF
+```
+
+`LogRotationInterval`は{{ rotation_interval_sec }}秒(1時間)ごとに`current/`配下のログを`{{ archive_root }}/logs/YYYY-MM-DD/`へ切り出します。`LogExpireInterval`は{{ expire_days }}日を超えた圧縮済みアーカイブをzeekctlが自動削除する設定です。変更前に`zeekctl.cfg.bak`へ退避しているため、問題があれば復元できます。
+
+### 2. JSON出力を有効化する
+
+```bash
+echo '@load policy/tuning/json-logs.zeek' | sudo tee -a /opt/zeek/share/zeek/site/local.zeek
+sudo zeekctl deploy
+```
+
+`local.zeek`に`json-logs.zeek`を追加すると、`conn.log`などの標準ログがJSON Lines形式で出力されるようになります。JSON化した時点で`zeek-cut`は使えなくなるため、以降の抽出作業は`jq`に切り替える必要があります。例: `zeek-cut id.orig_h id.resp_h < conn.log` は `jq -r '"\(.["id.orig_h"]) \(.["id.resp_h"])"' conn.log` に置き換えます。
+
+### 3. 設定を反映してZeekを再起動する
+
+```bash
+sudo zeekctl check
+sudo zeekctl restart
+sudo zeekctl status
+```
+
+`zeekctl check`で構文エラーがないことを確認してから`restart`します。`status`で全ワーカー/マネージャが`running`になっていることを確認します。
+
+### 4. ログシッパー({{ shipper }})を設定して転送を構成する
+
+```bash
+sudo tee /etc/promtail/config.yml <<'EOF'
+server:
+  http_listen_port: 9080
+clients:
+  - url: {{ shipper_endpoint }}
+    tls_config:
+      ca_file: {{ shipper_tls_ca }}
+scrape_configs:
+  - job_name: zeek
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: zeek
+          __path__: {{ zeek_log_dir }}/current/*.log
+EOF
+sudo systemctl restart promtail
+```
+
+`__path__`は稼働中ログ(`current/`)を対象にしており、ローテーション後のアーカイブ(`{{ archive_root }}/logs/YYYY-MM-DD/`)は`zeekctl`が切り出すタイミングで新しい`current/`のファイルとして再度検出されます。`tls_config.ca_file`により転送経路はTLSで暗号化されます。
+
+### 5. ローテーション後のアーカイブ生成を確認する
+
+```bash
+sudo find {{ archive_root }}/logs -maxdepth 1 -type d -name '20*' -newermt '1 day ago'
+sudo ls -la {{ archive_root }}/logs/$(date +%Y-%m-%d)/
+```
+
+当日分のアーカイブディレクトリが作成され、圧縮設定(`{{ compress }}`)通りに`.log.gz`拡張子のファイルが格納されていることを確認します。
+
+## 動作確認
+
+1. `{{ archive_root }}/logs/YYYY-MM-DD/`配下にローテーション周期({{ rotation_interval_sec }}秒)通りのタイムスタンプでアーカイブファイルが生成されていること
+2. `zcat`でアーカイブを開き、JSON出力設定(`{{ json_output }}`)通りにJSON Lines形式でログが記録されていること
+3. 転送先({{ shipper_endpoint }})でZeekログを受信できていること
+
+```bash
+curl -sS --cacert {{ shipper_tls_ca }} "{{ shipper_endpoint | replace('/loki/api/v1/push', '/ready') }}"
+```
+
+`{{ shipper }}`のクライアントログにpushエラーが出ていないこと、およびSIEM側のクエリで`job="zeek"`のログが直近のイベントとして検索できることを確認します。
+
+## 注意事項
+
+- Zeekログには内部IPアドレス・アクセスURL・DNSクエリ内容などのPIIに相当する情報が含まれます。転送経路は必ずTLS({{ shipper_tls_ca }}によるCA検証)で暗号化し、平文プロトコルでの転送は行わないでください。
+- アーカイブ保存先({{ archive_root }})とSIEM側の保管領域は、アクセス制御(必要な担当者のみ閲覧可能な権限設定)を行い、PIIを含むログへの不要なアクセスを防いでください。
+- `zeekctl.cfg`の変更は`zeekctl deploy`/`restart`が完了するまで反映されません。反映後は必ず`zeekctl status`で全プロセスが`running`であることを確認し、異常時は退避した`zeekctl.cfg.bak`へ戻して`zeekctl deploy`を再実行してください。
+- JSON化(`json-logs.zeek`の追加)は既存の`zeek-cut`ベースの解析スクリプトや監視ツールとの互換性を崩す可能性があります。切り替え前に`jq`ベースへの移行が完了していることを確認してから本番適用してください。

@@ -1,0 +1,160 @@
+# KeycloakでのMFA(OTP)強制設定
+
+認証フロー({{ source_flow }})を複製して OTP Form の実行要件を REQUIRED にし、realm の required action で
+CONFIGURE_TOTP をデフォルト有効化することで、全ユーザーに TOTP 多要素認証を強制します。
+
+## 目的
+
+Keycloak の認証フローの仕組み（複製・実行要件の変更）と OTP ポリシーの設定方法を理解し、
+ロックアウトを起こさずに MFA を全ユーザーへ段階的に強制できるようになることを目指します。
+
+## 用語解説
+
+- **認証フロー(Authentication Flow)**: ログイン時に実行されるステップ(execution)の並びを定義する Keycloak の設定単位
+- **OTP Form**: ブラウザフロー内で TOTP コードの入力を求めるステップ
+- **実行要件(Requirement)**: 各 execution に設定する `REQUIRED` / `ALTERNATIVE` / `CONDITIONAL` / `DISABLED` のいずれか
+- **条件付きOTP(Conditional OTP)**: グループやロールなど条件を満たすユーザーにのみ OTP を要求する構成。全ユーザー強制ではなく段階導入したい場合に使う
+- **required action**: ユーザーが次回ログイン時に強制的に実行させられるアクション。`CONFIGURE_TOTP` は OTP 未登録ユーザーに登録を促す
+- **OTP policy**: realm 全体の TOTP パラメータ(アルゴリズム/桁数/周期など)
+- **リカバリコード(recovery codes)**: OTP デバイスを紛失した場合に備えて事前発行しておく使い捨てログインコード
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| realm | {{ realm }} |
+| kcadm server | {{ kcadm.server }} |
+| kcadm admin realm | {{ kcadm.admin_realm }} |
+| kcadm admin user | {{ kcadm.admin_user }} |
+| コピー元フロー | {{ source_flow }} |
+| 新フロー名 | {{ flow_name }} |
+| OTP強制(otp_required) | {{ otp_required }} |
+| OTP policy type | {{ otp_policy.type }} |
+| OTP policy algorithm | {{ otp_policy.algorithm }} |
+| OTP policy digits | {{ otp_policy.digits }} |
+| OTP policy period(秒) | {{ otp_policy.period }} |
+| OTP policy look ahead window | {{ otp_policy.look_ahead_window }} |
+| デフォルトrequired action | {{ default_required_action }} |
+| 回復用管理者アカウント | {{ recovery_admin_user }} |
+| リカバリコード発行数 | {{ recovery_codes_count }} |
+| テストユーザー | {{ test_user }} |
+
+## 1. ロックアウト防止の下準備をする
+
+全体へ適用する前に、必ず回復手段を先に整備します。管理者自身が締め出されると復旧が困難になるため、
+バックアップ管理者アカウント `{{ recovery_admin_user }}` に事前に OTP を登録させ、
+リカバリコードを {{ recovery_codes_count }} 件発行して安全な場所に保管しておきます。
+
+```bash
+/opt/keycloak/bin/kcadm.sh config credentials \
+  --server {{ kcadm.server }} --realm {{ kcadm.admin_realm }} --user {{ kcadm.admin_user }}
+
+/opt/keycloak/bin/kcadm.sh get users -r {{ realm }} -q username={{ recovery_admin_user }}
+```
+
+上記で得た `id` を使い、バックアップ管理者に OTP 登録を要求します（実際の登録操作はブラウザで実施）。
+
+```bash
+/opt/keycloak/bin/kcadm.sh update users/<recovery_admin_id> -r {{ realm }} \
+  -s 'requiredActions=["CONFIGURE_TOTP"]'
+```
+
+## 2. 認証フローを複製する
+
+既存の `{{ source_flow }}` フローを直接編集せず、複製した `{{ flow_name }}` を編集対象にします。
+こうすることで、設定を誤っても元のフローに realm を戻すだけでロールバックできます。
+
+```bash
+/opt/keycloak/bin/kcadm.sh create "authentication/flows/{{ source_flow }}/copy" \
+  -r {{ realm }} -s newName={{ flow_name }}
+```
+
+## 3. OTP Form の実行要件を REQUIRED にする
+
+複製したフローの execution 一覧を取得し、`OTP Form` の `id` を確認します。
+
+```bash
+/opt/keycloak/bin/kcadm.sh get "authentication/flows/{{ flow_name }}/executions" -r {{ realm }}
+```
+
+`OTP Form` の execution を取得したら、その `id` を使って実行要件を更新します。
+`otp_required` が真の場合は全ユーザー強制の `REQUIRED` を、段階導入したい場合は `CONDITIONAL` を選択してください。
+
+```bash
+{% if otp_required %}
+/opt/keycloak/bin/kcadm.sh update "authentication/flows/{{ flow_name }}/executions" -r {{ realm }} \
+  -b '{"id":"<otp_form_execution_id>","requirement":"REQUIRED"}'
+{% else %}
+/opt/keycloak/bin/kcadm.sh update "authentication/flows/{{ flow_name }}/executions" -r {{ realm }} \
+  -b '{"id":"<otp_form_execution_id>","requirement":"CONDITIONAL"}'
+{% endif %}
+```
+
+## 4. OTP policy を設定する
+
+realm 全体の TOTP パラメータを設定します。既存の認証アプリ(Google Authenticator等)との互換性を保つため、
+`digits` や `period` を変更する場合は既存登録ユーザーの再登録が必要になる点に注意してください。
+
+```bash
+/opt/keycloak/bin/kcadm.sh update realms/{{ realm }} \
+  -s otpPolicyType={{ otp_policy.type }} \
+  -s otpPolicyAlgorithm={{ otp_policy.algorithm }} \
+  -s otpPolicyDigits={{ otp_policy.digits }} \
+  -s otpPolicyPeriod={{ otp_policy.period }} \
+  -s otpPolicyLookAheadWindow={{ otp_policy.look_ahead_window }}
+```
+
+## 5. required action(CONFIGURE_TOTP)をデフォルト有効化する
+
+realm レベルで `{{ default_required_action }}` をデフォルト有効化すると、以後作成される新規ユーザーおよび
+明示的に requiredActions を付与したユーザーに OTP 登録を強制できます。
+
+```bash
+/opt/keycloak/bin/kcadm.sh update authentication/required-actions/{{ default_required_action }} -r {{ realm }} \
+  -s enabled=true -s defaultAction=true
+```
+
+## 6. テストユーザーで登録〜ログインを確認してから全体へ適用する
+
+いきなり realm の browserFlow を差し替えず、まずテストユーザー `{{ test_user }}` だけに
+requiredActions を付与して動作確認します。
+
+```bash
+/opt/keycloak/bin/kcadm.sh get users -r {{ realm }} -q username={{ test_user }}
+/opt/keycloak/bin/kcadm.sh update users/<test_user_id> -r {{ realm }} \
+  -s 'requiredActions=["{{ default_required_action }}"]'
+```
+
+ブラウザでテストユーザーとしてログインし、OTP 登録画面が表示されて登録できること、
+2回目以降のログインで OTP コード入力が要求されることを確認します。
+問題がなければ、realm の browserFlow を複製したフローに切り替えて全ユーザーへ適用します。
+
+```bash
+/opt/keycloak/bin/kcadm.sh update realms/{{ realm }} -s browserFlow={{ flow_name }}
+```
+
+## 動作確認
+
+- Step 6 でテストユーザー `{{ test_user }}` の初回ログイン時に OTP 登録(QRコード表示)が要求されること
+- 登録完了後、2回目以降のログインで OTP コード入力画面が表示され、正しいコードでのみログインできること
+- `{{ recovery_admin_user }}` が OTP 登録済みで、バックアップ手段としてログイン可能な状態を保っていること
+- realm の browserFlow が `{{ flow_name }}` になっており、`authentication/flows/{{ flow_name }}/executions` の
+  `OTP Form` の requirement が意図した値(`{{ otp_required }}` に対応する REQUIRED/CONDITIONAL)になっていること
+
+## 注意事項
+
+- 新しい認証フロー `{{ flow_name }}` を realm の browserFlow に反映する前に、必ずテストユーザーで
+  OTP登録からログインまでを検証すること。検証前に全ユーザーへ適用すると、設定ミス時に全員がログイン
+  できなくなるリスクがある。
+- 管理者自身と回復手段(リカバリコード/バックアップ管理者 `{{ recovery_admin_user }}`)を、
+  browserFlow 切り替え前に必ず整備しておくこと。整備を怠ると管理者自身がロックアウトされ、
+  Keycloak管理コンソールにすら入れなくなる。
+- 発行したリカバリコード({{ recovery_codes_count }} 件)は暗号化された安全な場所に保管し、
+  平文でチケットやログに残さないこと。
+- TOTP はサーバーとクライアント双方の時刻同期(NTP)に依存する。時刻がずれるとコードが正しくても
+  拒否されるため、`otp_policy.look_ahead_window`({{ otp_policy.look_ahead_window }}) は多少のずれを
+  許容するために設定しているが、根本対策としてサーバー・クライアント双方のNTP同期を確認すること。
+- `otp_policy.digits`/`period`/`algorithm` を変更すると、既存に登録済みの認証アプリのコードと
+  一致しなくなる場合がある。変更する場合は既存ユーザーへの周知と再登録の手順を別途用意すること。
+- ロールバックする場合は realm の browserFlow を元の `{{ source_flow }}` に戻すだけでよく、
+  複製したフロー `{{ flow_name }}` 自体は削除せず残しておくと再適用が容易になる。

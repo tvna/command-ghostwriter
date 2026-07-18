@@ -1,0 +1,11 @@
+alert_rules:
+  - "5710: sshd authentication failed"
+  - "5712: sshd insecure connection attempt"
+  - "5551: PAM authentication failure"
+source_ip: 203.0.113.45
+targeted_accounts:
+  - root
+  - admin
+  - backup
+success_after_failures: true
+escalation: セキュリティインシデント対応チーム (内線 1199)

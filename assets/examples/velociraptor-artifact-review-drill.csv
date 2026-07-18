@@ -1,0 +1,7 @@
+artifact_name,type,monitoring,last_reviewed,safety_check,disposition
+Windows.System.Pslist,builtin,true,2026-06-01,reviewed,keep
+Windows.Detection.Amsi,builtin,true,2026-06-01,reviewed,keep
+Custom.Incident.CollectBrowserHistory,custom,true,2026-05-15,reviewed,keep
+Custom.Legacy.DumpRegistryHive,custom,false,2025-11-02,pending,review
+Custom.Debug.RemoteShellHelper,custom,false,-,unreviewed,remove
+Windows.Forensics.Timeline,builtin,true,2026-06-01,reviewed,keep

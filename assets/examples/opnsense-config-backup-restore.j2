@@ -1,0 +1,130 @@
+# OPNsense設定バックアップの取得と復元確認
+
+`config.xml`の定期バックアップをGUI手動エクスポートとAPI自動取得の両方で確立し、世代管理と2種類の復元経路、復元後の動作確認までを定型運用として整備します。
+
+## 目的
+
+OPNsenseの全設定を保持する`config.xml`について、手動エクスポートとAPIによる自動取得を使い分けられるようになり、暗号化オプションを正しく扱いながら世代管理を行い、復元時にはGUIリストアとインストーラー経由の2経路を状況に応じて選択できるようになることを目指します。復元後はインターフェース割当・証明書・ファイアウォールルール数を確認し、管理アクセスを失わないことまで含めて検証します。
+
+## 用語解説
+
+- **config.xml**: OPNsenseの全設定(ネットワーク、ファイアウォールルール、証明書、ユーザー、APIキー等)を1ファイルにまとめたXML。`/conf/config.xml`に実体があり、設定変更のたびに保存される
+- **Configuration history(自動リビジョン)**: 設定を保存するたびに`/conf/backup/`配下へ自動保存されるスナップショット群。System > Configuration > Backupsの「Configuration history」タブから任意のリビジョンを選んでリストアできる
+- **APIキー/シークレット**: System > Access > Usersの対象ユーザー詳細画面で発行するBasic認証用の資格情報ペア。発行時に一度だけダウンロードでき、以降は再表示できないため安全な場所に保管する
+- **暗号化バックアップ**: `config.xml`エクスポート時に「Encrypt this configuration file」を有効にしてパスワードを設定するオプション。AES-256-CBC(PBKDF2, SHA512)で暗号化され、APIキーや証明書秘密鍵を含むファイルを保護できる
+- **インストーラー経由のconfig.xmlインポート**: 新規/交換ハードウェアにOPNsenseをインストールする際、インストールメディアとは別のFAT32フォーマットUSBに`/conf/config.xml`を配置し、インストーラーの設定インポート画面から読み込む復元方法
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 対象ファイアウォール | `{{ fw_host }}` |
+| バックアップ保存先 | `{{ backup_dir }}` |
+| 保持世代数 | `{{ retention_generations }}` |
+| ダウンロード時の暗号化 | {% if encrypt_password_set %}有効(パスワード保護あり){% else %}無効(平文){% endif %} |
+
+## 手順
+
+### 1. GUIから手動エクスポートを実行する
+
+1. `https://{{ fw_host }}/` にログインし、`System > Configuration > Backups` を開く
+2. 「Backup configuration」セクションで{% if encrypt_password_set %}「Encrypt this configuration file」を`Yes`にし、パスワード欄に十分な強度のパスワードを入力する{% else %}暗号化は行わずそのまま{% endif %}
+3. 「Download configuration」をクリックし、`config-{{ fw_host }}-<timestamp>.xml` 形式のファイルを取得する
+4. ダウンロードしたファイルを管理端末側で保管する前に、ファイル名に日時が含まれていることを確認する
+
+### 2. APIキーを発行し自動取得を構成する
+
+`System > Access > Users` で自動取得専用のユーザー(閲覧・バックアップ権限のみ)を作成し、そのユーザーの詳細画面で「API keys」の`+`をクリックしてキー・シークレットを発行します。ダウンロードされるファイルは一度きりしか取得できないため、直後にシークレット管理ツールへ登録します。
+
+コマンドラインやシェル履歴に資格情報を残さないよう、取得専用のcurl設定ファイルに保存します。
+
+```bash
+install -m 600 /dev/null ~/.opnsense-api.conf
+cat <<'EOF' > ~/.opnsense-api.conf
+user = "CHANGE_ME_API_KEY:CHANGE_ME_API_SECRET"
+EOF
+```
+
+`CHANGE_ME_API_KEY`と`CHANGE_ME_API_SECRET`は、発行したAPIキー・シークレットに置き換えてください。
+
+```bash
+mkdir -p {{ backup_dir }}
+chmod 700 {{ backup_dir }}
+TS=$(date +%Y%m%d_%H%M%S)
+curl -k -K ~/.opnsense-api.conf \
+  https://{{ fw_host }}/api/core/backup/download/this \
+  -o {{ backup_dir }}/config_${TS}.xml
+```
+
+`-k`はfw管理面が社内CA未導入の自己署名証明書である場合の暫定回避であり、可能な限り正しいCA証明書を配布して`-k`なしで検証できる状態を目指します。
+
+### 3. 暗号化オプションを扱う
+
+{% if encrypt_password_set %}
+GUIの「Encrypt this configuration file」で保護したファイルは復元時にも同じパスワードが必要になるため、パスワード自体はシークレット管理ツールに保管し、`{{ backup_dir }}`には平文で置きません。
+
+一方、`/api/core/backup/download/this`が返す内容はAPI自体には暗号化パラメータがなく平文のXMLであるため、API取得分については取得直後にファイル単位で暗号化します。
+```bash
+openssl enc -aes-256-cbc -pbkdf2 -salt \
+  -in {{ backup_dir }}/config_${TS}.xml \
+  -out {{ backup_dir }}/config_${TS}.xml.enc \
+  -pass file:/root/.opnsense-backup-passphrase
+shred -u {{ backup_dir }}/config_${TS}.xml
+```
+`/root/.opnsense-backup-passphrase`はパーミッション600とし、`{{ backup_dir }}`とは別の管理領域に置きます。復号は`openssl enc -d -aes-256-cbc -pbkdf2`に同じパスフレーズを渡して行います。
+{% else %}
+本設定では暗号化を無効(`encrypt_password_set = false`)としていますが、`config.xml`にはAPIキー・証明書秘密鍵・ユーザーのハッシュ化パスワード等の機微情報が含まれます。暗号化を無効にする場合は、`{{ backup_dir }}`自体のファイルシステム暗号化またはアクセス制御で同等の保護を代替してください。
+{% endif %}
+
+### 4. 世代管理(古い世代の削除)
+
+保持世代数を`{{ retention_generations }}`件として、それを超えた古いバックアップを削除します。
+
+```bash
+ls -t {{ backup_dir }}/config_*.xml* 2>/dev/null | tail -n +$(( {{ retention_generations }} + 1 )) | xargs -r rm -f
+ls -t {{ backup_dir }}/config_*.xml* 2>/dev/null | wc -l
+```
+
+`wc -l`の結果が`{{ retention_generations }}`以下になっていることを確認します。
+
+### 5. 復元経路1: GUIのBackupsタブからリストアする
+
+1. 復元対象機の`System > Configuration > Backups`を開く
+2. {% if encrypt_password_set %}暗号化済みファイルを使う場合は「Restore configuration」のパスワード欄に、取得時と同じパスワードを入力する{% else %}平文ファイルであればパスワード欄は空欄のままでよい{% endif %}
+3. 「Restore configuration」でファイル選択欄に対象の`config_<timestamp>.xml`(または`.xml.enc`を復号したもの)を指定し、アップロード・リストアを実行する
+4. リストア完了後に自動的に発生する再起動を待つ
+
+このリストアは稼働中の機器へ即座に反映されるため、まず検証用の機器またはメンテナンスウィンドウ内で実施し、コンソール(シリアル/物理)アクセスを確保した状態で行います。
+
+### 6. 復元経路2: インストーラーからのconfig.xmlインポート
+
+ハードウェア交換や工場出荷状態からの復元など、OS再インストールを伴う場合の経路です。
+
+1. インストール対象の`config.xml`(暗号化されていない平文のもの)を、インストールメディアとは別のFAT32フォーマットUSBメモリの`/conf/config.xml`として配置する
+2. OPNsenseインストーラーを起動し、インストールメディアと手順1のUSBメモリの両方を接続する
+3. インストーラー起動時の案内に従って設定インポート画面を呼び出し、手順1のUSBメモリのデバイス名を指定してインポートする
+4. インポート完了後、通常のインストールを進めて再起動する
+
+新しいハードウェアでは物理NICの並び順が異なる場合があるため、インポートされた`<interfaces>`の割当がそのまま使えるとは限らないことを踏まえ、次の動作確認でインターフェース割当を必ず確認します。
+
+## 動作確認
+
+1. 復元直後、**既存の管理セッション(SSH/WebGUI)を切断せずに維持したまま**、別端末やタブから新規にSSH接続・WebGUIログインを試み、管理アクセス経路(ファイアウォールルール・ユーザー認証)が復元後の設定でも機能することを確認する。新規アクセスが確立できるまでは、既存セッションを閉じない
+2. `Interfaces > Assignments`で、WAN/LANなど各論理インターフェースが意図した物理NIC(`em0`/`igb0`等)に割り当てられていることを確認する。異なるハードウェアへの復元では、ここで再割当が必要になることがある
+3. `System > Trust > Certificates`で証明書の件数と主体(CN)が復元元と一致していることを確認する
+4. 復元前に取得していたバックアップファイルと、復元後の`/conf/config.xml`とでファイアウォールルール数を突き合わせる
+
+```bash
+grep -c "<rule>" {{ backup_dir }}/config_<復元に使ったtimestamp>.xml
+ssh admin@{{ fw_host }} 'grep -c "<rule>" /conf/config.xml'
+```
+
+両者のルール数が一致していること(意図的な差分がある場合はその差分のみであること)を確認します。
+
+## 注意事項
+
+- `config.xml`にはAPIキー・シークレット、証明書の秘密鍵、ユーザーのパスワードハッシュ等の機微情報が丸ごと含まれる。`{{ backup_dir }}`はパーミッション700で作成し、アクセス可能なアカウントを最小限に絞る。暗号化する場合もパスフレーズはバックアップ本体とは別の管理領域(シークレット管理ツール等)に保管し、同じディレクトリに平文で置かない。
+- 復元(リストア)はファイアウォールルール・管理者アカウント・SSH/WebGUIのアクセス設定を丸ごと置き換える操作であり、実施内容次第では自分自身が締め出される可能性がある。本手順の「動作確認」1.の通り、復元後は既存の管理セッションを維持したまま新規セッションで疎通を確認し、新しい経路が機能するまで既存セッションを切断しない。
+- 経路2(インストーラーからのconfig.xmlインポート)で使う`config.xml`は暗号化されていない平文である必要がある。暗号化済みバックアップを使う場合は、事前に安全な端末上で復号してから配置する。
+- 異なるハードウェアへ復元する場合、物理NICの識別名が変わり意図しないインターフェースにルールが適用される恐れがある。動作確認の`Interfaces > Assignments`確認を省略しない。
+- 世代管理で削除する対象は`{{ backup_dir }}`配下の自動取得ファイルのみとし、削除前に`{{ retention_generations }}`件を超えている一覧を目視確認してから`rm`を実行する。

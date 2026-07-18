@@ -1,0 +1,128 @@
+# OPNsenseポートフォワード不通の切り分け手順
+
+外部から公開サーバ（{{ int_host }}:{{ int_port }}）へ通信が届かない事象を、
+WAN側の到達確認 → Port Forward定義 → 関連付けフィルタルール → サーバ側設定、
+の順に切り分けます。OPNsense本体へはSSHまたはコンソールでroot権限で実行してください。
+
+## 目的
+
+外部公開サーバへの通信不通を、NAT・フィルタルール・戻り経路のどの段階で
+止まっているかを順番に切り分け、原因箇所を特定できるようになることを
+目指します。
+
+## 用語解説
+
+- **Port Forward（ポートフォワード）**: WAN側の宛先ポート宛の通信を、LAN側の
+  特定ホスト・ポートへ転送するNAT設定
+- **関連付けフィルタルール**: Port Forward作成時に自動生成される、WANインター
+  フェース上の許可ルール（これが無効/削除されていると転送先まで到達しない）
+- **pfctl**: OPNsense（FreeBSDのpf）のNAT/フィルタ状態をCLIで確認するコマンド
+- **NATリフレクション**: LAN内部から自組織のWAN側IP宛にアクセスした際に、
+  Port Forward経由でLAN内サーバへ折り返す仕組み（既定では無効）
+
+## シナリオ設定
+
+| 項目 | 値 |
+|------|-----|
+| WAN側IP | {{ wan_ip }} |
+| 外部公開ポート | {{ ext_port }}/{{ proto }} |
+| 転送先ホスト | {{ int_host }} |
+| 転送先ポート | {{ int_port }}/{{ proto }} |
+| 切り分け用テスト送信元 | {{ test_source }} |
+
+## 1. WAN側でパケットが到着しているか確認する
+
+まずOPNsense自身のWANインターフェースにパケットが到達しているかを
+Packet Captureで確認します（Diagnostics: Packet CaptureのCLI相当）。
+
+```bash
+tcpdump -ni $(ifconfig -l | tr ' ' '\n' | grep -m1 -E '^(igb|em|vtnet)') \
+  host {{ test_source }} and dst host {{ wan_ip }} and {{ proto }} port {{ ext_port }} -vv
+```
+
+- パケットが1件も見えない場合 → OPNsenseより手前（ISP/上流ルータ）で
+  遮断されている可能性が高い。切り分け対象を社外側に広げる。
+- パケットは見えるがOPNsenseからの応答がない場合 → 手順2以降に進む。
+
+## 2. Port Forward定義を確認する
+
+Firewall: NAT: Port Forwardで、対象ルールが有効か・宛先IP/ポート/
+インターフェースが想定通りかを確認します。CLIからはNATテーブルを確認します。
+
+```bash
+pfctl -sn | grep "{{ wan_ip }}" | grep "{{ ext_port }}"
+```
+
+- 該当するNATルールが出力されない → ルールが無効化されている、または
+  宛先ポート/宛先IPの指定誤り。GUIでPort Forward定義（宛先IP: {{ wan_ip }}、
+  ポート: {{ ext_port }}、Redirect target IP: {{ int_host }}、
+  Redirect target port: {{ int_port }}）を再確認する。
+
+## 3. 関連付けフィルタルール（WAN許可ルール）を確認する
+
+Port Forward作成時に「Filter rule association」で自動生成されたWAN側の
+許可ルールが有効かを確認します。
+
+```bash
+pfctl -sr | grep -A1 "{{ wan_ip }}" | grep "{{ ext_port }}"
+```
+
+- ルールが見つからない、または無効化されている → Firewall: Rules: WANで
+  当該ルールを有効化する。
+- 原因切り分け中にこのルールへ一時的な変更を加える場合は、既存の
+  本番許可ルールは無効化・削除せず、{{ test_source }} 送信元のみに
+  スコープした診断用ルールを並行して追加し、動作確認後に必ず削除する。
+
+```bash
+# 診断用の一時ルール（例: pfctl の一時アンカーで検証、本番ルールは変更しない）
+echo 'pass in on $WAN proto {{ proto }} from {{ test_source }} to {{ wan_ip }} port {{ ext_port }}' \
+  | pfctl -a diag-triage -f -
+# 確認後は必ず削除する
+pfctl -a diag-triage -F rules
+```
+
+## 4. サーバ側のLISTEN状態とデフォルトゲートウェイを確認する
+
+転送先サーバ（{{ int_host }}）にログインし、実際にポートをLISTENしているか、
+デフォルトゲートウェイがOPNsenseのLAN側インターフェースを指しているかを
+確認します。
+
+```bash
+ss -tlnp | grep ":{{ int_port }} "
+ip route show default
+```
+
+- `ss -tlnp` に該当ポートが出力されない → サービス未起動、または
+  別ポート/別インターフェースでLISTENしている。
+- デフォルトゲートウェイがOPNsense以外を指している → 戻りパケットが
+  OPNsenseを経由せず非対称経路になり、pfのstateテーブルと矛盾して
+  応答が破棄される。デフォルトゲートウェイをOPNsenseのLAN側IPへ修正する。
+
+## 動作確認
+
+1. `pfctl -ss | grep "{{ int_host }}"` でstateが `ESTABLISHED` または
+   `MULTIPLE:MULTIPLE` になっていることを確認する（SYN_SENTのまま
+   進まない場合は戻り経路の非対称性を疑う）。
+2. {{ test_source }} など外部相当のホストから
+   `curl -v telnet://{{ wan_ip }}:{{ ext_port }}` 等で疎通確認し、
+   接続が確立することを確認する。
+3. LAN内部から {{ wan_ip }}:{{ ext_port }} へ同様にアクセスし、
+   NATリフレクション未設定の環境では失敗するのが既知の挙動であることを
+   認識した上で、外部からの到達性のみを最終判断基準とする。
+4. 手順3で追加した診断用の一時ルールが削除され、既存の本番ルールのみが
+   残っていることを再確認する。
+
+## 注意事項
+
+- 切り分け中に追加した「送信元any・ポートany」等の広範な暫定許可ルールは、
+  調査終了後も残置しないこと。必ず {{ test_source }} など送信元を
+  スコープしたルールのみを使用し、確認後は速やかに削除する。
+- 既存の本番Port Forward・関連フィルタルールは、原因が確定するまで
+  無効化・削除しない。診断用ルールは常に並行して追加し、動作確認が
+  取れてから既存設定の変更に着手する。
+- よくある原因: (1) LAN内部からのテストがNATリフレクション未設定のため
+  失敗する（外部からの到達性とは切り分けて判断する）、(2) サーバの
+  デフォルトゲートウェイがOPNsense以外を向いており戻り経路が非対称に
+  なっている、(3) ISP側で該当ポートが下り方向で遮断されている。
+- 本番環境での`pfctl`直接操作は影響範囲が大きいため、可能な限りGUI
+  (Firewall: NAT / Firewall: Rules)で設定変更し、CLIは確認用途に限定する。

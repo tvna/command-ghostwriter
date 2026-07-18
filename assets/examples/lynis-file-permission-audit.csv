@@ -1,0 +1,7 @@
+path,issue_type,current_perm,recommended,disposition,note
+/usr/bin/passwd,suid,4755,4755,retain,正規のSUIDバイナリ(パスワード変更に必須)
+/usr/bin/sudo,suid,4755,4755,retain,正規のSUIDバイナリ(sudoコマンド実行に必須)
+/usr/bin/crontab,sgid,2755,2755,retain,正規のSGIDバイナリ(crontab更新に必須)
+/usr/local/bin/legacy-report.sh,suid,4777,0755,remediate,旧運用で付与された不要なSUID、対象は日次バッチのみ
+/etc/app/config.yml,world_writable,666,640,remediate,アプリ設定ファイルがworld-writable、所有者をapp:appへ是正
+/var/www/uploads,world_writable,777,750,escalate,公開Webディレクトリのworld-writable設定、サービス影響のため要承認

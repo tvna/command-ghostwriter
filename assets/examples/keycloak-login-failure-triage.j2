@@ -1,0 +1,155 @@
+# Keycloakログイン失敗事象の切り分け調査 — {{ realm_name }}
+
+- **対象**: {{ user_or_client }}
+- **報告されているエラー種別**: {{ error_type }}
+
+## 目的
+
+特定ユーザーまたはクライアントでログインができないという申告に対し、Events確認 → クライアント設定 → federation → 認証フロー → ブルートフォースロックの順に切り分け、原因箇所を1つに絞り込めるようになることを目指します。
+
+## 用語解説
+
+- **realm**: Keycloak内でユーザー・クライアント・認証フローをまとめる管理単位
+- **Events / Admin Events**: realmで発生したログイン成否や管理操作を記録するログ機能。デフォルトでは無効になっていることが多い
+- **エラー種別（error type）**: `invalid_user_credentials`（パスワード誤り）、`invalid_client`（redirect URI/web origins不一致など クライアント設定起因）、`user_disabled`（アカウント無効化）等、Eventsに記録される失敗理由の分類。この分類こそが切り分けの最有力情報であり、原因の当たりをつけずに設定を総当たりで変更するべきではない
+- **federation**: LDAP/Active DirectoryなどをKeycloakのユーザーストアとして連携する機能。接続断だとログイン自体が失敗する
+- **redirect URI / web origins**: クライアント設定で許可されたコールバック先URLとCORS許可元。不一致だと`invalid_client`になる
+- **PKCE (Proof Key for Code Exchange)**: 認可コード横取り対策の拡張。クライアント側実装とKeycloak側の要求設定が食い違うと認可コード交換に失敗する
+- **required action**: パスワード再設定やOTP登録などユーザーに残っている未完了の必須アクション。残留しているとログインフローが完了しない
+- **ブルートフォース検知（Brute Force Detection）**: 一定回数のログイン失敗でアカウントを一時ロックする機能
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| realm | {{ realm_name }} |
+| 対象ユーザー/クライアント | {{ user_or_client }} |
+| 申告されているエラー種別 | {{ error_type }} |
+| federation(LDAP)確認要否 | {{ federation_check }} |
+| ブルートフォースロック疑い | {{ bruteforce_locked }} |
+| Keycloak URL | {{ keycloak_url }} |
+| 対象クライアントID | {{ client_id_target }} |
+| 想定redirect URI | {{ redirect_uri_expected }} |
+| federationプロバイダalias | {{ ldap_provider_alias }} |
+
+## 手順
+
+### 1. kcadm.shにログインする
+
+```bash
+kcadm.sh config credentials \
+  --server {{ keycloak_url }} \
+  --realm master \
+  --user admin \
+  --config {{ kcadm_config_path }}
+```
+
+### 2. realmのEvents/Admin Eventsが有効か確認し、未有効なら先に有効化する
+
+Events未有効時は原因調査ができないため、必ず最初に確認・有効化する。
+
+```bash
+kcadm.sh get events/config -r {{ realm_name }} --config {{ kcadm_config_path }}
+```
+
+無効であれば以下で有効化する（保存期間は注意事項を参照）。
+
+```bash
+kcadm.sh update events/config -r {{ realm_name }} --config {{ kcadm_config_path }} \
+  -s eventsEnabled=true \
+  -s adminEventsEnabled=true \
+  -s eventsExpiration=604800
+```
+
+### 3. 失敗を再現し、Eventsのエラー種別を確認する
+
+対象者に手元でログインを再試行してもらい、直後に以下でイベントを取得する。
+
+```bash
+kcadm.sh get events -r {{ realm_name }} --config {{ kcadm_config_path }} \
+  -q client={{ client_id_target }} -q type=LOGIN_ERROR
+```
+
+取得した `error` フィールドの値（例: `{{ error_type }}`）を起点に、以下の分岐へ進む。
+
+### 4. `invalid_client` 系（redirect URI/web origins/PKCE）を切り分ける
+
+クライアント設定を取得し、想定値と一致しているか確認する。
+
+```bash
+kcadm.sh get clients -r {{ realm_name }} --config {{ kcadm_config_path }} \
+  -q clientId={{ client_id_target }} \
+  --fields 'clientId,redirectUris,webOrigins,attributes."pkce.code.challenge.method"'
+```
+
+`redirectUris` に `{{ redirect_uri_expected }}` が含まれない、または `webOrigins` が実際のオリジンと不一致であれば、それが原因である。PKCE必須設定(`attributes."pkce.code.challenge.method"`)がクライアント実装と食い違っていないかも合わせて確認する。
+
+### 5. federation(LDAP)の接続断を切り分ける
+
+{% if federation_check %}
+このユーザーはfederation({{ ldap_provider_alias }})経由のため、接続を確認する。
+
+```bash
+kcadm.sh get user-storage/{{ ldap_provider_alias }}/sync?action=triggerFullSync \
+  -r {{ realm_name }} --config {{ kcadm_config_path }}
+```
+
+エラーやタイムアウトが返る場合はLDAP側の接続断（ネットワーク到達性・bind DN認証情報の失効）が原因である。手順6以降に進む前に、まずこの接続を復旧できるか確認すること。
+{% else %}
+今回の対象はfederation経由ではないため、この項目は切り分け対象外である（`user-storage`にひも付いていないローカルユーザーであることを`kcadm.sh get users`の`federationLink`フィールドで確認済みとして扱う）。
+{% endif %}
+
+### 6. 認証フロー(条件付きOTP/required action残留)を確認する
+
+realmの認証フローと、対象ユーザーに残っているrequired actionを確認する。
+
+```bash
+kcadm.sh get authentication/flows -r {{ realm_name }} --config {{ kcadm_config_path }}
+kcadm.sh get users -r {{ realm_name }} --config {{ kcadm_config_path }} \
+  -q username={{ user_or_client }} --fields 'username,requiredActions,enabled'
+```
+
+条件付きOTP（Conditional OTP Form）の判定条件（グループ/ロール等）に対象ユーザーが該当し、かつOTPデバイス未登録のまま必須化されていないか、また`requiredActions`にパスワード再設定等が残留して完了できない状態になっていないかを確認する。
+
+### 7. ブルートフォースロックを確認する
+
+```bash
+kcadm.sh get realms/{{ realm_name }} --config {{ kcadm_config_path }} \
+  --fields 'bruteForceProtected,failureFactor,maxDeltaTimeSeconds'
+```
+
+{% if bruteforce_locked %}
+ロック疑いがあるため、対象ユーザーの個別ロック状態を確認する。
+
+```bash
+kcadm.sh get users -r {{ realm_name }} --config {{ kcadm_config_path }} \
+  -q username={{ user_or_client }} --fields 'username,enabled,notBefore'
+```
+
+ロック中と判明した場合でも、原因（パスワード誤り連投の理由）を確認しないまま解除だけを行わない。解除前に、まず本人以外の第三者による総当たり試行でないかログイン元IPをEventsの`ipAddress`で確認すること。
+{% else %}
+現時点ではロック疑いは低いため、この項目は参考確認にとどめる。
+{% endif %}
+
+### 8. 原因を特定し、修正した設定が機能することを別セッションで検証してから旧設定を無効化・削除する
+
+クライアント設定やrequired actionの修正を反映した場合は、対象者本人または検証用アカウントで別セッション・別ブラウザから実際にログインが成功することを確認してから、修正前の設定値（旧redirect URIエントリや旧required action等）を削除する。認証経路を先に断つと、修正が誤っていた場合に誰もログインできなくなるため、新旧の経路が並行して確認できる状態を経由すること。
+
+### 9. 自己解決できない場合はエスカレーションする
+
+原因が特定できない、または修正後も再現する場合は {{ escalation }} へ連絡する。
+
+## 動作確認
+
+- 手順2でrealmのevents/admin eventsが有効になっていること（`eventsEnabled: true`）
+- 失敗を再現し、Eventsに記録された`error`フィールドが取得できていること
+- 特定した原因（クライアント設定/federation/認証フロー/ブルートフォース）に対する修正後、対象者が別セッションで実際にログイン成功することを確認していること
+- 修正前の設定を削除・無効化した後も、ログイン成功が継続していること
+
+## 注意事項
+
+- Eventsにはユーザー名やIPアドレスなどのPIIが記録されるため、保存期間(`eventsExpiration`)を必要最小限に設定し、アクセス権限を持つ者を限定する。
+- 調査終了後、恒久的に不要であればEventsを再度無効化するか、保存期間を運用ポリシーに合わせて見直す。
+- ブルートフォースロックの解除やfederation設定変更、required actionの削除は、それが正しい原因であるとEventsのエラー種別で確認できてから行う。当てずっぽうに複数箇所を同時に変更しない。
+- クライアント設定(redirect URI/web origins/PKCE)を変更する際は、必ず修正後の設定で実際にログインが通ることを別セッションで確認してから、旧設定値を削除すること。旧設定を先に削除すると本番利用者全員がログイン不能になるリスクがある。
+- 本手順は演習・検証用realmで実施し、本番realmに対して行う場合は変更前の設定値を必ず控えておく。

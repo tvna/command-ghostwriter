@@ -7,3 +7,28 @@ chage = "chage"
 # exportfs = the real Linux NFS command that maintains the table of exported
 # file systems (`man exportfs`); not a misspelling of "exports".
 exportfs = "exportfs"
+# Hashi = the first half of "HashiCorp" (the company/product name behind
+# Vault); not a misspelling of "Hash".
+Hashi = "Hashi"
+# CAES = a plausible base64-decoded fragment inside an example HashiCorp
+# Vault Service token (`hvs.CAES...`), matching the real token format; not a
+# misspelling of "CASE"/"ACES".
+CAES = "CAES"
+# Pn = the real nmap flag `-Pn` (skip host discovery, treat all hosts as
+# online); not a misspelling of "On".
+Pn = "Pn"
+# iif = the real iproute2/nftables keyword for "input interface"
+# (e.g. `ip rule add iif ...`, `nft ... iif lo accept`); not a misspelling
+# of "if".
+iif = "iif"
+# oif = the real iproute2/nftables keyword for "output interface"
+# (e.g. `nft ... oif wg0 accept`); not a misspelling of "of".
+oif = "oif"
+# deprecat = an intentional grep -E alternation fragment
+# (`grep -iE "deprecat|breaking|removed"`) that matches both "deprecated"
+# and "deprecation"; not a misspelling.
+deprecat = "deprecat"
+# EDE = the middle segment of the real IANA TLS cipher suite name
+# `TLS_RSA_WITH_3DES_EDE_CBC_SHA` (Triple DES Encrypt-Decrypt-Encrypt);
+# not a misspelling of "EDGE".
+EDE = "EDE"

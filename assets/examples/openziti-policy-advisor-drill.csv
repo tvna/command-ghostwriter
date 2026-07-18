@@ -1,0 +1,7 @@
+identity,service,expected,advisor_result,match,checked_at
+mobile-sales-app,crm-api,allow,allow,true,2026-07-10
+mobile-sales-app,billing-api,deny,deny,true,2026-07-10
+mobile-sales-app,billing-api-v2,deny,allow,false,2026-07-10
+warehouse-scanner,inventory-api,allow,deny,false,2026-07-10
+contractor-vpn-bridge,crm-api,deny,deny,true,2026-07-10
+finance-report-svc,billing-api,allow,allow,true,2026-07-10

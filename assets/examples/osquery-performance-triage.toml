@@ -1,0 +1,45 @@
+slow_query_threshold_ms = 1000
+watchdog_memory_mb = 250
+
+[[suspect_queries]]
+name = "yara_scan_all_hosts"
+query_table = "yara"
+average_ms = 4200
+executions = 18
+wall_time_s = 75
+memory_mb = 210
+schedule_interval_s = 60
+reason = "yaraによる全ファイルスキャン(フルスキャン)"
+
+[[suspect_queries]]
+name = "hash_baseline_check"
+query_table = "hash"
+average_ms = 1800
+executions = 40
+wall_time_s = 72
+memory_mb = 95
+schedule_interval_s = 30
+reason = "hashテーブルでのWHERE未指定によるフルスキャン"
+
+[[suspect_queries]]
+name = "process_open_sockets_watch"
+query_table = "process_open_sockets"
+average_ms = 650
+executions = 120
+wall_time_s = 78
+memory_mb = 40
+schedule_interval_s = 10
+reason = "高頻度実行(10秒間隔)の累積負荷"
+
+[interval_adjust]
+yara_scan_all_hosts = 3600
+hash_baseline_check = 1800
+process_open_sockets_watch = 120
+
+[watchdog_kill]
+observed_level = "--watchdog_level=1"
+memory_limit_flag = "--watchdog_memory_limit_mb=250"
+killed_query_name = "yara_scan_all_hosts"
+killed_at = "2026-07-16T03:12:05Z"
+osqueryd_pid_before = 18422
+osqueryd_pid_after = 19107

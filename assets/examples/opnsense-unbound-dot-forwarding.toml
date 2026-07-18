@@ -1,0 +1,16 @@
+fw_ip = "192.168.1.1"
+lan_interface = "lan"
+lan_net = "192.168.1.0/24"
+allow_internal_dns_only = true
+test_domain = "example.com"
+external_test_ip = "8.8.8.8"
+
+[[dot_servers]]
+ip = "1.1.1.1"
+port = 853
+hostname = "cloudflare-dns.com"
+
+[[dot_servers]]
+ip = "9.9.9.9"
+port = 853
+hostname = "dns.quad9.net"

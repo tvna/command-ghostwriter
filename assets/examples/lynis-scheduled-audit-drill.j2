@@ -1,0 +1,111 @@
+# Lynis監査運用の妥当性検証訓練
+
+定期実行している Lynis 監査そのものが「動いている・記録されている・是正に繋がっている」かを検証する運用訓練です。監査結果（脆弱性の中身）ではなく、監査運用の健全性（cron動作・レポート保全・是正追跡）を主眼とします。
+
+## 目的
+
+Lynis の定期監査ジョブが無音で停止していないか、レポートが欠落なく蓄積されているか、新規warningが是正チケットに正しく追跡されているかを、チェックリストに沿って検証できるようになることを目指します。
+
+## 用語解説
+
+- **Lynis**: Linux/Unix向けのセキュリティ監査ツール。`lynis audit system` でシステム全体を走査し、warning/suggestionを出力する
+- **cronjobモード**: `lynis audit system --cronjob` で実行する非対話モード。色付け・一時停止なしでログファイルへ出力する
+- **lynis-report.dat**: 監査結果のkey=value形式のマシン可読レポート。デフォルトは `/var/log/lynis-report.dat`
+- **無音故障**: エラー通知が出ないままジョブが実行されなくなる故障。cronの設定ミスや権限変更で発生しやすい
+- **是正チケット化**: 検知した warning を追跡可能なチケット（本手順ではCSV台帳）に起票し、対応完了まで追跡すること
+- **監査運用の妥当性検証訓練**: 監査結果そのものではなく、監査の実行・記録・是正連携という運用プロセスが機能しているかを点検する訓練
+
+## シナリオ設定
+
+| check_item | expected | actual | gap | action |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["check_item"] }} | {{ r["expected"] }} | {{ r["actual"] }} | {{ r["gap"] }} | {{ r["action"] }} |
+{% endfor %}
+
+## 1. cronジョブの実行有無を確認する（無音故障の検知）
+
+Lynis の定期監査は systemd timer `lynis-audit.timer` から `lynis-audit.service` を起動する構成を前提とします。まず timer 自体が有効か、直近7日間で実際に起動されているかを確認します。
+
+```bash
+systemctl list-timers lynis-audit.timer
+systemctl is-enabled lynis-audit.service
+journalctl -u lynis-audit.service --since "7 days ago" | grep -E "Started|Finished|Failed"
+```
+
+出力に7日連続分の "Started" / "Finished" が無い場合、cronが無音で停止している疑いがあります。該当日の起動記録が欠けていないか、日付ごとに突き合わせてください。
+
+## 2. レポートの蓄積状況を確認する
+
+正常なら過去7世代分のレポートが `/var/backups/lynis/reports/` に日付付きで保存されているはずです。
+
+```bash
+ls -la /var/backups/lynis/reports/ | grep -E "lynis-report-[0-9]{8}\.dat"
+find /var/backups/lynis/reports/ -name "lynis-report-*.dat" -mtime -7 | wc -l
+```
+
+件数が7未満であれば、Step 1 のcron欠落と対応関係にあるかを確認し、欠落している日付を特定します。
+
+## 3. 新規warningを検知し、前回レポートとの差分を取る
+
+```bash
+sudo lynis audit system --cronjob
+grep "warning\[\]=" /var/log/lynis-report.dat > /tmp/lynis-warnings-latest.txt
+diff /var/backups/lynis/reports/lynis-warnings-previous.txt /tmp/lynis-warnings-latest.txt || true
+```
+
+差分に現れた新規行が「新規warning」です。前回との比較用に、今回の結果を保存しておきます。
+
+```bash
+cp /tmp/lynis-warnings-latest.txt /var/backups/lynis/reports/lynis-warnings-previous.txt
+```
+
+## 4. 是正チケットへの紐付け状況を突合する
+
+新規warningが是正チケット台帳（CSV）に起票されているかを確認します。
+
+```bash
+cat /var/backups/lynis/remediation-tickets.csv
+comm -23 <(sort /tmp/lynis-warnings-latest.txt) <(cut -d, -f2 /var/backups/lynis/remediation-tickets.csv | sort)
+```
+
+`comm` の出力に残った行は、台帳に未起票のwarningです。放置せず、この場でチケットを起票してください。
+
+```bash
+echo "$(date -I),<warning-id>,open,<担当者>" >> /var/backups/lynis/remediation-tickets.csv
+```
+
+## 5. 最新レポートの改ざん検知（ハッシュ検証）
+
+```bash
+sha256sum /var/log/lynis-report.dat > /tmp/lynis-report.sha256
+diff /tmp/lynis-report.sha256 /var/backups/lynis/reports/lynis-report-latest.sha256 || echo "ハッシュ不一致: レポート改ざん・破損の疑いあり"
+sha256sum /tmp/lynis-report.sha256 | tee -a /var/backups/lynis/audit-drill-log.txt
+```
+
+## 6. 訓練記録を証跡として保管する
+
+今回の訓練で確認した内容（Step1〜5の結果と、シナリオ設定表の check_item / gap / action）を訓練記録として保存します。
+
+```bash
+{
+  echo "=== Lynis監査運用妥当性検証訓練 $(date -I) ==="
+{% for r in csv_rows %}{% if r["gap"] != "-" %}  echo "要対応: {{ r["check_item"] }} - {{ r["gap"] }} -> {{ r["action"] }}"
+{% else %}  echo "問題なし: {{ r["check_item"] }}"
+{% endif %}{% endfor %}} >> /var/backups/lynis/audit-drill-log.txt
+find /var/backups/lynis/audit-drill-log.txt -mtime -90
+```
+
+## 動作確認
+
+- Step 1〜2 で、過去7日分の cron 起動記録とレポートファイルの世代数が一致していること（無音故障が無いこと）
+- Step 3〜4 で、新規warningが `remediation-tickets.csv` に漏れなく起票されていること（`comm` の出力が空であること）
+- Step 5 で、最新レポートのハッシュが前回保存したハッシュ台帳と一致していること
+- Step 6 の `audit-drill-log.txt` に今回の訓練結果（要対応/問題なしの一覧）が追記され、`find -mtime -90` で90日以内の保管であることが確認できること
+
+## 注意事項
+
+- 監査ジョブの無音故障（cron/timer停止によるレポート途絶）は、Step 1 の起動ログ確認を怠ると本番の脆弱性検知が長期間止まっていても気付けない。定期的に本訓練で必ず突合すること。
+- 是正の放置を防ぐため、Step 4 の台帳突合で未起票のwarningが見つかった場合は、その場でチケットを起票してから訓練を終了する。放置したまま次回訓練まで持ち越さない。
+- レポート保管の完全性（Step 2, 5）が崩れている場合、過去の監査結果を根拠にした是正判断ができなくなるため、欠落や改ざんを検知したら速やかに原因（ディスク容量・権限変更・cron設定変更など）を調査する。
+- 本訓練自体の実施記録（Step 6）を90日以上保管し、訓練が定期的に実施されている証跡を残す。証跡が途絶えている場合、監査運用自体が形骸化しているサインとして扱う。
+- 本手順は監査運用の健全性検証が目的であり、Lynis自体の設定変更や既存cron定義の削除は行わない。

@@ -1,0 +1,120 @@
+# Velociraptorサーバ監視とクライアント健全性
+
+Velociraptorサーバの`Server.Monitor.Health`アーティファクトとPrometheusメトリクスでサーバ自身の健全性を監視し、クライアントのlast seen・online率・Hunt完了率からEDR基盤としてのカバレッジを維持するための手順書です。
+
+## 目的
+
+サーバ健全性(frontend負荷・接続数・メモリ)とクライアントカバレッジ(online率の低下は収集漏れの兆候)を区別して監視できるようになること、オフラインクライアントを日次で洗い出し、原因切り分けの初動を取れるようになることを目指します。
+
+## 用語解説
+
+- **Server.Monitor.Health**: Velociraptorサーバ組み込みの監視アーティファクト。frontendの接続数・GRPCキュー・メモリ使用量などサーバ自身の状態を定期収集する
+- **サーバ健全性**: frontendの現在接続数(`velociraptor_frontend_current_connections`)やexecutorのワーカーキュー(`velociraptor_executor_worker_queue`)など、サーバプロセスそのものが処理しきれているかを示す指標
+- **クライアントカバレッジ**: 登録済みクライアントのうちどれだけが実際に通信できているかの割合。online率が下がるとHuntやアーティファクト収集が一部クライアントに届かず「収集漏れ」になる
+- **last seen**: クライアントがサーバに最後に通信した時刻(`clients()`プラグインの`last_seen_at`、マイクロ秒epoch)
+- **online率**: `client_online_threshold`時間以内にlast seenがあるクライアントの割合
+- **Hunt完了率**: `hunts()`プラグインの`stats.total_clients_with_results`を`stats.total_clients_scheduled`で割った値。低い場合はオフラインクライアントへの配布漏れを示唆する
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| Prometheusメトリクス有効化 | {{ prometheus_enabled }} |
+| クライアントonline判定閾値 | {{ client_online_threshold }}時間以内にlast seen |
+| 監視対象メトリクス数 | {{ watch_metrics | length }}件 |
+| アラート通知先 | {{ alert_channel }} |
+
+監視対象メトリクスは以下の{{ watch_metrics | length }}件です。
+
+{% for m in watch_metrics %}- `{{ m }}`
+{% endfor %}
+
+## 手順
+
+### 1. Server.Monitor.Healthを有効化する
+
+Velociraptor GUIの `Server Artifacts` タブから `Server.Monitor.Health` を追加、またはAPIクライアントで以下のVQLを実行して現在の収集状態を確認します。
+
+```sql
+SELECT * FROM server_monitoring(artifact='Server.Monitor.Health')
+```
+
+### 2. Prometheusメトリクスエンドポイントを確認する
+
+サーバ設定ファイル(`server.config.yaml`)の`Monitoring`セクションでエンドポイントが有効になっているか確認します。
+
+```yaml
+Monitoring:
+  bind_address: 127.0.0.1
+  bind_port: 8003
+```
+
+{% if prometheus_enabled %}
+Prometheusメトリクス収集は有効設定のため、以下でエンドポイントから値を取得します。
+
+```bash
+curl -s http://127.0.0.1:8003/metrics | grep -E '{{ watch_metrics | join("|") }}'
+```
+{% else %}
+Prometheusメトリクス収集は無効設定です。有効化する場合は`Monitoring.bind_address`/`bind_port`を設定しサーバを再起動してください。
+{% endif %}
+
+### 3. クライアントのlast seenとonline率を確認する
+
+Velociraptorノートブック、またはAPIクライアントで以下のVQLを実行し、`{{ client_online_threshold }}`時間以内に通信のあるクライアントの割合を算出します。
+
+```sql
+LET threshold_seconds <= {{ client_online_threshold }} * 3600
+SELECT count(items=client_id) AS total_clients,
+       count(items=client_id, if=now() - last_seen_at / 1000000 < threshold_seconds) AS online_clients
+FROM clients()
+```
+
+### 4. オフラインクライアントを洗い出す
+
+online率が想定より低い場合、対象クライアントを個別に特定します。
+
+```sql
+SELECT client_id, os_info.hostname AS hostname, last_seen_at,
+       timestamp(epoch=last_seen_at / 1000000) AS last_seen_readable
+FROM clients()
+WHERE now() - last_seen_at / 1000000 >= {{ client_online_threshold }} * 3600
+ORDER BY last_seen_at
+```
+
+### 5. Hunt完了率を確認する
+
+直近のHuntについて、配布対象クライアント数に対する結果取得済みクライアント数の割合を確認します。
+
+```sql
+SELECT hunt_id, state,
+       stats.total_clients_scheduled AS scheduled,
+       stats.total_clients_with_results AS with_results
+FROM hunts()
+WHERE state = 'RUNNING' OR state = 'STOPPED'
+ORDER BY create_time DESC
+LIMIT 10
+```
+
+### 6. しきい値超過をアラート通知先に連携する
+
+online率またはHunt完了率がしきい値を下回った場合、`{{ alert_channel }}`へ通知します(通知本文にはクライアント台数と対象Hunt IDのみを含め、生ログは添付しない)。
+
+```bash
+echo "Velociraptor client online rate below threshold: check {{ alert_channel }}" | logger -t velociraptor-monitor
+```
+
+## 動作確認
+
+- Step 2のcurlコマンドで{{ watch_metrics | length }}件の監視対象メトリクスがPrometheus形式で取得できること
+- Step 3のVQLで`total_clients`と`online_clients`が算出でき、online率(`online_clients / total_clients`)が把握できること
+- Step 4でオフラインクライアントの一覧が`last_seen_readable`付きで取得でき、個別調査に着手できる状態であること
+- Step 5でHunt完了率(`with_results / scheduled`)が算出でき、著しく低いHuntが無いこと
+
+## 注意事項
+
+- online率の低下は「ネットワーク経路の障害」「クライアントプロセスの停止」「クライアント証明書のCA失効(再発行が必要)」のいずれかが原因になりうる。原因を切り分けるまでは該当クライアントを収集対象から除外しない。
+- クライアント証明書のCAをローテーションする場合、旧CAで署名済みクライアントが接続できなくなるため、新CAでの接続確認(一部クライアントでの試験切り替え)を行ってから旧CAを失効させる。全台一斉切り替えは避ける。
+- online率の低下はインシデント発生時の収集カバレッジの盲点になる。特定拠点・特定OSでonline率が偏って低い場合、インシデント対応時にその範囲の証跡が取得できない可能性があることを前提に対応計画を立てる。
+- Prometheusメトリクスは`{{ alert_channel }}`への通知トリガーとしてのみ使い、長期保管は別途Prometheusサーバ側の`retention`設定またはリモートストレージに委ねる。サーバ本体のディスクにメトリクスを溜め込まない。
+- online率とHunt完了率は日次で記録し(Step 3・Step 5の結果をCSV等に追記)、傾向の変化(急な低下)を検知できるようにする。単発の確認で終わらせない。

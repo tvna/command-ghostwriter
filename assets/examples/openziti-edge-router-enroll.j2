@@ -1,0 +1,126 @@
+# OpenZitiエッジルータの登録と接続
+
+エッジルータをOpenZitiコントローラへ登録し、ゼロトラストオーバーレイのデータプレーンを構成します。
+
+## 目的
+
+`ziti edge create edge-router`で登録トークン(JWT)を発行し、`ziti create config router edge`で設定ファイルを生成、`ziti router enroll`でエンロールした上で`ziti router run`で起動する一連の手順を確立します。コントローラの管理画面(またはCLI)からエッジルータがオンライン状態で見えることを最終確認とします。
+
+## 用語解説
+
+- **エッジルータ (Edge Router)**: OpenZitiオーバーレイのデータプレーンを担うコンポーネント。エンドポイント間の暗号化トラフィックを中継し、コントローラの制御プレーンとは別に配置される
+- **エンロールメント (Enrollment)**: 短寿命のJWTトークンを使い、ルータ(や識別子)がコントローラに対して自身の証明書を発行してもらう初期登録プロセス。エンロール完了後はJWTではなくmTLS証明書で認証する
+- **tunnelerモード**: エッジルータ自身がtunneler(トンネル終端)としても動作するモード。専用のtunnelerホストを立てずに、ルータが直接アプリケーショントラフィックをオーバーレイへ引き込める
+- **advertised address**: エッジルータがクライアントやコントローラに対して「自分はここで待ち受けている」と広告するホスト名・ポート。実際のリスニングアドレスと異なる場合がある(NAT越しなど)
+- **メッシュ構成**: 複数のエッジルータを相互接続し、単一障害点をなくして経路の冗長性を持たせる構成
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| エッジルータ名 | `{{ router_name }}` |
+| コントローラエンドポイント | `{{ ctrl_endpoint }}` |
+| advertised address | `{{ router_advertised }}` |
+| リスニングポート | {{ listener_port }} |
+| tunnelerモード | {{ tunneler_mode }} |
+
+## 手順
+
+### 1. エッジルータの登録とJWT発行
+
+コントローラ管理端末(`ziti`管理者コンテキストでログイン済み)から、新規エッジルータを登録しエンロールトークンを発行します。
+
+```bash
+ziti edge login {{ ctrl_endpoint }} -u admin -p '<admin_password>'
+ziti edge create edge-router {{ router_name }} -o {{ router_name }}.jwt
+```
+
+発行された`{{ router_name }}.jwt`は短寿命(既定で有効期限は短い)であるため、エッジルータ側へ速やかに転送します。
+
+### 2. エッジルータ用の設定ファイルを生成する
+
+エッジルータを稼働させるホスト上で、テンプレートから`er.yaml`を生成します。
+
+```bash
+ziti create config router edge \
+  --routerName {{ router_name }} \
+  --tunnelerMode {{ tunneler_mode }} \
+  > {{ router_name }}.yaml
+```
+
+生成されたYAML内のリスナー設定・advertised addressが以下と一致していることを確認し、必要であれば修正します。
+
+```yaml
+# {{ router_name }}.yaml の該当箇所(生成後に確認)
+edge:
+  csr:
+    sans:
+      dns:
+        - {{ router_advertised.split(':')[0] }}
+listeners:
+  - binding: edge
+    address: tls:0.0.0.0:{{ listener_port }}
+    options:
+      advertise: "{{ router_advertised }}"
+```
+
+### 3. JWTでエンロールする
+
+JWTの有効期限が切れる前に、生成した設定ファイルとJWTを使ってエンロールします。
+
+```bash
+ziti router enroll {{ router_name }}.yaml --jwt {{ router_name }}.jwt
+```
+
+成功すると、mTLS用の証明書・鍵ファイル一式がルータのデータディレクトリに作成されます。JWTはこの時点で使い捨てになり、以降の認証には証明書が使われます。
+
+### 4. エッジルータを起動する
+
+```bash
+ziti router run {{ router_name }}.yaml
+```
+
+常駐運用する場合はsystemdユニット等に登録し、再起動時も自動起動するようにします。
+
+```bash
+sudo tee /etc/systemd/system/ziti-router-{{ router_name }}.service > /dev/null <<'EOF'
+[Unit]
+Description=OpenZiti Edge Router ({{ router_name }})
+After=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/ziti router run /etc/ziti/{{ router_name }}.yaml
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now ziti-router-{{ router_name }}
+```
+
+## 動作確認
+
+1. コントローラ側からエッジルータのオンライン状態を確認する。
+
+```bash
+ziti edge list edge-routers 'name="{{ router_name }}"'
+```
+
+出力の`ONLINE`列(またはステータス列)が`true`/オンライン表示になっていることを確認します。オフラインのままの場合は手順6に戻り、advertised addressとリスニングポートの到達性を再確認します。
+
+2. tunnelerモードを利用する構成では、既存の接続を止める前に新しいエッジルータ経由の識別子(identity)で疎通テストを行います。
+
+```bash
+ziti edge list edge-router-policies
+ziti edge list identities
+```
+
+新規識別子が新しいエッジルータ経由でオーバーレイに到達できることを確認してから、旧経路(旧ルータや旧tunneler)を無効化します。
+
+## 注意事項
+
+- エンロールトークン(JWT)は短寿命です。発行から時間が経つと`ziti router enroll`が失敗するため、発行後は速やかに転送・エンロールを完了させ、期限切れの場合は`ziti edge create edge-router`をやり直してJWTを再発行します。
+- `{{ router_advertised }}`は、実際に接続元クライアント・他のエッジルータから到達可能なアドレスである必要があります。NAT配下やプライベートIPをそのまま広告すると、コントローラからは`ONLINE`に見えてもクライアントからのデータプレーン接続が確立できないため、ファイアウォール・ポートフォワーディングの設定と合わせて到達性を事前に確認します。
+- 複数のエッジルータでメッシュ構成を組む場合は、既存の経路を無効化する前に新しいルータ経由の経路が確立していることを動作確認セクションの手順で必ず検証してから、旧ルータの`edge-router-policy`割り当てを外すか停止します。認証経路(mTLS証明書)を切り替える作業についても同様に、新旧の経路が並行して動く時間帯を設けてから旧経路を止めます。
+- ルータのデータディレクトリに保存される証明書・鍵ファイルは機密情報であるため、パーミッションを制限し、コンフィグ管理リポジトリに平文でコミットしないようにします。

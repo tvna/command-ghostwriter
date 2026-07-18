@@ -1,0 +1,6 @@
+port,protocol,bind_address,process_name,expected,note
+22,tcp,0.0.0.0,sshd,true,-
+443,tcp,0.0.0.0,nginx,true,-
+3306,tcp,0.0.0.0,mysqld,false,社内向けDBが外部公開されている
+9000,tcp,0.0.0.0,python3,false,デバッグ用HTTPサーバの消し忘れ疑い
+6379,tcp,127.0.0.1,redis-server,true,-

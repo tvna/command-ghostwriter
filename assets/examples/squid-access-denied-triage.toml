@@ -1,0 +1,4 @@
+client_ip = "10.20.5.44"
+target_url = "https://partner-portal.example.com/login"
+result_code = "TCP_DENIED/403"
+proxy_auth = true

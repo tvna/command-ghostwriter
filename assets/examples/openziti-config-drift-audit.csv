@@ -1,0 +1,7 @@
+object_type,name,expected_attr,actual_attr,drift,action
+service,erp-api,role.env=prod,role.env=prod,false,none
+service,helpdesk-portal,role.env=prod,role.env=staging,true,sync-attr
+service-policy,dial-prod-services,role.env=prod#Dial,role.env=prod#Dial,false,none
+service-policy,adhoc-full-access,role.env=prod#Dial+Bind,#all#Dial+Bind,true,remove-policy
+identity,svc-backup-agent,role.dept=ops,role.dept=ops,false,none
+identity,orphan-contractor-01,role.dept=none,role.dept=contractor,true,quarantine-identity

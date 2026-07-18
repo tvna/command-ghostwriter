@@ -1,0 +1,143 @@
+# Vaultサーバのraft統合ストレージ構築
+
+HashiCorp Vaultをraft統合ストレージ・TLSリスナーで構築し、init/unseal/rootトークン管理までを実施します。サーバ機へのsudo権限が必要です。
+
+## 目的
+
+raft統合ストレージによるVaultの単一バイナリ構成を理解し、TLSリスナーの設定、初期化（init）、Shamir分割unseal keyによるunseal、rootトークンの安全な取り扱いまでの一連の運用を構築できるようになることを目指します。
+
+## 用語解説
+
+- **raft統合ストレージ**: 外部のConsul等に依存せず、Vaultプロセス自身がRaftコンセンサスプロトコルでデータを複製・永続化するストレージバックエンド
+- **Shamir分割unseal key**: マスター暗号鍵を複数の鍵シェアに分割する方式。既定のkey-thresholdの数だけシェアを集めないと復元できず、単独管理者による不正unsealを防ぐ
+- **unseal**: プロセス再起動直後は暗号化されたデータへのアクセスができない「seal」状態にある。key-threshold分のunseal keyを投入して復号鍵を再構成する操作
+- **rootトークン**: 初期化直後にのみ発行される、全権限を持つ特権トークン。初期設定作業後は速やかにrevokeするのが鉄則
+- **auto-unseal**: クラウドKMSやVaultのTransitシークレットエンジンにマスター鍵の保護を委譲し、再起動時に手動unsealを不要にする方式
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| storage_type | {{ storage_type }} |
+| node_id | {{ node_id }} |
+| raft_path | {{ raft_path }} |
+| tls_cert_path | {{ tls_cert_path }} |
+| tls_key_path | {{ tls_key_path }} |
+| listener_address | {{ listener_address }} |
+| api_addr | {{ api_addr }} |
+| cluster_addr | {{ cluster_addr }} |
+| unseal_key_shares | {{ unseal_key_shares }} |
+| unseal_threshold | {{ unseal_threshold }} |
+| admin_policy_name | {{ admin_policy_name }} |
+
+## 手順
+
+### 1. vault.hclを作成する
+
+```bash
+sudo mkdir -p {{ raft_path }}
+sudo mkdir -p "$(dirname {{ tls_cert_path }})"
+
+sudo tee /etc/vault.d/vault.hcl <<EOF
+storage "{{ storage_type }}" {
+  path    = "{{ raft_path }}"
+  node_id = "{{ node_id }}"
+}
+
+listener "tcp" {
+  address       = "{{ listener_address }}"
+  tls_cert_file = "{{ tls_cert_path }}"
+  tls_key_file  = "{{ tls_key_path }}"
+}
+
+api_addr     = "{{ api_addr }}"
+cluster_addr = "{{ cluster_addr }}"
+disable_mlock = false
+EOF
+```
+
+TLS証明書・秘密鍵（`{{ tls_cert_path }}` / `{{ tls_key_path }}`）は事前に社内CAまたはstep-ca等で発行し、配置しておきます。`listener`ブロックに`tls_disable = true`を指定するオプションは存在しますが、本手順では平文通信を許可しないため使用しません。
+
+### 2. Vaultサーバを起動する
+
+```bash
+sudo systemctl enable --now vault
+sudo systemctl status vault --no-pager
+
+export VAULT_ADDR="{{ api_addr }}"
+vault status
+```
+
+この時点では未初期化のため`vault status`は`Initialized: false`を返します。
+
+### 3. vault operator initで初期化する
+
+```bash
+vault operator init \
+  -key-shares={{ unseal_key_shares }} \
+  -key-threshold={{ unseal_threshold }} \
+  > /root/vault-init-output.txt
+
+cat /root/vault-init-output.txt
+```
+
+出力にはUnseal Key 1〜{{ unseal_key_shares }}とInitial Root Tokenが**この時点でのみ**表示されます。unseal keyは{{ unseal_key_shares }}個のシェアに分割されており、後述のunseal操作には{{ unseal_threshold }}個以上のシェアが必要です。各シェアは別々の管理者へ個別に、かつ安全な経路（例: 個別のパスワードマネージャー共有）で分散保管し、`/root/vault-init-output.txt`は退避後に削除します。
+
+### 4. vault operator unsealでunsealする
+
+```bash
+vault operator unseal   # Unseal Key 1 を管理者Aが投入
+vault operator unseal   # Unseal Key 2 を管理者Bが投入
+vault operator unseal   # Unseal Key 3 を管理者Cが投入
+```
+
+{{ unseal_threshold }}個目のシェア投入後、`Sealed`が`false`に切り替わります。各管理者は自分のシェアのみを把握し、単独ではunsealできないことを確認してください。
+
+### 5. VAULT_TOKENを設定し初期ログインする
+
+```bash
+export VAULT_TOKEN="<initial-root-tokenをvault-init-output.txtから転記>"
+vault login -no-print $VAULT_TOKEN
+vault token lookup
+```
+
+### 6. 管理者用ポリシーとトークンを作成し、rootトークンなしで運用できることを検証する
+
+```bash
+vault policy write {{ admin_policy_name }} - <<EOF
+path "*" {
+  capabilities = ["create", "read", "update", "delete", "list", "sudo"]
+}
+EOF
+
+vault token create -policy="{{ admin_policy_name }}" -display-name="bootstrap-admin"
+```
+
+発行された新トークンを**別セッション**で`VAULT_TOKEN`に設定し、`vault token lookup`と任意のシークレットエンジン操作が成功することを確認してから、次のrootトークンrevoke手順に進みます。新トークンでの操作確認が取れるまでは、rootトークンをrevokeしないでください。
+
+### 7. rootトークンをrevokeする
+
+```bash
+# 新トークンでの動作確認が完了した後に、rootトークンのセッションで実行する
+vault token revoke -self
+```
+
+## 動作確認
+
+- `vault status`の出力で`Sealed`が`false`、`Initialized`が`true`であること
+- `vault operator raft list-peers`でノード`{{ node_id }}`が`voter`として一覧に表示されること
+
+```bash
+vault operator raft list-peers
+```
+
+- 手順6で発行した管理者トークンで`vault token lookup`が成功すること（rootトークンrevoke前に必ず確認）
+- rootトークンrevoke後、`vault login -no-print <initial-root-token>`が失敗すること（無効化の確認）
+
+## 注意事項
+
+- unseal keyとrootトークンは`vault operator init`実行時の一度きりしか表示されません。画面ロストや紛失に備え、表示直後にシェアごとに異なる管理者へ安全に配布し、平文でのメール送信や共有ドライブへの保存は避けてください。
+- rootトークンは初期設定作業専用です。手順6で新しい管理者トークンによる動作確認が取れたことを確認してから、手順7でrootトークンをrevokeしてください。動作確認前にrevokeすると復旧手段を失います。
+- 本構成の`listener`ブロックはTLS必須です。`tls_disable = true`を設定して平文通信を許可しないでください。TLS証明書は有効期限管理・更新手順を別途整備します。
+- 長期運用ではShamir分割unsealの手動対応はオペレーション負荷が高いため、クラウドKMSやVault Transitシークレットエンジンを用いたauto-unsealへの移行を検討してください。移行時もunseal keyでのリカバリキー再構成手順を事前に確認します。
+- {{ unseal_key_shares }}個中{{ unseal_threshold }}個の閾値は組織の管理者数・可用性要件に応じて調整し、閾値を下げすぎると単独障害点になり、上げすぎると復旧が困難になる点に留意してください。

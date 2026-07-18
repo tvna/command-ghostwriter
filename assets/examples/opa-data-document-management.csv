@@ -1,0 +1,5 @@
+data_path,content_type,update_method,consumer_policy,refresh
+roles,rbac_role_table,bundle,rbac.rego,60s
+allowlist,ip_allowlist,api_put,network.rego,immediate
+feature_flags,flag_map,bundle,features.rego,300s
+partner_attrs,user_attribute_map,api_put,partner_access.rego,immediate

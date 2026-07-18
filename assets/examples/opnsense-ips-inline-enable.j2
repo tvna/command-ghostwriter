@@ -1,0 +1,249 @@
+# OPNsense内蔵IPS(Suricata)のインライン有効化
+
+OPNsenseの侵入検知/防御エンジン(Suricata)を、まずpromiscuous(IDS)モード
+で1週間観察して誤検知を潰したうえで、Pattern Matcherを`{{ ips_mode }}`
+向けのHyperscanへ切り替え、インラインIPSへ昇格します。IPSモードは通過
+パケットを実際に破棄できる「フェイルクローズ」寄りの変更のため、切替
+直後に業務通信の疎通を必ず確認してから確定させます。
+
+## 目的
+
+Suricataのpromiscuous(IDS)モードとインライン(IPS)モードの違いを理解し、
+1週間分のアラートから誤検知シグネチャを特定してPolicy/Suppress Listで
+調整したうえで、業務影響を最小化しながら安全にインラインIPSへ昇格
+できるようになることを目指します。
+
+## 用語解説
+
+- **promiscuous(IDS)モード**: NIC上を流れるパケットのコピーを検査するだけ
+  で、検知(alert)はしても遮断はしないモード。誤検知があっても通信は
+  止まらないため、ルールセット導入直後の観察期間はこのモードで運用する
+- **インライン(IPS)モード**: パケットが実際にOPNsenseを通過する経路上で
+  Suricataが検査し、一致したルールのaction(drop等)に従ってその場で
+  破棄できるモード。誤検知がそのまま通信断につながる
+- **netmap**: FreeBSDのゼロコピーパケットI/Oフレームワーク。OPNsenseの
+  インラインIPSはこの上で動作し、**物理NICの単位でしかバインドできない**
+  制約がある。監視対象インターフェースがVLANサブインターフェース(例:
+  `lan`がタグVLANの場合)であっても、実際にnetmapが掴むのはそのVLANの
+  親物理NICであり、同じ親NIC上を流れる他のVLANのトラフィックも一括して
+  検査対象になる点に注意する
+- **ハードウェアオフロード(CRC/TSO/LRO)**: NICが行うチェックサム計算
+  (CRC/checksum offload)・TCPセグメント分割(TSO: TCP Segmentation
+  Offload)・受信パケット結合(LRO: Large Receive Offload)。これらが
+  有効なままだと、netmap/inline captureがワイヤ上の実パケット形状を
+  正しく取得できず、インラインIPSが誤動作(検査漏れ・誤破棄)する
+  ことがあるため、インライン化する物理NICでは事前に無効化しておく
+- **Pattern Matcher(Hyperscan / Basic hem)**: シグネチャの複数パターン
+  照合エンジン。Hyperscanは高スループット・低遅延向けの実装で、インライン
+  運用時のボトルネックを避けるために選択する。未対応環境ではBasic hemに
+  自動的にフォールバックする
+- **Policy**: `ruleset`や`classtype`などの条件に一致するルール群へ、
+  action(alert/drop/disable等)をまとめて上書き適用する仕組み。個別
+  ルールを1件ずつ編集せずに、誤検知の多いカテゴリ全体を一時的に
+  「alertのみ」へ落とすといった調整に使う
+- **Suppress List**: 特定のSID(シグネチャID)を名指しして、ルール本体を
+  変更せずにアラート自体を出さなくする抑制リスト。Suricataの
+  `threshold.config`相当の記法(`suppress gen_id <gid>, sig_id <sid>`)で
+  表現され、Policyより粒度の細かい個別調整に使う
+- **ET Open ruleset**: Proofpoint Emerging Threats(ET)が無償公開する
+  Suricata用シグネチャ集。カテゴリごとに`emerging-*.rules`という
+  ファイル名で提供され、OPNsenseの`Download`タブから選択して取得する
+
+## シナリオ設定
+
+今回の対象は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| 監視インターフェース(monitor_interfaces) | {% for i in monitor_interfaces %}`{{ i }}`{% if not loop.last %}, {% endif %}{% endfor %} |
+| 最終的なIPSモード(ips_mode) | `{{ ips_mode }}` |
+| 誤検知調整時のPolicyアクション(policy_action) | `{{ policy_action }}` |
+
+有効化するET Openルールセット(rulesets, {{ rulesets | length }} 件):
+
+| # | ファイル名 |
+|---|-----------|
+{% for rs in rulesets %}| {{ loop.index }} | `{{ rs }}` |
+{% endfor %}
+
+観察期間中に誤検知と判定し、個別に抑制するSID(suppress_sids,
+{{ suppress_sids | length }} 件):
+
+| # | SID |
+|---|-----|
+{% for sid in suppress_sids %}| {{ loop.index }} | {{ sid }} |
+{% endfor %}
+
+## 1. promiscuous(IDS)モードでルールセットを有効化する
+
+`Services > Intrusion Detection > Administration` を開き、以下を設定して
+`Save` します。この段階では**IPS modeのチェックは入れません**。
+
+- `Enabled`: チェックする
+- `IPS mode`: チェックしない(promiscuousのまま)
+- `Interfaces`: {% for i in monitor_interfaces %}`{{ i }}`{% if not loop.last %}, {% endif %}{% endfor %} を選択
+- `Pattern matcher`: `basic hem`(既定のまま)
+
+続いて `Services > Intrusion Detection > Download` を開き、次のルール
+ファイルにチェックを入れて `Download & Update Rules` を実行します。
+
+| # | ルールファイル |
+|---|---------------|
+{% for rs in rulesets %}| {{ loop.index }} | `{{ rs }}` |
+{% endfor %}
+
+CLIから同じ操作(ルール取得とSuricataへの反映)を行う場合は、コンソール
+またはSSHで次を実行します。
+
+```bash
+configctl ids update
+configctl ids restart
+```
+
+反映後、監視対象インターフェースでSuricataプロセスが起動していることを
+確認します。
+
+```bash
+ps aux | grep '[s]uricata'
+ls -l /usr/local/etc/suricata/rules/ | grep emerging
+```
+
+## 2. 1週間、promiscuousモードでアラートを観察する
+
+promiscuousモードのまま最低1週間運用し、`Services > Intrusion Detection
+> Alerts` タブでシグネチャ別の発生件数を確認します。CLIで集計する場合は
+次のようにします。
+
+```bash
+jq -r '.alert.signature_id' /var/log/suricata/*/eve.json \
+  | sort | uniq -c | sort -rn | head -n 30
+```
+
+業務通信に対して繰り返し発火しているシグネチャ(誤検知候補)の
+`signature_id`(SID)を洗い出します。発生元・宛先も合わせて確認し、
+本当に不要な検知かどうかを判断してください。
+
+```bash
+jq -r 'select(.alert.signature_id==2100498) | [.timestamp,.src_ip,.dest_ip,.alert.signature] | @tsv' \
+  /var/log/suricata/*/eve.json
+```
+
+## 3. 誤検知シグネチャをPolicy/Suppress Listで調整する
+
+観察の結果、誤検知と判断したカテゴリ全体には`Services > Intrusion
+Detection > Policy`でPolicyを追加します。
+
+- `Ruleset`: 誤検知の多かったルールファイル(例:
+  `emerging-attack_response.rules`)を選択
+- `New action`: `{{ policy_action }}`(既存のdropをalertへ引き下げ、
+  完全に無視はせず記録は残す)
+- `Description`: 調整理由と観察期間を記録して `Save` する
+
+個別のSIDだけを名指しで完全に黙らせたい場合は、`Services > Intrusion
+Detection > Administration` の `Alert suppression list` から次のSuppress
+List エントリを追加します(生成される記法は次のとおりです)。
+
+```
+{% for sid in suppress_sids %}suppress gen_id 1, sig_id {{ sid }}
+{% endfor %}```
+
+保存後、`Apply` を押して設定をSuricataへ反映します。
+
+## 4. インライン化の前提条件を満たす(ハードウェアオフロード無効化)
+
+インラインIPSへ切り替える対象インターフェースが乗る物理NICで、CRC/TSO/
+LROのハードウェアオフロードを無効化します。監視インターフェースが
+VLANサブインターフェースの場合は、必ず**親の物理NIC**に対して実行して
+ください。
+
+```bash
+ifconfig
+```
+
+上記で対象インターフェース(例: `lan`)の親物理NICデバイス名(例:
+`igb1`)を確認したうえで、次を実行します。
+
+```bash
+ifconfig igb1 -rxcsum -txcsum -tso -lro
+ifconfig igb1
+```
+
+`ifconfig igb1` の出力から `rxcsum,txcsum,tso4,tso6,lro` が options行に
+含まれなくなっていることを確認します。再起動後も設定を維持するため、
+`Interfaces > Settings` の `Disable hardware checksum offload` /
+`Disable hardware TCP segmentation offload` / `Disable hardware large
+receive offload` にもチェックを入れて `Save` してください。
+
+## 5. Pattern matcherをHyperscanへ切替し、業務時間外にIPSモードを有効化する
+
+**必ず業務時間外の変更管理ウィンドウで実施してください。** 切替直後に
+誤検知で業務通信が破棄される可能性があるためです。
+
+`Services > Intrusion Detection > Administration` で次を設定し、`Save`
+してから `Apply` します。
+
+- `Pattern matcher`: `hyperscan` に変更
+- `IPS mode`: チェックする(`{{ ips_mode }}`へ切替)
+- `Interfaces`: {% for i in monitor_interfaces %}`{{ i }}`{% if not loop.last %}, {% endif %}{% endfor %} のまま変更しない
+
+CLIから反映を確認する場合は次を実行します。
+
+```bash
+configctl ids restart
+configctl ids status
+```
+
+## 6. 切替直後に業務通信の疎通を確認する(旧経路への切り戻しはこの確認後)
+
+**IPSモードが有効化された直後、この手順を終える前に**、監視対象
+インターフェースを通過する主要な業務通信が正常に疎通することを、別
+セッション・別端末から確認します。
+
+```bash
+# 監視インターフェース配下の業務ホストへ、別端末から実行する
+ping -c 5 <業務サーバのIPアドレス>
+curl -kv https://<業務サーバのIPアドレス>/healthz
+```
+
+疎通に問題があれば、直ちに `IPS mode` のチェックを外して `Save` /
+`Apply` し、promiscuous(IDS)モードへ切り戻したうえで
+`Services > Intrusion Detection > Alerts` で何が破棄されたかを確認して
+ください。切り戻しは手順5と同じ画面操作(チェックを外すだけ)で即座に
+反映できます。
+
+疎通確認が取れてから、最低24時間はAlertsタブを継続監視し、意図しない
+dropが発生していないことを確認したうえで本切替を完了とします。
+
+## 動作確認
+
+- `configctl ids status`(またはGUIの`Administration`画面)でSuricataが
+  起動しており、`IPS mode`が有効(`{{ ips_mode }}`)になっていること
+- `ifconfig <親物理NIC>` の options行に `rxcsum,txcsum,tso4,tso6,lro` が
+  含まれていないこと
+- 手順6の業務通信疎通確認(ping/curl)が、IPSモード有効化の直後に成功
+  すること
+- `Services > Intrusion Detection > Alerts` で、suppress_sids/Policyで
+  調整した誤検知シグネチャが再発していない(または`{{ policy_action }}`
+  相当の記録のみになっている)こと
+- 有効化後24時間、業務影響のある予期しないdropアラートが発生していない
+  こと
+
+## 注意事項
+
+- **インラインIPS化は通信を実際に破棄しうる変更である。** 手順6の疎通
+  確認を、IPSモード有効化の直後・その場で必ず実施すること。確認前に
+  作業を終了しない
+- **切替は業務時間外の変更管理ウィンドウで行うこと。** 誤検知シグネチャが
+  想定外に多く残っていた場合、業務時間中の切替は広範な通信断につながる
+- **旧経路(promiscuous/IDSのみ)への切り戻し手段を、切替後も直ちに使える
+  状態で維持すること。** `IPS mode`のチェックを外すだけで即座に
+  promiscuousへ戻せるため、疎通確認が完了するまでは手を離さない
+- VLANサブインターフェースを監視対象にしている場合、ハードウェア
+  オフロード無効化は**親の物理NIC**に対して行う。VLANインターフェース
+  自体に対して実行しても効果がない
+- 観察期間(手順2)を十分に取らずにインライン化すると、まだ洗い出して
+  いない誤検知が業務通信を遮断する。最低1週間、可能であれば繁忙日を
+  含む期間で観察すること
+- Suppress Listで完全に抑制したSIDは、以後そのシグネチャの検知自体が
+  見えなくなる。本当に無害と判断できたSIDのみを対象にし、判断根拠を
+  Policy/Suppress Listの説明欄に記録しておくこと

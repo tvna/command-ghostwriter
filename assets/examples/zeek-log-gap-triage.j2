@@ -1,0 +1,121 @@
+# Zeekログ欠損・無出力の切り分け調査 — {{ missing_log }}
+
+想定していた **{{ missing_log }}** が生成されない、または一部の通信だけログに残らない事象を、トラフィック到達からアナライザ有効性まで順番に切り分け、原因を特定します。
+
+## 目的
+
+監視インタフェース **{{ monitor_interface }}** で稼働するZeekにおいて、**{{ missing_log }}** が出力されない原因を、ミラー到達 → プロセス状態 → node.cfg設定 → アナライザ有効性 → ディスク容量の順で切り分け、対象サービス **{{ expected_service }}** の通信が正しくログ化される状態に復旧することを目指します。
+
+## 用語解説
+
+- **reporter.log**: Zeek自身の内部エラー・警告・スクリプト実行時の問題を記録するログ。ログ欠損の第一の確認先
+- **stderr.log**: `zeekctl`配下のZeekプロセスが標準エラー出力に吐いたクラッシュメッセージやパースエラーが残る。`spool/<node>/stderr.log` に生成される
+- **capture_loss.log / capture_loss高騰**: キャプチャ側でパケットが取りこぼされている割合を示すログ。値が高騰している場合、NIC側のドロップやCPU不足でトラフィックがZeekに届く前に失われており、特定ログの欠損がアナライザ側の問題ではなくキャプチャ側の問題であることを示す
+- **node.cfg**: `zeekctl`が読むワーカー構成ファイル。`interface`（監視NIC）や`lb_method`/`lb_procs`（ロードバランス方式・プロセス数）を定義する
+- **DPD(Dynamic Protocol Detection)**: ポート番号によらず、ペイロードの特徴からプロトコルを検出しアナライザを起動する仕組み。`dpd_config`が無効・欠落しているとポート番号だけでは判定できない通信の解析が行われない
+- **片方向ミラー**: SPAN/TAP設定で送信方向・受信方向のどちらか一方しかコピーされていない状態。応答パケットが届かず、セッションが片側からしか見えないためログが欠落する
+
+## シナリオ設定
+
+監視インタフェース {{ monitor_interface }} でZeekを稼働させていますが、期待している **{{ missing_log }}** が `spool/<node>/logs/current/` 配下に生成されません。対象サービスは **{{ expected_service }}** で、本来であればこのトラフィックに対応するログが継続的に出力されているはずです。ディスク容量の確認{% if disk_check %}も切り分け対象に含めます{% else %}は今回のスコープ外とします{% endif %}。
+
+## 手順
+
+### 1. ミラー到達をtcpdumpで直接確認する
+
+Zeekより手前の問題を切り分けるため、監視インタフェースに対象トラフィックが物理的に届いているかをtcpdumpで直接確認します。
+
+```bash
+sudo tcpdump -ni {{ monitor_interface }} -c 20 port 53 or port 80 or port 443
+```
+
+→ ここで対象サービス（{{ expected_service }}）のパケットが1つも見えない場合、Zeekの設定以前にミラー（SPAN/TAP）がこのインタフェースに届いていません。手順6のミラー設定確認に進みます。
+
+### 2. zeekctl statusとreporter.logでプロセス状態を確認する
+
+Zeekプロセス自体が正常に稼働しているか、内部エラーを起こしていないかを確認します。
+
+```bash
+sudo zeekctl status
+sudo tail -n 100 /opt/zeek/spool/<node>/reporter.log
+sudo tail -n 100 /opt/zeek/spool/<node>/stderr.log
+```
+
+→ `zeekctl status` で該当workerが `running` でない、または `reporter.log` に `error` レベルの行がある場合はスクリプトロード失敗やアナライザ初期化エラーが原因です。まずこれを解消してから先に進みます。
+
+### 3. capture_loss.logでパケットドロップを確認する
+
+Zeekプロセスは動いていても、キャプチャ段階でパケットが落ちていないかを確認します。
+
+```bash
+sudo zeek-cut ts peer gaps acks percent_lost < /opt/zeek/spool/<node>/logs/current/capture_loss.log | tail -n 20
+```
+
+→ `percent_lost` が継続的に高い（目安として数%を超えて上昇し続ける）場合、CPU不足やNICのリングバッファ不足によるドロップが疑われ、対象ログの欠損はアナライザではなくキャプチャ性能側の問題です。
+
+### 4. node.cfgのinterfaceとlb設定を確認する
+
+`zeekctl`が実際にどのインタフェース・どのロードバランス方式で監視しているかを確認します。
+
+```bash
+sudo cat /opt/zeek/etc/node.cfg
+```
+
+```ini
+[worker-1]
+type=worker
+host=localhost
+interface={{ monitor_interface }}
+lb_method=pf_ring
+lb_procs=4
+```
+
+→ `interface` が実際のミラーポートと一致しているか、`lb_method`/`lb_procs` の設定でワーカー間のトラフィック分散が偏り、特定のフロー（対象サービス宛のセッション）が一部ワーカーにしか回っていないケースがないかを確認します。
+
+### 5. 対象プロトコルのアナライザ有効性を確認する
+
+トラフィックは届いているのにログが出ない場合、アナライザ自体が無効化されていないかを確認します。
+
+```bash
+sudo zeek -NN Zeek::DNS
+grep -R "disable_analyzer\|dpd_config" /opt/zeek/share/zeek/site/local.zeek
+```
+
+→ 対象が {{ missing_log }} で、期待サービスが {{ expected_service }} の場合、DNS(UDP/TCP 53)宛のトラフィックが非標準ポートで運用されているとDPDが無効だとアナライザが起動せずログが生成されません。`local.zeek` で `disable_analyzer` していないか、DPDが有効かを確認します。
+
+### 6. ディスク容量を確認する
+{% if disk_check %}
+ログ書き込み先のディスクが満杯だと、新規ログファイルの生成やローテーションが失敗し、特定のログだけ欠落・途中で止まったように見えることがあります。
+
+```bash
+df -h /opt/zeek/spool /opt/zeek/logs
+sudo tail -n 50 /opt/zeek/spool/<node>/reporter.log | grep -i "disk\|space\|write"
+```
+
+→ 使用率が100%に近い、または `reporter.log` に書き込み失敗の記録がある場合はディスク逼迫が根本原因です。古いログのアーカイブ・削除、または保存先の拡張で解消します。
+{% else %}
+今回のシナリオではディスク容量は切り分け対象外としていますが、他の原因が見つからない場合は必ず `df -h` で確認してください。
+{% endif %}
+
+## 動作確認
+
+1. 対象プロトコル（{{ expected_service }}）の模擬通信を発生させます。
+
+```bash
+dig @127.0.0.1 example.com
+```
+
+2. 数秒待った後、{{ missing_log }} が更新されていることを確認します。
+
+```bash
+sudo zeek-cut ts id.orig_h id.resp_h query < /opt/zeek/spool/<node>/logs/current/{{ missing_log }} | tail -n 5
+```
+
+→ 模擬通信に対応する行が新規に出力されていれば復旧完了です。出力がなければ手順1に戻り、切り分けをやり直します。
+
+## 注意事項
+
+- 片方向ミラー・VLANタグの有無・NICオフロード設定・ディスク満杯は、いずれも「Zeekは動いているのにログが出ない」事象の典型的な原因であり、手順2〜3だけで原因を決め打ちしない。
+- SPAN/TAP設定やNICオフロード(`ethtool -K`のGRO/LRO等)、`node.cfg`のロードバランス方式を切り分けの過程で変更した場合、その変更を恒久化してよいかを必ず判断する。一時的に無効化したオフロードやロードバランス方式の変更を戻し忘れると、性能低下や別トラフィックの取りこぼしを招く。
+- `disable_analyzer`やDPD設定を切り分けのために変更した場合、対象サービス以外のログ出力に影響しないか（意図せず他のアナライザまで無効化していないか）を確認してから恒久反映する。
+- 恒久対応前に、模擬通信によるログ出力確認（動作確認セクション）を必ず実施し、既存の監視対象トラフィックへの影響がないことを確認したうえで設定を確定する。

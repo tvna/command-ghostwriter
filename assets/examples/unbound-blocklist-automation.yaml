@@ -1,0 +1,9 @@
+blocklist_sources:
+  - "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
+  - "https://big.oisd.nl/domainswild"
+output_include: "/etc/unbound/unbound.conf.d/blocklist.conf"
+refresh_schedule: "0 4 * * *"
+whitelist_domains:
+  - "cdn.ampproject.org"
+  - "metrics.example-cdn.net"
+reload_after: true

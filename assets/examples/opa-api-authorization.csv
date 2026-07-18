@@ -1,0 +1,6 @@
+resource,action,subject_attr,policy_rule,decision
+/v1/orders,read,role:viewer,allow_role_read,allow
+/v1/orders,write,role:viewer,allow_role_read,deny
+/v1/invoices,read,dept:finance,abac_dept_match,allow
+/v1/invoices,read,dept:sales,abac_dept_match,deny
+/v1/admin/users,delete,role:viewer,default_deny,deny

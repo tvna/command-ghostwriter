@@ -1,0 +1,143 @@
+# OPA予期しない認可判定の切り分け調査
+
+想定される認可判定({{ expected_decision }})と実際の`opa eval`の結果が異なる場合に、`--explain {{ explain_mode }}`の評価トレースとdecision logを突き合わせて原因を切り分ける調査手順書です。
+
+## 目的
+
+「{{ input_sample }}」という入力に対して期待した判定(`{{ expected_decision }}`)が得られない事象について、評価トレース・decision log・ルール衝突・bundle反映状況・input構造の5点を順に切り分け、原因ルールを特定して修正できるようになることを目指します。
+
+## 用語解説
+
+- **opa eval**: Regoポリシーに対して単発でクエリを評価するCLIコマンド。`--explain`でどのルールがどう評価されたかのトレースを出力できる
+- **--explain full**: 評価対象になった全ルール・式の成否と評価順序を出力するモード。`notes`は`trace()`関数で明示的に埋め込んだメモのみを出力する
+- **default deny**: `default allow = false`のように、どのルールにも合致しない場合の既定値を定義する書き方。既定値自体は「未定義」ではなく確定値になる
+- **deny優先(deny-overrides)**: `allow`ルールが真であっても`deny`ルールが1つでも真になれば最終的に拒否とする合成パターン
+- **decision log**: OPAが実際に下した判定・入力・該当したルール集合を記録するログ。ポリシーの`opa eval`単体評価とは別に、稼働中の実判定を確認する手段になる
+- **bundleのバージョンずれ**: OPAサーバが読み込んでいるポリシー/データのbundleが、手元で確認しているソースの最新版と一致していない状態
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 入力サンプル | {{ input_sample }} |
+| 期待される判定 | `{{ expected_decision }}` |
+| explainモード | `{{ explain_mode }}` |
+| bundleバージョン確認要否 | {{ bundle_version_check }} |
+
+## 手順
+
+### 1. explainトレースで評価経路を確認する
+
+対象のRegoポリシーと入力を用意し、`opa eval`にトレースオプションを付けて実行します。
+
+```bash
+cat > input.json <<'EOF'
+{
+  "user": { "name": "tanaka", "roles": ["developer"] },
+  "action": "deploy",
+  "resource": { "env": "production" }
+}
+EOF
+
+opa eval \
+  --data policy/ \
+  --input input.json \
+  --format pretty \
+  --explain {{ explain_mode }} \
+  'data.authz.allow'
+```
+
+出力の`result`が期待値(`{{ expected_decision }}`)と一致するか、`Enter`/`Exit`/`Fail`のトレース行を上から順に読み、どのルール・式で評価が確定したかを確認します。
+
+### 2. decision logで実際に下された判定を突き合わせる
+
+`opa eval`は手元のポリシーに対する単発評価であるのに対し、decision logは稼働中のOPAが実際に下した判定です。両者がズレていないか確認します。
+
+```bash
+curl -s http://localhost:8181/v1/data/authz/allow \
+  --data-binary @input.json \
+  -H 'Content-Type: application/json' | jq .
+
+curl -s http://localhost:8181/logs \
+  | jq 'select(.input.action == "deploy" and .input.resource.env == "production")'
+```
+
+`opa eval`側の結果とdecision log側の`result`が一致しない場合は、稼働中OPAのポリシー/データが手元と異なる(手順4のbundle反映遅延)可能性を優先して疑います。
+
+### 3. 複数allowルールとdeny優先の衝突を切り分ける
+
+Regoソース側で、想定外の判定に寄与しているルールを洗い出します。
+
+```bash
+grep -n '^allow\|^deny\|^default' policy/authz.rego
+```
+
+```rego
+package authz
+
+default allow = false
+
+allow {
+    input.action == "deploy"
+    input.user.roles[_] == "developer"
+}
+
+allow {
+    input.action == "deploy"
+    input.resource.env != "production"
+}
+
+deny {
+    input.resource.env == "production"
+    not input.user.roles[_] == "release-manager"
+}
+```
+
+`allow`ルールが複数あり、かつ`deny`ルールが真になっている場合、多くの合成パターンでは`deny`が優先されて最終判定が`deny`になります。`--explain full`のトレースで、どの`allow`ブロックが真になり、どの`deny`ブロックが真になったかを個別に確認し、想定していた`allow`条件だけでなく`deny`条件の成否も必ず確認します。
+
+### 4. bundleの反映遅延を切り分ける
+
+```bash
+curl -s http://localhost:8181/v1/status | jq '.bundles'
+```
+
+手元のRegoソースのコミットハッシュ/リビジョンと、稼働中OPAが読み込んでいる`active_revision`を比較します。ずれている場合はbundle配信元(OCIレジストリ/S3等)への反映が完了しているか、OPA側のポーリング間隔(`polling.min_delay_seconds`)がまだ満了していないかを確認します。
+
+### 5. input構造のミスマッチを切り分ける
+
+期待した判定と異なる最頻の原因は、ポリシーが参照しているフィールドパスと実際のinput構造の不一致です。
+
+```bash
+opa eval --data policy/ --input input.json --format pretty 'input.resource.env'
+opa eval --data policy/ --input input.json --format pretty 'input.user.roles'
+```
+
+各評価結果が`undefined`になる場合、ポリシー側が参照しているパス(例: `input.resource.env`)と、実際に送信されているinput側のキー構造(例: `input.env`しか存在しない、`roles`が文字列でなく配列でない等)が食い違っています。`--explain full`のトレースで該当式が`Fail`ではなく`undefined`のまま終了しているかどうかも確認します。
+
+### 6. 原因ルールを修正し再評価する
+
+特定した原因(ルール衝突/bundle反映遅延/input構造ミスマッチ)に応じてポリシーまたはinputを修正した上で、同じ入力に対して再評価します。
+
+```bash
+opa eval \
+  --data policy/ \
+  --input input.json \
+  --format pretty \
+  --explain {{ explain_mode }} \
+  'data.authz.allow'
+```
+
+## 動作確認
+
+1. `--explain {{ explain_mode }}`のトレースから、最終判定に寄与した`allow`/`deny`ルールをそれぞれ1つ以上特定できていること
+2. decision logの`result`と`opa eval`の結果を突き合わせ、ズレの有無(bundle反映遅延の兆候)を確認していること
+3. input構造の不一致がある場合、該当フィールドパスを特定できていること
+4. 修正後の再評価で判定が期待値(`{{ expected_decision }}`)と一致していること
+
+## 注意事項
+
+- 想定と異なる判定の原因として最も頻度が高いのはinput構造のミスマッチ(フィールドパスの綴り違いや型の不一致)です。ルール本体を疑う前に、まずinput.jsonの構造を確認してください。
+- bundleは配信元への反映後もOPA側のポーリング間隔(`polling.min_delay_seconds`)分の遅延があります。反映直後の再評価では古いバージョンのまま評価している可能性があるため、`/v1/status`の`active_revision`で確認してから判断してください。
+- Regoでは未定義(undefined)は「false」と同義に扱われますが、`Fail`(式が偽と評価された)と`undefined`(式が評価不能だった)はトレース上で区別されます。原因切り分けの際はどちらだったかを明確に記録してください。
+- decision logは本番トラフィックの実データを含むため、調査ログの共有時は個人情報・認証情報を含むフィールドをマスクしてから展開してください。
+- 本手順は認可判定(allow/deny)の切り分けのみを扱います。修正したポリシーを本番へ反映する際は、既存のロールアウト手順(canaryデプロイやstaging環境での事前検証)に従い、旧ポリシーを無効化する前に新ポリシーが期待通り動作することを別セッションやdry-run評価で確認してください。

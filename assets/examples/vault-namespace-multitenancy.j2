@@ -1,0 +1,115 @@
+# Vaultパス設計によるマルチテナント分離
+
+OSS版のHashiCorp Vaultは Namespace（Enterprise機能）が使えないため、代わりに **マウントパス + ポリシー + AuthRoleのパス境界** の3点でチーム（テナント）ごとのシークレットを論理分離します。
+
+## 目的
+
+Vault OSSでもEnterpriseのNamespaceに近い分離を実現するため、テナントごとに専用の secrets マウントパスを切り、そのパス配下のみを許可するポリシーを書き、AuthRole（AppRole）にそのポリシーだけを紐付けることで、テナント間のシークレットを相互不可視化できるようになることを目指します。
+
+## 用語解説
+
+- **Namespace（Enterprise機能）**: Vault Enterprise限定の完全なテナント分離機構。OSS版には存在しない
+- **パス境界による論理分離**: 物理的な分離ではなく、マウントパスとポリシーの組み合わせで「そのテナントの配下しか読めない」状態を作ること
+- **secrets enable -path**: KVシークレットエンジンを指定パスにマウントするコマンド。テナントごとに別マウントにすることでパスの重複を防ぐ
+- **ポリシー(HCL)**: `path "secret/data/<tenant>/*"` のようにパスパターンとcapabilitiesを対応付けたアクセス制御定義
+- **AppRole**: マシン/サービス向けの認証方式。role_id + secret_idでログインし、`token_policies` に指定したポリシーだけが有効なトークンを取得する
+- **相互不可視化**: あるテナントのトークンで他テナントのパスにアクセスすると `permission denied` になり、存在の有無すら実質判別できない状態
+
+## シナリオ設定
+
+| tenant | mount_path | policy_name | auth_method | isolation_note |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["tenant"] }} | {{ r["mount_path"] }} | {{ r["policy_name"] }} | {{ r["auth_method"] }} | {{ r["isolation_note"] }} |
+{% endfor %}
+
+## 1. テナント専用のKVマウントを有効化する
+
+各テナントに専用の KV v2 マウントを切ります。マウントパスが分かれていること自体が分離の第一の境界です。
+
+```bash
+{% for r in csv_rows %}{% if r["isolation_note"] == "-" %}vault secrets enable -path={{ r["mount_path"] }} -version=2 kv
+{% endif %}{% endfor %}```
+
+## 2. テナント別ポリシーを作成する
+
+ポリシーは「自分のマウントパス配下のみ」を明示的に許可します。他テナントのパスは記述しない = 暗黙的にdeny（Vaultはデフォルト拒否）です。
+
+```bash
+{% for r in csv_rows %}{% if r["isolation_note"] == "-" %}vault policy write {{ r["policy_name"] }} - <<EOF
+path "{{ r["mount_path"] }}/data/*" {
+  capabilities = ["create", "read", "update", "delete", "list"]
+}
+path "{{ r["mount_path"] }}/metadata/*" {
+  capabilities = ["list", "read"]
+}
+EOF
+{% endif %}{% endfor %}```
+
+## 3. 共通シークレット(PKI)の共有マウントと読み取り専用ポリシーを作る
+
+証明書発行基盤(PKI)のようにテナント横断で使う共通シークレットは、専用の共有マウントを切り、書き込みは管理者のみ・各テナントは読み取り専用で参照させます。
+
+```bash
+{% for r in csv_rows %}{% if r["isolation_note"] != "-" %}# {{ r["isolation_note"] }}
+vault secrets enable -path={{ r["mount_path"] }} pki
+vault policy write {{ r["policy_name"] }} - <<EOF
+path "{{ r["mount_path"] }}/*" {
+  capabilities = ["read"]
+}
+EOF
+{% endif %}{% endfor %}```
+
+必要なテナントの `token_policies` に、自テナントのポリシーと合わせて `shared-pki-read` のような共有読み取りポリシーを追加で紐付けることで、書き込み権限を与えずに共有できます。
+
+## 4. AuthRole(AppRole)にパス境界を紐付ける
+
+AppRoleの `token_policies` に、そのテナント自身のポリシー **だけ** を指定します。他テナントのポリシー名を混在させないことが、この手順で最も事故が起きやすい箇所です。
+
+```bash
+vault auth enable approle
+{% for r in csv_rows %}{% if r["isolation_note"] == "-" %}vault write auth/approle/role/role-{{ r["tenant"] }} \
+  token_policies="{{ r["policy_name"] }}" \
+  token_ttl=1h \
+  token_max_ttl=4h \
+  secret_id_ttl=24h
+{% endif %}{% endfor %}```
+
+## 5. テナントごとにログインし、パス境界を検証する
+
+各テナントのrole_id/secret_idでログインし、発行されたトークンで自テナントのパスだけにアクセスできることを確認します。
+
+```bash
+{% for r in csv_rows %}{% if r["isolation_note"] == "-" %}vault read -field=role_id auth/approle/role/role-{{ r["tenant"] }}/role-id
+vault write -f -field=secret_id auth/approle/role/role-{{ r["tenant"] }}/secret-id
+vault write auth/approle/login role_id=<role-id-{{ r["tenant"] }}> secret_id=<secret-id-{{ r["tenant"] }}>
+{% endif %}{% endfor %}```
+
+取得した各トークンを `VAULT_TOKEN` に設定し、自テナント・他テナントの両方に対してアクセスを試みます。
+
+```bash
+{% for r in csv_rows %}{% if r["isolation_note"] == "-" %}VAULT_TOKEN=<token-{{ r["tenant"] }}> vault kv get {{ r["mount_path"] }}/example
+{% endif %}{% endfor %}```
+
+## 動作確認
+
+- 各テナントのトークンで、自テナントの `mount_path`（シナリオ設定の表を参照）配下の `vault kv get` が成功すること
+- 同じトークンで他テナントの `mount_path` に対して `vault kv get` を実行すると `permission denied` になること（存在の有無も判別できないこと）
+- `vault policy read <policy_name>` の出力に、自テナント以外のパスが含まれていないこと
+- 共有PKIマウントに対しては、テナントのトークンで `read` はできても `write`/`delete` は `permission denied` になること
+
+## 注意事項
+
+- OSS版のVaultにはNamespace（Enterprise機能）が存在しない。この手順のパス+ポリシー分離は近似であり、Namespaceのような管理者権限ごと分離する完全なマルチテナントではない点を利用者に周知すること。
+- パス設計を誤ると容易に越境する。例えばポリシーで `secret/data/*` のようにワイルドカードを広く取ってしまうと、全テナントのパスに一致してしまう。ポリシーのパスは必ずテナント固有の `mount_path` 配下に限定し、`vault policy read` で内容を確認してからロールに紐付けること。
+- 認証境界に関わる変更（新しいAuthRoleやポリシーの適用）は、既存のトークン・既存ポリシーを無効化する前に、新しいロールでログインしてトークン発行と境界検証（動作確認のセクション）が成功することを確認してから、旧ポリシーやroleを廃止すること。
+- PKIなどテナント横断で使う共通シークレットは、書き込み権限を持つのは管理者ポリシーのみとし、各テナントには読み取り専用ポリシーのみ紐付ける。共有マウントに誤って `create`/`update`/`delete` を許可しないこと。
+- テナントを追加する際は、シナリオ設定のCSVに1行追加し、本手順の1〜4を新規テナント分だけ再実行すればよい。ポリシー雛形は以下の通り。
+
+```hcl
+path "secret/data/<new-tenant>/*" {
+  capabilities = ["create", "read", "update", "delete", "list"]
+}
+path "secret/metadata/<new-tenant>/*" {
+  capabilities = ["list", "read"]
+}
+```

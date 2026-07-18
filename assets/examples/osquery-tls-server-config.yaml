@@ -1,0 +1,11 @@
+tls_hostname: "osquery-fleet.internal.example.com"
+tls_port: 8443
+tls_server_certs_path: "/etc/osquery/certs/fleet-ca.pem"
+enroll_secret_path: "/etc/osquery/secrets/enroll_secret.txt"
+enroll_secret_set: true
+enroll_endpoint: "/api/v1/osquery/enroll"
+config_endpoint: "/api/v1/osquery/config"
+logger_endpoint: "/api/v1/osquery/log"
+distributed_enabled: true
+distributed_read_endpoint: "/api/v1/osquery/distributed/read"
+distributed_write_endpoint: "/api/v1/osquery/distributed/write"

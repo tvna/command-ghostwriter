@@ -1,0 +1,105 @@
+# osqueryによるユーザー・権限の棚卸し
+
+`users` / `user_groups` / `sudoers` / `shadow` / `last` / `authorized_keys` を横断し、
+不審アカウントや過剰権限をosqueryで洗い出す監査手順です。
+
+## 目的
+
+osqueryのテーブルを横断的に問い合わせることで、UID 0の重複（裏口root）・未管理の
+authorized_keys・過剰なsudoers設定・空パスワードアカウント・退職者の残存ログインを
+検出し、既知の正規アカウントとの差分から是正対象を特定できるようになることを目指します。
+
+## 用語解説
+
+- **osquery / osqueryi**: OSの状態（プロセス、ユーザー、鍵、sudo設定など）をSQLライクな
+  クエリで横断的に問い合わせるツール。`osqueryi`は対話型シェルで単発クエリを即実行できる
+- **UID 0の重複(裏口root)**: `users`テーブルで`uid=0`の行が正規の`root`以外にも存在する
+  状態。攻撃者が権限昇格用に仕込む典型的な裏口の痕跡
+- **未管理authorized_keys**: `~/.ssh/authorized_keys`に、鍵管理台帳へ登録されていない
+  公開鍵が追加されている状態。侵害後の永続化や離職者の鍵消し忘れで発生する
+- **sudoers過剰付与**: `visudo`で管理される`/etc/sudoers`や`/etc/sudoers.d/*`に、業務上
+  必要な範囲を超えた`NOPASSWD`や`ALL=(ALL:ALL)`のような広範な許可が残っている状態
+- **空パスワードアカウント**: `/etc/shadow`のパスワードハッシュが空（`password_status`が
+  `empty`）で、パスワード無しでログインが成立し得る危険な状態
+- **user_groupsによる特権グループ突合**: `user_groups`を`users`・`groups`とJOINし、
+  `wheel`/`sudo`/`adm`/`docker`など特権を持つグループへの所属者を洗い出すこと
+
+## シナリオ設定
+
+| 監査項目 | osqueryテーブル | 要注意サイン | 備考 |
+|---|---|---|---|
+{% for r in csv_rows %}| {{ r["audit_item"] }} | {{ r["osquery_table"] }} | {{ r["red_flag"] }} | {{ r["note"] }} |
+{% endfor %}
+
+## 1. osqueryiの起動を確認する
+
+```bash
+osqueryi --version
+osqueryi "SELECT version FROM osquery_info;"
+```
+
+## 2. アカウント・権限の横断クエリを実行し、結果をファイルに保全する
+
+各クエリの実行結果は、コピー＆ペーストではなく`--json`でファイルに保存し、監査項目名
+をファイル名に含めて後から追跡できるようにします。
+
+```bash
+{% for r in csv_rows %}echo "=== {{ r["audit_item"] }} ({{ r["osquery_table"] }}) ==="
+osqueryi --json "{{ r["query"] | safe }}" > audit_{{ r["osquery_table"] }}.json
+{% endfor %}```
+
+## 3. 検出結果を要注意サインと突き合わせる
+
+シナリオ設定の表の「要注意サイン」列を基準に、各JSONの出力を確認します。
+
+```bash
+{% for r in csv_rows %}echo "[確認観点] {{ r["audit_item"] }}: {{ r["red_flag"] }}"
+cat audit_{{ r["osquery_table"] }}.json
+{% endfor %}```
+
+## 4. 既知の正規アカウント台帳と差分を取る
+
+事前に用意した正規アカウント一覧（`known_accounts.txt`、1行1ユーザー名）と、実際に
+検出された`users`テーブルの結果を突合し、台帳にないアカウントを洗い出します。
+
+```bash
+osqueryi --json "SELECT username FROM users WHERE uid >= 1000;" \
+  | python3 -c "import json,sys; [print(u['username']) for u in json.load(sys.stdin)]" \
+  | sort > detected_accounts.txt
+comm -23 detected_accounts.txt <(sort known_accounts.txt)
+```
+
+## 5. 是正対象を記録し、担当チームへ連携する
+
+このクエリ集自体は読み取り専用の監査であり、ロック・鍵削除・sudoers修正などの是正は
+本手順の範囲外です。検出結果を一覧化し、担当チーム（アカウント管理・システム管理者）へ
+連携します。
+
+```bash
+{% for r in csv_rows %}echo "[是正連携] {{ r["audit_item"] }} -> {{ r["note"] }}"
+{% endfor %}```
+
+## 動作確認
+
+1. 手順1で`osqueryi --version`がエラーなく動作し、`osquery_info`から`version`が取得できること。
+2. 手順2の全クエリが`--json`で正常終了し、`audit_*.json`が監査項目数分（{{ csv_rows | length }}件）生成されていること。
+3. 手順4の`comm -23`の出力（台帳にない検出アカウント）が空であること、または差分が手順5で是正チームへ連携されていること。
+4. `UID0の重複`の結果が`root`の1行のみであり、それ以外のアカウントが含まれていないこと。
+5. `空パスワード・アカウントの検出`の結果が0件であること（1件でもあれば緊急対応）。
+
+## 注意事項
+
+- 本手順はosqueryによる**読み取り専用の監査**であり、アカウントのロック・鍵の削除・
+  sudoersの修正は行いません。検出した是正対象は必ず担当チームに連携し、承認を得てから
+  別手順で実施してください。
+- `authorized_keys`や`sudoers`はSSH認証・特権昇格に直結するため、是正（鍵の削除や
+  sudoers行の無効化）を行う際は、対象アカウント以外の**別のログインセッションまたは
+  別の管理アクセス手段**で新しい正規の経路が機能することを必ず確認してから、旧来の
+  鍵や権限を無効化・削除してください。作業対象のセッションだけを閉じてしまうと、
+  自分自身がロックアウトされるおそれがあります。
+- 収集した情報（ユーザー名、公開鍵、sudoers設定、ログイン履歴）は機微情報です。保存先
+  のJSONファイルはアクセス制御された監査ログ基盤に転送し、調査対象ホスト自身に平文の
+  まま放置しないでください。
+- 退職者アカウントが検出された場合は削除ではなくロックを優先し、共有アカウントは
+  台帳の棚卸し手順（アカウントのライフサイクル管理）に従って個別ユーザーへの移行を
+  検討してください。

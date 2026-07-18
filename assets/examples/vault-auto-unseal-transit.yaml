@@ -1,0 +1,21 @@
+vault:
+  host: vault-01.example.internal
+  admin_user: vaultops
+  addr: https://vault-01.example.internal:8200
+  config_path: /etc/vault.d/vault.hcl
+  service_name: vault
+  backup_path: /opt/vault/backup/vault.hcl.pre-migration
+
+seal:
+  seal_type: transit
+  transit_address: https://vault-transit.example.internal:8200
+  transit_token: s.TransitTokenPlaceholder
+  key_name: autounseal-prod
+  mount_path: transit/
+
+shamir:
+  unseal_threshold: 3
+
+recovery:
+  recovery_shares: 5
+  recovery_threshold: 3

@@ -1,0 +1,6 @@
+indicator,indicator_type,source,tlp,added_at
+203.0.113.45,ADDR,commercial-feed-a,TLP:AMBER,2026-07-10
+malicious-c2.example.net,DOMAIN,commercial-feed-a,TLP:AMBER,2026-07-10
+http://198.51.100.9/payload.bin,URL,osint-feed-b,TLP:GREEN,2026-07-12
+a1b2c3d4e5f60718293a4b5c6d7e8f9012345678,CERT_HASH,osint-feed-b,TLP:GREEN,2026-07-12
+zt-intel-selftest.internal.example.org,DOMAIN,internal-test,TLP:CLEAR,2026-07-17

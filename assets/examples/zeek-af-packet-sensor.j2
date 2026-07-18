@@ -1,0 +1,110 @@
+# ZeekによるAF_PACKETセンサー構築
+
+ミラーポート(SPAN/TAP)から受信したトラフィックを、AF_PACKETキャプチャ方式のZeekセンサーで解析できるようにします。`node.cfg`の設定からログ生成確認までを行います。
+
+## 目的
+
+ミラーポートに接続したインターフェースをAF_PACKETでZeekに取り込み、`zeekctl`で起動・監視できる状態を作ります。負荷分散(lb_procs)によって高トラフィックでもパケットドロップを抑えつつ、`conn.log`・`dns.log`が正しく生成されることを確認します。
+
+## 用語解説
+
+- **AF_PACKET**: Linuxカーネルのソケットタイプの一つ。libpcap経由よりも高速にパケットを取得でき、ゼロコピーやRSS(受信側スケーリング)と組み合わせて高スループット環境向けに使われる
+- **node.cfg**: Zeekのプロセス構成(standalone/manager/proxy/worker)とキャプチャインターフェースを定義するzeekctl設定ファイル
+- **networks.cfg**: 監視対象ネットワークの内部/外部判定に使うローカルアドレス空間を定義する設定ファイル
+- **lb_procs**: 1インターフェースに対して起動するworkerプロセス数。AF_PACKETのRSSキュー数と合わせて負荷分散する
+- **zeek-af_packet-plugin**: AF_PACKketキャプチャをZeekから利用するための追加プラグイン。デフォルトのZeekビルドには含まれないため別途導入が必要
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 監視インターフェース | `{{ monitor_interface }}` |
+| ローカルネットワーク | {% for net in local_networks %}`{{ net }}`{% if not loop.last %}, {% endif %}{% endfor %} |
+| workerプロセス数(lb_procs) | `{{ lb_procs }}` |
+| ログ出力先 | `{{ log_dir }}` |
+
+## 手順
+
+### 1. AF_PACKETプラグインの有無を確認する
+
+```bash
+/opt/zeek/bin/zeek -N Zeek::AF_Packet
+```
+
+出力に`Zeek::AF_Packet`が表示されない場合、`zeek-af_packet-plugin`(またはディストリのZeek LTSパッケージに同梱されたAF_PACKETサポート)が未導入です。ソースビルドの場合は`zkg install zeek-af_packet-plugin`で追加し、Zeekを再ビルド・再起動します。
+
+### 2. ミラー元NICのオフロードを無効化する
+
+```bash
+sudo ethtool -K {{ monitor_interface }} rx off tx off gro off lro off tso off gso off
+sudo ethtool -k {{ monitor_interface }} | grep -E 'generic-receive-offload|tcp-segmentation-offload'
+```
+
+オフロード(GRO/LRO/TSO/GSO)が有効なままだとキャプチャ時にパケットが結合・分割され、Zeekが本来とは異なるパケット境界を解析してしまいます。ミラーポート専用インターフェースでは常時オフロードを無効化します。
+
+### 3. node.cfgでAF_PACKETと負荷分散を設定する
+
+```bash
+sudo tee /opt/zeek/etc/node.cfg <<'EOF'
+[zeek]
+type=standalone
+host=localhost
+interface=af_packet::{{ monitor_interface }}
+lb_method=custom
+lb_procs={{ lb_procs }}
+EOF
+```
+
+`interface=af_packet::{{ monitor_interface }}`と指定することで、libpcapではなくAF_PACKETソケット経由でのキャプチャに切り替わります。`lb_procs={{ lb_procs }}`により、このインターフェースに対して{{ lb_procs }}個のworkerプロセスへパケットが分散されます。
+
+### 4. networks.cfgでローカルネットを定義する
+
+```bash
+sudo tee /opt/zeek/etc/networks.cfg <<'EOF'
+{% for net in local_networks %}{{ net }}	Local network
+{% endfor %}EOF
+```
+
+`networks.cfg`に定義したアドレス空間は`conn.log`の`local_orig`/`local_resp`列の判定に使われ、内部/外部通信の切り分けに直結します。
+
+### 5. 設定を反映してセンサーを起動する
+
+```bash
+sudo /opt/zeek/bin/zeekctl deploy
+```
+
+`deploy`は設定の構文チェック(`zeekctl check`相当)を行ったうえで、既存プロセスの停止と新設定での起動を一括で行います。構文エラーがある場合はここで起動が中断されるため、事前にnode.cfg/networks.cfgの内容を確認しておきます。
+
+### 6. 稼働状態を確認する
+
+```bash
+sudo /opt/zeek/bin/zeekctl status
+```
+
+`zeek`(standaloneノード)の`Peer`列が`running`になっていることを確認します。`crashed`や`stopped`の場合は`{{ log_dir }}/current/stderr.log`を確認します。
+
+## 動作確認
+
+1. `zeekctl status`でノードが`running`状態であることを確認する。
+2. ログファイルが生成されていることを確認する。
+
+```bash
+ls -la {{ log_dir }}/current/conn.log {{ log_dir }}/current/dns.log
+```
+
+3. `zeek-cut`で実際にレコードが記録されていることを確認する。
+
+```bash
+cat {{ log_dir }}/current/conn.log | /opt/zeek/bin/zeek-cut id.orig_h id.resp_h id.resp_p proto service duration | tail -n 20
+cat {{ log_dir }}/current/dns.log | /opt/zeek/bin/zeek-cut id.orig_h query qtype_name answers | tail -n 20
+```
+
+`conn.log`に`{{ monitor_interface }}`で観測される通信の行が、`dns.log`に名前解決クエリが継続的に追記されていくことを確認します。
+
+## 注意事項
+
+- AF_PACKETキャプチャには`zeek-af_packet-plugin`の導入が前提となる。プラグイン未導入のまま`node.cfg`に`interface=af_packet::...`を設定すると、`zeekctl deploy`時にプラグイン未検出のエラーで起動に失敗する。手順1で事前に必ず確認する。
+- ミラー元スイッチがVLANタグを付与したままミラーリングする場合、Zeekは802.1Qタグ付きフレームとして受信する。タグを想定していないと`conn.log`の解析漏れや取りこぼしが発生するため、スイッチ側でタグを剥がして転送する設定(または`redef`によるVLANタグ考慮)を事前に確認する。
+- `ethtool -K`によるオフロード無効化は、当該インターフェースを本番トラフィックの転送経路として使っていないミラー受信専用ポートであることを前提とする。転送経路と兼用のインターフェースに対して誤って実行すると、通信性能に影響するため対象インターフェース名を必ず確認してから実行する。
+- `zeekctl deploy`は既存のZeekプロセスを一度停止してから起動し直すため、設定投入中は数秒〜数十秒のログ取得断が発生する。既存の監視基盤(SIEM連携など)がある場合は、断が許容される時間帯に実施する。
+- `lb_procs`の増加はCPUコア数とAF_PACKETのRSSキュー数に応じて設定する。物理コア数を超える値を設定してもパケット分散の効果は頭打ちになり、かえってコンテキストスイッチが増える。

@@ -1,0 +1,102 @@
+# fail2banカスタムフィルタ(failregex)作成
+
+独自アプリ（myapp）の認証失敗ログ用に `failregex` / `ignoreregex` を定義し、`fail2ban-regex` で一致検証したうえで jail に組み込みます。
+
+## 目的
+
+既存の fail2ban フィルタが対応していない独自アプリのログ形式に対して、`<HOST>` プレースホルダを含む正規表現（failregex）と除外用正規表現（ignoreregex）を作成し、本番ログに適用する前に `fail2ban-regex` で機械的に検証してから jail に組み込めるようになることを目指します。
+
+## 用語解説
+
+- **filter.d/\<app\>.conf**: fail2ban のフィルタ定義ファイル。`[Definition]` セクションに `failregex` と `ignoreregex` を書く。
+- **`<HOST>` プレースホルダ**: fail2ban が IPv4/IPv6/ホスト名として抽出する特殊トークン。内部的には `(?:::f{4,6}:)?(?P<host>[\w\-.^_]+)` 相当に展開されるため、抽出対象の直前・直後の区切り文字（空白など）を正しく書かないと誤検出や抽出漏れが起きる。
+- **ignoreregex**: `failregex` に一致してもこの正規表現にも一致する行は攻撃としてカウントしない。ヘルスチェックや監視用アクセスの除外に使う。
+- **datepattern**: ログ先頭のタイムスタンプ書式を fail2ban に伝える設定。省略すると自動検出に頼ることになり、独自フォーマットでは誤検出・検出漏れの原因になる。
+- **fail2ban-regex**: 実際にログファイルとフィルタを渡し、どの行が failregex/ignoreregex に一致するかを本番投入前に検証する付属コマンド。
+- **ReDoS（正規表現サービス拒否）**: `(\S+)+` のようなバックトラック爆発を起こす書き方をした正規表現が、悪意あるログ1行の処理でCPUを長時間占有してしまう問題。
+
+## シナリオ設定
+
+| filter_name | failregex_pattern | ignoreregex | test_log_line | expected_matches |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["filter_name"] }} | `{{ r["failregex_pattern"] | safe }}` | `{{ r["ignoreregex"] | safe }}` | `{{ r["test_log_line"] }}` | {{ r["expected_matches"] }} |
+{% endfor %}
+
+## 1. フィルタ定義ファイルを作成する
+
+{% for r in csv_rows %}
+```bash
+sudo tee /etc/fail2ban/filter.d/{{ r["filter_name"] }}.conf >/dev/null <<'EOF'
+[Definition]
+failregex = {{ r["failregex_pattern"] | safe }}
+ignoreregex = {{ r["ignoreregex"] | safe }}
+datepattern = ^%%Y-%%m-%%d %%H:%%M:%%S
+EOF
+```
+{% endfor %}
+
+`datepattern` はシナリオのログ先頭（`2026-07-17 10:22:01` 形式）に合わせて明示しています。自動検出に任せず固定することで、ログのタイムゾーン表記やフォーマットが変わった際に検出が黙って壊れるのを防ぎます。
+
+## 2. テストログを用意し、fail2ban-regexで一致検証する
+
+```bash
+{% for r in csv_rows %}cat >> /tmp/{{ r["filter_name"] }}-test.log <<'EOF'
+{{ r["test_log_line"] }}
+EOF
+{% endfor %}
+fail2ban-regex /tmp/myapp-auth-test.log /etc/fail2ban/filter.d/myapp-auth.conf
+```
+
+出力末尾の `Lines: <total> lines, <matched> matched, <missed> missed` と、`Failregex:` セクションの一致件数を、シナリオ設定表の `expected_matches` 合計（この例では 1）と突き合わせます。一致しない場合は正規表現を修正し、本ステップを再実行してからでないと次のステップへ進みません。
+
+## 3. jailに組み込む
+
+```bash
+{% for r in csv_rows %}sudo tee /etc/fail2ban/jail.d/{{ r["filter_name"] }}.local >/dev/null <<'EOF'
+[{{ r["filter_name"] }}]
+enabled  = true
+filter   = {{ r["filter_name"] }}
+logpath  = /var/log/myapp/auth.log
+backend  = auto
+maxretry = 3
+findtime = 600
+bantime  = 3600
+action   = %(action_)s
+EOF
+{% endfor %}
+sudo fail2ban-client reload
+```
+
+## 4. jail適用後に実際のBanを確認する
+
+新しい filter/jail を有効化した直後は、既存の SSH 用 jail など他のログ監視パスを止めずに並行稼働させ、まず新filterだけがテスト用IPを実際にBanできることを確認してから本番ログパスへの切替を確定します。
+
+```bash
+sudo fail2ban-client status
+sudo fail2ban-client status myapp-auth
+sudo tail -f /var/log/myapp/auth.log &
+sudo tee -a /var/log/myapp/auth.log <<'EOF'
+2026-07-17 10:22:01 myapp[1234]: authentication failure from 203.0.113.7 user=admin
+2026-07-17 10:22:02 myapp[1234]: authentication failure from 203.0.113.7 user=admin
+2026-07-17 10:22:03 myapp[1234]: authentication failure from 203.0.113.7 user=admin
+EOF
+sudo fail2ban-client status myapp-auth
+sudo iptables -L f2b-myapp-auth -n
+```
+
+`fail2ban-client status myapp-auth` の `Currently banned` / `Total banned` が増加し、`iptables -L f2b-myapp-auth -n` に対象IP（この例では `203.0.113.7`）を拒否するルールが現れることを確認します。
+
+## 動作確認
+
+- ステップ2で `expected_matches` が `1` の行（攻撃ログ）が `fail2ban-regex` で match すること
+- `expected_matches` が `0` の行（正常ログ・ヘルスチェックログ）が match しないこと（ignoreregex による除外を含む）
+- ステップ4で実際にテストIPが `fail2ban-client status myapp-auth` 上でBanされ、`iptables` ルールに反映されること
+- 既存の SSH 用 jail など他のフィルタが並行稼働中も継続して機能していること（新filter追加が既存Ban機能を止めていないこと）
+
+## 注意事項
+
+- `failregex` を過度に緩く書く（例: `.*<HOST>.*` のような無条件マッチ）と、正常なリクエストや別ユーザーの操作まで一致し、意図しない誤Ban（正規のユーザーやヘルスチェック元IPの遮断）につながる。シナリオ設定表の `expected_matches` が `0` の行が実際に一致しないことを必ず確認する。
+- ログのタイムゾーン表記やタイムスタンプ書式がアプリのバージョンアップ等で変わると、`datepattern` の前提が崩れて検出が黙って効かなくなる。ログ形式を変更した場合は本手順のステップ1・2をやり直す。
+- `(\S+)+` や `(.*)*` のようなネスト量指定子はReDoS（バックトラック爆発）を招くおそれがあるため使用しない。`\S+` や `[^ ]+` など曖昧さのない量指定子に留める。
+- `<HOST>` の前後の区切り文字（空白・括弧など）を正しく書かないと、IPアドレスの一部しか抽出できない、あるいはホスト名を含む文字列を誤抽出することがある。`fail2ban-regex` の出力で抽出されたホスト値を必ず目視確認する。
+- 新しいfilter/jailを有効化する際は、既存の監視パス（他のjailやSSHアクセス経路）を無効化・停止する前に、ステップ4のように並行稼働させた状態で新filterが正しくBanできることを確認する。確認前に既存のjailを止めると、検知の穴が生じたまま無防備な期間ができる。

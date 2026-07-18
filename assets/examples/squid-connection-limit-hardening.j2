@@ -1,0 +1,110 @@
+# Squid 接続数制限による DoS 耐性強化手順 — 変更管理番号 {{ squid.apply_change_id }}
+
+対象 Squid プロキシに `maxconn` ACL とバッファ上限を導入し、単一送信元からの過剰な同時接続によるサービス低下（DoS的挙動）を緩和します。適用は変更管理番号 **{{ squid.apply_change_id }}** の下で実施します。
+
+## 目的
+
+このシナリオでは、Squid プロキシに対して単一クライアント（送信元）あたりの同時 TCP 接続数を制限し、暴走したクライアントや意図的な大量接続によるプロキシのリソース枯渇を防ぐことを目指します。あわせてリクエストバッファの上限も設定し、メモリ資源の消費を抑えます。
+
+## 用語解説
+
+- **maxconn ACL**: `acl <name> maxconn <n>` の形式で、ある送信元条件に対して「現在の同時接続数が n を超えるか」を判定する ACL。`http_access deny` と組み合わせることで、閾値超過クライアントの新規接続を拒否できる
+- **client_request_buffer_max_size**: クライアントからのリクエストヘッダ/ボディを読み込む際にプロセス側が確保するバッファの上限サイズ。過大な同時接続時のメモリ消費を抑える効果がある
+- **TCP_DENIED**: Squid のアクセスログに記録される結果コードの一つで、`http_access deny` により要求が拒否されたことを示す
+- **NAT 集約**: 拠点の複数端末が同一のグローバル/代表 IP アドレス経由でプロキシに接続する構成。この場合、maxconn の判定は「端末単位」ではなく「集約後の IP 単位」で行われる点に注意が必要
+- **target_scope**: 本手順で maxconn 制限の適用対象とする送信元範囲（CIDR 表記）
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 最終適用する同時接続数上限 (max_connections_per_client) | {{ squid.max_connections_per_client }} |
+| 観察フェーズの暫定上限（最終値の3倍） | {{ squid.max_connections_per_client * 3 }} |
+| リクエストバッファ上限 (request_buffer_kb) | {{ squid.request_buffer_kb }} KB |
+| 適用対象範囲 (target_scope) | {{ squid.target_scope }} |
+| 変更管理番号 (apply_change_id) | {{ squid.apply_change_id }} |
+
+## 1. 設定ファイルのバックアップを取得する
+
+変更前に必ず現行設定を退避し、切り戻しできる状態を確保します。
+
+```bash
+sudo cp /etc/squid/squid.conf /etc/squid/squid.conf.bak.{{ squid.apply_change_id }}
+```
+
+## 2. 観察フェーズ: 高めの閾値でまず様子を見る
+
+いきなり最終値を適用すると、ブラウザの複数同時接続や自動更新処理を誤って遮断する恐れがあります。まずは最終値の3倍程度の緩い閾値で `maxconn` ACL を投入し、実際の接続傾向を観察します。
+
+```bash
+cat <<'EOF' | sudo tee -a /etc/squid/squid.conf
+
+# --- {{ squid.apply_change_id }}: observation phase ---
+acl src_scope src {{ squid.target_scope }}
+acl maxconn_limit maxconn {{ squid.max_connections_per_client * 3 }}
+http_access deny src_scope maxconn_limit
+EOF
+sudo squid -k parse
+sudo squid -k reconfigure
+```
+
+観察期間中は、以下でアクセスログの TCP_DENIED 発生状況を確認します。
+
+```bash
+sudo tail -f /var/log/squid/access.log | grep --line-buffered TCP_DENIED
+squidclient -h 127.0.0.1 mgr:info | grep -i "client_http.requests"
+```
+
+## 3. 観察結果をもとに最終閾値へ調整する
+
+観察期間中に正常な多重接続（ブラウザの並列取得、Windows Update 等のダウンロードクライアント）が誤って `TCP_DENIED` になっていないことを確認したら、閾値を業務実態に合わせた最終値へ引き下げます。
+
+```bash
+sudo sed -i "s/^acl maxconn_limit maxconn .*/acl maxconn_limit maxconn {{ squid.max_connections_per_client }}/" /etc/squid/squid.conf
+```
+
+## 4. リクエストバッファ上限を設定し本適用する
+
+同時接続数の制限に加え、1接続あたりのリクエストバッファ上限を設定してメモリ消費の上限を明確にします。
+
+```bash
+cat <<'EOF' | sudo tee -a /etc/squid/squid.conf
+
+# --- {{ squid.apply_change_id }}: final apply ---
+client_request_buffer_max_size {{ squid.request_buffer_kb }} KB
+EOF
+sudo squid -k parse
+sudo squid -k reconfigure
+```
+
+## 動作確認
+
+1. 観察フェーズ・本適用後とも `sudo squid -k parse` が構文エラーなく完了すること
+2. 閾値（{{ squid.max_connections_per_client }}）を超える同時接続を意図的に発生させたテスト送信元について、`access.log` に `TCP_DENIED` が記録されること
+
+   ```bash
+   for i in $(seq 1 30); do
+     curl -s -o /dev/null -x http://127.0.0.1:3128 http://example.com/ &
+   done
+   wait
+   grep TCP_DENIED /var/log/squid/access.log | tail -n 5
+   ```
+
+3. 通常利用のクライアント（同時接続数が閾値以下）からのアクセスが `TCP_DENIED` にならず、`TCP_MISS`/`TCP_HIT` 等で正常に通過すること
+
+   ```bash
+   curl -s -o /dev/null -w "%{http_code}\n" -x http://127.0.0.1:3128 http://example.com/
+   grep "TCP_MISS\|TCP_HIT" /var/log/squid/access.log | tail -n 5
+   ```
+
+## 注意事項
+
+- 本手順は「まず緩い閾値で観察し、正常な多重接続を誤遮断しないことを確認してから最終値へ絞り込む」順序を必ず守ること。最終閾値をいきなり適用すると、正常利用者の通信まで遮断し、切り戻しが後手に回るリスクがある。
+- 拠点内の多数端末が NAT 配下で単一の代表 IP に集約されている環境では、`maxconn` は「端末単位」ではなく「集約後の IP 単位」で同時接続数を数える。想定より早く閾値に達し、正常な複数端末の通信が一括で拒否される可能性があるため、対象範囲 (target_scope) にそうしたセグメントが含まれるかを事前に確認する。
+- 閾値は業務内容（ブラウザの並列接続数、業務システムの多重コネクション利用など）に適合させること。過度に低い値は正常利用まで遮断し、過度に高い値は DoS 耐性強化の効果を失わせる。
+- 設定投入後に問題が発生した場合は、取得済みのバックアップで即座に切り戻す。
+
+  ```bash
+  sudo cp /etc/squid/squid.conf.bak.{{ squid.apply_change_id }} /etc/squid/squid.conf
+  sudo squid -k reconfigure
+  ```

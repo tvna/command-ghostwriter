@@ -1,0 +1,8 @@
+opa_url = "http://localhost:8181"
+policy_package = "authz.http.api"
+slow_rule = "data.authz.http.api.allow"
+input_file = "input.json"
+bundle_name = "authz-bundles"
+profile_enabled = true
+bundle_status_check = true
+partial_eval = true

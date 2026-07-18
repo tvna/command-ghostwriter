@@ -1,0 +1,25 @@
+config_path: /etc/osquery/osquery.conf
+logger_plugin: filesystem
+log_dir: /var/log/osquery
+tls_hostname: fleet.internal.example.com
+tls_server_certs: /etc/osquery/certs/fleet-ca.pem
+enroll_secret_path: /etc/osquery/secrets/enroll.secret
+host_identifier: hostname
+schedule_queries:
+  - name: system_info
+    query: "SELECT hostname, cpu_brand, physical_memory, hardware_model FROM system_info;"
+    interval: 3600
+  - name: listening_ports
+    query: "SELECT pid, port, address, protocol FROM listening_ports;"
+    interval: 300
+  - name: logged_in_users
+    query: "SELECT user, host, time, tty FROM logged_in_users;"
+    interval: 600
+  - name: process_open_sockets
+    query: "SELECT pid, local_address, local_port, remote_address, remote_port, state FROM process_open_sockets;"
+    interval: 300
+packs:
+  - name: incident-response
+    path: /usr/share/osquery/packs/incident-response.conf
+  - name: hardware-monitoring
+    path: /usr/share/osquery/packs/hardware-monitoring.conf

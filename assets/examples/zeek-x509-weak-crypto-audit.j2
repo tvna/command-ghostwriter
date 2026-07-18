@@ -1,0 +1,108 @@
+# Zeek による弱い暗号・証明書の棚卸し手順（定期監査）
+
+ssl.log / x509.log から旧バージョンの TLS・弱い鍵長・期限切れ証明書を棚卸しし、
+是正候補となる社内向けサーバを一覧化する定期監査手順です。今回対象は
+{{ csv_rows | length }} 台のサーバです。
+
+## 目的
+
+Zeek が記録した ssl.log（TLS バージョン・暗号スイート）と x509.log（証明書の
+鍵長・署名アルゴリズム・有効期限）を突き合わせ、社内向けサーバの TLS 設定を
+定期的に棚卸しし、是正が必要な候補を一覧化できるようになることを目指します。
+
+## 用語解説
+
+- **ssl.log**: Zeek が TLS ハンドシェイクごとに記録するログ。`version`（TLS
+  バージョン）や `cipher`（合意した暗号スイート）が含まれる
+- **x509.log**: Zeek が観測した証明書を記録するログ。`certificate.key_length`
+  （鍵長）・`certificate.sig_alg`（署名アルゴリズム）・`certificate.not_valid_after`
+  （有効期限）が含まれる
+- **是正候補**: RSA 2048bit 未満の鍵長、SHA-1 系の署名（暗号スイート名末尾が
+  素の `SHA` のもの）、TLS1.1 以下のいずれかに該当し、設定変更の検討対象とする
+  サーバ
+- **棚卸し（インベントリ）**: 実際に設定変更を行う「是正」とは別の、現状を
+  可視化して一覧化する作業
+
+## シナリオ設定
+
+| server_name | tls_version | cipher | key_length | not_valid_after | disposition |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["server_name"] }} | {{ r["tls_version"] }} | {{ r["cipher"] }} | {{ r["key_length"] }} | {{ r["not_valid_after"] }} | {{ r["disposition"] }} |
+{% endfor %}
+
+## 1. Zeek ログから TLS バージョンと暗号スイートを抽出する
+
+ssl.log から `version` と `cipher` を抽出し、対象サーバごとに集計します。
+
+```bash
+zeek-cut id.orig_h id.resp_h server_name version cipher < ssl.log \
+  | sort -u > ssl_summary.tsv
+```
+
+## 2. Zeek ログから証明書の鍵長・署名アルゴリズム・有効期限を抽出する
+
+x509.log から `certificate.key_length`・`certificate.sig_alg`・
+`certificate.not_valid_after` を抽出します。
+
+```bash
+zeek-cut certificate.subject certificate.key_alg certificate.key_length \
+  certificate.sig_alg certificate.not_valid_after < x509.log \
+  | sort -u > x509_summary.tsv
+```
+
+## 3. ssl.log と x509.log を server_name で突き合わせる
+
+`ssl_summary.tsv` の接続情報（uid）と x509.log の証明書情報を uid で結合し、
+サーバ単位の一覧を作成します。
+
+```bash
+zeek-cut uid server_name version cipher < ssl.log > ssl_by_uid.tsv
+zeek-cut uid certificate.key_length certificate.sig_alg \
+  certificate.not_valid_after < x509.log > x509_by_uid.tsv
+join -t $'\t' -1 1 -2 1 \
+  <(sort -k1,1 ssl_by_uid.tsv) <(sort -k1,1 x509_by_uid.tsv) \
+  > tls_cert_inventory.tsv
+```
+
+## 4. 是正候補基準に基づき棚卸し結果を判定する
+
+以下のいずれかに該当するサーバを是正候補（要対応）として一覧化します。
+
+- RSA 鍵長が 2048bit 未満
+- 署名アルゴリズムが SHA-1 系（暗号スイート名の末尾が素の `SHA`）
+- TLS バージョンが 1.1 以下
+- 証明書の有効期限（`not_valid_after`）が現在日時より過去（期限切れ）
+
+今回の棚卸し対象を上記基準で判定した結果は次のとおりです。
+
+{% for r in csv_rows %}- **{{ r["server_name"] }}**（{{ r["tls_version"] }} / {{ r["cipher"] }} / 鍵長{{ r["key_length"] }}bit / 有効期限 {{ r["not_valid_after"] }}）: {{ r["disposition"] }}
+{% endfor %}
+
+```bash
+# 是正候補のみを抽出して一覧化する例
+awk -F'\t' '$2 ~ /^TLSv1\.[01]$/ || $4 < 2048 || $5 ~ /SHA$/ { print }' \
+  tls_cert_inventory.tsv > remediation_candidates.tsv
+```
+
+## 動作確認
+
+- 棚卸し対象の各サーバへアクセスし、Zeek が ssl.log / x509.log を新規に記録すること
+- `zeek-cut` で抽出した各フィールド（version・cipher・key_length・sig_alg・
+  not_valid_after）が空欄なく記録されていること
+- `tls_cert_inventory.tsv` に本手順のシナリオ設定と同じ台数のサーバが1行ずつ
+  記載されていること
+- `remediation_candidates.tsv` に是正候補として判定したサーバのみが抽出され
+  ていること
+
+## 注意事項
+
+- 本手順はあくまで棚卸し（可視化）であり、サーバ側の TLS 設定変更（暗号ス
+  イートの無効化・証明書の再発行等）そのものは別作業として扱う。棚卸し結果
+  だけをもって設定変更を実施しない。
+- 外部宛て通信（社外のサービスへ接続した際に観測される証明書）は自組織の管
+  理外であるため、是正候補の一覧化対象は社内向けサーバの証明書に限定する。
+- 実際に是正（TLS バージョンや暗号スイートの無効化）を行う場合は、旧設定を
+  即時に無効化せず、新しい設定（新しい暗号スイート・証明書）で疎通できるこ
+  とを別セッションや並行ルールで確認したうえで、旧設定を段階的に廃止する。
+- 棚卸し結果には鍵長・署名アルゴリズム・有効期限などサーバの構成情報が含ま
+  れるため、一覧の共有範囲は監査担当者に限定する。

@@ -1,0 +1,130 @@
+# OPNsense CARPフェイルオーバー切替訓練 — {{ master_host }} → {{ backup_host }}
+
+CARP冗長構成の計画切替訓練を {{ drill_date }} に実施し、切替時間・セッション維持・復帰動作を測定して手順の有効性を確認します。
+
+## 目的
+
+MASTER機 `{{ master_host }}` からBACKUP機 `{{ backup_host }}` への計画的なCARPフェイルオーバーを訓練として実行し、VIP `{{ vip_address }}`({{ vip_interface }})の切替時間が目標値 {{ measured_failover_seconds_target }} 秒以内に収まること、pfsyncによってセッションが維持されること、訓練後にMASTER機へ正しく復帰できることを確認します。
+
+## 用語解説
+
+- **CARP(Common Address Redundancy Protocol)**: 複数のOPNsenseノードで仮想IP(VIP)を共有し、MASTERの障害時にBACKUPが自動的にVIPを引き継ぐ冗長化プロトコル
+- **Persistent CARP Maintenance Mode**: Interfaces > Virtual IPs > Status から有効化する機能。内部的に `net.inet.carp.demotion` を引き上げてそのノードの全CARP VIPを強制的にBACKUP状態へ降格させる、再起動しても解除されない永続的なメンテナンスモード
+- **advskew**: CARPのアドバタイズ間隔に加算される値。値が大きいほど優先度が低くなり、MASTERになりにくくなる
+- **pfsync**: ステートフルファイアウォールのコネクションテーブル(state table)をノード間でリアルタイム同期する仕組み。SSHやpingのセッションを切替後も維持するために使う
+- **設定同期(config sync)**: OPNsenseのXMLRPC設定同期機能。CARP構成ではMASTERの設定変更をBACKUPへ自動反映する
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 訓練実施日 | {{ drill_date }} |
+| MASTER機 | {{ master_host }} (バージョン {{ config_version_master }}) |
+| BACKUP機 | {{ backup_host }} (バージョン {{ config_version_backup }}) |
+| VIP | {{ vip_address }} ({{ vip_interface }}) |
+| pfsyncインターフェース | {{ pfsync_interface }} |
+| 切替時間目標 | {{ measured_failover_seconds_target }} 秒以内 |
+| 中断・切り戻し期限 | {{ rollback_deadline }} |
+
+参加者:
+{% for p in participants %}- {{ p }}
+{% endfor %}
+
+## 手順
+
+### 1. 訓練前チェック(両系のバージョン一致・設定同期・pfsync状態)
+
+```bash
+ssh admin@{{ master_host }} "opnsense-version"
+ssh admin@{{ backup_host }} "opnsense-version"
+```
+
+→ 出力バージョンが `{{ config_version_master }}` / `{{ config_version_backup }}` と一致し、両機で差異がないことを確認します。差異があれば訓練を中止し、先にバージョン統一を行います。
+
+```bash
+ssh admin@{{ master_host }} "diff <(md5 -q /conf/config.xml) <(ssh admin@{{ backup_host }} md5 -q /conf/config.xml)"
+```
+
+→ 差分が出力されなければ設定同期は完了しています。差分がある場合は設定同期を再実行してから訓練を開始します。
+
+```bash
+ssh admin@{{ master_host }} "sysctl net.inet.carp.allow net.inet.carp.demotion"
+ssh admin@{{ master_host }} "netstat -s -p carp"
+```
+
+→ `net.inet.carp.demotion` が `0`(正常なMASTER状態)であること、pfsyncのカウンタ(`checked states`, `states added` 等)が増加し続けていることを確認します。
+
+### 2. 事前計測ベースラインの取得(SSH/ping継続セッションの確立)
+
+```bash
+{% for s in test_sessions %}{% if s.type == "ssh" %}ssh -o ServerAliveInterval=1 -o ServerAliveCountMax=60 admin@{{ s.target }} "while true; do date +%s.%N; sleep 0.2; done" > ssh-session-{{ loop.index }}.log &
+{% elif s.type == "ping" %}ping -i 0.2 {{ s.target }} > ping-session-{{ loop.index }}.log &
+{% endif %}{% endfor %}
+```
+
+→ 切替前から継続セッションを開始しておき、切替中に途切れなく継続するかをログのタイムスタンプ間隔で後から検証します。中断判断者({{ participants[0] }})にこの時点で訓練開始を告知します。
+
+### 3. MASTER機でPersistent CARP Maintenance Modeを有効化する
+
+Web UIの `Interfaces > Virtual IPs > Status` から「Enter Persistent CARP Maintenance Mode」を実行するか、同等の操作をCLIで行います。
+
+```bash
+date +%s.%N
+ssh admin@{{ master_host }} "sysctl net.inet.carp.demotion=240"
+```
+
+→ 実行直後の時刻を記録し、`{{ master_host }}` の全CARP VIP(`{{ vip_interface }}` を含む)がBACKUP状態へ降格を開始します。
+
+### 4. VIP移動とBACKUP機の昇格を確認する
+
+```bash
+ssh admin@{{ master_host }} "ifconfig {{ vip_interface }} | grep carp"
+ssh admin@{{ backup_host }} "ifconfig {{ vip_interface }} | grep carp"
+date +%s.%N
+```
+
+→ `{{ master_host }}` 側が `BACKUP` 、`{{ backup_host }}` 側が `MASTER` と表示された時刻を記録します。手順3の実行時刻との差分が切替時間(目標 {{ measured_failover_seconds_target }} 秒以内)です。
+
+### 5. セッション維持を確認する(SSH/ping継続)
+
+```bash
+{% for s in test_sessions %}{% if s.type == "ssh" %}tail -n 20 ssh-session-{{ loop.index }}.log
+{% elif s.type == "ping" %}tail -n 20 ping-session-{{ loop.index }}.log
+{% endif %}{% endfor %}
+```
+
+→ 各ログのタイムスタンプ・応答が切替の前後で途切れていないかを確認します。ping-{{ test_sessions[1].target }} でパケットロスが数個以内、SSHセッションが切断されていなければpfsyncによるセッション維持は成功です。
+
+### 6. 訓練後: メンテナンスモード解除とMASTER復帰確認
+
+```bash
+ssh admin@{{ master_host }} "sysctl net.inet.carp.demotion=0"
+sleep {{ measured_failover_seconds_target }}
+ssh admin@{{ master_host }} "ifconfig {{ vip_interface }} | grep carp"
+ssh admin@{{ backup_host }} "ifconfig {{ vip_interface }} | grep carp"
+```
+
+→ `{{ master_host }}` 側が再び `MASTER` 、`{{ backup_host }}` 側が `BACKUP` に戻ったことを確認します。復帰しない場合は advskew設定や `net.inet.carp.preempt` の設定を見直します。
+
+```bash
+{% for s in test_sessions %}{% if s.type == "ssh" %}pkill -f "ssh-session-{{ loop.index }}"
+{% elif s.type == "ping" %}pkill -f "ping-session-{{ loop.index }}"
+{% endif %}{% endfor %}
+```
+
+→ 手順2で開始した継続セッションを停止し、ログを保全します。
+
+## 動作確認
+
+- 手順4で記録した切替時間が {{ measured_failover_seconds_target }} 秒以内であること
+- 手順5のSSH/pingログで、切替前後を通じてセッションが途切れていないこと(pfsyncによるセッション維持の確認)
+- 手順6で `{{ master_host }}` がMASTER、`{{ backup_host }}` がBACKUPへ正しく復帰していること
+- `{{ rollback_deadline }}` までにメンテナンスモードの解除とMASTER復帰確認が完了していること
+
+## 注意事項
+
+- 本訓練は本番トラフィックが実際にBACKUP機へ切り替わる実切替訓練です。開始前に利用者・関連チームへ影響(数秒間のVIP移動)を告知し、中断が必要な場合の判断者を {{ participants[2] }} に一本化しておくこと。
+- 手順1の訓練前チェックで両系のバージョン不一致・設定未同期・pfsync異常のいずれかが確認された場合は訓練を開始しない。
+- 手順3でメンテナンスモードを有効化した後、{{ rollback_deadline }} を超えても手順6の復帰確認が完了しない場合は、中断判断者の判断で `sysctl net.inet.carp.demotion=0` を即時実行し旧経路(MASTER機)へ切り戻すこと。
+- メンテナンスモードは再起動しても解除されない永続設定のため、訓練終了後は必ず手順6で解除を実施し、解除を確認するまで訓練終了を宣言しないこと。
+- 新経路(BACKUP機側のVIP)でセッションが維持されていることを手順5で確認してから、旧経路(MASTER機)側の状態変更を確定させること。確認前に元の状態へ戻さない。

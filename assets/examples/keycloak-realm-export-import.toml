@@ -1,0 +1,6 @@
+[realm]
+realm_name = "corp-sso"
+export_dir = "/opt/keycloak/export"
+include_secrets = false
+target_env = "staging"
+vcs_managed = true

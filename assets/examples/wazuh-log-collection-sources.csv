@@ -1,0 +1,5 @@
+log_source,log_format,path_or_command,target_decoder,note
+auth_syslog,syslog,/var/log/auth.log,sshd,SSH認証・sudo実行のsyslog行を収集
+kernel_audit,audit,/var/log/audit/audit.log,auditd,auditdの生イベントをそのまま収集し相関に利用
+app_json,json,/var/log/myapp/app.log,json,アプリケーションが1行1JSONで出力する構造化ログ
+disk_usage_check,full_command,df -P /,df,ディスク使用率を定期実行で収集ししきい値アラートに利用

@@ -1,0 +1,6 @@
+drop_rate_threshold = 0.01
+profiling_enabled = false
+ring_size_current = 2048
+ring_size_new = 4096
+suspect_sids = [2019401, 2024766, 2010935]
+bpf_exclude_filter = "not port 9100"

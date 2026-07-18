@@ -1,0 +1,4 @@
+identity_name,role_attributes,reason,revoked_at,active_sessions,followup
+laptop-tanaka,"remote-worker,finance",端末紛失の疑い,2026-07-17T09:15:00+09:00,2,MFAリセットとヘルプデスク経由の再登録案内
+mobile-sato,contractor,退職済み委託者の鍵漏洩疑い,2026-07-17T09:20:00+09:00,0,-
+server-agent-03,"cicd,build-runner",APIキー漏洩(GitHub誤コミット検知),2026-07-17T09:25:00+09:00,1,CI/CD側のシークレットローテーションとコミット履歴の除去

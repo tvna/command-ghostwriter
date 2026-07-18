@@ -1,0 +1,9 @@
+suggestion_id,category,current,target,change_action,risk,rollback
+KRNL-5820,kernel,net.ipv4.conf.all.accept_redirects = 1,net.ipv4.conf.all.accept_redirects = 0,sysctl.dドロップインを配置しICMPリダイレクト受入を無効化,low,ドロップインファイルを削除しsysctl --systemを再実行
+KRNL-5830,kernel,net.ipv4.conf.all.send_redirects = 1,net.ipv4.conf.all.send_redirects = 0,sysctl.dドロップインを配置しICMPリダイレクト送出を無効化,low,ドロップインファイルを削除しsysctl --systemを再実行
+SSH-7408,ssh,PermitRootLogin yes,PermitRootLogin prohibit-password,予備セッションでの鍵ログイン確認後にsshd_configを是正,high,バックアップしたsshd_configへ戻しsshdをreload
+AUTH-9328,ssh,PasswordAuthentication yes,PasswordAuthentication no,鍵認証での接続成功を確認してからパスワード認証を無効化,high,バックアップしたsshd_configへ戻しsshdをreload
+FILE-6310,permissions,/etc/shadow のmodeが644,/etc/shadow のmodeを640に是正,chmod/chownで所有者とパーミッションを是正,medium,是正前のmodeを変更記録から復元
+FILE-7524,permissions,/var/log のmodeが777,/var/log のmodeを750に是正,ログディレクトリのパーミッションを是正,medium,是正前のmodeを変更記録から復元
+PKGS-7381,packages,telnet-server がインストール済み,telnet-server を削除,不要な平文プロトコルのパッケージを削除,medium,dnf install telnet-serverで復元(設定ロス無し)
+PKGS-7392,packages,openssl 3.0.7-1(既知脆弱性あり),openssl 3.0.9-1へ更新,セキュリティ更新の適用,low,dnfキャッシュから旧バージョンへdowngrade

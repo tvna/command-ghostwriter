@@ -1,0 +1,136 @@
+# OpenZiti コントローラ HAクラスタ構築手順 — {{ cluster_name }}
+
+OpenZiti コントローラを Raft ベースの複数ノード構成にし、ZTNA オーバーレイの制御プレーン（証明書発行・ポリシー配布・ルーティング決定）を単一障害点から冗長化する手順です。
+
+## 目的
+
+{{ cluster_members | length }} ノードの Raft クラスタでコントローラを構成し、`ziti agent cluster list` によるメンバー確認と、リーダーノード停止時の自動フェイルオーバー（新リーダー選出後も edge ログインが継続できること）を検証できるようになることを目指します。
+
+## 用語解説
+
+- **Raft**: 分散合意アルゴリズム。複数ノード間で設定・状態を複製し、過半数（quorum）の合意がある場合のみ書き込みを確定する
+- **quorum（クォーラム）**: 書き込みを確定するために必要な最小合意ノード数。`floor(N/2) + 1` で、クラスタは奇数ノードで構成するのが基本（偶数だと同数分裂時にquorumが決まらない）
+- **リーダー / フォロワー**: Raft クラスタでは常に1台のリーダーが書き込みを受け付け、他はフォロワーとしてログを複製する。リーダーが失われると残ったノード間で新リーダー選挙が行われる
+- **minClusterSize**: このノード数に達するまでクラスタが初期ブートストラップを待機する設定値
+- **dataDir**: Raft のログ・スナップショットを保存するディレクトリ。ノードごとに固有のローカルディスク上に置く
+- **edge login**: `ziti edge login` でコントローラの Edge API（管理・データプレーン制御用REST API）に対して行う認証。コントローラがどのノードにフェイルオーバーしても継続できることが冗長化の目的そのもの
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| クラスタ名 | {{ cluster_name }} |
+| dataDir | {{ data_dir }} |
+| minClusterSize | {{ min_cluster_size }} |
+| Edge API | {{ edge_api }} |
+| 管理ユーザー | {{ admin_user }} |
+| ノード数 | {{ cluster_members | length }} |
+
+クラスタメンバー:
+
+| name | advertised |
+| --- | --- |
+{% for m in cluster_members %}| {{ m.name }} | {{ m.advertised }} |
+{% endfor %}
+## 1. 各ノードに controller.yaml を配置する（全ノード共通）
+
+各ノードで OpenZiti コントローラをインストールし、`raft` セクションに `dataDir` と `minClusterSize` を設定します。`dataDir` はノードごとのローカルディスク上に置き、他ノードと共有しないでください（共有ストレージ上に置くと Raft ログの整合性前提が崩れます）。
+
+```bash
+sudo mkdir -p {{ data_dir }}
+sudo useradd --system --home /var/lib/ziti-controller --shell /usr/sbin/nologin ziti || true
+sudo chown -R ziti:ziti {{ data_dir }}
+```
+
+`/opt/openziti/etc/controller.yaml` の該当部分（ノードごとに `advertised` のみ自ノードの値に変更）:
+
+```yaml
+db: /var/lib/ziti-controller/ctrl.db
+raft:
+  dataDir: {{ data_dir }}
+  minClusterSize: {{ min_cluster_size }}
+{% for m in cluster_members %}  # ノード {{ m.name }} の advertised: {{ m.advertised }}
+{% endfor %}
+```
+
+## 2. 最初のノードでクラスタを初期化する（{{ cluster_members[0].name }}）
+
+```bash
+sudo systemctl enable --now ziti-controller
+sudo ziti agent cluster init {{ cluster_members[0].advertised }} --id {{ cluster_members[0].name }}
+```
+
+`minClusterSize: {{ min_cluster_size }}` に達するまで、このノードは書き込み可能な単独クラスタとしては確定しません。残りのノードを続けて join させます。
+
+## 3. 残りのノードをクラスタに参加させる
+
+{% for m in cluster_members %}{% if not loop.first %}{{ m.name }}（{{ m.advertised }}）:
+
+```bash
+sudo systemctl enable --now ziti-controller
+sudo ziti agent cluster add tls:{{ m.advertised }} --id {{ m.name }} --voter
+```
+
+{% endif %}{% endfor %}
+## 4. クラスタメンバーを確認する
+
+任意のノードから実行し、{{ cluster_members | length }} ノード全員が表示され、うち1台が leader、残りが voter（フォロワー）として認識されていることを確認します。
+
+```bash
+ziti agent cluster list
+```
+
+期待される出力イメージ:
+
+```text
+ID       ADDR                        VOTER  LEADER
+{% for m in cluster_members %}{{ m.name }}    {{ m.advertised }}   true   {% if loop.first %}true{% else %}false{% endif %}
+
+{% endfor %}```
+
+## 5. edge login の到達性を確認する
+
+冗長化の目的は「リーダーが変わっても edge login が継続できる」ことです。まずは平常時に全ノード経由でログインできることを確認します。
+
+```bash
+{% for m in cluster_members %}ziti edge login {{ edge_api }} --username {{ admin_user }} --yes   # {{ m.name }} 経由の疎通を意識して実行
+{% endfor %}```
+
+## 6. リーダー障害時のフェイルオーバーを検証する
+
+現在のリーダーを特定し、意図的に停止して新リーダーが選出されること、edge login が継続できることを確認します。**quorum を割らないよう、停止するのは常に1台のみにしてください。**
+
+```bash
+ziti agent cluster list   # LEADER=true のノードを確認
+sudo systemctl stop ziti-controller   # 特定したリーダーノード上で実行
+```
+
+残ったノードのいずれかで新リーダーが選出されたことを確認します（数秒〜十数秒かかります）:
+
+```bash
+ziti agent cluster list   # 別ノードでLEADER=trueに切り替わっていること
+ziti edge login {{ edge_api }} --username {{ admin_user }} --yes   # 新リーダー選出後もログインできること
+```
+
+確認後、停止したノードを復旧します:
+
+```bash
+sudo systemctl start ziti-controller
+ziti agent cluster list   # 復旧したノードがvoterとして復帰していること
+```
+
+## 動作確認
+
+1. `ziti agent cluster list` で {{ cluster_members | length }} ノード全員が表示され、リーダーが1台だけ存在すること
+2. リーダーノードを停止後、`ziti agent cluster list` で別ノードに LEADER=true が移ること
+3. リーダー切替後も `ziti edge login {{ edge_api }} --username {{ admin_user }} --yes` が成功すること
+4. 停止したノードを復旧後、再び {{ cluster_members | length }} ノード全員が表示されること
+
+## 注意事項
+
+- **quorum 喪失に注意する**: 過半数（{{ min_cluster_size }} ノード構成では2台）が同時にダウンすると、残りのノードは quorum を確定できず**書き込み不可**（設定変更・証明書発行が停止）になります。検証で停止してよいのは常に1台のみです。
+- **時刻同期**: Raft のログタイムスタンプと証明書検証はノード間の時刻ずれに弱いため、全ノードで chrony 等による NTP 同期を事前に構成しておくこと。
+- **ネットワーク遅延要件**: Raft の合意はノード間の往復遅延に比例して遅くなります。リーダー選挙のタイムアウトより十分小さい遅延（目安として同一リージョン内、数十ms未満）のネットワークでノードを配置すること。
+- **初期ブートストラップ順序を守る**: 手順2でクラスタを初期化してから手順3で残りのノードを join させること。順序を逆にする、または `minClusterSize` に達する前に複数ノードを同時初期化すると、クラスタが分裂した状態で立ち上がる可能性があります。
+- **新しい経路を検証してから旧経路を止める**: 本手順はコントローラの冗長化そのものが認証・可用性の要となるため、新リーダーでの `ziti edge login` 継続を確認する（手順6・動作確認3）まで、停止したノードの復旧や設定変更の判断を行わないこと。
+- `ziti agent cluster` サブコマンドのフラグ名はバージョンにより変わる場合があるため、投入前に導入バージョンの `ziti agent cluster --help` で構文を確認すること。

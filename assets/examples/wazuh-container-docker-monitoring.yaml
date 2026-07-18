@@ -1,0 +1,15 @@
+docker_listener_enabled: true
+monitored_events:
+  - create
+  - start
+  - stop
+  - die
+  - exec_create
+  - exec_start
+alert_on_privileged: true
+alert_on_exec: true
+agent_name: docker-host-01
+wazuh_manager: wazuh-manager.internal
+docker_socket_path: /var/run/docker.sock
+docker_listener_rule_id: 87900
+docker_listener_wodle_tag: docker-listener

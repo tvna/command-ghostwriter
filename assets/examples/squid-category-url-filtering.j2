@@ -1,0 +1,136 @@
+# SquidによるURLカテゴリフィルタリング手順
+
+ドメインリストとACLを組み合わせ、カテゴリ別のWebアクセス制御をSquidで構成します。
+Squid 5系(RHEL系/Debian系ディストリビューションの標準パッケージ)を前提に、
+プロキシサーバ上でroot権限により実行してください。
+
+## 目的
+
+ドメインリストを外部ファイルとして管理しつつ、dstdomain ACLとhttp_accessの評価順序を理解した上で、
+カテゴリ・時間帯・利用者グループを組み合わせたWebアクセス制御を安全に構成できるようになることを目指します。
+
+## 用語解説
+
+- **acl / dstdomain**: `acl <name> dstdomain "<ファイルパス>"` の形式で、リストファイルに列挙したドメインに
+  一致するアクセスを名前付きACLとして定義する。`acl blocked_sites dstdomain "/etc/squid/lists/blocked.txt"` が典型例
+- **http_access**: 定義済みACLに対してallow/denyを適用するディレクティブ。`http_access deny blocked_sites` のように
+  上から順に評価され、最初に一致した行で確定するため記述順序が結果を左右する
+- **dstdomainの先頭ドット**: `.facebook.com` のように先頭にドットを付けると `www.facebook.com` 等のサブドメインも
+  まとめて一致する。ドットなしの `facebook.com` は完全一致のみで、サブドメインは別途列挙が必要になる
+- **url_regexとの使い分け**: dstdomainはホスト名（FQDN）単位の一致に使う軽量な照合方式。パス名やクエリ文字列まで
+  条件に含めたい場合はurl_regexを使うが、正規表現の評価はリクエスト毎に行われるためdstdomainより負荷が高い
+- **リストファイルの外部管理**: ドメインリストをsquid.conf本体に書かず`/etc/squid/lists/`配下の外部ファイルに
+  分離することで、カテゴリ運用担当者がsquid.conf自体を編集せずにリスト更新・レビューできるようにする運用形態
+- **time ACL / src ACL**: `acl <name> time <曜日><開始>-<終了>` で時間帯を、`acl <name> src <CIDR>` で送信元ネットワーク
+  (グループ)をACL化できる。他のACLと組み合わせることで「特定グループの特定時間帯のみ」といった条件を表現できる
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 件のドメインをリストファイルに登録します。
+
+| list_name | domain | category | action | note |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["list_name"] }} | {{ r["domain"] }} | {{ r["category"] }} | {{ r["action"] }} | {{ r["note"] }} |
+{% endfor %}
+
+## 1. カテゴリ別リストファイルを配置する
+
+リストファイルはsquid.conf本体とは別に管理し、カテゴリ担当者が更新できるようにします。
+
+```bash
+mkdir -p /etc/squid/lists
+
+cat > /etc/squid/lists/sns_block.txt <<'EOF'
+{% for r in csv_rows %}{% if r["list_name"] == "sns_block" %}{{ r["domain"] }}
+{% endif %}{% endfor %}EOF
+
+cat > /etc/squid/lists/gambling_block.txt <<'EOF'
+{% for r in csv_rows %}{% if r["list_name"] == "gambling_block" %}{{ r["domain"] }}
+{% endif %}{% endfor %}EOF
+
+cat > /etc/squid/lists/streaming_block.txt <<'EOF'
+{% for r in csv_rows %}{% if r["list_name"] == "streaming_block" %}{{ r["domain"] }}
+{% endif %}{% endfor %}EOF
+
+cat > /etc/squid/lists/partner_allow.txt <<'EOF'
+{% for r in csv_rows %}{% if r["list_name"] == "partner_allow" %}{{ r["domain"] }}
+{% endif %}{% endfor %}EOF
+
+chown root:squid /etc/squid/lists/*.txt
+chmod 640 /etc/squid/lists/*.txt
+```
+
+## 2. squid.confにACLと時間帯・グループACLを定義する
+
+`/etc/squid/squid.conf` に以下を追記します。業務ネットワーク(staff_net)からの動画配信カテゴリのみ、
+就業時間中(business_hours)に限って遮断する組み合わせを含みます。取引先ドメインは他のACLより先に
+allowを評価させ、カテゴリブロックの例外として扱います。
+
+```
+acl sns_block dstdomain "/etc/squid/lists/sns_block.txt"
+acl gambling_block dstdomain "/etc/squid/lists/gambling_block.txt"
+acl streaming_block dstdomain "/etc/squid/lists/streaming_block.txt"
+acl partner_allow dstdomain "/etc/squid/lists/partner_allow.txt"
+
+acl staff_net src 10.0.10.0/24
+acl business_hours time MTWHF 09:00-18:00
+
+http_access allow partner_allow
+http_access deny sns_block
+http_access deny gambling_block
+http_access deny streaming_block staff_net business_hours
+http_access allow localnet
+```
+
+## 3. 構文チェックしてから反映する
+
+`squid -k reconfigure` の前に必ず構文検証を行い、誤りがあれば本番トラフィックに影響する前に修正します。
+
+```bash
+squid -k parse
+
+cp /etc/squid/squid.conf /etc/squid/squid.conf.bak.$(date +%Y%m%d%H%M%S)
+
+squid -k reconfigure
+```
+
+## 動作確認
+
+1. 許可対象(取引先ドメイン)への通信が通過することを確認する
+
+```bash
+curl -x http://proxy.example.internal:3128 -o /dev/null -s -w '%{http_code}\n' https://partner-example.co.jp/
+```
+
+2. 遮断対象(SNS/ギャンブルカテゴリ)への通信がプロキシで拒否されることを確認する
+
+```bash
+curl -x http://proxy.example.internal:3128 -o /dev/null -s -w '%{http_code}\n' https://facebook.com/
+```
+
+3. `access.log` で遮断・許可それぞれの記録を確認する
+
+```bash
+tail -n 50 /var/log/squid/access.log | grep -E 'TCP_DENIED|TCP_MISS|TCP_TUNNEL'
+```
+
+- 遮断対象へのアクセスで `TCP_DENIED` が記録され、許可対象では `TCP_TUNNEL` または `TCP_MISS` など通過を示す
+  結果コードが記録されていること
+- `squid -k reconfigure` 実行後、リストファイルの更新内容が反映されていること(反映前のキャッシュされた
+  応答ではないこと)
+
+## 注意事項
+
+- **段階的な適用**: 既存の許可運用を止める前に、まず取引先ドメイン等の許可対象への通信(手順の動作確認1)が
+  正常に通ることを確認してから、遮断ルール(手順の動作確認2)を本番の全利用者へ展開すること。反映直後に
+  想定外の遮断が発生した場合に備え、`squid.conf.bak.*` からの復元手順(`cp` で戻して`squid -k reconfigure`)を
+  即座に実行できるようにしておく。
+- **過大な正規表現による性能劣化**: url_regexを多用すると、リクエスト毎に全パターンとの照合が発生し
+  プロキシのスループットが低下する。ホスト名単位で判定できる条件は極力dstdomainを使い、url_regexは
+  パス・クエリまで見る必要がある場合に限定して使うこと。
+- **HTTPSでの制限**: SSL Bump(中間者的な復号)を導入していない構成では、HTTPS通信はTLSハンドシェイクの
+  SNI(サーバ名表示)のみが可視であり、ドメイン単位の許可・拒否は可能だがパス・クエリ単位の細かい制御は
+  できない。パス単位の制御が必要な場合はSSL Bumpの導入を別途検討すること。
+- **リスト更新の反映**: `/etc/squid/lists/` 配下のファイルを更新しただけでは実行中のSquidには反映されない。
+  必ず `squid -k reconfigure` を実行し、`access.log` で意図した結果が出ていることを確認すること。
+- リストファイルの所有者・権限(`root:squid`, `640`)を維持し、squidプロセスが読み取れる状態を壊さないこと。

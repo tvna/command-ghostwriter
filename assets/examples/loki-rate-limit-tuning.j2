@@ -1,0 +1,143 @@
+# Lokiレート制限とストリーム上限の調整
+
+`limits_config` の `ingestion_rate_mb` / `ingestion_burst_size_mb` / `per_stream_rate_limit` / `max_streams_per_user` / `max_line_size` を調整し、429エラーによるログ欠落を解消する手順です。
+
+## 目的
+
+Lokiのレート制限・ストリーム上限設定を安全に見直し、429エラー(レート制限超過)によるログ欠落を防ぎつつ、根本原因であるログの高カーディナリティ化を放置したまま制限だけを緩和しないようにすることを目指します。
+
+## 用語解説
+
+- **429エラー**: Lokiのdistributorがテナントのレート制限を超えたリクエストを拒否する際に返すHTTPステータス。発生するとpush対象のログ行はドロップされ、欠落として扱われる
+- **ingestion_rate_mb**: テナントごとの平均取り込みレート上限(MB/秒)
+- **ingestion_burst_size_mb**: 平均レートを一時的に超えて許容するバースト上限(MB)
+- **per_stream_rate_limit**: 単一ストリームあたりの書き込みレート上限
+- **ストリーム(stream)**: ラベルの組み合わせごとに作られるログ系列。ラベル値の種類が増えるほどストリーム数が増える
+- **max_streams_per_user**: テナントが保持できるストリーム数の上限。超過するとストリーム作成が拒否される
+- **max_line_size**: 1ログ行あたりの最大バイト数。超過した行は拒否される
+- **カーディナリティ**: ラベル値の取りうる種類の多さ。`request_id`のような一意性の高い値をラベルに使うとストリームが爆発的に増える
+- **per_tenant_overrides**: テナント単位で`limits_config`の値を上書きする設定。マルチテナント環境で負荷特性の異なるテナントに個別の上限を与える
+
+## シナリオ設定
+
+対象設定ファイルは `{{ config_path }}` で、サービス名は `{{ loki_service }}` です。
+
+| 項目 | 現状値 | 変更後の値 |
+| --- | --- | --- |
+| ingestion_rate_mb | {{ current_ingestion_rate_mb }} | {{ new_ingestion_rate_mb }} |
+| ingestion_burst_size_mb | {{ current_ingestion_burst_size_mb }} | {{ new_ingestion_burst_size_mb }} |
+| per_stream_rate_limit | {{ current_per_stream_rate_limit }} | {{ new_per_stream_rate_limit }} |
+| max_streams_per_user | {{ current_max_streams_per_user }} | {{ new_max_streams_per_user }} |
+| max_line_size | {{ current_max_line_size }} | {{ new_max_line_size }} |
+
+テナント別overridesは以下の通りです。
+
+| テナント | ingestion_rate_mb | ingestion_burst_size_mb | max_streams_per_user |
+| --- | --- | --- | --- |
+{% for tenant, override in per_tenant_overrides.items() %}
+| {{ tenant }} | {{ override.ingestion_rate_mb }} | {{ override.ingestion_burst_size_mb }} | {{ override.max_streams_per_user }} |
+{% endfor %}
+
+高カーディナリティの疑いがあるラベルは `{{ high_cardinality_labels }}` です。
+
+## 手順
+
+### 1. 現状のlimits_configと429発生状況を確認する
+
+```bash
+yq '.limits_config' {{ config_path }}
+```
+
+```promql
+sum(rate(loki_distributor_lines_dropped_total{reason="{{ rate_limited_reason }}"}[5m])) by (tenant)
+```
+
+上記PromQLで直近5分間にテナントごとドロップされた行数を確認し、429が発生しているテナントを特定します。
+
+### 2. ストリーム数が上限に達していないか確認する(根本原因の切り分け)
+
+```promql
+{{ ingester_streams_query }}
+```
+
+`max_streams_per_user`({{ current_max_streams_per_user }})に近い値が出ている場合、単純なレート緩和ではなく高カーディナリティラベル(`{{ high_cardinality_labels }}`)の是正を優先します。
+
+### 3. ingestion_rate_mb / ingestion_burst_size_mbを調整する
+
+`{{ config_path }}` の `limits_config` を編集します。
+
+```yaml
+limits_config:
+  ingestion_rate_mb: {{ new_ingestion_rate_mb }}
+  ingestion_burst_size_mb: {{ new_ingestion_burst_size_mb }}
+```
+
+`{{ current_ingestion_rate_mb }}` MB/秒・バースト{{ current_ingestion_burst_size_mb }}MBから、{{ new_ingestion_rate_mb }}MB/秒・バースト{{ new_ingestion_burst_size_mb }}MBへ引き上げます。
+
+### 4. per_stream_rate_limit / max_streams_per_user / max_line_sizeを調整する
+
+```yaml
+limits_config:
+  per_stream_rate_limit: {{ new_per_stream_rate_limit }}
+  max_streams_per_user: {{ new_max_streams_per_user }}
+  max_line_size: {{ new_max_line_size }}
+```
+
+### 5. テナント別overridesを設定する
+
+負荷特性の異なるテナントには、全体の`limits_config`ではなく`runtime_config`のper-tenant overridesで個別調整します。
+
+```yaml
+overrides:
+{% for tenant, override in per_tenant_overrides.items() %}
+  {{ tenant }}:
+    ingestion_rate_mb: {{ override.ingestion_rate_mb }}
+    ingestion_burst_size_mb: {{ override.ingestion_burst_size_mb }}
+    max_streams_per_user: {{ override.max_streams_per_user }}
+{% endfor %}
+```
+
+### 6. 設定を検証し、段階的に反映する
+
+まず設定ファイルの構文を検証します。
+
+```bash
+yq '.limits_config' {{ config_path }} > /tmp/limits_config.before.yaml
+loki -config.file={{ config_path }} -verify-config
+```
+
+検証が通ったら、まずカナリア的に1テナントのoverridesのみ反映してリロードし、429が解消するかを確認してから残りのテナントへ展開します。
+
+```bash
+systemctl reload {{ loki_service }}
+```
+
+## 動作確認
+
+1. 対象テナントで429が解消していることを確認します。
+
+```promql
+sum(rate(loki_distributor_lines_dropped_total{reason="{{ rate_limited_reason }}"}[5m])) by (tenant)
+```
+
+2. ログが実際に取り込まれていることを確認します。
+
+```bash
+logcli query '{tenant="tenant-billing"}' --limit 20 --since 5m
+```
+
+3. ストリーム数がmax_streams_per_userの新しい上限({{ new_max_streams_per_user }})内に収まっているか、増加傾向が続いていないかを確認します。
+
+```promql
+{{ ingester_streams_query }}
+```
+
+4. `{{ loki_service }}` サービスのメモリ・ディスク使用量が調整後に許容範囲内であることを監視で確認します。
+
+## 注意事項
+
+- レート制限の緩和とメモリ・ストレージ使用量はトレードオフです。ingestion_rate_mb/ingestion_burst_size_mbやmax_streams_per_userを引き上げるとingester・distributorのメモリ消費が増えるため、必ずリソース監視と併せて段階的に反映してください。
+- 429エラーの根本原因が高カーディナリティラベル(`{{ high_cardinality_labels }}`)によるストリーム爆発である場合、レート制限の緩和は対症療法に過ぎません。ラベル設計の是正を優先し、緩和は暫定対応として扱ってください。
+- テナントごとに負荷特性が異なる場合は、全体の`limits_config`を一律に緩めるのではなく`per_tenant_overrides`で個別に調整し、他テナントへの影響を局所化してください。
+- burst上限(ingestion_burst_size_mb)は平均レートの緩和とは別に設計します。スパイク的な取り込みを許容しすぎるとメモリ使用量が急増するため、通常時のログ量とスパイク時のログ量の両方を実測してから値を決定してください。
+- 設定変更は必ず変更前の値(`{{ config_path }}` の内容)を保存してから行い、まず一部テナント・一部インスタンスへ段階的に反映して429解消とリソース状況を確認したうえで全体へ展開してください。想定外の負荷増加が見られた場合は保存した変更前の設定へ直ちに戻せるようにしておきます。

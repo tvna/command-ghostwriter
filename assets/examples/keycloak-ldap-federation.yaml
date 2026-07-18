@@ -1,0 +1,14 @@
+realm: corp
+kc_server_url: https://keycloak.corp.example.com
+provider_name: corp-ldap
+connection_url: ldaps://ldap.corp.example.com:636
+bind_dn: cn=svc-keycloak,ou=service-accounts,dc=corp,dc=example,dc=com
+bind_credential_vault_key: ldap-bind-credential
+users_dn: ou=users,dc=corp,dc=example,dc=com
+user_object_classes: inetOrgPerson, organizationalPerson
+edit_mode: READ_ONLY
+sync_period: 86400
+groups_dn: ou=groups,dc=corp,dc=example,dc=com
+group_mapper_name: corp-ldap-group-mapper
+test_ldap_user: jsato
+leaver_user: ysuzuki

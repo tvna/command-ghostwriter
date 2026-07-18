@@ -1,0 +1,108 @@
+# Squidキャッシュ性能チューニング
+
+`cache_dir`・`cache_mem`・`refresh_pattern`を調整してキャッシュヒット率と応答性を高め、`access.log`とmgr機能でその効果を検証する手順です。root権限(sudo)で実施してください。
+
+## 目的
+
+Squidのキャッシュ関連パラメータを見直し、ディスクI/Oとメモリ使用量のバランスを取りながらキャッシュヒット率を高め、レスポンスの体感速度を改善できるようになることを目指します。
+
+## 用語解説
+
+- **cache_dir(aufs/rock)**: ディスクキャッシュの格納方式。`aufs`は非同期I/Oで汎用的、`rock`は固定長スロットで小オブジェクトの格納・読み出しが高速だが大きなオブジェクトの格納には不向き
+- **cache_mem**: ディスクへ書き込む前にメモリ上に保持するホットオブジェクト用の領域サイズ。頻繁にアクセスされる小さいオブジェクトの応答を高速化する
+- **maximum_object_size**: この値を超えるオブジェクトはキャッシュされず、都度オリジンへ取得しに行く
+- **refresh_pattern(min percent max オプション)**: `Expires`ヘッダが無いレスポンスの鮮度をヒューリスティックに計算する設定。`min`分は無条件に新鮮とみなし、`min`〜`max`の間は`Last-Modified`からの経過時間に`percent`を掛けた値を鮮度期間とし、`max`分を超えたら必ず再検証する
+- **オブジェクト鮮度(freshness)**: キャッシュされたオブジェクトをオリジンへ再検証せずに返してよいと判断できる期間。鮮度切れは`TCP_REFRESH_*`として記録される
+- **rock storeの小オブジェクト適性**: `rock`は固定サイズスロット単位で管理するため、アイコンやCSS/JSのような小さく大量のオブジェクトのキャッシュに向くが、スロットサイズを超えるオブジェクトは格納できない
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| cache_dir方式 | `{{ cache_dir_type }}` |
+| cache_dirサイズ | `{{ cache_dir_size_mb }}` MB |
+| cache_mem | `{{ cache_mem_mb }}` MB |
+| maximum_object_size | `{{ max_object_size_kb }}` KB |
+| refresh_patternの数 | {{ refresh_patterns | length }} 件 |
+
+refresh_patternの内訳:
+
+| pattern | min(分) | percent | max(分) | オプション |
+| --- | --- | --- | --- | --- |
+{% for rp in refresh_patterns %}| `{{ rp.pattern }}` | {{ rp.min }} | {{ rp.percent }}% | {{ rp.max }} | {{ rp.options }} |
+{% endfor %}
+
+## 手順
+
+### 1. 現在の設定をバックアップする
+
+```bash
+sudo cp /etc/squid/squid.conf /etc/squid/squid.conf.bak.$(date +%Y%m%d)
+```
+
+### 2. squid.confにキャッシュパラメータを設定する
+
+```bash
+sudo tee -a /etc/squid/squid.conf <<'EOF'
+cache_dir {{ cache_dir_type }} /var/spool/squid {{ cache_dir_size_mb }} 16 256
+cache_mem {{ cache_mem_mb }} MB
+maximum_object_size {{ max_object_size_kb }} KB
+{% for rp in refresh_patterns %}
+refresh_pattern {{ rp.pattern }} {{ rp.min }} {{ rp.percent }}% {{ rp.max }} {{ rp.options }}
+{% endfor %}
+EOF
+```
+
+### 3. 設定ファイルの構文を検証する
+
+```bash
+sudo squid -k parse
+```
+
+エラーが出ないことを確認してから次の手順へ進みます。
+
+### 4. cache_dirを再初期化する
+
+`cache_dir`のタイプやサイズを変更した場合、既存のキャッシュディレクトリ構造との不整合を避けるため、Squidを停止した状態で`squid -z`によりディレクトリ構造を再作成する必要があります。
+
+```bash
+sudo systemctl stop squid
+sudo squid -z
+sudo systemctl start squid
+```
+
+### 5. アクセスを発生させてキャッシュを温める
+
+```bash
+for i in 1 2 3; do curl -x http://localhost:3128 -s -o /dev/null -w "%{http_code}\n" http://example.com/; done
+```
+
+### 6. access.logでTCP_HIT/TCP_MISSを集計する
+
+```bash
+sudo awk '{print $4}' /var/log/squid/access.log | grep -oE 'TCP_[A-Z_]+' | sort | uniq -c | sort -rn
+```
+
+`TCP_HIT`と`TCP_MISS`(および`TCP_REFRESH_*`)の件数比からヒット率を算出します。ヒット率は概算で「`TCP_HIT`件数 ÷ 全リクエスト件数 × 100」として求めます。
+
+### 7. squidclientでキャッシュディレクトリの使用状況を確認する
+
+```bash
+squidclient mgr:storedir
+```
+
+`cache_dir`ごとのオブジェクト数・使用容量・空き容量が表示されるので、`{{ cache_dir_size_mb }}` MBに対してどの程度使用されているかを確認します。
+
+## 動作確認
+
+- `sudo squid -k parse`がエラーなく完了すること
+- `squid -z`実行後にSquidが正常に起動し、`systemctl status squid`が`active (running)`であること
+- access.logの集計で`TCP_HIT`が観測され、ヒット率が調整前と比べて改善していること
+- `squidclient mgr:storedir`で`{{ cache_dir_type }}`のcache_dirが認識され、使用容量が`{{ cache_dir_size_mb }}` MBの範囲内に収まっていること
+
+## 注意事項
+
+- `cache_mem`(`{{ cache_mem_mb }}` MB)を大きくしすぎるとメモリ不足やスワップの原因になり、`cache_dir`(`{{ cache_dir_size_mb }}` MB)を大きくしすぎるとディスクI/O待ちが応答遅延の原因になる。サーバの搭載メモリとディスク性能に応じてバランスを取ること。
+- HTTPS(TLS)通信はSSL Bump(中間者化)を導入しない構成では中身を検査できずCONNECTトンネルとして中継されるだけのため、レスポンス本体はキャッシュできない。本手順のrefresh_pattern調整はHTTP(平文)コンテンツのヒット率改善が対象であることに注意する。
+- `cache_dir`のタイプ(`aufs`/`rock`)やサイズを変更した場合は、変更前の`cache_dir`ディレクトリと構造に互換性が無いため、必ず`squid -z`で再初期化してから起動すること。再初期化を怠るとSquidが起動に失敗するか、キャッシュが破損した状態で動作する。
+- 設定変更前に`squid.conf.bak.<日付>`としてバックアップを取得しているため、動作確認で問題が見つかった場合はバックアップに戻して`sudo systemctl reload squid`で切り戻せる。

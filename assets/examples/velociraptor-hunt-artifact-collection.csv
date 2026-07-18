@@ -1,0 +1,6 @@
+artifact_name,vql_source_summary,target_scope,parameter,triage_note
+Windows.System.Pslist,SELECT * FROM pslist(),labels:incident-response,-,実行中プロセス一覧から不審な実行ファイルパス・親プロセスを確認する
+Linux.Sys.Crontab,SELECT * FROM parse_crontab(),os:linux,-,cron永続化エントリの有無と不審なコマンドを確認する
+Generic.System.Pstree,SELECT * FROM pstree(),labels:incident-response,-,親子プロセスの系統から侵害の起動経路を確認する
+Windows.Forensics.Prefetch,SELECT * FROM prefetch(),os:windows,-,実行履歴（Prefetch）から侵害後の実行痕跡と実行時刻を確認する
+Windows.Registry.NTUser,SELECT * FROM read_reg_key(globs=key),os:windows,HKEY_USERS\*\Software\Microsoft\Windows\CurrentVersion\Run,レジストリRunキーの永続化設定を確認する

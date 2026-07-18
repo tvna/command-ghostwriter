@@ -1,0 +1,7 @@
+manager_ip: 10.20.1.10
+enrollment_password_set: true
+agent_groups:
+  - web-servers
+  - default
+registration_method: agent-auth
+agent_hostname: web01

@@ -1,0 +1,6 @@
+check_type,parameter,applied_service,enforcement
+mfa,totp-timeout=90s,svc-erp-web,required
+os,windows-10-plus;macos-13-plus;linux,svc-erp-web,required
+domain,CORP.EXAMPLE.LOCAL,svc-erp-web,required
+process,C:\Program Files\CorpAV\avagent.exe,svc-erp-web,required
+mac,00:1A:2B:3C:4D:5E,svc-finance-db,required

@@ -1,0 +1,13 @@
+nft_table: "inet filter"
+nft_chain: "forward"
+nic_interface: "ens19"
+queue_num: 0
+fail_open: true
+protected_net: "192.168.10.0/24"
+suricata_yaml_path: "/etc/suricata/suricata.yaml"
+custom_rules_path: "/etc/suricata/rules/local.rules"
+fast_log_path: "/var/log/suricata/fast.log"
+drop_sids:
+  - 9000001
+ids_soak_days: 7
+telnet_test_host: "192.168.10.50"

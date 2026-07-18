@@ -1,0 +1,12 @@
+prometheus_enabled: true
+scrape_interval: "15s"
+watch_metrics:
+  - "cs_parser_hits_ok_total / cs_parser_hits_total のパース成功率"
+  - "cs_parser_hits_ko_total のパース失敗数"
+  - "cs_bucket_overflowed_total のシナリオ発火数"
+  - "cs_active_decisions のアクティブ遮断数"
+  - "cs_alerts_total の総アラート数"
+alert_rules:
+  - "5分間でcs_parser_hits_ko_totalが100件を超えたらログフォーマット変化の疑いとして即時通知"
+  - "1時間でcs_active_decisionsが平常時比3倍を超えたら攻撃急増または誤検知の疑いとして通知"
+  - "cs_bucket_overflowed_totalがゼロのまま24時間継続したらパーサ停止の疑いとして通知"

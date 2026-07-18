@@ -1,0 +1,160 @@
+# Lokiマルチテナントとauth_enabledによるアクセス制御
+
+Grafana Loki + Promtailで、`auth_enabled: true`と`X-Scope-OrgID`ヘッダを用いたテナント分離を構成し、リバースプロキシ(nginx)で認証を委譲する手順書です。root権限（sudo）とnginx・Loki管理者権限が必要です。
+
+## 目的
+
+複数チーム（テナント）が同一Lokiクラスタを共有しつつ、テナント間でログが混在・越境しないようにアクセス制御を構成し、テナントごとの取り込み・クエリ上限を設定できるようになることを目指します。
+
+## 用語解説
+
+- **auth_enabled**: Loki自体にtrueを設定すると、全リクエストに`X-Scope-OrgID`ヘッダを必須とし、そのヘッダ値でテナント間のログ・インデックスを完全分離するモード。ただし**Loki自体はヘッダの中身を検証しない**（誰でも任意の`X-Scope-OrgID`を名乗れる）ため、認証自体はLokiの責務ではない。
+- **X-Scope-OrgID**: リクエストごとにテナントを識別するHTTPヘッダ。Loki/Promtail/GrafanaはこのヘッダでテナントIDを解決し、ストレージ上のインデックス・チャンクを分離する。
+- **認証委譲**: `auth_enabled: true`はヘッダを信頼するだけなので、実際の「このユーザーはteam-payments名乗ってよいか」を検証する認証はリバースプロキシ（本手順ではnginx）側で行い、検証済みテナントIDのみをLokiへ転送する構成のこと。
+- **per_tenant_limits**: テナントごとに取り込みレート・クエリで返却可能な系列数の上限を分けて設定する仕組み。1テナントの高負荷が他テナントに影響しないようにする。
+
+## シナリオ設定
+
+| 設定項目 | 値 |
+| --- | --- |
+| auth_enabled | {{ auth_enabled }} |
+| proxy_auth_method | {{ proxy_auth_method }} |
+{% for t in tenants %}| tenant[{{ loop.index0 }}].org_id | {{ t.org_id }} |
+| tenant[{{ loop.index0 }}].proxy_user | {{ t.proxy_user }} |
+{% endfor %}
+{% for t in tenants %}| per_tenant_limits[{{ t.org_id }}].ingestion_rate_mb | {{ per_tenant_limits[t.org_id].ingestion_rate_mb }} |
+| per_tenant_limits[{{ t.org_id }}].max_query_series | {{ per_tenant_limits[t.org_id].max_query_series }} |
+{% endfor %}
+
+## 手順
+
+### 1. loki-config.yamlでauth_enabledとテナント別limits_configを設定する
+
+```bash
+cp /etc/loki/loki-config.yaml /etc/loki/loki-config.yaml.bak
+```
+
+`/etc/loki/loki-config.yaml`に以下を設定します（既存の`schema_config`/`storage_config`はそのまま維持）。
+
+```yaml
+auth_enabled: {{ auth_enabled }}
+
+limits_config:
+  ingestion_rate_mb: 4
+  max_query_series: 2000
+
+overrides:
+{% for t in tenants %}  {{ t.org_id }}:
+    ingestion_rate_mb: {{ per_tenant_limits[t.org_id].ingestion_rate_mb }}
+    max_query_series: {{ per_tenant_limits[t.org_id].max_query_series }}
+{% endfor %}
+```
+
+設定を検証してからLokiを再起動します。
+
+```bash
+/usr/bin/loki -config.file=/etc/loki/loki-config.yaml -verify-config
+systemctl restart loki
+```
+
+### 2. nginxでテナント別Basic認証とX-Scope-OrgID付与を設定する
+
+テナントごとにhtpasswdファイルを作成します。
+
+```bash
+mkdir -p /etc/nginx/loki-tenants
+{% for t in tenants %}htpasswd -c /etc/nginx/loki-tenants/{{ t.org_id }}.htpasswd {{ t.proxy_user }}
+{% endfor %}
+```
+
+`/etc/nginx/conf.d/loki-proxy.conf`にテナント別ロケーションを定義し、認証成功後にサーバ側で`X-Scope-OrgID`を上書き付与します（クライアント指定のヘッダは信用しない）。
+
+```nginx
+{% for t in tenants %}location /loki/{{ t.org_id }}/ {
+    auth_basic "Loki tenant {{ t.org_id }}";
+    auth_basic_user_file /etc/nginx/loki-tenants/{{ t.org_id }}.htpasswd;
+    proxy_set_header X-Scope-OrgID "{{ t.org_id }}";
+    proxy_pass http://127.0.0.1:3100/;
+}
+{% endfor %}
+```
+
+設定を検証し反映します。
+
+```bash
+nginx -t
+systemctl reload nginx
+```
+
+### 3. Promtail/GrafanaのX-Scope-OrgIDヘッダ設定
+
+Promtail側（クライアント）は、送信先をnginxのテナント別パス経由にすることでヘッダ付与をプロキシに委譲します。`/etc/promtail/config.yml`の`clients`を以下のように設定します。
+
+```yaml
+clients:
+{% for t in tenants %}  - url: https://loki-proxy.internal/loki/{{ t.org_id }}/loki/api/v1/push
+    basic_auth:
+      username: {{ t.proxy_user }}
+      password_file: /etc/promtail/secrets/{{ t.org_id }}.pass
+{% endfor %}
+```
+
+Grafanaのデータソース（Loki）側も、テナントごとに別データソースを作成し、それぞれのURLを`https://loki-proxy.internal/loki/<org_id>/`に向け、対応するBasic認証情報を設定します。
+
+### 4. 新しい認証経路を並行稼働させ、旧経路を無効化する前に検証する
+
+既存の（認証なしの）直接アクセス経路がまだ有効な間に、新しいnginx経由の認証必須経路を並行して稼働させ、動作確認が完了するまで直接ポートは閉じない。
+
+```bash
+curl -s -u {{ tenants[0].proxy_user }}:'<password>' https://loki-proxy.internal/loki/{{ tenants[0].org_id }}/loki/api/v1/labels
+```
+
+上記が200を返すことを確認したうえで、次の手順でLokiの直接ポート(3100)をファイアウォールで外部非公開にします。
+
+```bash
+firewall-cmd --permanent --remove-port=3100/tcp
+firewall-cmd --reload
+```
+
+## 動作確認
+
+1. テナント別OrgIDでのログ投入とクエリ分離を確認する
+
+```bash
+{% for t in tenants %}curl -s -u {{ t.proxy_user }}:'<password>' \
+  -H "Content-Type: application/json" \
+  -X POST https://loki-proxy.internal/loki/{{ t.org_id }}/loki/api/v1/push \
+  -d '{"streams":[{"stream":{"job":"{{ t.org_id }}-test"},"values":[["'"$(date +%s%N)"'","hello from {{ t.org_id }}"]]}]}'
+{% endfor %}
+```
+
+```bash
+{% for t in tenants %}curl -s -u {{ t.proxy_user }}:'<password>' \
+  "https://loki-proxy.internal/loki/{{ t.org_id }}/loki/api/v1/query_range?query={job=\"{{ t.org_id }}-test\"}"
+{% endfor %}
+```
+
+2. 他テナントのログが見えないことを確認する（越境の確認）
+
+```bash
+curl -s -u {{ tenants[0].proxy_user }}:'<password>' \
+  "https://loki-proxy.internal/loki/{{ tenants[0].org_id }}/loki/api/v1/query_range?query={job=\"{{ tenants[1].org_id }}-test\"}"
+```
+
+上記のクエリ結果が空（`"result":[]`）であることを確認する。`{{ tenants[0].org_id }}`の認証情報で`{{ tenants[1].org_id }}`のログへアクセスできないことがテナント分離の証拠となる。
+
+3. 認証必須化の確認
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" https://loki-proxy.internal/loki/{{ tenants[0].org_id }}/loki/api/v1/labels
+```
+
+認証情報なしでのアクセスが`401`となること、また旧直接ポート(3100)が外部から到達不能（タイムアウトまたは接続拒否）になっていることを確認する。
+
+## 注意事項
+
+- `auth_enabled: true`は**Loki自体が認証を行うわけではない**。`X-Scope-OrgID`ヘッダの値をそのまま信頼してテナントを決定するだけなので、リバースプロキシでの認証（本手順のnginx Basic認証）を必ず併設すること。プロキシを経由せずLokiへ直接到達できる経路が残っていると、任意のクライアントが`X-Scope-OrgID`を詐称して他テナントのログへアクセスできてしまう。
+- nginxの`proxy_set_header X-Scope-OrgID`は、クライアントが送ってきたヘッダではなく**サーバ側で固定値として上書き設定**すること。クライアント指定値をそのまま転送する設定にすると、OrgID詐称によるテナント越境が可能になる。
+- 新しい認証必須経路（手順3・4）が実際に機能する（200が返る、認証なしは401になる）ことを動作確認章で確認してから、旧来の認証なし直接アクセス経路（3100番ポートの外部公開）を無効化すること。順序を逆にすると、切り戻し不能な形で全テナントのログ投入・参照が停止しうる。
+- プロキシのBasic認証資格情報（`.htpasswd`ファイル、パスワードファイル）はバージョン管理や共有ログに含めず、権限を600等に制限したファイルとして配布する。ローテーション時は新旧資格情報を一時的に併存させ、Promtail/Grafana側の切替後に旧資格情報を失効させること。
+- テナント間の`per_tenant_limits`は共有`limits_config`のデフォルトを上書きする形で機能する。上限を高く設定しすぎたテナントが他テナントの取り込み・クエリ性能へ影響しないよう、Loki全体のリソース余力を踏まえて設定すること。

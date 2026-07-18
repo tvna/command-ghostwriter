@@ -1,0 +1,17 @@
+mode = "hybrid"
+previous_mode = "automatic"
+wan_interface = "wan"
+lan_network = "10.0.10.0/24"
+vpn_descr = "IPsec-SiteB"
+alias_descr = "MAIL-OUT-FIXED-IP"
+mail_host = "10.0.40.10"
+
+[[static_source_maps]]
+src_net = "10.0.40.0/24"
+nat_ip = "203.0.113.30"
+purpose = "mail-server-fixed-source-ip"
+
+[[no_nat_networks]]
+src_net = "10.0.10.0/24"
+dst_net = "10.0.90.0/24"
+purpose = "site-to-site-vpn-siteB-napt-exclude"

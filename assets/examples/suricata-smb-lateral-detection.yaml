@@ -1,0 +1,23 @@
+sensor_name: "core-tap-01"
+mirror_source: "コアスイッチのSPANポート（東西トラフィックを含む集約ミラー）"
+home_net: "10.10.0.0/16,10.20.0.0/16"
+internal_segments:
+  - "10.10.0.0/16"
+  - "10.20.0.0/16"
+watch_shares:
+  - "ADMIN$"
+  - "C$"
+  - "IPC$"
+alert_on_exe_transfer: true
+rule_file_path: "/etc/suricata/rules/local-smb-lateral.rules"
+eve_json_path: "/var/log/suricata/eve.json"
+sid_admin_share: 9100401
+sid_exe_transfer: 9100402
+rev_number: 1
+test_target_host: "10.10.5.20"
+test_share: "ADMIN$"
+test_user: "labtest"
+backup_tool_ip: "10.10.5.5"
+asset_mgmt_ip: "10.10.5.6"
+suppress_rule_path: "/etc/suricata/rules/local-smb-lateral.suppress"
+reload_command: "suricatasc -c reload-rules"

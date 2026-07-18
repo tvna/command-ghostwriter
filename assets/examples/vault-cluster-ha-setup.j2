@@ -1,0 +1,132 @@
+# Vault raft HAクラスタの構築 — {{ nodes|length }}ノード構成
+
+Integrated Storage(raft)を用いて、HashiCorp Vaultを{{ nodes|length }}ノードで冗長化し、リーダー選出とフェイルオーバーを検証する手順書です。
+
+## 目的
+
+raft integrated storageによるVaultクラスタを構築し、クォーラム(過半数)の仕組みとautopilotによる健全性管理、リーダー障害時の自動フェイルオーバーを理解・検証できるようになることを目指します。
+
+## 用語解説
+
+- **raft quorum(過半数)**: raftクラスタが書き込みを受け付けるために必要な生存ノード数。{{ nodes|length }}ノード構成では過半数である2ノード以上が生存している必要がある
+- **autopilot**: raftクラスタの健全性を継続的に監視し、不健全なノードの自動除外や昇格を行うVaultの機能。`min_quorum`はクォーラム維持に必要な最小ノード数を明示する設定値
+- **standbyノードのリクエスト転送**: リーダー以外のノード(standby)が受けたリクエストを、内部的にリーダーへ転送して応答する仕組み。クライアントはどのノードにアクセスしてもよい
+- **retry_join**: 起動時に指定したリーダー候補へ自動的にraft joinを試みるvault.hclのstanza。手動での`operator raft join`を省略できる
+- **cluster_addr**: ノード間のraftレプリケーション通信に使うアドレス。クライアント向けの`api_addr`とは別に管理する
+
+## シナリオ設定
+
+| ノード名 | api_addr | cluster_addr |
+| --- | --- | --- |
+{% for n in nodes %}| {{ n.name }} | {{ n.api_addr }} | {{ n.cluster_addr }} |
+{% endfor %}
+- リーダー候補(retry_join_leader): {{ retry_join_leader }}
+- autopilot最小クォーラム(autopilot_min_quorum): {{ autopilot_min_quorum }}
+- ノード間TLS検証(tls_verify): {{ tls_verify }}
+
+## 1. 各ノードのvault.hclを作成する
+
+各ノードで`storage "raft"`スタンザに`cluster_addr`と`retry_join`を設定します。`retry_join`にはリーダー候補のAPIアドレスを指定し、起動時の自動joinを試みさせます。
+
+```bash
+{% for n in nodes %}sudo tee /etc/vault.d/vault.hcl <<'EOF' # {{ n.name }} で実行
+ui = true
+
+listener "tcp" {
+  address       = "0.0.0.0:8200"
+  tls_disable   = false
+  tls_cert_file = "/etc/vault.d/tls/vault-cert.pem"
+  tls_key_file  = "/etc/vault.d/tls/vault-key.pem"
+}
+
+storage "raft" {
+  path    = "/opt/vault/data"
+  node_id = "{{ n.name }}"
+
+  retry_join {
+    leader_api_addr = "{{ retry_join_leader }}"
+  }
+}
+
+cluster_addr = "{{ n.cluster_addr }}"
+api_addr     = "{{ n.api_addr }}"
+EOF
+{% endfor %}```
+
+## 2. 各ノードを起動しinitializeする
+
+リーダー候補となるノードのみ`vault operator init`を実行し、他ノードはretry_joinによって自動的に参加させます。
+
+```bash
+{% for n in nodes %}sudo systemctl enable --now vault # {{ n.name }} で実行
+{% endfor %}
+export VAULT_ADDR={{ retry_join_leader }}
+vault operator init -key-shares=5 -key-threshold=3 > /root/vault-init.txt
+# 出力されたUnseal Keyを閾値分適用してunsealする
+vault operator unseal
+```
+
+## 3. 残りのノードをraftクラスタへ参加させる
+
+retry_joinで自動参加しない場合に備え、手動でも`operator raft join`を実行できるようにしておきます。参加後は各ノードでもunsealが必要です。
+
+```bash
+{% for n in nodes %}export VAULT_ADDR={{ n.api_addr }} # {{ n.name }} で実行
+vault operator raft join {{ retry_join_leader }}
+vault operator unseal
+{% endfor %}```
+
+## 4. autopilotの設定を行う
+
+autopilotがクォーラム維持のために監視する最小ノード数を明示的に設定します。
+
+```bash
+export VAULT_ADDR={{ retry_join_leader }}
+vault operator raft autopilot set-config \
+  -min-quorum={{ autopilot_min_quorum }} \
+  -cleanup-dead-servers=true \
+  -dead-server-last-contact-threshold=24h
+vault operator raft autopilot state
+```
+
+## 動作確認
+
+1. 全ノードがraftクラスタに参加していることを確認します。
+
+```bash
+export VAULT_ADDR={{ retry_join_leader }}
+vault operator raft list-peers
+```
+
+- 出力の`Voter`列に{{ nodes|length }}ノード全てが`true`で表示されること
+- `Leader`列に1ノードのみ`true`が表示されること
+
+2. standbyノードへ直接リクエストしても、内部転送により正常に応答することを確認します(直接アクセスしても停止させるノードとは別なので影響を受けません)。
+
+```bash
+{% for n in nodes %}export VAULT_ADDR={{ n.api_addr }} # {{ n.name }} 経由でアクセス
+vault status
+{% endfor %}```
+
+3. リーダーを意図的に停止し、新リーダーへのフェイルオーバーとサービス継続を確認します。
+
+```bash
+# 現在のリーダーノードでVaultサービスを停止する(対象ノード名は事前にraft list-peersで確認する)
+sudo systemctl stop vault
+
+# 数秒待機後、生存ノードのいずれかから新リーダーを確認する
+export VAULT_ADDR={{ nodes[1].api_addr }}
+vault operator raft list-peers
+vault status
+```
+
+- 停止直後は一時的に書き込みエラーが発生し得るが、新リーダー選出後は`vault status`が`Sealed: false`かつ`HA Mode: active`を返すノードが1つ出現すること
+- 停止したノードを復旧後、`vault operator raft list-peers`に再び{{ nodes|length }}ノード全てが表示されること
+
+## 注意事項
+
+- {{ nodes|length }}ノード構成では過半数(2ノード)を割り込む(同時に2ノード停止)とクラスタはread-onlyとなり書き込みを受け付けなくなる。同時メンテナンスは1ノードずつに限定する。
+- ノード間通信(`cluster_addr`)には必ずTLSを使用し、`tls_verify`(現在の設定: {{ tls_verify }})を有効にして中間者攻撃を防ぐこと。無効化して運用しない。
+- raftはノード間の時刻同期に敏感なため、全ノードでchronyやntpdによる時刻同期を事前に構成しておくこと。同期がずれるとリーダー選出やハートビートの判定が不安定になる。
+- auto-unsealを併用する場合、フェイルオーバー時の自動unsealはauto-unseal機構(KMS等)が正しく設定されて初めて機能する。本手順のように手動unsealのままフェイルオーバーを自動化したい場合は、事前にauto-unsealへ切り替え、切替後は一度ノードを再起動して自動unsealが実際に成功することを確認してから、旧来の手動unseal手順を運用から外すこと。
+- リーダー停止(動作確認の手順3)は既存のリーダーを意図的に落とす操作のため、事前にstandbyノードへの直接アクセス(動作確認の手順2)で新リーダー候補が正常応答することを確認した上で実施する。

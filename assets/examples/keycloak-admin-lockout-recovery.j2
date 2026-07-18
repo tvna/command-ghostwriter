@@ -1,0 +1,149 @@
+# Keycloak管理者ロックアウトからの復旧 — {{ server.realm }} realm
+
+対象Keycloak（コンテナ **{{ server.container }}**、`{{ server.base_url }}`）の **{{ server.realm }}** realmで管理者がログイン不能になった場合の復旧手順です。原因を切り分けてから、最短の復旧経路を選んでください。
+
+## 目的
+
+master realm管理者のロックアウト原因を切り分け、一時管理者（break-glass admin）の起動またはkcadm.shによるパスワードリセット、LDAP連携断の復旧のいずれかを安全に実施し、恒久管理者を使える状態に戻すことを目指します。
+
+## 用語解説
+
+- **MFA紛失（mfa）**: TOTPデバイスの紛失・機種変更でワンタイムコードを入力できず、パスワードは合っていてもログインできない状態。DBに直接アクセスできるならOTP資格情報を削除する経路、できないなら一時管理者経由でTOTPを再登録する経路になる。
+- **ブルートフォースロック（bruteforce）**: Keycloakのbrute force detectionが連続失敗を検知し、アカウントを一時的にロックした状態。パスワードやMFAは正しくてもロック解除が必要で、`kcadm.sh update users/{id}/reset-password`ではなく`kcadm.sh update users/{id} -s enabled=true`や失敗カウンタのリセットが復旧経路になる。
+- **federation断（federation）**: 管理者アカウントがLDAP等の外部federationにマッピングされており、LDAP側の接続断や認証情報失効でログイン自体が失敗する状態。federation接続の復旧、またはfederationを一時無効化してローカル資格情報にフォールバックする経路になる。
+- **パスワード失念（password）**: 資格情報自体を覚えていない状態。DBへ到達できる運用ならkcadm.shでのパスワードリセットが最短、到達できないなら一時管理者を起動して恒久管理者のパスワードを再設定する経路になる。
+- **一時管理者（temp_admin / break-glass admin）**: `KC_BOOTSTRAP_ADMIN_USERNAME`/`KC_BOOTSTRAP_ADMIN_PASSWORD`環境変数、またはKeycloak 26以降の`bootstrap-admin`コマンドで起動する、復旧専用の使い捨て管理者アカウント。
+- **kcadm.sh**: Keycloak管理REST APIをCLIから叩くための公式クライアント。到達性があればGUIを介さず復旧操作ができる。
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| コンテナ名 | {{ server.container }} |
+| 管理コンソールURL | {{ server.base_url }} |
+| 対象realm | {{ server.realm }} |
+| ロックアウト原因 | {{ lockout.cause }} |
+| 復旧方式 | {{ lockout.recovery_method }} |
+| 一時管理者の利用 | {{ lockout.temp_admin }} |
+| 一時管理者ユーザー名 | {{ temp_admin.username }} |
+| 恒久管理者ユーザー名 | {{ permanent_admin.username }} |
+| federation alias | {{ federation.provider_alias }} |
+| LDAP接続先 | {{ federation.connection_url }} |
+
+## 1. 状況の切り分け
+
+まず、どの原因に該当するかを確認します。今回のケースは **{{ lockout.cause }}** です。
+
+```bash
+# コンテナが稼働しているか、直近のログにロック関連のイベントが出ていないか確認する
+docker logs --tail 200 {{ server.container }} | grep -iE "brute force|ldap|federation|invalid_user_credentials"
+```
+
+- ログイン画面で「アカウントが一時的に無効化されています」と出る場合は bruteforce ロックの疑いが強い。
+- パスワードは正しいのにワンタイムコードで弾かれる場合は mfa（TOTP紛失）。
+- ログインボタン押下後にタイムアウト・500エラーになる場合は federation（LDAP接続断）の疑い。
+- 単純にパスワードを思い出せない場合は password。
+
+## 2. 一時管理者（break-glass admin）を起動する
+
+DBへ直接到達できない、またはfederation経由でしか認証できず切り分け中は操作できない場合、一時管理者を起動して復旧の足場にします。
+
+```bash
+docker exec -e {{ temp_admin.env_user_var }}={{ temp_admin.username }} \
+  -e {{ temp_admin.env_pass_var }}="$(openssl rand -base64 24)" \
+  {{ server.container }} \
+  /opt/keycloak/bin/kc.sh bootstrap-admin user \
+    --username {{ temp_admin.username }} \
+    --password-env {{ temp_admin.env_pass_var }}
+```
+
+パスワードは環境変数として渡すのみとし、平文でファイルや`{{ paths.history_file }}`のようなシェル履歴に残さないでください。生成した一時パスワードは復旧完了後すぐに破棄します。
+
+一時管理者でログインできることを確認します。
+
+```bash
+/opt/keycloak/bin/kcadm.sh config credentials \
+  --server {{ server.base_url }} \
+  --realm {{ server.realm }} \
+  --user {{ temp_admin.username }} \
+  --password-env {{ temp_admin.env_pass_var }}
+```
+
+## 3. kcadm.shでの恒久管理者パスワードリセット（DBへ到達できる場合の代替経路）
+
+kcadm.shがREST API経由でDBに到達できる運用なら、一時管理者を経由せずこちらを使えます。password原因、またはbruteforce解除後の再設定に使います。
+
+```bash
+/opt/keycloak/bin/kcadm.sh get users -r {{ server.realm }} -q username={{ permanent_admin.username }}
+```
+
+出力されたユーザーIDを控え、パスワードを再設定します。
+
+```bash
+/opt/keycloak/bin/kcadm.sh set-password -r {{ server.realm }} \
+  --username {{ permanent_admin.username }} \
+  --new-password "$(openssl rand -base64 24)" \
+  --temporary
+```
+
+bruteforceロックの場合は、失敗カウンタと無効化状態を明示的に解除します。
+
+```bash
+/opt/keycloak/bin/kcadm.sh update users/USER_ID -r {{ server.realm }} -s enabled=true
+```
+
+## 4. LDAP federation断の復旧
+
+lockout.causeがfederationの場合、まずLDAP側の疎通を確認します。
+
+```bash
+ldapsearch -H {{ federation.connection_url }} -x -D "cn=readonly,dc=example,dc=internal" -W -b "dc=example,dc=internal" "(uid={{ permanent_admin.username }})"
+```
+
+疎通が取れない間は、一時的にfederationを無効化してローカル資格情報でのログインにフォールバックします（LDAP側の復旧を待たずに管理コンソールへ入れるようにする応急処置です）。
+
+```bash
+/opt/keycloak/bin/kcadm.sh update components/COMPONENT_ID -r {{ server.realm }} -s config.enabled=[\"false\"]
+```
+
+LDAP側の接続が復旧したら、federation設定を元に戻し疎通確認後に再度有効化します。
+
+```bash
+/opt/keycloak/bin/kcadm.sh update components/COMPONENT_ID -r {{ server.realm }} -s config.enabled=[\"true\"]
+```
+
+## 5. 恒久管理者の再整備とMFA再登録
+
+MFA紛失（mfa）の場合は、恒久管理者のTOTP資格情報を一度削除し、次回ログイン時に再登録させます。
+
+```bash
+/opt/keycloak/bin/kcadm.sh update users/USER_ID -r {{ server.realm }} -s 'requiredActions=["CONFIGURE_TOTP"]'
+```
+
+再登録後、資格情報ラベルが想定どおりであることを確認します。
+
+```bash
+/opt/keycloak/bin/kcadm.sh get users/USER_ID/credentials -r {{ server.realm }}
+```
+
+期待するラベルは `{{ permanent_admin.totp_credential_label }}` です。
+
+## 動作確認
+
+- 一時管理者 `{{ temp_admin.username }}` で管理コンソールにログインでき、対象realm `{{ server.realm }}` のユーザー一覧が閲覧できること。
+- 恒久管理者 `{{ permanent_admin.username }}` がパスワード（必要ならMFA再登録後のTOTP）でログインでき、一時管理者を使わず管理操作ができること。
+- federation断だった場合は、`ldapsearch`が成功し、federationを再有効化した状態でもログインできること。
+- bruteforceロックだった場合は、`kcadm.sh get users -r {{ server.realm }} -q username={{ permanent_admin.username }}`で`enabled: true`が返ること。
+
+## 注意事項
+
+- 恒久管理者でのログインが確認できるまで、一時管理者 `{{ temp_admin.username }}` を削除しないでください。先に恒久管理者の復旧を検証し、その後で一時管理者を無効化・削除する順序を必ず守ります。
+- 一時管理者の削除は復旧完了後、確認が取れてから行います。
+
+  ```bash
+  /opt/keycloak/bin/kcadm.sh delete users/TEMP_ADMIN_USER_ID -r {{ server.realm }}
+  ```
+
+- `{{ temp_admin.env_pass_var }}`・`{{ temp_admin.env_user_var }}`はコマンドライン引数やシェル変数展開に直接書かず、`docker exec -e`のようにプロセス起動時にのみ渡し、`{{ paths.env_file }}`のような永続ファイルやシェル履歴（`{{ paths.history_file }}`）に平文パスワードを残さないこと。実行後は該当行を必ず削除・履歴無効化(`HISTIGNORE`等)で対処する。
+- 復旧後は同一障害の再発防止として、恒久管理者を複数名体制にする、MFAの回復コードを事前発行して安全に保管する、federation障害時のローカルフォールバック手順を runbook 化しておくことを徹底する。
+- federationを一時無効化する操作はログイン経路を変える不可逆に近い変更のため、無効化前に別セッション（一時管理者側）でログインできる状態を確保してから実施し、復旧後は速やかに元の設定へ戻すこと。

@@ -1,0 +1,11 @@
+target_host: web01.internal.example.com
+focus_categories:
+  - authentication
+  - ssh
+  - file_permissions
+  - malware
+  - networking
+report_path: /var/log/lynis-report-post-incident.dat
+baseline_compare: true
+baseline_report_path: /var/log/lynis-report-baseline.dat
+incident_ticket: INC-2026-0713

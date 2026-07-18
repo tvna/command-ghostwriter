@@ -1,0 +1,100 @@
+# Unboundローカルゾーンによる内部名前解決
+
+Unbound の local-zone / local-data で内部名を提供し、外部へは一切漏らさない split-horizon 構成を作ります。
+
+## 目的
+
+社内専用のホスト名を Unbound の local-zone/local-data で権威応答させ、外部の権威DNSやフォワーダには一切問い合わせない split-horizon 構成を構築できるようになることを目指します。あわせて access-control による外部からの内部名非公開を検証します。
+
+## 用語解説
+
+- **local-zone**: Unbound 自身がそのゾーンについて権威を持つように振る舞わせる設定。type によって未知の名前をどう扱うか(外部へ再帰解決するか拒否するか)が変わる
+- **static**: local-zone に登録した local-data 以外の名前は NXDOMAIN を返す。ゾーン内の未登録名を外部へ漏らさない
+- **transparent**: local-data に登録した名前だけ応答し、未登録の名前は通常どおり外部へ再帰解決する。static と異なり、ゾーン内の別名を外部の権威DNSに問い合わせてしまう可能性がある
+- **local-data-ptr**: 逆引き(PTR)応答を1行で定義するショートハンド構文
+- **split-horizon**: 内部クライアントと外部クライアントで異なる名前解決結果を返す構成。本手順では access-control と local-zone の組み合わせで実現する
+- **unbound-control**: 稼働中の Unbound に対して設定の再読み込みやキャッシュ操作を行う制御コマンド
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| リスンインターフェース | {{ listen_interface }} |
+| 許可クライアント | {{ allowed_clients | join(", ") }} |
+{% for z in local_zones %}| local-zone | {{ z.name }} ({{ z.type }}) |
+{% endfor %}{% for r in local_records %}| local-data | {{ r.name }} {{ r.type }} {{ r.value }} |
+{% endfor %}{% for p in ptr_records %}| local-data-ptr | {{ p.ip }} -> {{ p.host }} |
+{% endfor %}
+## 手順
+
+### 1. Unbound をインストールする
+
+```bash
+apt-get update
+apt-get install -y unbound
+```
+
+### 2. local-zone と local-data を設定する
+
+```bash
+cat > /etc/unbound/unbound.conf.d/internal-zone.conf <<'EOF'
+server:
+    interface: {{ listen_interface }}
+{% for c in allowed_clients %}    access-control: {{ c }} allow
+{% endfor %}{% for z in local_zones %}    local-zone: "{{ z.name }}" {{ z.type }}
+{% endfor %}{% for r in local_records %}    local-data: "{{ r.name }} {{ r.type }} {{ r.value }}"
+{% endfor %}{% for p in ptr_records %}    local-data-ptr: "{{ p.ip }} {{ p.host }}"
+{% endfor %}EOF
+```
+
+local-zone の type には `{{ local_zones[0].type }}` を用いています。static は登録外の名前を NXDOMAIN で終端し、社内ゾーンの構造を外部へ推測させません。transparent を使う場合は登録外の名前がそのまま外部再帰解決へ流れるため、split-horizon の目的では原則 static を選びます。
+
+### 3. 構文を検証する
+
+```bash
+unbound-checkconf
+```
+
+### 4. 再起動して稼働を確認する
+
+```bash
+systemctl restart unbound
+systemctl status unbound --no-pager
+```
+
+### 5. 内部名の解決と逆引きを検証する(新しい設定が機能することを先に確認する)
+
+```bash
+# 正引き: 許可クライアントから内部名が解決できることを確認する
+dig @{{ listen_interface }} {{ local_records[0].name }} {{ local_records[0].type }} +short
+
+# 逆引き: PTRが期待どおり返ることを確認する
+dig @{{ listen_interface }} -x {{ ptr_records[0].ip }} +short
+```
+
+### 6. 外部への非漏洩を access-control 併用で検証する
+
+```bash
+# 許可外ネットワークからの問い合わせを模した確認。access-control に含まれないアドレス範囲からは
+# REFUSED となり、内部名の存在自体が外部へ推測されないことを確認する
+dig @{{ listen_interface }} {{ local_records[0].name }} {{ local_records[0].type }}
+# ANSWER: REFUSED (許可外クライアントとして到達した場合)
+
+# 外部の公開DNSに同じ内部名を問い合わせても解決できない(ゾーン非委任)ことを確認する
+dig {{ local_records[0].name }} {{ local_records[0].type }} @8.8.8.8 +short
+# 空(NXDOMAIN相当)であることを確認し、内部名が外部権威DNSへ一切登録されていないことを裏付ける
+```
+
+## 動作確認
+
+- `unbound-checkconf` がエラーなく通ること
+- `systemctl status unbound` が `active (running)` であること
+- 手順5で許可クライアントから内部名の正引き・逆引きが解決できること
+- 手順6で許可外クライアントからの問い合わせが REFUSED になり、外部の公開DNSからは内部名が一切解決できないこと
+
+## 注意事項
+
+- access-control の許可範囲を誤って広げると、内部名がオープンリゾルバ経由で外部から引けるようになり、社内ネットワーク構成の推測材料を与えてしまう。許可範囲は必要最小限のCIDRに限定すること。
+- local-zone の type を transparent にすると、local-data に登録していない同一ゾーン内の名前は外部への再帰解決に回ってしまい、split-horizon の前提(内部名は一切外部へ問い合わせない)が崩れる。内部専用ゾーンには static を使うこと。
+- local-data / local-data-ptr を追加・変更した場合、Unbound を再起動しなくても `unbound-control reload` でファイルを再読み込みして反映できる。ただし反映前に必ず `unbound-checkconf` で構文検証してから reload すること。
+- 本手順は既存の名前解決経路(外部フォワーダや上位キャッシュDNSへの問い合わせ)を変更するものではなく、内部ゾーンの権威応答を追加するだけである。それでも手順5で新しい内部名解決が機能することを確認してから、他システムのDNS参照先切り替えなど後続作業に進むこと。

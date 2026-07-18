@@ -1,0 +1,111 @@
+# OpenZitiアクセス到達性の定期検証訓練
+
+想定するidentity×serviceの到達可否マトリクスを、`ziti edge policy-advisor` の実行結果と突合し、ポリシー逸脱（過剰許可・過剰拒否）を洗い出す定期訓練手順です。
+
+## 目的
+
+OpenZitiのZTNAオーバーレイにおいて、identityとserviceの組み合わせごとに「本来こうあるべき」到達可否（expected）を台帳化し、`ziti edge policy-advisor` の実測結果（advisor_result）と定期的に突合することで、最小権限からの逸脱（過剰許可）や意図しない誤設定（過剰拒否）を早期に検出できるようになることを目指します。
+
+## 用語解説
+
+- **policy-advisor**: `ziti edge policy-advisor` サブコマンド。指定したidentityまたはserviceについて、Dial/Bind可否をEdge Router Policy・Service Policy・Service Edge Router Policyの組み合わせから評価し、実際にアクセス可能かどうかを判定するOpenZiti CLIの診断機能
+- **expected（期待値）**: 台帳で定義する「本来allow/denyであるべき」到達可否
+- **advisor_result（実測値）**: policy-advisorが実際に返したallow/deny判定
+- **match**: expectedとadvisor_resultが一致していればtrue、乖離していればfalse
+- **過剰許可**: expectedがdenyなのにadvisor_resultがallowになっている逸脱。role attributeの追加やService Policyの範囲拡大が原因になりやすい
+- **過剰拒否（誤設定）**: expectedがallowなのにadvisor_resultがdenyになっている逸脱。Service Policy未紐付けやEdge Router Policyの範囲不足が原因になりやすい
+
+## シナリオ設定
+
+今回の定期検証訓練対象は {{ csv_rows | length }} 組のidentity×serviceの組み合わせです。台帳には `identity` / `service` / `expected` / `advisor_result` / `match` / `checked_at` を記録します。
+
+| identity | service | expected | advisor_result | match | checked_at |
+| --- | --- | --- | --- | --- | --- |
+{% for r in csv_rows %}| {{ r["identity"] }} | {{ r["service"] }} | {{ r["expected"] }} | {{ r["advisor_result"] }} | {{ r["match"] }} | {{ r["checked_at"] }} |
+{% endfor %}
+## 手順
+
+### 1. controllerへログインする
+
+```bash
+ziti edge login localhost:1280 -u drill-auditor -p "$ZITI_DRILL_PW" -y
+```
+
+### 2. 台帳に載っているidentityとserviceの存在を確認する
+
+```bash
+{% for r in csv_rows %}ziti edge list identities 'name="{{ r["identity"] }}"' -q || echo "未検出: identity {{ r["identity"] }}"
+ziti edge list services 'name="{{ r["service"] }}"' -q || echo "未検出: service {{ r["service"] }}"
+{% endfor %}```
+
+### 3. identity単位でpolicy-advisorを全件実行する
+
+```bash
+{% for r in csv_rows %}echo "=== policy-advisor identities {{ r["identity"] }} -> {{ r["service"] }} ==="
+ziti edge policy-advisor identities "{{ r["identity"] }}" -q
+{% endfor %}```
+
+policy-advisorの出力は identity ごとに接続可能なserviceを列挙し、Dial/Bindそれぞれについて Common（Service PolicyとEdge Router Policyの両方が成立しているか）を判定します。`-q` を付けない場合は次のようにOK/FAILの根拠が表示されます。
+
+```text
+IDENTITY: mobile-sales-app (7fA2...)
+    SERVICE: crm-api (9kLp...)
+        Common Edge Routers: YES
+        Dial   : YES  (Service Policy: sp-mobile-dial, Edge Router Policy: erp-hq)
+        Bind   : NO   (Identity has no bind policies for this service)
+```
+
+### 4. service単位でも突合し、逆方向の漏れがないか確認する
+
+```bash
+{% for r in csv_rows %}ziti edge policy-advisor services "{{ r["service"] }}" -q
+{% endfor %}```
+
+### 5. expectedとadvisor_resultを突合し、逸脱を分類する
+
+```bash
+{% for r in csv_rows %}{% if r["match"] != "true" %}{% if r["expected"] == "deny" and r["advisor_result"] == "allow" %}echo "過剰許可の疑い: {{ r["identity"] }} -> {{ r["service"] }} (expected=deny, advisor=allow)"
+{% elif r["expected"] == "allow" and r["advisor_result"] == "deny" %}echo "過剰拒否(誤設定)の疑い: {{ r["identity"] }} -> {{ r["service"] }} (expected=allow, advisor=deny)"
+{% endif %}{% endif %}
+{% endfor %}```
+
+### 6. 過剰許可はrole attributeの棚卸しから原因を特定する
+
+過剰許可が検出された場合、まず該当identity・serviceに紐づくrole attributeとService Policyの `identityRoles` / `serviceRoles` を確認し、意図しない範囲拡大がないか調べます。
+
+```bash
+{% for r in csv_rows %}{% if r["match"] != "true" and r["expected"] == "deny" and r["advisor_result"] == "allow" %}ziti edge list identities 'name="{{ r["identity"] }}"' -q
+ziti edge list service-policies 'serviceRoles contains "@{{ r["service"] }}"' -q
+{% endif %}{% endfor %}```
+
+### 7. 是正はいきなり本番ポリシーを削除せず、新経路の成立を確認してから旧経路を外す
+
+過剰許可を是正するためService PolicyからidentityRoleやserviceRoleを外す場合は、先に是正後の想定構成をdry-runで検証してから適用します。
+
+```bash
+{% for r in csv_rows %}{% if r["match"] != "true" and r["expected"] == "deny" and r["advisor_result"] == "allow" %}# 是正後を想定した別ロールで一時identityを作成し、正規アクセスが残ることを先に確認する
+ziti edge create identity service "tmp-verify-{{ r["identity"] }}" -o tmp-verify-{{ r["identity"] }}.jwt
+ziti edge policy-advisor identities "tmp-verify-{{ r["identity"] }}" -q
+# 新経路の到達性を確認できてから、該当role attributeをService Policyから除外する
+{% endif %}{% endfor %}```
+
+### 8. 訓練結果を台帳に反映し、証跡として保管する
+
+```bash
+{% for r in csv_rows %}echo "{{ r["identity"] }},{{ r["service"] }},{{ r["expected"] }},{{ r["advisor_result"] }},{{ r["match"] }},{{ r["checked_at"] }}" >> /var/log/ziti-drill/policy-advisor-drill-result.csv
+{% endfor %}```
+
+## 動作確認
+
+- 全 {{ csv_rows | length }} 組について `ziti edge policy-advisor` の実測結果（advisor_result）を取得できていること
+- expectedとadvisor_resultの突合結果（match）が台帳のとおりであり、`false` となった組み合わせすべてが「過剰許可」または「過剰拒否(誤設定)」のどちらかに分類されていること
+- 過剰許可について、is-a(role attribute)の棚卸しにより原因（追加されたattribute、拡大されたService Policy）を特定できていること
+- 是正適用前に、tmp-verify用identityなどで新しいポリシー構成でも正規アクセスが成立することを確認済みであること
+
+## 注意事項
+
+- ポリシー変更（Service Policy / Edge Router Policyの追加・変更）を行った直後は、必ず想定マトリクス（本CSV）のexpected列を更新してから次回訓練を実施する。マトリクスが古いままだと、正当な変更を誤って逸脱と誤検知する。
+- role attributeの追加は、意図しないidentityやserviceまで一致範囲を広げ、過剰許可を生みやすい。attribute追加の都度、影響を受けるService Policyの `identityRoles` / `serviceRoles` を確認し、想定外の組み合わせが新たにmatchしていないかpolicy-advisorで再検証する。
+- 過剰許可の是正でrole attributeやService Policyを外す際は、先に手順7のように新しい構成（是正後の想定）で正規アクセスが成立することを別identityやdry-run相当の検証で確認してから、旧いallowを外すこと。確認前に外すと正規利用者の通信を止める可能性がある。
+- 訓練結果（advisor_result・matchの一覧、実行日時checked_at）は `/var/log/ziti-drill/` 配下に追記保存し、監査証跡として一定期間保持する。
+- policy-advisorの出力書式はOpenZitiのバージョンにより表示項目が変わることがあるため、`-q` の終了コードに加え、必要に応じて `-o json` 相当の構造化出力の利用も検討し、自動突合の安定性を確保する。

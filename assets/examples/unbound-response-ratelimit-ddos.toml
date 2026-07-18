@@ -1,0 +1,4 @@
+ratelimit_qps = 1000
+ip_ratelimit_qps = 20
+ratelimit_factor = 10
+allowed_clients = ["10.0.20.0/24", "127.0.0.0/8"]

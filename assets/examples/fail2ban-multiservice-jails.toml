@@ -1,0 +1,46 @@
+[server]
+host = "web-01"
+admin_user = "ops"
+
+ignoreip = ["203.0.113.10", "198.51.100.20"]
+ban_action = "iptables-multiport"
+
+[[jails]]
+name = "sshd"
+filter = "sshd"
+logpath = "/var/log/auth.log"
+maxretry = 5
+findtime = 600
+bantime = 3600
+
+[[jails]]
+name = "nginx-http-auth"
+filter = "nginx-http-auth"
+logpath = "/var/log/nginx/error.log"
+maxretry = 5
+findtime = 600
+bantime = 3600
+
+[[jails]]
+name = "postfix-sasl"
+filter = "postfix-sasl"
+logpath = "/var/log/mail.log"
+maxretry = 4
+findtime = 600
+bantime = 3600
+
+[[jails]]
+name = "dovecot"
+filter = "dovecot"
+logpath = "/var/log/mail.log"
+maxretry = 4
+findtime = 600
+bantime = 3600
+
+[[jails]]
+name = "recidive"
+filter = "recidive"
+logpath = "/var/log/fail2ban.log"
+maxretry = 3
+findtime = 86400
+bantime = 604800

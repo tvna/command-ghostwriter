@@ -1,0 +1,204 @@
+# OpenZiti上のzrok自己ホスト共有基盤 構築手順 — {{ frontend_host }}
+
+既存の OpenZiti コントローラ（{{ ziti_ctrl }}）上に zrok の controller / frontend をデプロイし、社内サービスを一時的・恒久的に安全へ共有するための構築手順です。zrok 本体・OpenZiti ともに Apache-2.0 の OSS で構成します。
+
+## 目的
+
+OpenZiti を基盤とした zrok 自己ホスト環境を構築し、アカウント発行から reserved share・private share の払い出しまでを、公開範囲を取り違えずに実施できるようになることを目指します。
+
+## 用語解説
+
+- **OpenZiti**: ゼロトラストのオーバーレイネットワークを提供する基盤。zrok はこの上に構築された共有レイヤであり、zrok 単体では通信できず OpenZiti のコントローラ/ルータが必須。
+- **zrok controller**: アカウント・環境・share を管理する制御プレーン。OpenZiti のエッジクライアントとして {{ ziti_ctrl }} に接続する。
+- **zrok frontend**: public share の入口となるプロセス。{{ frontend_host }} で待ち受け、OpenZiti アイデンティティ（{{ frontend_identity }}）としてネットワークに参加する。
+- **public share**: `zrok share reserved` などで発行した共有を、frontend（{{ frontend_host }}）経由の URL で誰でも到達可能にするモード。
+- **private share**: frontend を経由せず、共有先の zrok 環境で `zrok access private` を実行したトンネラーからのみ到達できるモード。URL は発行されない。
+- **reserved share**: `zrok reserve` で確保する恒久的な share token。プロセスを再起動しても token が変わらないため、恒久公開に使う。対して `zrok share public`/`zrok share private` を直接実行するとプロセス終了時に破棄される一時 share になる。
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| Ziti コントローラ | {{ ziti_ctrl }} |
+| zrok 管理エンドポイント | {{ zrok_admin_endpoint }} |
+| frontend ホスト | {{ frontend_host }} |
+| frontend OpenZiti アイデンティティ | {{ frontend_identity }} |
+
+共有対象サービス:
+
+| サービス名 | 転送先 | share_mode | backend_mode | 所有者 |
+| --- | --- | --- | --- | --- |
+{% for s in services %}| {{ s.name }} | {{ s.target }} | {{ s.share_mode }} | {{ s.backend_mode }} | {{ s.owner }} |
+{% endfor %}
+アカウント:
+
+| メールアドレス | パスワード格納先（環境変数名） | 権限 |
+| --- | --- | --- |
+{% for a in accounts %}| {{ a.email }} | {{ a.password_env }} | {{ a.role }} |
+{% endfor %}
+
+## 1. zrok controller をデプロイする（{{ ziti_ctrl }} と疎通できるホスト）
+
+既存の Ziti コントローラのエッジ管理者クレデンシャルを使って、zrok controller 用の OpenZiti アイデンティティを発行します。
+
+```bash
+ziti edge login {{ ziti_ctrl }} -u admin
+ziti edge create identity service "zrok-controller" -o zrok-controller.jwt
+ziti edge enroll zrok-controller.jwt
+```
+
+controller 設定ファイルを配置します。
+
+```bash
+sudo install -d -m 750 /etc/zrok-controller
+sudo tee /etc/zrok-controller/config.yml <<EOF
+v: 3
+admin:
+  secrets:
+    - $(openssl rand -hex 24)
+endpoint:
+  host: 0.0.0.0
+  port: 8441
+store:
+  path: /var/lib/zrok-controller/sqlite3.db
+  type: sqlite3
+ziti:
+  apiEndpoint: https://{{ ziti_ctrl }}
+  identity: /etc/zrok-controller/zrok-controller.json
+EOF
+sudo mv zrok-controller.json /etc/zrok-controller/zrok-controller.json
+sudo tee /etc/systemd/system/zrok-controller.service <<'EOF'
+[Unit]
+Description=zrok controller
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/zrok-controller controller /etc/zrok-controller/config.yml
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now zrok-controller
+```
+
+## 2. zrok frontend をデプロイする（{{ frontend_host }}）
+
+frontend も専用の OpenZiti アイデンティティで登録し、frontend 単体では TLS を持たないため手前に TLS 終端を置きます。
+
+```bash
+ziti edge create identity service "{{ frontend_identity }}" -o {{ frontend_identity }}.jwt
+ziti edge enroll {{ frontend_identity }}.jwt
+sudo install -d -m 750 /etc/zrok-frontend
+sudo mv {{ frontend_identity }}.json /etc/zrok-frontend/{{ frontend_identity }}.json
+sudo tee /etc/zrok-frontend/config.yml <<EOF
+v: 3
+identityPath: /etc/zrok-frontend/{{ frontend_identity }}.json
+zrokApiEndpoint: {{ zrok_admin_endpoint }}
+bindAddress: 127.0.0.1:8080
+publicName: {{ frontend_host }}
+EOF
+```
+
+管理APIに frontend を登録します。
+
+```bash
+zrok admin create frontend {{ frontend_identity }} public '{"urlTemplate":"{token}.{{ frontend_host }}"}'
+sudo tee /etc/systemd/system/zrok-frontend.service <<'EOF'
+[Unit]
+Description=zrok public frontend
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/zrok access public /etc/zrok-frontend/config.yml
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now zrok-frontend
+```
+
+手前の TLS 終端（Caddy）を設定します。`{{ frontend_host }}` およびそのワイルドカードサブドメイン宛のリクエストを frontend の待ち受けへ中継します。
+
+```bash
+sudo tee /etc/caddy/Caddyfile <<EOF
+{{ frontend_host }}, *.{{ frontend_host }} {
+  tls {{ tls.cert_path }} {{ tls.key_path }}
+  reverse_proxy 127.0.0.1:8080
+}
+EOF
+sudo systemctl reload caddy
+```
+
+## 3. アカウントを作成し環境を有効化する
+
+controller ホストで管理者アカウントを直接作成します（自己ホストでは招待メールを経由しないため、controller の管理APIから直接作成します）。
+
+```bash
+{% for a in accounts %}zrok admin create account {{ a.email }} "$( printenv {{ a.password_env }} )"{% if a.role == "admin" %} --admin{% endif %}
+
+{% endfor %}```
+
+各利用者は自分の端末で zrok クライアントを設定し、環境を有効化します。
+
+```bash
+zrok config set apiEndpoint {{ zrok_admin_endpoint }}
+zrok enable "$(printenv ZROK_ENABLE_TOKEN)"
+zrok status
+```
+
+## 4. public share を reserved share として払い出す
+
+`share_mode: public` のサービスは reserved share を発行し、frontend 経由の URL で恒久的に公開します。
+
+```bash
+{% for s in services %}{% if s.share_mode == "public" %}zrok reserve public {{ s.target }} --backend-mode {{ s.backend_mode }} --unique-name {{ s.reserved_token }}
+zrok share reserved {{ s.reserved_token }}
+{% endif %}{% endfor %}```
+
+実行すると `https://{token}.{{ frontend_host }}` の形式で URL が払い出されます（token は上記の `--unique-name` で固定した値）。
+
+## 5. private share をトンネラー経由で公開する
+
+`share_mode: private` のサービスは URL を払い出さず、reserved share を作った上で、到達させたい端末側でのみ `zrok access private` を実行します。
+
+サービス側（共有元）:
+
+```bash
+{% for s in services %}{% if s.share_mode == "private" %}zrok reserve private {{ s.target }} --backend-mode {{ s.backend_mode }} --unique-name {{ s.reserved_token }}
+zrok share reserved {{ s.reserved_token }}
+{% endif %}{% endfor %}```
+
+到達させたい利用者の端末側（別セッション）:
+
+```bash
+{% for s in services %}{% if s.share_mode == "private" %}zrok access private {{ s.reserved_token }}
+{% endif %}{% endfor %}```
+
+`zrok access private` を実行した端末だけが `127.0.0.1` の割り当てポート経由で到達でき、frontend を経由しないため {{ frontend_host }} からは一切見えません。
+
+## 6. 動作確認
+
+public share は frontend 経由の URL で発行済みトークンでの到達を確認します。
+
+```bash
+{% for s in services %}{% if s.share_mode == "public" %}curl -sS -o /dev/null -w "%{http_code}\n" https://{{ s.reserved_token }}.{{ frontend_host }}
+{% endif %}{% endfor %}```
+
+private share は `zrok access private` を実行していない別端末からは到達できない（frontend にも URL が存在しない）ことを確認したうえで、`zrok access private` を実行した端末からのみ到達できることを確認します。
+
+```bash
+{% for s in services %}{% if s.share_mode == "private" %}curl -sS -o /dev/null -w "%{http_code}\n" http://127.0.0.1:9191   # zrok access private 実行後にローカルへ割り当てられたポート宛
+{% endif %}{% endfor %}zrok overview   # controller 側で有効な share/reserve の一覧を確認
+```
+
+## 注意事項
+
+- public share は frontend（{{ frontend_host }}）経由で誰でも到達可能になるため、`share_mode: public` にするサービスは公開してよい範囲か事前にレビューする。private で足りる用途を誤って public にしないこと。
+- reserved share は明示的に破棄しない限り残り続けるため、`zrok overview` で定期的に棚卸しし、不要になった reserved share は `zrok delete share <token>` で削除する。退職・異動したアカウントの reserved share は放置しない。
+- frontend の TLS 証明書（{{ tls.cert_path }} / {{ tls.key_path }}）は有効期限を監視し、失効前に更新する。証明書切れは public share 全体の到達不能に直結する。
+- private share へ切り替える際は、切替後に別セッションで `zrok access private` からの到達を確認してから、旧来の直接到達経路（該当サービスの外部公開ポートやファイアウォール許可）を閉じる。確認前に閉じると復旧手段を失う。
+- controller の管理シークレット（`admin.secrets`）と各アカウントのパスワードは、演習用の平文表示・ログ出力を避け、パスワードマネージャ等の安全な場所に保管する。

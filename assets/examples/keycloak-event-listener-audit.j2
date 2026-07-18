@@ -1,0 +1,136 @@
+# Keycloakイベント監査とSIEM連携 — realm `{{ realm }}`
+
+realm `{{ realm }}` の login イベント・admin イベントを有効化し、event listener でログ出力した上で Promtail 経由で外部 SIEM（`{{ siem_endpoint }}`）へ転送する監査運用を構成します。
+
+## 目的
+
+Keycloak の認証イベント（login events）と構成変更イベント（admin events）を区別して有効化し、event listener によるログ出力から SIEM への転送までを一気通貫で構成・検証できるようになることを目指します。
+
+## 用語解説
+
+- **login events（認証イベント）**: ログイン成功・失敗、ログアウト、トークン更新など、エンドユーザーの認証操作を記録するイベント。realm の `eventsEnabled` で有効化する
+- **admin events（管理イベント）**: realm・クライアント・ユーザー・ロールなどの構成変更を記録するイベント。realm の `adminEventsEnabled` で有効化し、変更前後の詳細まで記録するには `adminEventsDetailsEnabled` も合わせて有効化する
+- **eventsExpiration**: Keycloak 内部のイベントストア（デフォルトはDB）がイベントを保持する秒数。Keycloak自身のイベントAPI（`/admin/realms/{realm}/events`）で参照できる期間であり、コンプライアンス上必要な長期保持はSIEM側が担う（役割分担）
+- **event listener**: イベント発生時にフックして処理する拡張ポイント。標準の `jboss-logging` リスナーはイベントをKeycloakのログ（`{{ log_path }}`）にINFOレベルで書き出す
+- **Promtail/Filebeat**: ログファイルを収集し外部SIEM/ログ基盤へ転送するログシッパー。Keycloakのログファイルを `tail` してSIEMのHTTPエンドポイントへ送信する
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| realm | `{{ realm }}` |
+| Keycloak管理API | `{{ kcadm_url }}` |
+| kcadm管理ユーザー | `{{ kcadm_admin_user }}` |
+| login events有効化 | `{{ 'true' if login_events else 'false' }}` |
+| admin events有効化 | `{{ 'true' if admin_events else 'false' }}` |
+| eventsExpiration（秒） | `{{ events_expiration }}` |
+| event listener | `{{ listener }}` |
+| SIEM転送先 | `{{ siem_endpoint }}` |
+| Keycloakログ出力先 | `{{ log_path }}` |
+
+## 1. kcadm.shでKeycloak管理APIにログインする
+
+```bash
+kcadm.sh config credentials \
+  --server {{ kcadm_url }} \
+  --realm master \
+  --user {{ kcadm_admin_user }}
+```
+
+パスワードはプロンプトで入力します（コマンド引数に含めない）。
+
+## 2. realmでlogin events・admin eventsを有効化する
+
+```bash
+kcadm.sh update realms/{{ realm }} \
+  -s eventsEnabled={{ 'true' if login_events else 'false' }} \
+  -s adminEventsEnabled={{ 'true' if admin_events else 'false' }} \
+  -s adminEventsDetailsEnabled={{ 'true' if admin_events else 'false' }} \
+  -s eventsExpiration={{ events_expiration }} \
+  -s 'eventsListeners=["{{ listener }}","admin-event-listener"]'
+```
+
+`eventsListeners` には既定の `admin-event-listener`（admin eventsの保存に必要）を残したまま `{{ listener }}` を追加します。既定値を削除すると admin events が保存されなくなるため注意します。
+
+## 3. event listenerの出力先ログレベルを確認する
+
+Keycloak（Quarkus配布）の `conf/keycloak.conf` で、`{{ listener }}` が出力するカテゴリのログレベルをINFO以上に設定します。
+
+```bash
+grep -q '^log-level=' /opt/keycloak/conf/keycloak.conf \
+  && sed -i 's/^log-level=.*/log-level=INFO/' /opt/keycloak/conf/keycloak.conf \
+  || echo 'log-level=INFO' >> /opt/keycloak/conf/keycloak.conf
+echo 'log-file={{ log_path }}' >> /opt/keycloak/conf/keycloak.conf
+```
+
+設定反映のため Keycloak を再起動します（既存セッションは維持されるため業務影響は限定的ですが、メンテナンスウィンドウでの実施を推奨します）。
+
+```bash
+sudo systemctl restart keycloak
+sudo systemctl status keycloak --no-pager
+```
+
+## 4. Promtailでログをsiemへ転送する
+
+`{{ promtail_config_path }}` にKeycloakログ用のスクレイプ設定を追加し、`{{ siem_endpoint }}` へ転送します。
+
+```bash
+sudo tee -a {{ promtail_config_path }} <<'EOF'
+scrape_configs:
+  - job_name: {{ promtail_job_name }}
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: {{ promtail_job_name }}
+          realm: {{ realm }}
+          __path__: {{ log_path }}
+EOF
+```
+
+`clients` セクションの転送先URLが `{{ siem_endpoint }}` を指していることを確認します。
+
+```bash
+grep -A2 '^clients:' {{ promtail_config_path }}
+sudo systemctl restart promtail
+sudo systemctl status promtail --no-pager
+```
+
+## 動作確認
+
+1. **login eventの記録確認**: テストユーザー `{{ test_user }}` でログインを試み、Keycloak管理APIでイベントが記録されたことを確認します。
+
+   ```bash
+   curl -s -o /dev/null -w '%{http_code}\n' \
+     -X POST {{ kcadm_url }}/realms/{{ realm }}/protocol/openid-connect/token \
+     -d client_id={{ test_client_id }} -d grant_type=password \
+     -d username={{ test_user }} -d password=<test_user_password>
+   kcadm.sh get events -r {{ realm }} --offset 0 --limit 1
+   ```
+
+   直近のイベントの `type` が `LOGIN` であり、`userId` と `ipAddress` が記録されていることを確認します。
+
+2. **admin eventの記録確認**: クライアント設定を1つ変更し、admin eventsに記録されることを確認します。
+
+   ```bash
+   kcadm.sh update clients/$(kcadm.sh get clients -r {{ realm }} -q clientId={{ test_client_id }} --fields id --format csv --noquotes) \
+     -r {{ realm }} -s 'attributes."audit.test"="{{ test_user }}"'
+   kcadm.sh get admin-events -r {{ realm }} --max 1
+   ```
+
+   `operationType` が `UPDATE`、`resourceType` が `CLIENT` であることを確認します。
+
+3. **SIEM転送先での受信確認**: SIEM側（`{{ siem_endpoint }}`）で直近のログエントリを検索し、Step 1・2で発生させたイベント（`LOGIN` / `UPDATE`）が到達していることを確認します。到達していない場合はPromtailの `tail -f` とプロセス状態を確認します。
+
+   ```bash
+   sudo tail -n 20 {{ log_path }}
+   journalctl -u promtail --since "10 min ago" --no-pager
+   ```
+
+## 注意事項
+
+- login events・admin eventsには `userId` や `ipAddress` などのPIIが含まれるため、Keycloak管理API（`kcadm.sh get events` / `get admin-events`）と転送先SIEMの両方で、閲覧権限をアクセス制御された監査ロールに限定する。
+- admin eventsは構成変更を全て記録するため、`operationType=UPDATE` かつ `resourceType=REALM_ROLE_MAPPING` や `resourceType=CLIENT` へのロール付与・権限変更が短時間に集中する場合は権限昇格の兆候として検知ルールを設定することを推奨する。
+- realmの `eventsExpiration`（`{{ events_expiration }}` 秒）はKeycloak内部ストアの保持期間に過ぎず、コンプライアンス上必要な長期保持期間より短い場合、Keycloak側で失われたイベントは復元できない。SIEM側の保持期間がコンプライアンス要件を満たすことを、`eventsExpiration` 設定前に確認する。
+- Step 3のKeycloak再起動は既存の認証フロー自体には影響しないが、設定ミスでKeycloakが起動失敗すると認証全体が停止するため、`systemctl status keycloak` で正常起動を確認してから本手順を完了とする。再起動前に `keycloak.conf` のバックアップを取得しておくこと。
+- `eventsListeners` を更新する際、既定の `admin-event-listener` を誤って削除するとadmin eventsが保存されなくなるため、更新後に `kcadm.sh get realms/{{ realm }} --fields eventsListeners` で両方のリスナーが残っていることを確認する。

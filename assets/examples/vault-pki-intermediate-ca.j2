@@ -1,0 +1,124 @@
+# VaultのPKIエンジンによる証明書発行基盤 — {{ pki_mount }}
+
+HashiCorp VaultのPKI secrets engineで中間CA（Intermediate CA）を構成し、短命な証明書を自動発行できる基盤を構築します。ルートCAはVault外（オフライン）または別のroot専用マウントで厳重に管理し、Vaultには**中間CAの秘密鍵のみ**を置く構成とします。
+
+## 目的
+
+root/intermediateを分離したPKI構成をVaultに構築し、ロールでドメインとTTLを制約した短命証明書を自動発行できるようになることを目指します。CRL/OCSPによる失効確認の仕組みも合わせて理解します。
+
+## 用語解説
+
+- **PKI secrets engine**: Vaultが証明書の発行・署名・失効を担う secrets engine
+- **root CA / intermediate CA分離**: ルートCAの秘密鍵は極力オフラインまたは隔離された場所に置き、日常の証明書発行は中間CAだけに行わせる構成。ルート鍵の漏えい影響を局所化できる
+- **CSR（証明書署名要求）**: 中間CAが自身の公開鍵を含めてルートCAに署名を依頼するためのリクエスト
+- **set-signed**: ルートCAが署名した中間CA証明書をVaultの中間CAマウントに取り込み、有効化する操作
+- **ロール制約（allowed_domains / allow_subdomains / max_ttl）**: 発行対象ドメインとその配下、証明書の最大有効期間をロール単位で制限し、想定外のドメインや長期証明書の発行を防ぐ仕組み
+- **短命証明書**: TTLを数時間〜数日程度に絞った証明書。漏えい時の悪用可能期間を短くし、失効運用への依存を減らす
+- **CRL（証明書失効リスト）/ OCSP**: 失効した証明書を検証者に通知する仕組み。CRLは失効リストの配布、OCSPは個別のオンライン照会
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 中間CAマウントパス | {{ pki_mount }} |
+| 中間CAの共通名(CN) | {{ intermediate_common_name }} |
+| 許可ドメイン(allowed_domains) | {{ allowed_domains | join(", ") }} |
+| 証明書の最大TTL(max_ttl) | {{ max_ttl }} |
+| 鍵種別(key_type) | {{ key_type }} |
+
+## 1. root CAマウントと中間CAマウントを準備する
+
+ルートCAは既存の `pki` マウントに存在する前提とします（初回のみ `vault secrets enable -path=pki pki` で有効化し、長いmax-lease-ttlを設定してルート証明書を生成します）。中間CA用に新しいマウントを分離して有効化します。
+
+```bash
+vault secrets enable -path={{ pki_mount }} pki
+vault secrets tune -max-lease-ttl={{ max_ttl }} {{ pki_mount }}
+```
+
+## 2. 中間CAのCSRを生成する
+
+中間CAの秘密鍵は `{{ pki_mount }}` マウント内で生成され、外部に取り出されません。
+
+```bash
+vault write -format=json {{ pki_mount }}/intermediate/generate/internal \
+    common_name="{{ intermediate_common_name }}" \
+    key_type="{{ key_type }}" \
+    | jq -r '.data.csr' > pki_intermediate.csr
+```
+
+## 3. ルートCAでCSRに署名する
+
+```bash
+vault write -format=json pki/root/sign-intermediate \
+    csr=@pki_intermediate.csr \
+    format=pem_bundle \
+    max_ttl="{{ max_ttl }}" \
+    | jq -r '.data.certificate' > intermediate.cert.pem
+```
+
+## 4. 署名済み証明書をVaultに取り込む(set-signed)
+
+```bash
+vault write {{ pki_mount }}/intermediate/set-signed \
+    certificate=@intermediate.cert.pem
+```
+
+## 5. CRL/OCSPの配布先を設定する
+
+```bash
+vault write {{ pki_mount }}/config/urls \
+    issuing_certificates="https://vault.internal.example.com:8200/v1/{{ pki_mount }}/ca" \
+    crl_distribution_points="https://vault.internal.example.com:8200/v1/{{ pki_mount }}/crl" \
+    ocsp_servers="https://vault.internal.example.com:8200/v1/{{ pki_mount }}/ocsp"
+```
+
+## 6. 発行ロールをドメイン・TTL制約付きで作成する
+
+```bash
+vault write {{ pki_mount }}/roles/internal-services \
+    allowed_domains="{{ allowed_domains | join(",") }}" \
+    allow_subdomains=true \
+    max_ttl="{{ max_ttl }}" \
+    key_type="{{ key_type }}"
+```
+
+## 7. 短命証明書を発行する
+
+許可ドメイン配下のホスト名に対して、ロールのmax_ttl以内のTTLで証明書を発行します。
+
+```bash
+vault write -format=json {{ pki_mount }}/issue/internal-services \
+    common_name="app1.{{ allowed_domains[0] }}" \
+    ttl="24h" \
+    > /tmp/app1_cert_bundle.json
+jq -r '.data.certificate' /tmp/app1_cert_bundle.json > app1.cert.pem
+jq -r '.data.private_key' /tmp/app1_cert_bundle.json > app1.key.pem
+shred -u /tmp/app1_cert_bundle.json
+```
+
+## 動作確認
+
+1. `internal-services` ロールで許可ドメイン配下のCNに対して証明書発行が成功し、`app1.cert.pem` / `app1.key.pem` が取得できること。
+2. 許可ドメイン外のCN（例: `evil.example.org`）を指定して発行を試み、拒否されることを確認する。
+
+```bash
+vault write {{ pki_mount }}/issue/internal-services \
+    common_name="app1.evil.example.org" \
+    ttl="24h" 2>&1 | grep -Ei "not allowed|denied" && echo "拒否確認OK: 許可ドメイン外は発行されない"
+```
+
+3. CRLが取得でき、失効テストとして発行済み証明書を失効(revoke)した後にCRLへ反映されることを確認する。
+
+```bash
+SERIAL=$(jq -r '.data.serial_number' /tmp/app1_cert_bundle.json 2>/dev/null || echo "<発行時のserial_numberを指定>")
+vault write {{ pki_mount }}/revoke serial_number="$SERIAL"
+curl -s https://vault.internal.example.com:8200/v1/{{ pki_mount }}/crl | openssl crl -inform DER -noout -text | grep -A2 "Revoked Certificates"
+```
+
+## 注意事項
+
+- ルートCAの秘密鍵はVault内であっても日常運用では使用せず、可能な限りオフライン（別クラスタ・封印されたバックアップ等）で保管する。Vaultで日常的に鍵を扱うのは中間CA（`{{ pki_mount }}`）のみとし、`pki/root/sign-intermediate` の実行は中間CA更新時など限定的な操作にとどめる。
+- `max_ttl` は必要以上に長くしない。本手順の既定値（{{ max_ttl }}）は短命証明書運用を前提としており、ロール作成時にmax_ttlをさらに短縮できないか都度見直す。
+- 証明書を失効させる場合は必ず `vault write {{ pki_mount }}/revoke serial_number=...` を実行し、CRLエンドポイント（`config/urls` で設定した `crl_distribution_points`）にRevoked Certificatesとして反映されていることを検証してから、失効対象の旧証明書を利用するサービスを停止する。新しい証明書での接続確認が取れるまでは、旧証明書を使うサービスを止めない。
+- `private_key` はVaultのレスポンスに一度しか含まれない。ログや履歴（シェル履歴、CI出力等）に残さないよう、一時ファイルは `jq` での抽出後に `shred -u` 等で確実に削除し、標準出力への表示や `vault write` コマンドの引数として鍵を渡すことは避ける。
+- ロールの `allowed_domains` / `allow_subdomains` は必ず用途に応じた最小範囲に設定する。ワイルドカードや広すぎるドメイン許可は、想定外ホスト名への証明書発行を許してしまう。

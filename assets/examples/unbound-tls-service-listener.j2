@@ -1,0 +1,91 @@
+# UnboundのDoT/DoHサービス提供構成
+
+クライアント向けにDoT(DNS over TLS, 853番ポート)を提供し、クライアントからのDNSクエリを暗号化した状態で受信できるように Unbound を構成します。
+
+## 目的
+
+Unbound をDoTサービス提供サーバとして構成し、クライアントとリゾルバ間のDNSクエリを盗聴・改ざんから保護できるようにします。あわせてDoHを利用したい場合の構成方針(nginx/Cloudflareプロキシとの併用)も整理します。
+
+## 用語解説
+
+- **DoTサービス提供(受信側暗号化)**: リゾルバがクライアントからのクエリを853番ポートでTLS終端し、暗号化された問い合わせを受け付ける機能。本手順の `tls-service-key` / `tls-service-pem` はこちらを指す
+- **アップストリームDoT(送信側)**: リゾルバ自身が上位の別リゾルバへ問い合わせを転送する際に、その通信をTLSで暗号化する機能。`forward-tls-upstream` 等で設定するもので、本手順のDoTサービス提供とは向きが逆
+- **tls-service-key / tls-service-pem**: DoTサービス提供時にUnboundがクライアントへ提示するTLS秘密鍵・証明書チェーンを指す `unbound.conf` のキー
+- **tls-port**: DoTの待受ポート番号を指定する設定項目。標準は853
+- **DoH(DNS over HTTPS)**: HTTPS(443番)でDNSクエリを運ぶ方式。Unbound単体ではHTTPSリスナーを持たないため、nginxやCloudflareの前段プロキシでTLS終端しUnboundへ中継する構成が一般的
+- **access-control**: 853番ポートへの問い合わせを許可するクライアント範囲を制限するUnboundの設定項目
+- **kdig +tls**: knot-dns-utilsに含まれる、TLS経由でDNSクエリを送信し証明書検証結果も確認できる問い合わせツール
+
+## シナリオ設定
+
+DoTサービスは {{ listen_interfaces | join(", ") }} の {{ dot_port }}/tcp で待ち受け、証明書は `{{ tls_cert_path }}`、秘密鍵は `{{ tls_key_path }}` を使用します。許可クライアントは {{ allowed_clients | join(", ") }} に限定し、リゾルバのホスト名は `{{ resolver_hostname }}` とします。証明書更新後は `{{ acme_renew_hook }}` を実行してUnboundへ反映します。
+
+## 手順
+
+### 1. 証明書を配置する
+
+ACME(例: certbot)で取得済みの証明書一式を、Unboundの実行ユーザーが読み取れる権限で配置します。
+
+```bash
+install -o unbound -g unbound -m 0640 fullchain.pem {{ tls_cert_path }}
+install -o unbound -g unbound -m 0600 privkey.pem {{ tls_key_path }}
+```
+
+### 2. unbound.conf にDoTサービス提供を設定する
+
+既存の平文53番リスナーは維持したまま、853番のTLSリスナーを追加します(切替前の並行稼働については注意事項を参照)。
+
+```bash
+cat > /etc/unbound/unbound.conf.d/dot-service.conf <<'EOF'
+server:
+{% for i in listen_interfaces %}    interface: {{ i }}@{{ dot_port }}
+{% endfor %}    tls-service-key: "{{ tls_key_path }}"
+    tls-service-pem: "{{ tls_cert_path }}"
+    tls-port: {{ dot_port }}
+{% for c in allowed_clients %}    access-control: {{ c }} allow
+{% endfor %}EOF
+```
+
+### 3. 構文を検証してから反映する
+
+```bash
+unbound-checkconf
+systemctl reload unbound
+```
+
+### 4. DoHを併用する場合の方針(参考)
+
+Unbound単体ではDoHリスナーを持たないため、DoHを提供する場合は前段にnginx等のTLS終端プロキシを置き、`/dns-query` へのHTTPSリクエストをUnboundのDoTリスナー、またはローカルの53番へ中継します。Cloudflareの前段プロキシを利用する場合も同様に、プロキシ側でDoHを終端しUnboundへは平文またはDoTで中継する構成にします。ここでは設定ファイルの具体例までは踏み込まず、853番のDoT提供を主眼とします。
+
+## 動作確認
+
+### 5. DoTでの問い合わせと証明書検証を確認する
+
+```bash
+kdig -d +tls @{{ resolver_hostname }} -p {{ dot_port }} example.com A
+```
+
+出力中の `TLS session` セクションで証明書検証が成功していること(`Chain validated` 相当のメッセージ)と、想定した証明書のサブジェクトが表示されることを確認します。
+
+### 6. 許可範囲外クライアントからの遮断を確認する
+
+```bash
+# access-control の許可範囲({{ allowed_clients[0] }})に含まれないクライアントから実行し、
+# REFUSED または応答なしとなることを確認する
+kdig -d +tls @{{ resolver_hostname }} -p {{ dot_port }} example.com A
+```
+
+### 7. 既存の平文53番リスナーが引き続き稼働していることを確認する
+
+DoTへの切替を完了するまでは、853番と並行して53番も稼働させ、クライアント側の移行完了を確認してから53番の外部公開範囲を絞ります。
+
+```bash
+dig @{{ resolver_hostname }} example.com A +short
+```
+
+## 注意事項
+
+- 853番ポートの公開範囲は必ず `access-control` で最小化すること。許可範囲を誤って広く設定すると、DoT経由のオープンリゾルバ化につながる。
+- クライアント側でDoTへ切り替える際は、既存の平文53番問い合わせ経路を残したまま新しいDoT経路(`kdig +tls`)での疎通と証明書検証が成功することを確認してから、平文53番の外部からの到達性を絞ること。新旧経路を同時に動かさずいきなり53番を止めると、DoT未対応クライアントが名前解決不能になる。
+- 証明書はACME(certbot等)で自動更新される前提とし、更新フック(`{{ acme_renew_hook }}`)で `tls-service-pem` / `tls-service-key` の再読み込み(`systemctl reload unbound`)を必ず自動実行すること。反映漏れが起きると、証明書が失効しクライアント側の検証が失敗し始める。
+- `tls-service-key` の秘密鍵ファイルはUnboundの実行ユーザーのみ読み取り可能なパーミッション(0600相当)にすること。

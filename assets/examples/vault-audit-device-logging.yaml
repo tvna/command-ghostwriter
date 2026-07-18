@@ -1,0 +1,23 @@
+vault_addr: "https://vault.internal.example.com:8200"
+
+audit_type: file
+audit_path: /var/log/vault/audit.log
+log_raw: false
+
+secondary_audit:
+  audit_type: syslog
+  facility: local1
+  tag: vault-audit
+
+rotation:
+  logrotate_path: /etc/logrotate.d/vault-audit
+  schedule: daily
+  retain_days: 90
+
+offsite_target: "s3://corp-audit-archive/vault/"
+
+probe_secret:
+  mount: secret
+  path: audit-check/probe
+  key: probe_value
+  value: "S3cr3t-Sample-Value-2026"

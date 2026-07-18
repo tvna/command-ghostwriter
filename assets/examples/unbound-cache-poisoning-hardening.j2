@@ -1,0 +1,123 @@
+# Unboundキャッシュ汚染対策のハードニング
+
+既存のキャッシュDNSサーバ(Unbound)に対して、harden系オプションと送信元ポートのランダム化を強化し、カミンスキー型のキャッシュポイズニング攻撃への耐性を高めます。
+
+## 目的
+
+Unbound の harden-glue / harden-referral-path / harden-below-nxdomain / use-caps-for-id(0x20) / unwanted-reply-threshold を有効化し、送信元ポートランダム化と合わせてキャッシュ汚染攻撃の成功率を実用上無視できる水準まで下げられるようになることを目指します。
+
+## 用語解説
+
+- **カミンスキー型攻撃**: 権威サーバへの問い合わせに対する正規応答が届く前に、送信元ポート・トランザクションID・クエリ名の大小文字を推測した偽の応答をねじ込み、キャッシュに不正なレコードを注入する攻撃手法
+- **エントロピー源**: 攻撃者が偽応答を当てるために推測しなければならない要素の数。送信元ポート(約6万通り)・トランザクションID(16bit)・0x20エンコーディング(クエリ名の大小文字パターン)の3つを組み合わせることで推測空間を指数的に広げる
+- **use-caps-for-id (0x20エンコーディング)**: 問い合わせ時にクエリ名の英字を無作為に大小文字化し、応答が同じ大小文字パターンを保持しているかを検証する仕組み。一致しなければ偽応答とみなして破棄する
+- **harden-glue**: 権威サーバの委任応答に含まれるグルーレコード(A/AAAA)のうち、権威範囲外のものを信用せずキャッシュしない設定
+- **harden-referral-path**: 権威サーバへの委任チェーンを辿る際、無関係なゾーンからの参照情報を追加のクエリで再検証する設定
+- **harden-below-nxdomain**: あるドメインがNXDOMAINと確定した場合、その配下の全ての名前もNXDOMAINとして扱いキャッシュ汚染の余地を減らす設定(RFC 8020準拠)
+- **unwanted-reply-threshold**: 要求していない(問い合わせと対応しない)応答パケットの受信数がこの閾値を超えた際に、キャッシュを汚染された可能性ありとみなしてクリアする防御機構
+- **送信元ポートランダム化**: 問い合わせのたびに送信元UDPポートを無作為に選ぶことで、攻撃者が偽応答を当てるべきポート番号を予測困難にする仕組み。Unboundは既定で `outgoing-range` の範囲内からランダムに選択する
+- **rrset-roundrobin**: 同一クエリに対して複数のRRSet候補がある場合に応答順序をランダムに入れ替える設定。特定順序への依存や偏った推測を防ぐ
+
+## シナリオ設定
+
+適用する harden 系オプションは次の通りです。
+
+| オプション | 値 |
+| --- | --- |
+| harden-glue | {{ harden_options.harden_glue }} |
+| harden-referral-path | {{ harden_options.harden_referral_path }} |
+| harden-below-nxdomain | {{ harden_options.harden_below_nxdomain }} |
+
+また、use-caps-for-id は `{{ caps_for_id }}`、unwanted-reply-threshold は `{{ unwanted_reply_threshold }}` 件、rrset-roundrobin は `{{ rrset_roundrobin }}` とします。
+
+## 手順
+
+### 1. 現状の設定と稼働状況を記録する
+
+```bash
+unbound-control status
+unbound-control get_option harden-glue
+unbound-control get_option harden-referral-path
+unbound-control get_option harden-below-nxdomain
+unbound-control get_option use-caps-for-id
+unbound-control get_option unwanted-reply-threshold
+```
+
+### 2. ステージング用の設定断片を作成する
+
+本番の `unbound.conf` を直接書き換える前に、まずステージング環境またはテスト用インスタンスへ以下の設定断片を投入します。
+
+```bash
+cat > /etc/unbound/unbound.conf.d/cache-poisoning-hardening.conf <<'EOF'
+server:
+    harden-glue: {{ harden_options.harden_glue | lower }}
+    harden-referral-path: {{ harden_options.harden_referral_path | lower }}
+    harden-below-nxdomain: {{ harden_options.harden_below_nxdomain | lower }}
+    use-caps-for-id: {{ caps_for_id | lower }}
+    unwanted-reply-threshold: {{ unwanted_reply_threshold }}
+    rrset-roundrobin: {{ rrset_roundrobin | lower }}
+EOF
+```
+
+### 3. 構文を検証する
+
+```bash
+unbound-checkconf
+```
+
+### 4. ステージングでライブ反映し、名前解決を検証する
+
+本番の `unbound-control reload` を叩く前に、ステージングインスタンス(または本番と並行稼働する検証用ポート)へ反映し、既存の名前解決経路が壊れていないことを確認します。
+
+```bash
+unbound-control -c /etc/unbound/unbound-staging.conf reload
+dig @127.0.0.1 -p 5391 example.com A +short
+dig @127.0.0.1 -p 5391 example.com AAAA +short
+```
+
+### 5. 本番へ反映する
+
+ステージングでの検証が問題なければ、本番インスタンスへ同じ設定断片を配置し、リロードします。
+
+```bash
+unbound-control reload
+unbound-control status
+```
+
+### 6. 各hardenオプションが反映されたことを確認する
+
+```bash
+unbound-control get_option harden-glue
+unbound-control get_option harden-referral-path
+unbound-control get_option harden-below-nxdomain
+unbound-control get_option use-caps-for-id
+unbound-control get_option unwanted-reply-threshold
+unbound-control get_option rrset-roundrobin
+```
+
+### 7. DNSSEC併用での検証を行う
+
+harden系オプションはあくまで緩和策であり、根本対策であるDNSSECバリデーションと併用されていることを確認します。
+
+```bash
+dig @127.0.0.1 example.com A +dnssec +short
+dig @127.0.0.1 example.com A +cd +dnssec
+# ADフラグが立っていること(検証済み)、+cdで検証を無効化した場合との差分で
+# バリデーションが機能していることを確認する
+```
+
+## 動作確認
+
+- `unbound-checkconf` がエラーなく通ること
+- ステージングでの `dig` によるA/AAAAレコード解決が反映前と同じ結果を返すこと(harden設定による誤ブロックがないこと)
+- `unbound-control get_option` で各オプション(harden-glue / harden-referral-path / harden-below-nxdomain / use-caps-for-id / unwanted-reply-threshold / rrset-roundrobin)が設定値と一致すること
+- 本番反映後も既存クライアントからの名前解決が継続して成功すること
+- `dig +dnssec` の応答にADフラグが付与され、DNSSECバリデーションが有効に機能していること
+
+## 注意事項
+
+- 本設定は名前解決の既定経路(通常のキャッシュ応答)に影響するため、必ずステージングまたは並行稼働する検証用インスタンスで名前解決が壊れていないことを確認してから、本番の `unbound-control reload` を実行すること。検証を飛ばして本番へ直接適用しないこと。
+- `use-caps-for-id` (0x20エンコーディング)は一部の古い権威サーバ実装で大小文字を保持せず応答するため非互換が発生する場合がある。有効化後に特定ドメインの名前解決だけが失敗する場合は、当該ドメインを疑い、Unboundのログで0x20不一致による再問い合わせや失敗が急増していないか確認すること。
+- `unwanted-reply-threshold` は正規のトラフィックが急増した場合(大規模な再帰失敗やネットワーク遅延など)にも閾値を超え、誤ってキャッシュがクリアされる誤検知を起こし得る。閾値超過時はキャッシュヒット率が一時的に低下しUX悪化につながるため、導入後はログと統計(`unbound-control stats_noreset`)を継続監視すること。
+- harden系オプションとポートランダム化はキャッシュ汚染の成功確率を下げる緩和策に過ぎず、根本対策はDNSSECによる応答署名の検証である。DNSSECバリデーションを併用していない環境では、本手順だけに依存しないこと。
+- 変更は一度に全オプションを有効化せず、harden-glue/harden-referral-path/harden-below-nxdomainのような比較的安全な設定から段階的に適用し、各段階での名前解決への影響を確認したうえでuse-caps-for-idなど非互換リスクの高い設定に進むこと。

@@ -1,0 +1,123 @@
+# Vault HAクラスタ性能・シール事象の調査 — {{ hostname }}
+
+- **クラスタ**: {{ cluster_name }}
+- **VAULT_ADDR**: {{ vault_addr }}
+- **報告内容**: クライアントからの応答遅延、または一部ノードのsealed化が疑われる
+
+## 目的
+
+HashiCorp Vault HAクラスタで発生した「応答が遅い」「一部ノードがsealedになった」という事象を、raft状態 → リース数 → audit device → ストレージI/Oの順に切り分け、原因箇所を特定できるようになることを目指します。原因を推測で決め打ちせず、各段階の出力で裏取りしながら進めます。
+
+## 用語解説
+
+- **sealed（シール状態）**: Vaultが暗号化キーを保持しておらず、リクエストに応答できない状態。再unsealか、auto-unsealの依存先への再接続で復帰する
+- **raft quorum（クォーラム）**: raftストレージバックエンドで書き込みを確定するために必要な過半数のノード合意。quorumを失うとクラスタはread-onlyまたは応答不能になる
+- **autopilot**: raftクラスタのノード健全性を自動監視し、不健全なノードの除去や昇格を助ける機能
+- **lease（リース）**: 発行したシークレットやトークンに付与される有効期限管理の単位。`sys/leases/count` で総数を確認できる
+- **audit device**: 全リクエスト/レスポンスを記録する監査ログの出力先。Vaultは「有効な audit device が1つでもあれば」動作するが、**設定済みの audit device が全て書き込み不能になると、Vaultは監査ログを残せないリクエストを一切処理せず応答停止する**（fail-safe設計のため）
+- **auto-unseal**: KMSやTransitなど外部の鍵管理サービスにunsealキーを委任する方式。当該サービスとの疎通が切れると、再起動時や再シール時にunsealできずsealedのまま留まる
+
+## シナリオ設定
+
+{{ hostname }} を含む {{ cluster_name }} で応答遅延の報告があり、一部ノードがsealedになっている可能性があります。以下の値を前提に調査します。
+
+| 項目 | 値 |
+| --- | --- |
+| 対象ノード | {{ hostname }} |
+| VAULT_ADDR | {{ vault_addr }} |
+| raftクォーラム確認要否 | {{ raft_quorum }} |
+| リース数閾値 | {{ lease_count_threshold }} |
+| audit device確認要否 | {{ audit_device_check }} |
+| クラスタ全体確認要否 | {{ cluster_check }} |
+
+## 手順
+
+### 1. 対象ノードのsealed/HA状態を確認する
+
+```bash
+export VAULT_ADDR="{{ vault_addr }}"
+vault status
+```
+
+`Sealed` が `true` の場合、まず auto-unseal依存先（KMS/Transit）との疎通を疑います。`HA Mode` が `standby` か `active` かも合わせて確認します。
+
+{% if cluster_check %}
+### 2. クラスタ全ノードのHA状態を横並びで確認する
+
+```bash
+for node in vault-prod-01 vault-prod-02 vault-prod-03; do
+  echo "=== ${node} ==="
+  VAULT_ADDR="https://${node}:8200" vault status
+done
+```
+
+sealedになっているノードが1台か複数かで影響範囲の切り分けが変わります。複数ノードが同時にsealedの場合は、個別障害よりauto-unseal依存先側の障害を優先して疑います。
+{% endif %}
+
+{% if raft_quorum %}
+### 3. raftのピア構成とautopilot状態を確認する
+
+```bash
+vault operator raft list-peers
+vault operator raft autopilot state
+```
+
+`list-peers` の `voter` 列でクォーラムに必要な過半数のノードが `leader`/`follower` として生存しているか確認します。`autopilot state` の `Healthy` が `false` のノードがあれば、そのノードを切り分け対象から除外して原因追跡を続けます。raftクォーラムを失っている場合、クラスタはread-only化または応答不能になるため、この時点で「quorum喪失」を暫定原因として記録し、ノード復旧を優先します。
+{% endif %}
+
+### 4. リース数の急増を確認する
+
+```bash
+vault login -method=token
+vault read sys/leases/count
+```
+
+出力される総リース数が {{ lease_count_threshold }} を超えている場合、リース急増による性能劣化を疑います。併せて発行元マウントごとの内訳を確認します。
+
+```bash
+vault list sys/leases/lookup/auth
+```
+
+短いTTLのトークン/シークレットを大量発行しているクライアントが原因になっていないか、発行元のポリシー・アプリケーションログと突き合わせます。
+
+{% if audit_device_check %}
+### 5. audit deviceの状態を確認する
+
+```bash
+vault audit list -detailed
+```
+
+有効な audit device の書き込み先（ファイルパスやsyslog宛先）に到達できているか、ディスク容量やパーミッションを確認します。
+
+```bash
+ls -la /var/log/vault/audit.log
+df -h /var/log/vault
+```
+
+**設定済みの audit device が全て書き込み不能になっている場合、Vaultは仕様として新規リクエストの処理を停止します。** これが応答停止の原因であれば、まず書き込み不能な device を切り離す前に、正常に書き込める代替の audit device を追加してから、障害のある device を無効化します。
+{% endif %}
+
+### 6. ストレージI/Oを確認する
+
+```bash
+iostat -xz 1 5
+```
+
+raftストレージのディスクI/Oでawait（応答待ち時間）や%utilが高止まりしていないか確認します。ここまでの手順で他の原因が特定できなかった場合、ストレージ側のディスクI/O律速を暫定原因として記録します。
+
+## 動作確認
+
+- 手順1・2の `vault status` で対象ノードおよびクラスタ全体の `Sealed`/`HA Mode` が把握できていること
+- 手順3の `raft list-peers`/`autopilot state` でクォーラム充足の有無が判定できていること
+- 手順4の `sys/leases/count` の値と {{ lease_count_threshold }} との比較結果が記録されていること
+- 手順5の `vault audit list -detailed` で全audit deviceの生死が確認できていること
+- 手順6の `iostat` 出力でストレージI/Oの状態が確認できていること
+- 上記いずれかの段階で原因が特定され、調査記録に暫定原因として明記されていること
+
+## 注意事項
+
+- auto-unseal依存先（KMS/Transit）との接続が切れるとノードはsealedのまま復帰できません。ネットワーク/認証情報の変更を行う際は、事前に別セッションまたはテスト用ノードで新しい接続経路が機能することを確認してから、既存の接続経路を切り替え・削除してください。
+- audit deviceを無効化・変更する操作は、全device書き込み不能によるVault応答停止を誘発し得る不可逆に近い操作です。必ず先に正常な代替deviceを追加し、動作確認した上で障害deviceを無効化してください。
+- リース急増は短いTTLでの大量発行が主原因になりやすいため、恒久対策としてはTTL設計の見直しやレート制限を検討し、リース失効の一括操作（revoke -prefix等）は影響範囲を確認してから実行してください。
+- raftクラスタはクォーラム確保のため奇数台（3台・5台など）で構成してください。偶数台構成はネットワーク分断時にクォーラムが成立しない組み合わせを生みやすく、可用性が下がります。
+- 本手順は既存の調査・観測操作を中心としています。unseal操作やaudit device切り替えなど状態変更を伴う操作は、影響範囲をチームに共有した上で {{ escalation }} と連携して実施してください。

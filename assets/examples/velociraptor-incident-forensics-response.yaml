@@ -1,0 +1,11 @@
+title: Velociraptorによるインシデントフォレンジック対応
+target_host: web-app-12.internal.example.jp
+triage_artifacts:
+  - Generic.Client.Info
+  - Windows.System.Pslist
+  - Windows.Network.Netstat
+  - Windows.Forensics.Timeline
+  - Windows.NTFS.MFT
+offline_collector: true
+quarantine: true
+evidence_dir: /evidence/incident-2026-0717-web-app-12

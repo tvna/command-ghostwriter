@@ -1,0 +1,6 @@
+test_id,category,command,expected_sid,expected_action,last_result,tested_at
+T01,ET-OPEN既知シグネチャ(testmynids.org),curl -s -A Mozilla/5.0 http://testmynids.org/uid/index.html,2100498,alert,-,-
+T02,攻撃ツールUA検知,curl -s -A sqlmap/1.7.2#stable http://10.0.9.50/,2008538,alert,-,-
+T03,ポートスキャン検知(自組織カスタムルール),nmap -sS -Pn -p 1-1024 10.0.9.50,1000010,alert,-,-
+T04,DNSトンネリング検知(自組織カスタムルール),dig +short TXT aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example.test,1000020,alert,-,-
+T05,既知マルウェア検体パターン(EICAR),curl -s -o /tmp/eicar.com.txt http://10.0.9.50/eicar/eicar.com.txt,1207,alert,-,-

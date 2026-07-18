@@ -1,0 +1,12 @@
+title = "Wazuhで期待した検知アラートが出ない事象の調査"
+agent_name = "web01"
+manager_host = "wazuh-manager01"
+log_source = "/var/log/nginx/access.log"
+log_format = "syslog"
+expected_rule_id = 31106
+expected_rule_description = "Web attack returned code 403 (Forbidden)"
+decoder_name = "nginx-log"
+decoded = false
+rule_level = 3
+sample_log = "192.0.2.10 - - [17/Jul/2026:10:22:31 +0900] \"GET /wp-login.php HTTP/1.1\" 403 162"
+escalation = "SOC運用チーム (Slack #soc-ops)"

@@ -1,0 +1,85 @@
+# Squid delay poolsによる帯域制御
+
+delay poolsを用いて、特定ユーザー/ネットワーク単位の帯域を制限し、一部のダウンロードが回線全体を圧迫しないようにします。既存のsquid.confへの追記となるため、投入前に必ず設定ファイルのバックアップを取得してください。
+
+## 目的
+
+delay_pools / delay_class / delay_parameters / delay_accessを組み合わせ、対象ACL(`{{ target_acl }}`)に該当する通信の帯域を上限付きで制御できるようになることを目指します。あわせて、対象外の通信が制限の影響を受けないことを検証します。
+
+## 用語解説
+
+- **delay_pools**: 帯域制限プール(バケツ)の総数を宣言するディレクティブ。プール番号はこの数以内で1から採番する
+- **delay_class**: 各プールの種別を指定する。`class1`は全体で1つの制限枠のみ、`class2`は全体枠に加えて個別クライアント(IPアドレス単位)ごとの枠を持つ、`class3`は全体枠・ネットワーク(サブネット)単位の枠・個別クライアント単位の枠の3階層を持つ。今回はクライアントごとの制限も必要なため`class{{ pool_class }}`を使用する
+- **delay_parameters**: 各枠のrestore(定常時に回復する速度、バイト/秒)とmax(バケツに貯められる最大バイト数、バーストの上限)を`restore/max`の形式で指定する。`-1`を指定するとその枠は無制限になる
+- **delay_access**: どの通信をどのプールに振り分けるか(allow)、あるいはプール制御の対象外とするか(deny)をACLで判定する。最後に`delay_access N deny all`を置き、対象外通信が制限を受けないようにする
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| プールクラス | class{{ pool_class }} |
+| 対象ACL名 | {{ target_acl }} |
+| 対象ネットワーク | {{ target_net }} |
+| 全体(aggregate)上限 | {{ aggregate_bytes_per_sec }} バイト/秒 |
+| 個別(individual)上限 | {{ individual_bytes_per_sec }} バイト/秒 |
+
+`{{ target_acl }}`に該当するクライアント全体で合計{{ aggregate_bytes_per_sec }}バイト/秒までに制限しつつ、クライアント1台あたりは{{ individual_bytes_per_sec }}バイト/秒までに制限します。バーストを許容するmax値は、まずrestore値と同値から開始し、実測を見て調整します。
+
+## 手順
+
+### 1. 対象ACLを定義する
+
+squid.confに、制限対象を判定するためのACLを追加します。
+
+```
+acl {{ target_acl }} src {{ target_net }}
+```
+
+### 2. delay_poolsとdelay_classを設定する
+
+プール数を1、プール1のクラスを{{ pool_class }}として宣言します。
+
+```
+delay_pools 1
+delay_class 1 {{ pool_class }}
+```
+
+### 3. delay_parametersで上限値を設定する
+
+プール1について、全体枠と個別枠それぞれのrestore/maxを設定します。単位はバイト/秒であり、ビット/秒ではないことに注意してください。
+
+```
+delay_parameters 1 {{ aggregate_bytes_per_sec }}/{{ aggregate_bytes_per_sec }} {{ individual_bytes_per_sec }}/{{ individual_bytes_per_sec }}
+```
+
+### 4. delay_accessで対象通信をプールに割り当てる
+
+`{{ target_acl }}`に一致する通信のみをプール1に割り当て、それ以外はプール制御の対象外とします。
+
+```
+delay_access 1 allow {{ target_acl }}
+delay_access 1 deny all
+```
+
+### 5. 設定を検証し反映する
+
+構文エラーがないことを確認してからリロードします。
+
+```bash
+squid -k parse
+squid -k reconfigure
+```
+
+## 動作確認
+
+1. 対象ネットワーク({{ target_net }})に属する端末から大容量ファイルをダウンロードし、`squidclient mgr:info`や`iftop`などでスループットが{{ individual_bytes_per_sec }}バイト/秒付近に張り付くことを確認する
+2. 同一時間帯に対象クライアントを複数台からダウンロードさせ、合計スループットが{{ aggregate_bytes_per_sec }}バイト/秒付近で頭打ちになることを確認する(class{{ pool_class }}の全体枠が機能していること)
+3. 対象ネットワーク外の端末から同様のダウンロードを行い、帯域制限の影響を受けず通常速度が出ることを確認する(delay_accessの対象外判定が正しいこと)
+4. `squidclient mgr:delay`(または`cachemgr.cgi`)でプール1の現在のバケツ残量が制限に応じて増減していることを確認する
+
+## 注意事項
+
+- delay_parametersの単位は常にバイト/秒であり、回線速度としてよく使われるビット/秒(bps)表記と混同しないこと。回線契約値をそのまま入力すると意図した1/8の速度で誤って制限してしまう
+- restore/maxのいずれかに`-1`を指定するとその枠は無制限になる。全体枠のみ制限し個別枠は制限しない、といった構成も`-1`の組合せで表現できる
+- SSL Bump(HTTPS復号)を行っていない環境でも、HTTPS通信のボディはdelay poolsの制限対象になる。ただしdelay_accessでのドメイン判定はTLSハンドシェイク時のSNI(またはCONNECT先ホスト名)に依存するため、SNIを偽装または省略する通信では意図した振り分けができない場合がある
+- 本設定は既存のsquid.confへの追記であるため、投入前に設定ファイルをバックアップし、`squid -k parse`で構文検証してから`squid -k reconfigure`で反映すること。誤ったACLで全通信が制限対象になっていないか、動作確認の手順3(対象外通信への非影響)を反映後に必ず確認してから本番運用に移行する

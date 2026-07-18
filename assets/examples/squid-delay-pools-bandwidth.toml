@@ -1,0 +1,5 @@
+pool_class = 2
+target_acl = "dept_users"
+target_net = "192.168.20.0/24"
+aggregate_bytes_per_sec = 1250000
+individual_bytes_per_sec = 250000

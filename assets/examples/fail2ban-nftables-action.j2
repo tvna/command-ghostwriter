@@ -1,0 +1,124 @@
+# fail2banのnftablesアクション連携
+
+banaction を `{{ jail.banaction }}` に切り替え、遮断を iptables ルールの都度追加ではなく **nftables set への要素追加/削除** で行います。**既存の nftables ルールセットを確認してから** 導入し、fail2ban用チェーンの挿入位置を誤らないようにします。
+
+## 目的
+
+fail2banの遮断アクションをnftables setベースに切り替え、iptables方式との効率差を理解したうえで、ban/unban時のset操作を検証できるようになることを目指します。
+
+## 用語解説
+
+- **banaction**: fail2banがban/unban時に実行する具体的な遮断コマンド群を定義するアクション設定（`action.d/*.conf`）
+- **nftables-multiport / nftables-allports**: nftablesのsetを使った標準アクション。`multiport`はjailごとにポートを絞った遮断、`allports`は送信元IPを全ポートで遮断する
+- **nftables set**: 動的に要素（IPアドレス）を追加・削除できる集合オブジェクト。iptablesがban毎に個別ルールを`-I`で挿入・`-D`で削除するのに対し、nftables setは1本のルールが参照するsetの中身だけを増減させるため、ban数が増えてもルール評価コストがほぼ増加しない
+- **table family（inet）**: `inet`ファミリーは1つのテーブル定義でIPv4とIPv6の両方を同時に扱える。ファミリーを`ip`にするとIPv4のみになりIPv6遮断が漏れる
+- **persistent**: nftables setの内容をOS再起動後も維持するかどうか。nftables自体は再起動でルールセットが揮発するため、永続化には`nft list ruleset`のsave/restore運用が別途必要
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| jail名 | {{ jail.name }} |
+| 監視ポート | {{ jail.port }} |
+| ログパス | {{ jail.logpath }} |
+| bantime | {{ jail.bantime }} |
+| findtime | {{ jail.findtime }} |
+| maxretry | {{ jail.maxretry }} |
+| banaction | {{ jail.banaction }} |
+| block_type | {{ jail.block_type }} |
+| table_family | {{ jail.table_family }} |
+| persistent対策 | {% if jail.persistent %}有効化する{% else %}無効（未対応）{% endif %} |
+
+## 1. 既存のnftablesルールセットを確認する
+
+fail2banチェーンを追加する前に、既存ルールと衝突しない位置（優先度）を確認します。
+
+```bash
+sudo nft list ruleset
+```
+
+drop則が先に評価されるチェーンが既にある場合、fail2banのチェーン優先度（`priority filter;` 相当）が先に評価されてしまわないか確認してください。
+
+## 2. fail2banとnftablesを導入し、jail.localを作成する
+
+`jail.conf`は直接編集せず、`jail.local`に上書き設定を書きます。`banaction`に`{{ jail.banaction }}`を指定すると、`action.d/{{ jail.banaction }}.conf`が使用されます。
+
+```bash
+sudo apt-get install -y fail2ban nftables
+sudo tee /etc/fail2ban/jail.local <<'EOF'
+[DEFAULT]
+banaction = {{ jail.banaction }}
+ignoreip = 127.0.0.1/8{% for ip in ignoreip %} {{ ip.address }}{% endfor %}
+
+[{{ jail.name }}]
+enabled = true
+port = {{ jail.port }}
+logpath = {{ jail.logpath }}
+bantime = {{ jail.bantime }}
+findtime = {{ jail.findtime }}
+maxretry = {{ jail.maxretry }}
+EOF
+```
+
+## 3. action.d/{{ jail.banaction }}.confの動作を確認する
+
+`{{ jail.banaction }}`アクションは、初回起動時に`nft add table`, `add chain`, `add set`でテーブル・チェーン・setを作成し、ban時は`add element`、unban時は`delete element`でsetの要素だけを増減させます。ファミリーは`{{ jail.table_family }}`（{% if jail.table_family == "inet" %}IPv4/IPv6両対応{% else %}単一プロトコルのみ{% endif %}）です。
+
+```bash
+sudo grep -A3 '^actionban' /etc/fail2ban/action.d/{{ jail.banaction }}.conf
+sudo grep -A3 '^actionunban' /etc/fail2ban/action.d/{{ jail.banaction }}.conf
+```
+
+`actionban`が`nft add element {{ jail.table_family }} fail2ban fail2ban-{{ jail.name }} { <ip> }`、`actionunban`が同じsetから`delete element`を実行する行になっていることを確認します。
+
+## 4. サービスを起動し、テーブル・setの生成を確認する
+
+```bash
+sudo systemctl enable --now fail2ban
+sudo fail2ban-client status {{ jail.name }}
+sudo nft list ruleset | grep -A5 'table {{ jail.table_family }} fail2ban'
+```
+
+`block_type = {{ jail.block_type }}`に対応するチェーン（{% if jail.block_type == "multiport" %}`{{ jail.port }}`ポート限定{% else %}全ポート{% endif %}）が生成されていることを確認します。
+
+## 5. 手動banでset要素の追加を確認する
+
+`{{ test.attacker_ip }}`は`ignoreip`に含まれない外部攻撃想定のIPです。手動banにより、nftables setへのIP追加を直接確認します。
+
+```bash
+sudo fail2ban-client set {{ jail.name }} banip {{ test.attacker_ip }}
+sudo nft list set {{ jail.table_family }} fail2ban fail2ban-{{ jail.name }}
+```
+
+`elements = { {{ test.attacker_ip }}, ... }`のように、setの要素に対象IPが追加されていることを確認します。
+
+## 6. unbanでset要素の削除と実遮断を確認する
+
+```bash
+sudo fail2ban-client set {{ jail.name }} unbanip {{ test.attacker_ip }}
+sudo nft list set {{ jail.table_family }} fail2ban fail2ban-{{ jail.name }}
+```
+
+unban後は`elements`から`{{ test.attacker_ip }}`が消えていることを確認します。再度banして実遮断を確認する場合は、攻撃元とみなすホストから対象ポートへ接続し、unban前は到達不可・unban後は到達可能に戻ることを確認してください。
+
+```bash
+sudo fail2ban-client set {{ jail.name }} banip {{ test.attacker_ip }}
+sudo nft list set {{ jail.table_family }} fail2ban fail2ban-{{ jail.name }} | grep {{ test.attacker_ip }}
+sudo fail2ban-client set {{ jail.name }} unbanip {{ test.attacker_ip }}
+```
+
+## 動作確認
+
+- `nft list ruleset`にfail2banのtable/chain/setが、既存ルールと衝突しない優先度で挿入されていること（Step 1, 4）
+- Step 5でban実行後、`nft list set {{ jail.table_family }} fail2ban fail2ban-{{ jail.name }}`の`elements`に`{{ test.attacker_ip }}`が追加されること
+- Step 6でunban実行後、同setの`elements`から`{{ test.attacker_ip }}`が削除され、実際に対象ポートへ到達できる状態へ戻ること
+- 管理端末（{% for ip in ignoreip %}{{ ip.address }}{% if not loop.last %}, {% endif %}{% endfor %}）に対しては、setへの追加が発生しないこと
+
+## 注意事項
+
+- nftablesのルールセットはOS再起動で揮発する。{% if jail.persistent %}`persistent`対策として、`nft list ruleset > /etc/nftables.conf`を`systemctl enable nftables`のロード対象にし、fail2ban再起動時にsetを再構築させる運用を必ず組む。{% else %}本構成では永続化を行っていないため、再起動のたびにfail2banが再構築したsetのみが有効になる（再起動直後は既存banが失われる）ことを運用手順に明記する。{% endif %}
+- 既存のnftablesルール（Step 1で確認したもの）とfail2banが追加するチェーンの優先度が競合すると、fail2banのban/unbanが反映されない、または既存のallow則より先に評価されて意図しない遮断が起きる場合がある。導入前に必ず`nft list ruleset`で確認し、fail2ban側の優先度を既存ルールより先（drop側）に置くか、明示的に調整すること。
+- `table_family = {{ jail.table_family }}`は{% if jail.table_family == "inet" %}IPv4/IPv6を同一テーブルで扱うため、`ignoreip`にIPv6の管理端末アドレスがある場合も同じsetで除外される。IPv6のみ別ファミリー（`ip6`）で運用している既存ルールがある場合は二重管理にならないよう統合すること{% else %}IPv4またはIPv6の一方のみが対象となるため、他方のプロトコルの遮断が漏れていないか別途確認すること{% endif %}。
+- `jail.conf`を直接編集せず、`jail.local`への上書きで運用する（パッケージ更新で`jail.conf`が上書きされても設定が失われない）。
+- `ignoreip`に管理端末のIPを必ず登録してから有効化する。setベースの遮断は反映が速いため、登録漏れは即座の自己ロックアウトに直結する。
+- 遮断方式をiptablesからnftablesアクションへ切り替える際は、既存のiptablesルールが残ったまま二重に遮断されないよう、切り替え前に旧`banaction`（iptables系）を無効化し、新しいnftablesベースのban/unbanで実遮断が機能することをStep 5・6で確認してから旧ルールを削除すること。

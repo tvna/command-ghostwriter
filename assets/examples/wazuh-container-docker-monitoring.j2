@@ -1,0 +1,157 @@
+# WazuhによるDockerコンテナ監視
+
+Wazuhエージェントの `docker-listener` wodleでDocker Engineのイベントを収集し、特権コンテナの起動や`exec`によるコンテナ内侵入をルールで検知します。
+
+## 目的
+
+`{{ agent_name }}` 上のDocker Engineで発生するコンテナのライフサイクルイベント(作成・起動・停止・exec)をWazuhエージェントで収集し、特権コンテナの起動や不審な`exec`セッションをマネージャ側のルールで検知・アラート化できる状態にすることを目指します。
+
+## 用語解説
+
+- **docker-listener**: Wazuhエージェントに組み込まれたwodle(拡張モジュール)。Docker Engine APIのイベントストリームを購読し、JSON形式のログとしてエージェントに取り込む
+- **Docker Engineイベント**: `create`/`start`/`stop`/`die`/`exec_create`/`exec_start`など、コンテナのライフサイクルや操作に応じてDocker daemonが発行するイベント。`docker events`コマンドで直接確認できるものと同じ情報源
+- **特権コンテナ(privileged container)**: `--privileged`オプションで起動され、ホストのデバイス・カーネル機能にほぼ制限なくアクセスできるコンテナ。コンテナエスケープの主要な経路の一つ
+- **exec検知**: 稼働中コンテナに対する`docker exec`によるプロセス起動(`exec_create`/`exec_start`イベント)を検知すること。侵入後の追加コマンド実行や横展開の兆候になり得る
+- **ルールグループ(if_group/if_sid)**: Wazuhのマネージャ側ルールで、ベースルールセットが分類したイベント種別(グループ)や特定ルールIDの発火を条件に、カスタムルールを重ねて評価する仕組み
+
+## シナリオ設定
+
+| 設定項目 | 値 |
+|---|---|
+| エージェント名 | {{ agent_name }} |
+| Wazuhマネージャ | {{ wazuh_manager }} |
+| Dockerソケット | {{ docker_socket_path }} |
+| docker-listener有効化 | {{ docker_listener_enabled }} |
+| 特権コンテナ検知(alert_on_privileged) | {{ alert_on_privileged }} |
+| exec検知(alert_on_exec) | {{ alert_on_exec }} |
+| ベースルールID帯 | {{ docker_listener_rule_id }}番台 |
+
+収集対象イベント({{ monitored_events | length }}件):
+
+{% for e in monitored_events %}- `{{ e }}`
+{% endfor %}
+
+## 手順
+
+### 1. docker-listenerの前提条件を確認する
+
+`docker-listener`はWazuhエージェント同梱のPython(`/var/ossec/framework/python/bin/python3`)から`docker`パッケージ経由でDocker Engine APIに接続します。エージェントのPython環境にパッケージが無い場合は追加します。
+
+```bash
+sudo /var/ossec/framework/python/bin/python3 -m pip show docker || \
+  sudo /var/ossec/framework/python/bin/pip3 install docker
+```
+
+エージェントプロセスが`{{ docker_socket_path }}`を読めることも確認します。
+
+```bash
+ls -l {{ docker_socket_path }}
+getent group docker
+```
+
+Unixソケットのグループが`docker`になっている場合、Wazuhエージェントの実行ユーザーを`docker`グループへ追加します(rootでwodleを実行する構成では不要な場合があります)。
+
+```bash
+sudo usermod -aG docker wazuh
+sudo systemctl restart wazuh-agent
+```
+
+### 2. ossec.confでdocker-listenerを有効化する
+
+```bash
+sudo tee -a /var/ossec/etc/ossec.conf <<'EOF'
+<ossec_config>
+  <wodle name="docker-listener">
+    <disabled>{% if docker_listener_enabled %}no{% else %}yes{% endif %}</disabled>
+    <interval>10m</interval>
+    <run_on_start>yes</run_on_start>
+  </wodle>
+</ossec_config>
+EOF
+```
+
+### 3. 収集対象イベントを確認する
+
+`docker-listener`はDocker Engineのイベントストリーム全体を購読しますが、運用上着目するのは以下のイベントです。監視方針(どのイベントに注目してアラート運用するか)をチームで共有しておきます。
+
+```bash
+{% for e in monitored_events %}echo "monitor: {{ e }}"
+{% endfor %}```
+
+### 4. マネージャ側にカスタム検知ルールを追加する
+
+ベースルールセット(`{{ docker_listener_rule_id }}`番台、`docker`グループ)がdocker-listenerのJSONイベントを分類します。特権コンテナとexec検知を強化するローカルルールを追加します。
+
+```bash
+sudo tee -a /var/ossec/etc/rules/local_rules.xml <<'EOF'
+<group name="docker,">
+  <rule id="100620" level="7">
+    <if_group>docker</if_group>
+    <field name="docker.Action">^start$</field>
+    <description>Docker: container started ($(docker.Actor.Attributes.name))</description>
+  </rule>
+
+{% if alert_on_privileged %}  <rule id="100621" level="12">
+    <if_sid>100620</if_sid>
+    <field name="docker.Actor.Attributes.privileged">^true$</field>
+    <description>Docker: privileged container started ($(docker.Actor.Attributes.name)) - possible container escape risk</description>
+    <mitre>
+      <id>T1610</id>
+    </mitre>
+  </rule>
+
+{% endif %}{% if alert_on_exec %}  <rule id="100622" level="10">
+    <if_group>docker</if_group>
+    <field name="docker.Action">^exec_create$</field>
+    <description>Docker: exec session created in container ($(docker.Actor.Attributes.name))</description>
+  </rule>
+
+  <rule id="100623" level="12">
+    <if_sid>100622</if_sid>
+    <field name="docker.Actor.Attributes.execID">\.+</field>
+    <description>Docker: interactive exec started in running container ($(docker.Actor.Attributes.name)) - review for unauthorized access</description>
+  </rule>
+
+{% endif %}</group>
+EOF
+```
+
+### 5. 設定を反映する
+
+```bash
+sudo /var/ossec/bin/wazuh-control restart
+sudo /var/ossec/bin/wazuh-logtest
+```
+
+`wazuh-logtest`では、上記ルールに合致するサンプルJSON(`docker.Action=start`かつ`docker.Actor.Attributes.privileged=true`など)を貼り付け、ルールID`100620`系列がヒットすることを対話的に確認します。
+
+### 6. 実際にDockerイベントを発生させて検証する
+
+```bash
+# 通常起動(ベースルールのみ発火想定)
+docker run -d --name normal-test nginx:alpine
+
+# 特権コンテナ起動(alert_on_privileged=trueならルール100621が発火想定)
+docker run -d --privileged --name privileged-test alpine sleep 300
+
+# 稼働中コンテナへのexec(alert_on_exec=trueならルール100622/100623が発火想定)
+docker exec -it privileged-test /bin/sh -c "id"
+```
+
+## 動作確認
+
+- マネージャの`/var/ossec/logs/alerts/alerts.log`に、`docker run --privileged`実行後、ルールID`100621`のアラートが記録されること
+- `docker exec`実行後、ルールID`100622`/`100623`のアラートが記録されること
+- `docker run`(非特権)実行後は、ルールID`100620`のみが発火し、`100621`は発火しないこと(誤検知がないことの確認)
+
+```bash
+sudo grep -A 5 '"rule":{"id":"100621"' /var/ossec/logs/alerts/alerts.json | tail -n 20
+sudo grep -A 5 '"rule":{"id":"100622"' /var/ossec/logs/alerts/alerts.json | tail -n 20
+```
+
+## 注意事項
+
+- `docker-listener`の有効化には、エージェント側Python環境への`docker`パッケージ導入と、Dockerソケットへの読み取り権限が必須。パッケージ未導入やソケット権限不足の場合、wodleは起動時にエラーを`ossec.log`に出すだけで停止し、イベントが一切収集されない状態に気づきにくいため、有効化直後に`/var/ossec/logs/ossec.log`で`docker-listener`のエラーが出ていないか必ず確認する。
+- Docker Engineのイベントには、コンテナ起動時の環境変数(`docker inspect`の`Config.Env`)がそのまま含まれる場合がある。パスワードやAPIキーを環境変数で渡している既存コンテナがあると、そのままWazuhのアラートやログに機微情報が転記されてしまうため、監視対象のコンテナ運用では環境変数にシークレットを直書きしない、または当該フィールドをデコーダ/フィルタ側でマスクする方針を事前に決めておく。
+- コンテナの起動・停止が頻繁な環境(CI runner、オートスケールするワーカー等)では、`{{ monitored_events | join(", ") }}`を無条件に収集するとアラートが大量発生し、本当に重要な特権コンテナ検知が埋もれる。ノイズが多い場合は`alert_on_exec`を一時的に`false`にする、対象イベントを`start`/`die`など最小限に絞る、特定イメージ名を除外する等の調整を、検知精度を確認しながら段階的に行う。
+- ルール追加や`disabled`の変更を反映する`wazuh-control restart`はエージェント・マネージャの監視を一時的に止める操作である。既存の監視(他のwodleやルール)に影響が出ないよう、変更はまずステージング環境かテスト用エージェント1台に適用し、`wazuh-logtest`とステップ6のアラート発火確認が取れてから本番の全エージェントへ展開する。

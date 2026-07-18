@@ -1,0 +1,15 @@
+interfaces:
+  - wg0
+  - wg1
+handshake_stale_seconds: 180
+peers_expected:
+  - name: office-gw
+    public_key: "AbCdEf0123456789abcdef0123456789ABCDEF01234="
+    allowed_ips: "10.10.0.1/32"
+  - name: remote-worker-01
+    public_key: "ZyXwVu9876543210zyxwvu9876543210ZYXWVU98765="
+    allowed_ips: "10.10.0.11/32"
+  - name: branch-office
+    public_key: "QqWwEe4567891234qqweerty4567891234QQWWEE12="
+    allowed_ips: "10.10.0.21/32"
+alert_channel: "https://hooks.example.internal/services/T000/B000/xxxxxxxxxxxxxxxxxxxxxxxx"

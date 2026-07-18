@@ -1,0 +1,196 @@
+# OPNsense管理プレーンのアクセス制限強化
+
+`System > Settings > Administration` の GUI/SSH 設定を見直し、管理プレーン
+（GUI・SSH）へのアクセスを管理セグメント({{ mgmt_networks | length }} 件の
+ネットワーク)のみに限定します。パスワード認証の無効化・全インターフェース
+Listen の解除は「旧経路の無効化」にあたるため、新経路(鍵認証SSH・新ポート
+GUI)を別セッションで検証し、成功を確認してから最後に実施します。
+
+## 目的
+
+OPNsense自身の管理プレーン(GUI/SSH)を、GUIのListen Interfaces限定・HTTPS
+強制・SSHの鍵認証化によって要塞化し、かつ自己ロックアウトを起こさない適用
+順序（新経路の検証を先に、旧経路の無効化を後に、anti-lockout ruleの無効化
+は最後に）を実践できるようになることを目指します。
+
+## 用語解説
+
+- **管理プレーン(Management Plane)**: 機器そのものを設定・監視するための
+  経路。ここでは OPNsense の Web GUI(HTTPS)と SSH を指す
+- **Listen Interfaces**: `System > Settings > Administration` の GUI が
+  応答を待ち受ける(listen)インターフェースを絞り込む設定。既定は全
+  インターフェース(All)で、管理セグメントが属するインターフェースのみに
+  限定するとそれ以外からの応答自体をなくせる
+- **Disable password login for Secure Shell (SSH)**: 同じ設定画面にある
+  チェックボックス。有効にするとSSHの認証方法が公開鍵認証のみに限定される
+- **anti-lockout rule**: OPNsense が自動生成する、GUI/SSH管理アクセス用の
+  暗黙許可ルール。`Firewall > Settings > Advanced` の
+  `Disable anti-lockout rule` を有効にしない限り常に有効で、他の
+  ファイアウォールルールの設定ミスからも管理アクセスを守る最後の砦
+- **(self)**: ファイアウォールルールの送信元/宛先で「このOPNsense自身の
+  インターフェースアドレス」を指す特別なエイリアス
+
+## シナリオ設定
+
+今回、管理プレーンへのアクセスを許可する管理セグメントと、変更後の
+待受設定は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| 新GUIポート(gui_port) | {{ gui_port }} |
+| 新SSHポート(ssh_port) | {{ ssh_port }} |
+| SSH公開鍵(ssh_pubkey) | `{{ ssh_pubkey }}` |
+| パスワード認証を無効化するか(disable_password_auth) | {{ disable_password_auth }} |
+
+管理セグメント一覧(mgmt_networks, {{ mgmt_networks | length }} 件):
+
+| # | ネットワーク |
+|---|--------------|
+{% for net in mgmt_networks %}| {{ loop.index }} | {{ net }} |
+{% endfor %}
+
+## 1. 現状の設定をバックアップする
+
+新旧いずれの経路も失う事態に備え、変更前の `config.xml` をAPI経由で
+退避します。`$OPNSENSE_API_KEY` / `$OPNSENSE_API_SECRET` には、
+`System > Access > Users` で発行したAPIキー/シークレットをそれぞれ
+環境変数として設定してください。
+
+```bash
+export FW_HOST="10.0.0.1"
+curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" \
+  "https://${FW_HOST}/api/core/backup/download/this" \
+  -o "opnsense-config-backup-$(date +%Y%m%d%H%M).xml"
+```
+
+コンソールに直接ログインできる場合は、`/conf/config.xml` を別途 `scp` で
+退避しておくとさらに安全です。
+
+## 2. 管理セグメントから新ポートへの許可ルールを先に追加する
+
+GUI/SSHの待受ポートを変更する**前**に、管理セグメントから新ポートへの
+通信を許可する Floating Rule を追加します。ポート変更後に許可ルールが
+存在しない状態を作らないための予防措置です。既存の22番/443番向けルール
+はこの時点ではまだ変更しません。
+
+```bash
+{% for net in mgmt_networks %}curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST \
+  "https://${FW_HOST}/api/firewall/filter/addRule" \
+  -H "Content-Type: application/json" \
+  -d '{"rule":{"action":"pass","quick":"1","interface":"vlan_mgmt","direction":"in","ipprotocol":"inet","protocol":"TCP","source_net":"{{ net }}","destination_net":"(self)","destination_port":"{{ gui_port }}","description":"mgmt-plane-lockdown: new GUI port from {{ net }}","log":"1"}}'
+curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST \
+  "https://${FW_HOST}/api/firewall/filter/addRule" \
+  -H "Content-Type: application/json" \
+  -d '{"rule":{"action":"pass","quick":"1","interface":"vlan_mgmt","direction":"in","ipprotocol":"inet","protocol":"TCP","source_net":"{{ net }}","destination_net":"(self)","destination_port":"{{ ssh_port }}","description":"mgmt-plane-lockdown: new SSH port from {{ net }}","log":"1"}}'
+{% endfor %}
+curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST "https://${FW_HOST}/api/firewall/filter/apply"
+```
+
+`interface` に指定した `vlan_mgmt` は、環境ごとの実際の管理VLAN
+インターフェース名(例: `igc0_vlan99`)に読み替えてください。
+
+## 3. 新しい経路を用意する(旧経路はまだ無効化しない)
+
+`System > Settings > Administration` で、GUIとSSHの新しい経路を用意
+します。この段階では **パスワード認証は無効化せず、Listen Interfaces も
+`All` のまま**にしておき、新旧経路を並行して使える状態を保ちます。
+
+- **GUI設定**
+  - `Protocol`: `HTTPS` に設定(HTTP応答を停止し、常時HTTPSを強制する)
+  - `TCP port`: `{{ gui_port }}` を入力
+  - `Listen Interfaces`: このステップではまだ変更しない(`All`のまま)
+  - `Save` を押す(この時点でGUIは新ポートで応答を始める)
+- **SSH公開鍵の登録**: `System > Access > Users` で管理者アカウントを開き、
+  `Authorized keys` 欄に次の公開鍵を貼り付けて保存する
+
+  ```
+  {{ ssh_pubkey }}
+  ```
+
+- **SSH設定**(同じ `System > Settings > Administration` 画面の
+  Secure Shell セクション)
+  - `SSH Port`: `{{ ssh_port }}` を入力
+  - `Disable password login for Secure Shell (SSH)`: **まだチェックしない**
+  - `Save` を押す(`sshd` が新ポートで再起動する)
+
+## 4. 別セッションで新経路を検証する
+
+**今使っているGUI/SSHセッションは切断せずに残したまま**、管理セグメント
+内の別端末、または同じ端末の別ターミナル/別ブラウザタブから新経路を
+検証します。
+
+```bash
+# 別ターミナルで実行する。パスワードプロンプトが出ず鍵認証のみで
+# ログインできることを確認する
+ssh -i ~/.ssh/mgmt_admin_ed25519 -p {{ ssh_port }} admin@<firewall-mgmt-ip>
+```
+
+別のブラウザタブで `https://<firewall-mgmt-ip>:{{ gui_port }}/` を開き、
+証明書警告を除いて正常にログイン画面が表示されることも確認してください。
+
+**この2点(鍵認証SSH・新ポートGUI)が両方成功するまで、次の手順には
+進まないでください。** 失敗した場合は手順1のバックアップから復旧し、
+手順2・3をやり直します。
+
+## 5. 検証成功後、旧経路を無効化する
+
+新経路の検証が取れて初めて、旧経路(パスワード認証・全インターフェース
+Listen)を無効化します。
+
+- `System > Settings > Administration` の `Listen Interfaces` で、
+  管理セグメントが属するインターフェースのみにチェックを絞り込み、
+  `All` 相当の待受を解除する
+{% if disable_password_auth %}- 同画面の `Disable password login for Secure Shell (SSH)` に
+  チェックを入れ、パスワード認証を無効化する
+{% endif %}- `Save` を押して適用する
+
+適用後、手順4と同じ方法でもう一度、新経路(鍵認証SSH・新ポートGUI・
+限定Listen Interfaces)から接続できることを再確認してください。
+
+## 6. 不要になった一時ルールを整理する(anti-lockout ruleは最後まで維持)
+
+旧ポート(22番/443番、全インターフェース向け)を狙った一時的な広い許可
+ルールが残っていれば、ここで無効化・削除します。
+
+**`Firewall > Settings > Advanced` の `Disable anti-lockout rule` には、
+本手順のいずれの段階でも触れないでください。** anti-lockout rule は
+ファイアウォールルールの設定ミスからも管理アクセスを守る最後の砦です。
+どうしても無効化が必要な場合は、手順1〜5がすべて完了し、再起動を挟んで
+も新経路で接続できることを確認した後、**最後の手順として**単独で実施
+してください。
+
+## 動作確認
+
+- 手順4・手順5直後の両方で、別セッションから鍵認証のみで
+  `ssh -p {{ ssh_port }}` によるログインが成功すること
+- `https://<firewall-mgmt-ip>:{{ gui_port }}/` にGUIでログインでき、
+  HTTPでの旧ポートアクセスが応答しなくなっていること
+- 手順5の適用後、管理セグメント以外のネットワークから
+  `{{ gui_port }}`/`{{ ssh_port }}` への接続がいずれも失敗すること
+- `Firewall > Settings > Advanced` で `Disable anti-lockout rule` が
+  チェックされていない(有効なまま)こと
+- パスワードのみでのSSHログイン試行が拒否されること(disable_password_auth
+  が `{{ disable_password_auth }}` の場合)
+
+## 注意事項
+
+- **適用順序を厳守すること。** 先に管理セグメントからの新経路(鍵認証SSH・
+  新ポートGUI)を別セッションで検証し、成功を確認してから旧経路
+  (パスワード認証・全インターフェースListen)を無効化する。順序を逆にする
+  と、新経路が使えないまま旧経路を失い、GUI/SSHともに到達不能になる
+  おそれがある。
+- **元のセッションは、手順4・手順5の検証が終わるまで切断しないこと。**
+  検証に失敗した場合の復旧手段を残しておくため。
+- **anti-lockout ruleの無効化は最後に、かつ単独の手順として行うこと。**
+  他の変更(ポート変更・Listen Interfaces限定・パスワード認証無効化)と
+  同時に行わないでください。
+- ロックアウトが発生した場合の復旧手段: コンソール(シリアル/物理コンソール)
+  に接続し、コンソールメニューの `Restart web configurator` を選ぶと
+  GUIはHTTPで全インターフェースへ一時的に復帰する。ファイアウォール
+  ルール自体が原因の場合は、コンソールのシェルから `pfctl -d` で一時的に
+  フィルタを無効化するか、手順1で取得した `config.xml` を
+  `/conf/config.xml` に復元して再起動する。
+- `interface` に指定した `vlan_mgmt` はこの手順書内の仮称であり、環境ごとの
+  実際の管理VLANインターフェース名に読み替えること。
+- APIキー/シークレットは平文でリポジトリやログに残さず、環境変数や
+  秘密管理ツール経由で扱うこと。

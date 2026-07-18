@@ -1,0 +1,179 @@
+# OPAによるTerraform/IaCポリシー検査
+
+conftest(Open Policy Agent)を用いて、Terraform planの内容をRegoポリシーで検査し、
+publicアクセス禁止・暗号化必須・タグ必須といったガードレールをapply前(シフトレフト)に
+強制し、CIパイプラインでマージ前の必須ゲートとする手順です。
+
+## 目的
+
+Terraform planをJSON化してRegoポリシーで検査し、違反があるplanをapply前に検出できる
+ようになること、また合格したポリシーテストをCIの必須チェックとして組み込めるように
+なることを目指します。
+
+## 用語解説
+
+- **シフトレフト**: 欠陥や違反の検出を、適用(apply)後ではなくコードレビューやCIの
+  早い段階(左側)に前倒しして行う考え方
+- **conftest**: OPAのRegoポリシーをテスト形式で実行できるCLIツール。`terraform show -json`
+  などの構造化データに対してポリシーを適用できる
+- **Rego**: OPA(Open Policy Agent)が使うポリシー記述言語。`deny`ルールが1件でも
+  評価結果に含まれると、そのplanは違反とみなす
+- **deny_rules**: 本手順で強制するガードレール項目。今回は公開アクセス禁止・暗号化
+  必須・タグ必須の3種類を扱う
+- **ci_gate**: CI上でこのポリシーテストを必須(マージ前に緑化が必要)にするかどうかの設定
+- **exemption(例外)**: 特定リソースを一時的にポリシー対象から除外する仕組み。乱用を
+  防ぐため理由・期限・承認者を明記して管理する
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| ポリシーディレクトリ | `{{ policy_dir }}` |
+| plan JSON出力先 | `{{ plan_json }}` |
+| CIゲート化 | {{ "有効(マージ前必須)" if ci_gate else "無効(warnのみ)" }} |
+| 強制するガードレール | {% for rule in deny_rules %}{{ rule }}{% if not loop.last %} / {% endif %}{% endfor %} |
+
+## 手順
+
+### 1. Terraform planをJSON化する
+
+`terraform plan`のバイナリ出力を`terraform show -json`でRegoが読める構造化データに
+変換します。
+
+```bash
+terraform plan -out=plan.tfplan
+terraform show -json plan.tfplan > {{ plan_json }}
+```
+
+### 2. Regoポリシーを作成する(publicアクセス禁止)
+
+```rego
+package terraform.deny
+
+import future.keywords.in
+
+deny[msg] {
+    resource := input.resource_changes[_]
+    resource.type == "aws_security_group_rule"
+    resource.change.after.cidr_blocks[_] == "0.0.0.0/0"
+    resource.change.after.type == "ingress"
+    msg := sprintf("publicアクセス禁止違反: %s がingressで0.0.0.0/0を許可しています", [resource.address])
+}
+
+deny[msg] {
+    resource := input.resource_changes[_]
+    resource.type == "aws_s3_bucket_public_access_block"
+    resource.change.after.block_public_acls == false
+    msg := sprintf("publicアクセス禁止違反: %s がpublic ACLをブロックしていません", [resource.address])
+}
+```
+
+### 3. Regoポリシーを作成する(暗号化必須・タグ必須)
+
+```rego
+package terraform.deny
+
+deny[msg] {
+    resource := input.resource_changes[_]
+    resource.type == "aws_ebs_volume"
+    resource.change.after.encrypted == false
+    msg := sprintf("暗号化必須違反: %s が暗号化されていません", [resource.address])
+}
+
+deny[msg] {
+    resource := input.resource_changes[_]
+    resource.type == "aws_s3_bucket_server_side_encryption_configuration"
+    count(resource.change.after.rule) == 0
+    msg := sprintf("暗号化必須違反: %s に暗号化設定がありません", [resource.address])
+}
+
+deny[msg] {
+    required_tags := {"Owner", "Environment"}
+    resource := input.resource_changes[_]
+    resource.type == "aws_instance"
+    tags := object.get(resource.change.after, "tags", {})
+    missing := required_tags - {k | tags[k]}
+    count(missing) > 0
+    msg := sprintf("タグ必須違反: %s に必須タグ %v が不足しています", [resource.address, missing])
+}
+```
+
+これら3種類のRegoファイルを`{{ policy_dir }}`配下に配置します。
+
+```bash
+mkdir -p {{ policy_dir }}
+ls {{ policy_dir }}
+```
+
+### 4. ローカルでconftest testを実行する
+
+apply前に手元でポリシー違反の有無を確認します。
+
+```bash
+conftest test {{ plan_json }} --policy {{ policy_dir }}
+```
+
+`opa eval`でも同等の検査ができます。
+
+```bash
+opa eval --format pretty --data {{ policy_dir }} --input {{ plan_json }} "data.terraform.deny"
+```
+
+### 5. CIパイプラインに組み込む
+
+GitHub Actionsの例です。
+
+```yaml
+name: iac-policy-check
+on: [pull_request]
+jobs:
+  conftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: terraform init -input=false
+      - run: terraform plan -input=false -out=plan.tfplan
+      - run: terraform show -json plan.tfplan > {{ plan_json }}
+      - uses: instrumenta/conftest-action@master
+        with:
+          files: {{ plan_json }}
+          policy: {{ policy_dir }}
+```
+
+{% if ci_gate %}
+このジョブをブランチ保護ルールの必須ステータスチェックに登録し、違反したままの
+マージを技術的に禁止します。
+{% else %}
+現段階では必須ステータスチェックには登録せず、結果はPRコメントとしてwarn表示に
+留めます。
+{% endif %}
+
+## 動作確認
+
+1. 違反を含むplan(例: `cidr_blocks`に`0.0.0.0/0`を含むingressルール)で
+   `conftest test {{ plan_json }} --policy {{ policy_dir }}` を実行し、
+   非ゼロ終了かつ違反メッセージが出力されることを確認する。
+2. 同じ違反を含むplanをCIパイプラインに流し、`iac-policy-check`ジョブが
+   失敗することを確認する。
+3. 違反を修正した準拠planで手順1のローカルconftest testを再実行し、
+   `PASS`のみが表示されることを確認する。
+4. 準拠planをCIパイプラインに流し、`iac-policy-check`ジョブが成功することを確認する。
+
+## 注意事項
+
+- {{ "ci_gateが有効なため" if ci_gate else "ci_gateは現在無効だが将来有効化する前提で" }}、
+  本ポリシーチェックは必ずブランチ保護のマージ前必須チェックとして運用し、
+  違反したplanが人手のレビューだけでマージされないようにする。
+- `{{ plan_json }}`にはリソースの属性値がすべて含まれ、DBパスワードやAPIキーなど
+  state/secret由来の機微値が平文で残る場合がある。CIのアーティファクトとして
+  永続化・外部共有せず、ジョブ終了時に削除するか、機微値をマスクするツールを
+  介してから保管する。
+- Regoポリシーへの例外(exemption)は、対象リソースアドレス・除外理由・承認者・
+  失効期限をコメントまたは別ファイルで明記した上で追加し、期限切れの例外は
+  レビューで棚卸しする。理由のない例外の追加は認めない。
+- 新しいdenyルールを追加する際は、既存の運用を壊さないよう、まず結果を
+  warnとして可視化する段階を経てから、影響範囲を確認した上でdenyへ昇格する
+  (warn→denyの段階導入)。いきなりdenyで全リソースに適用しない。
+- `{{ policy_dir }}`のRegoファイルを変更した場合は、変更後のポリシーで
+  既存の全plan(または代表的なplanのサンプル)に対してconftest testを再実行し、
+  意図しない新規違反が発生していないことを確認してからマージする。

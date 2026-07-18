@@ -1,0 +1,125 @@
+# OpenZitiトランジットルータによるメッシュ経路構成
+
+複数拠点のedge-router同士をリンクで結び、fabricレベルのトランジットメッシュを構成します。利用者は最寄りのedge-routerへ接続するだけで、遠隔拠点のサービスにも多段中継で到達できるようにします。
+
+## 目的
+
+各拠点のedge-routerにlink listener/dialerを設定してルータ間リンクを確立し、controllerが管理するfabricがルータ間を多段中継する経路(トランジットメッシュ)を構成します。あわせてcostベースのsmart routingにより、リンク障害時や複数経路がある場合に最短経路が自動選択される状態を作ります。
+
+## 用語解説
+
+- **edge-router**: OpenZitiのデータプレーンを構成するルータプロセス。エッジ(クライアント/サービス)の終端とfabricへの中継の両方を担う
+- **link listener / link dialer**: edge-router間でfabric linkを張るための待受設定(listener)と、他ルータへ能動的に接続する設定(dialer)。両方を持つルータ同士は相互にリンクを確立できる
+- **fabric / transit**: controller配下の全edge-routerが形成する内部中継網。transitが有効なルータは、自身が終端しないトラフィックであっても次のルータへ中継する
+- **smart routing / コストベース経路選択**: 各edge-routerにはリンクごと・ルータごとに数値コストが設定され、controllerはコスト合計が最小となる経路を優先して選択する。リンクダウンや高コスト化時には自動的に代替経路へ切り替わる
+- **no-traversal**: edge-router作成時に指定できるフラグ。trueにするとそのルータはfabricの中継(トランジット)に参加せず、終端専用ルータになる
+
+## シナリオ設定
+
+| ルータ名 | link listener | advertised address |
+| --- | --- | --- |
+{% for r in routers %}| {{ r.name }} | {{ r.link_listener }} | {{ r.advertised }} |
+{% endfor %}
+
+link dialerには`{{ link_dialer }}`バインディングを使用し、transit_enabledは`{{ transit_enabled }}`です。
+
+## 手順
+
+### 1. 各edge-routerの設定ファイルにlink listener/dialerを追加する
+
+各拠点のedge-router設定ファイル(`/opt/openziti/etc/router/{{ '{{router_name}}' }}.yaml`に相当)へ、以下のブロックを追記します。listenerは自拠点への着信、dialerは他拠点への発信を担当します。
+
+```yaml
+listeners:
+  - binding: link
+    address: {{ '{{link_listener}}' }}
+    options:
+      outQueueSize: 16
+  - binding: edge
+    address: tls:0.0.0.0:3022
+    options:
+      advertise: {{ '{{advertised}}' }}
+
+dialers:
+  - binding: link
+    options:
+      bindingType: {{ link_dialer }}
+```
+
+{% for r in routers %}
+拠点`{{ r.name }}`では、listenerのaddressを`{{ r.link_listener }}`、advertiseを`{{ r.advertised }}`に設定します。
+{% endfor %}
+
+### 2. controllerにedge-routerを登録し、transitの可否を指定する
+
+```bash
+{% for r in routers %}
+{% if transit_enabled %}
+ziti edge create edge-router {{ r.name }} --tunneler-enabled -o {{ r.name }}.jwt
+{% else %}
+ziti edge create edge-router {{ r.name }} --tunneler-enabled --no-traversal -o {{ r.name }}.jwt
+{% endif %}
+{% endfor %}
+```
+
+発行された`.jwt`ファイルを各拠点のedge-routerへ配布し、以下のコマンドでcontrollerへ登録(enroll)します。
+
+```bash
+ziti-router enroll /opt/openziti/etc/router/config.yaml --jwt /opt/openziti/etc/router/{{ '{{router_name}}' }}.jwt
+```
+
+### 3. edge-routerプロセスを起動し、ルータ証明書の相互信頼を確立する
+
+```bash
+systemctl enable ziti-router
+systemctl start ziti-router
+journalctl -u ziti-router -f --no-pager
+```
+
+enroll時に発行されたクライアント証明書/サーバ証明書がcontroller配下のPKIチェーンで署名されるため、起動後は各ルータが相互にTLSで認証し合い、link listener/dialerの組み合わせで自動的にfabric linkが確立されます。
+
+### 4. コストベースの経路選択を調整する
+
+拠点間の回線品質や優先度に応じて、ルータ単位のコストを調整します。コストが低いほど優先して経路として選択されます。
+
+```bash
+{% for r in routers %}
+ziti fabric update router {{ r.name }} --cost 10
+{% endfor %}
+```
+
+冗長経路を持たせたい場合は、迂回させたい拠点のコストを高め(例: 50)に設定し、smart routingが平常時は低コスト経路を、障害時のみ高コスト経路を使うようにします。
+
+## 動作確認
+
+1. 各ルータの登録状態を確認します。
+
+```bash
+ziti edge list edge-routers
+```
+
+`ONLINE`列がすべて`true`になっていることを確認します。
+
+2. ルータ間リンクの確立状態を確認します。
+
+```bash
+ziti fabric list links
+```
+
+{% for r in routers %}`{{ r.name }}`を含む行の`STATE`が`Connected`になっていることを確認します。
+{% endfor %}
+
+3. 遠隔拠点のサービスへの通信がトランジット経由で成立することを確認します。最寄りのedge-router配下のクライアントから、別拠点にのみバインドされたサービスへ接続します。
+
+```bash
+ziti fabric list circuits
+```
+
+生成された回線(circuit)のパスに、直接繋がっていない中継ルータが含まれていること(2ホップ以上のedge-router名が並ぶこと)を確認し、トランジット経由で到達していることを確かめます。
+
+## 注意事項
+
+- link listenerのポート(本手順では`10080`)は、拠点間ファイアウォール/クラウドセキュリティグループの双方向で相互到達可能である必要があります。導入前に`nc -vz`等で疎通確認を行ってください。
+- ルータ証明書は必ずcontroller配下のenrollプロセスを通して発行し、相互信頼(mTLS)が確立されていることを`ziti fabric list links`の`STATE`で確認してから本番トラフィックを流してください。
+- 既存の拠点間VPN等、現行の到達経路がある場合は、それを無効化・撤去する前に、本手順で構成したfabricメッシュ経由での到達性(手順3)を並行稼働の状態で検証し、問題がないことを確認してから旧経路を廃止してください。
+- コスト調整(`--cost`)は本番影響があるため、まず変更前の経路(`ziti fabric list circuits`)を記録し、変更後に意図した経路へ切り替わったことを確認したうえで反映してください。

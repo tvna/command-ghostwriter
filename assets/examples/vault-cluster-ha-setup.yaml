@@ -1,0 +1,13 @@
+nodes:
+  - name: vault-node1
+    api_addr: https://10.0.1.11:8200
+    cluster_addr: https://10.0.1.11:8201
+  - name: vault-node2
+    api_addr: https://10.0.1.12:8200
+    cluster_addr: https://10.0.1.12:8201
+  - name: vault-node3
+    api_addr: https://10.0.1.13:8200
+    cluster_addr: https://10.0.1.13:8201
+retry_join_leader: https://10.0.1.11:8200
+autopilot_min_quorum: 3
+tls_verify: true

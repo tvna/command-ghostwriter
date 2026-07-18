@@ -1,0 +1,12 @@
+home_net: "$HOME_NET"
+external_net: "$EXTERNAL_NET"
+rule_file: "/etc/suricata/rules/local-icmp-tunnel.rules"
+fast_log_path: "/var/log/suricata/fast.log"
+payload_size_threshold: 512
+rate_count: 20
+rate_seconds: 60
+exempt_hosts:
+  - "10.0.0.10"
+  - "10.0.0.11"
+test_target_host: "203.0.113.50"
+test_payload_size: 1000

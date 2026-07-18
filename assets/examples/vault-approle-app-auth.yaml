@@ -1,0 +1,9 @@
+role_name: payment-api
+token_policies:
+  - payment-api-read
+  - payment-api-db
+secret_id_ttl: 15m
+token_ttl: 30m
+cidr_bind:
+  - 10.20.30.0/24
+  - 10.20.31.0/24

@@ -1,0 +1,9 @@
+metric,pattern,threshold,note
+user_agent,curl,contains,APIヘルスチェック等の正規利用があるため除外リストと照合してから判断する
+user_agent,python-requests,contains,バッチジョブ等の正規自動化であるかhostごとの許可リストで確認する
+user_agent,sqlmap,contains,SQLインジェクション探索ツールの既知UA。検出時は即時遮断を検討する
+user_agent,Nikto,contains,Webサーバ脆弱性スキャナの既知UA
+status_code,4xx,rate_over_20pct,同一orig_hからの応答4xx多発はディレクトリ探索やパスの当てずっぽうアクセスの兆候
+status_code,5xx,rate_over_10pct,応答5xx多発はアプリ例外の集中発生やDoS試行の兆候
+uri_length,200,over_chars,長大なURIはSQLi/XSSペイロード注入や過大パラメータ攻撃の兆候
+mime_type,executable,resp_mime_type_unexpected,想定外の実行形式ファイル配信はマルウェア配布や踏み台化の兆候

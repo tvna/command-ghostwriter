@@ -1,0 +1,154 @@
+# Loki分散構成による高可用スケーリング — {{ cluster_name }}
+
+## 目的
+
+Grafana Loki を read/write/backend の3ロールに分割した simple scalable deployment で構築し、共有オブジェクトストレージ・memberlist リング・レプリケーション係数を設定して、単一ノード障害でもログの取り込み・検索が継続する高可用構成を作れるようになることを目指します。
+
+## 用語解説
+
+- **monolithic（単体構成）**: 全コンポーネント(distributor/ingester/querier等)を単一プロセス・単一バイナリで動かす構成。小規模検証向けで水平スケールできない。
+- **simple scalable deployment（今回採用する構成）**: プロセスを read（querier/query-frontend）・write（distributor/ingester）・backend（compactor/ruler/index-gateway等）の3ロールに分割し、ロール単位でスケールできる構成。運用の複雑さと拡張性の中間点。
+- **microservices（マイクロサービス構成）**: 全コンポーネントを個別プロセス・個別デプロイに分割する構成。最大のスケーラビリティを持つが運用コストが高く、大規模事業者向け。
+- **リング(ring)**: ingester など複数インスタンス間でトークン空間を分割・共有し、どのインスタンスがどのログストリームを担当するかを決めるハッシュリング。
+- **memberlist**: gossip プロトコルでリングの状態をコンポーネント間に伝播する kvstore 実装。Consul/etcd を使わずにリングを構成できる。
+- **replication_factor（レプリケーション係数）**: 1つのログストリームを何台の ingester に複製するか。過半数（quorum）から応答が得られれば書き込み/読み込みが成功する。
+
+## シナリオ設定
+
+クラスタ `{{ cluster_name }}` を `{{ deployment_mode }}`（simple scalable）モードで構築します。
+
+| ロール | レプリカ数 | HTTPポート | gRPCポート |
+| --- | --- | --- | --- |
+{% for t in targets %}
+| {{ t.name }} | {{ t.replicas }} | {{ t.http_port }} | {{ t.grpc_port }} |
+{% endfor %}
+
+- オブジェクトストレージ: {{ object_store.type }} ({{ object_store.endpoint }} / バケット {{ object_store.bucket }} / リージョン {{ object_store.region }})
+- レプリケーション係数(replication_factor): {{ replication_factor }}
+- memberlist 参加ノード:
+{% for m in memberlist_join %}
+  - {{ m }}
+{% endfor %}
+- 設定ファイル配置先: {{ config_path }}
+
+## 手順1: 共通設定ファイルを作成する
+
+`{{ config_path }}` に、全ロール共通の設定を1本作成します（`-target` フラグでロールを切り替えるだけで同一ファイルを使い回せます）。
+
+```yaml
+auth_enabled: false
+
+common:
+  replication_factor: {{ replication_factor }}
+  path_prefix: /loki
+  storage:
+    s3:
+      endpoint: {{ object_store.endpoint }}
+      bucketnames: {{ object_store.bucket }}
+      region: {{ object_store.region }}
+      access_key_id: {{ object_store.access_key_ref }}
+      secret_access_key: {{ object_store.secret_key_ref }}
+      s3forcepathstyle: true
+      insecure: false
+  ring:
+    kvstore:
+      store: memberlist
+
+memberlist:
+  join_members:
+{% for m in memberlist_join %}
+    - {{ m }}
+{% endfor %}
+  bind_port: 7946
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: s3
+      schema: v13
+      index:
+        prefix: loki_index_
+        period: 24h
+
+limits_config:
+  retention_period: 744h
+  ingestion_rate_mb: 16
+  ingestion_burst_size_mb: 32
+
+compactor:
+  working_directory: /loki/compactor
+  retention_enabled: true
+```
+
+環境変数 `{{ object_store.access_key_env }}` / `{{ object_store.secret_key_env }}` は各ノードの systemd unit の `EnvironmentFile=` 経由で注入し、この設定ファイル自体には資格情報を平文で書きません。
+
+## 手順2: ロール別にコンポーネントを起動する
+
+同一バイナリ・同一設定ファイルに対して `-target` を変えて起動します。まずレプリカ1台ずつを起動し、リング形成を確認してから残りのレプリカを追加します。
+
+{% for t in targets %}
+### {{ t.name }} ({{ t.replicas }}台構成)
+
+```bash
+loki \
+  -config.file={{ config_path }} \
+  -target={{ t.name }} \
+  -server.http-listen-port={{ t.http_port }} \
+  -server.grpc-listen-port={{ t.grpc_port }} \
+  -memberlist.bind-port=7946
+```
+{% endfor %}
+
+## 手順3: リング形成状態を確認する
+
+backend の任意の1台で ring ステータス API を確認し、全 write/backend インスタンスが `ACTIVE` になっていることを確認します。
+
+```bash
+curl -s http://localhost:{{ targets[2].http_port }}/ring | grep -E 'ACTIVE|JOINING|LEFT'
+```
+
+memberlist 側のメンバー数も突き合わせます。
+
+```bash
+curl -s http://localhost:{{ targets[2].http_port }}/memberlist | grep -c '"State":0'
+```
+
+## 動作確認
+
+1. write ロールへのログ取り込みが成功することを確認します。
+
+```bash
+curl -s -X POST http://localhost:{{ targets[1].http_port }}/loki/api/v1/push \
+  -H 'Content-Type: application/json' \
+  -d '{"streams":[{"stream":{"job":"ha-check"},"values":[["'"$(date +%s%N)"'","ring smoke test"]]}]}'
+```
+
+2. read ロールへの検索クエリが成功することを確認します。
+
+```bash
+curl -s -G http://localhost:{{ targets[0].http_port }}/loki/api/v1/query_range \
+  --data-urlencode 'query={job="ha-check"}'
+```
+
+3. backend インスタンスを1台停止し、replication_factor={{ replication_factor }} による quorum が維持されることを確認します。
+
+```bash
+systemctl stop loki-backend@2
+curl -s http://localhost:{{ targets[2].http_port }}/ring | grep -E 'ACTIVE|LEFT'
+```
+
+4. 停止中でも手順「動作確認」の1・2を再実行し、取り込み・検索が継続していることを確認します。復旧後、停止したノードを再起動しリングに `ACTIVE` で復帰することを確認します。
+
+```bash
+systemctl start loki-backend@2
+curl -s http://localhost:{{ targets[2].http_port }}/ring | grep 'ACTIVE'
+```
+
+## 注意事項
+
+- simple scalable deployment はオブジェクトストレージ（{{ object_store.type }}: {{ object_store.bucket }}）を必須前提とする。ローカルディスクのみの monolithic 構成からの移行時は、既存データのオブジェクトストレージへの移行完了を先に確認すること。
+- replication_factor={{ replication_factor }} の場合、書き込み/読み込みは quorum（過半数、今回は2/3）の応答で成功する。backend/write の同時停止台数が quorum を割り込むと書き込み・検索の両方が失敗するため、同時停止は1台までに留める。
+- memberlist の参加ノード（{{ memberlist_join | length }}件）は全ノード間で UDP/TCP 7946 の到達性が必須。ファイアウォールやセキュリティグループで事前に疎通確認を行うこと。
+- 新しい simple scalable 構成への切り替え時は、既存の monolithic 構成を維持したまま新構成でリング形成・取り込み・検索が成功することを確認してから、旧構成のトラフィックを切り離すこと（本設定変更は認証境界・到達経路に影響するため、旧経路を残した並行稼働での検証が必須）。
+- コンポーネント別スケールでは write（distributor/ingester）を優先して増強する。書き込みスループットがボトルネックになりやすく、read は検索負荷、backend はコンパクション・ルール評価の負荷に応じて調整する。

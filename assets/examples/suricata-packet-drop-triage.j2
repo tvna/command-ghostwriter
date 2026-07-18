@@ -1,0 +1,133 @@
+# Suricataパケットドロップ発生時の調査
+
+`kernel_drops` の増加時に、取りこぼしの原因をキャプチャ・ルール負荷・CPUの順で切り分けます。
+
+## 目的
+
+Suricataの統計値でパケットドロップ(`kernel_drops`)の増加を検知した際に、リングバッファ不足・重いルールによる処理遅延・CPU飽和のどこが根本原因かを切り分け、恒久対処(リングバッファ増量、高負荷ルールの無効化、BPFフィルタによる除外)まで実施できるようになることを目指します。
+
+## 用語解説
+
+- **kernel_packets / kernel_drops**: カーネル(AF_PACKET)がSuricataに渡したパケット数と、リングバッファ溢れ等で破棄されたパケット数。`kernel_drops / kernel_packets` の比率がドロップ率
+- **suricatasc**: Suricataのユニックスソケット経由で統計や設定を操作する制御クライアント。`dump-counters` でランタイム統計を取得できる
+- **af-packet ring-size**: AF_PACKETキャプチャ方式でパケットを一時的に保持するリングバッファのスロット数。小さいとバースト時にドロップしやすい
+- **--engine-analysis**: ルールセットをロードせず、ルールの構文解析結果や統計のみを出力してSuricataを終了させる解析専用の起動オプション
+- **profiling.rules**: `suricata.yaml` のプロファイリング設定。有効化すると個々のルールの処理時間を `rule_perf.log` に記録できるが、有効化自体が処理コストを増やす
+- **pidstat -t**: プロセス配下のスレッド単位でCPU使用率を表示するコマンド。Suricataのワーカースレッドがどの程度CPUを使っているか確認できる
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| ドロップ率の判定閾値 | {{ drop_rate_threshold }} |
+| ルールプロファイリングの現在の有効状態 | {{ profiling_enabled }} |
+| 現在のring-size | {{ ring_size_current }} |
+| 変更後のring-size(暫定) | {{ ring_size_new }} |
+| 疑わしいルールのSID | {% for sid in suspect_sids %}{{ sid }}{% if not loop.last %}, {% endif %}{% endfor %} |
+| 恒久対処で追加するBPF除外条件 | {{ bpf_exclude_filter }} |
+
+## 手順
+
+### 1. ドロップ率を確認する(統計取得)
+
+```bash
+sudo suricatasc -c "dump-counters" | python3 -m json.tool | grep -A2 '"capture"'
+grep -E "kernel_packets|kernel_drops" /var/log/suricata/stats.log | tail -20
+```
+
+→ 直近の `kernel_packets` と `kernel_drops` から `kernel_drops / kernel_packets` を計算します。現在の判定閾値は `{{ drop_rate_threshold }}` です。この値を超えていれば、以降の切り分けに進みます。閾値以下であれば一時的なバーストとして経過観察に留めます。
+
+### 2. リングバッファ(af-packet ring-size)を確認する
+
+```bash
+grep -A5 "af-packet:" /etc/suricata/suricata.yaml
+grep "ring-size" /etc/suricata/suricata.yaml
+```
+
+→ 現在の `ring-size` は `{{ ring_size_current }}` です。ドロップ率が閾値を超えており、かつ後述のCPU使用率に余裕がある場合は、リングバッファ不足が主因の可能性が高いため、手順4のring-size増量に進みます。
+
+### 3. 重いルールを特定する(ルールプロファイリング)
+
+```bash
+sudo suricata -T -c /etc/suricata/suricata.yaml --engine-analysis
+grep -A3 "^rule" /var/log/suricata/rules_analysis.txt | head -40
+```
+
+→ `--engine-analysis` はルール構文とロード状況のみを解析し、パケット処理は行わずに終了します。個々のルールの実処理時間まで見るには、一時的にプロファイリングを有効化します。
+
+```toml
+# /etc/suricata/suricata.yaml の profiling セクションを一時的に変更
+profiling:
+  rules:
+    enabled: true
+    filename: rule_perf.log
+    append: yes
+```
+
+```bash
+sudo systemctl reload suricata
+sleep 300
+sudo cat /var/log/suricata/rule_perf.log | sort -k5 -rn | head -20
+```
+
+→ `rule_perf.log` の処理時間(ticks)が突出しているSIDを確認します。現在の疑わしいルールは SID {% for sid in suspect_sids %}{{ sid }}{% if not loop.last %}, {% endif %}{% endfor %} です。確認後は必ず `profiling.rules.enabled` を `{{ profiling_enabled }}` に戻し、リロードしてください(手順は「注意事項」参照)。
+
+### 4. CPU飽和を確認する
+
+```bash
+pidstat -t -p $(pgrep -o suricata) 5 3
+top -H -p $(pgrep -o suricata)
+```
+
+→ Suricataのワーカースレッド(`W#01-eth0` 等)のCPU使用率が継続して100%近い場合、CPU飽和がドロップの主因です。この場合はring-size増量だけでは解決せず、ルール数の削減かワーカースレッド数(`threads`)の見直しが必要です。
+
+### 5. 恒久対処を実施する
+
+リングバッファを増量する場合:
+
+```yaml
+# /etc/suricata/suricata.yaml
+af-packet:
+  - interface: eth0
+    ring-size: {{ ring_size_new }}
+```
+
+```bash
+sudo systemctl reload suricata
+```
+
+高負荷ルールを無効化する場合:
+
+```bash
+cat <<'EOF' | sudo tee -a /etc/suricata/disable.conf
+{% for sid in suspect_sids %}{{ sid }}
+{% endfor %}EOF
+sudo suricata-update --disable-conf /etc/suricata/disable.conf
+sudo suricatasc -c "reload-rules"
+```
+
+BPFフィルタで対象外トラフィックを除外する場合:
+
+```bash
+sudo suricata -c /etc/suricata/suricata.yaml -i eth0 --bpf-filter "{{ bpf_exclude_filter }}"
+```
+
+→ 恒久化する場合は `suricata.yaml` の `af-packet` セクションに `bpf-filter: "{{ bpf_exclude_filter }}"` を追記し、リロードします。
+
+## 動作確認
+
+### 1. ドロップ率を確認する(統計取得)
+
+上記の手順1を対処後に再実行し、`kernel_drops / kernel_packets` が `{{ drop_rate_threshold }}` を下回っていることを確認します。
+
+- `grep -E "kernel_packets|kernel_drops" /var/log/suricata/stats.log | tail -5` で直近の値を確認し、ドロップ率が改善していること
+- `sudo systemctl status suricata` が `active (running)` であり、リロード後にクラッシュしていないこと
+- 高負荷ルールを無効化した場合、`suricatasc -c "ruleset-stats"` で読み込みルール数が想定どおり減少していること
+
+## 注意事項
+
+- ルールプロファイリング(`profiling.rules.enabled: true`)は有効化自体がパケット処理のオーバーヘッドを増やすため、調査中のみ有効化し、原因特定後は速やかに `{{ profiling_enabled }}` (無効)へ戻して `systemctl reload suricata` を実行すること。
+- ring-sizeの増量はメモリ使用量の増加を伴う。ホストの空きメモリを確認したうえで `{{ ring_size_new }}` への変更を適用すること。
+- 高負荷ルール(SID {% for sid in suspect_sids %}{{ sid }}{% if not loop.last %}, {% endif %}{% endfor %})を無効化する前に、そのルールが検知しているシグネチャが実際に不要(誤検知・低リスク)であることをルール内容(`msg`, `classtype`)から確認すること。セキュリティ検知の欠落を招くため、安易な無効化は避ける。
+- BPFフィルタ(`{{ bpf_exclude_filter }}`)を恒久設定に追加する前に、まず一時的な `--bpf-filter` オプション付き起動(またはテスト環境)で除外対象のトラフィックが本当に監視不要であることを検証してから `suricata.yaml` に反映すること。誤って重要な監視対象を除外すると検知の抜け穴になる。
+- いずれの恒久対処も適用後は手順1・4を再実行し、ドロップ率とCPU使用率が改善していることを確認するまで作業を完了とみなさないこと。

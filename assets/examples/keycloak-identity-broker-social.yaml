@@ -1,0 +1,21 @@
+realm: corp
+kc_server_url: https://keycloak.corp.example.com
+idp_alias: corp-google-oidc
+protocol: oidc
+issuer: https://accounts.google.com
+client_id: 123456789012-abcdefghijklmnop.apps.googleusercontent.com
+client_secret_vault_key: idp-corp-google-oidc-secret
+authorization_url: https://accounts.google.com/o/oauth2/v2/auth
+token_url: https://oauth2.googleapis.com/token
+first_broker_login_flow: first broker login
+attribute_mappers:
+  - name: email-to-username
+    mapper_type: oidc-user-attribute-idp-mapper
+    external_claim: email
+    target_attribute: email
+  - name: dept-to-role
+    mapper_type: oidc-user-attribute-idp-mapper
+    external_claim: hd
+    target_attribute: department
+test_broker_user: hanako.sato@corp.example.com
+existing_local_user: hsato

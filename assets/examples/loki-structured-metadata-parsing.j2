@@ -1,0 +1,143 @@
+# Promtailパイプラインによるログ構造化
+
+promtailのpipeline_stagesでログをパースし、抽出したフィールドをラベルまたはstructured_metadataへ振り分ける手順です。
+
+## 目的
+
+json/regexp/timestamp/labels/template/structured_metadataの各ステージの役割を理解し、抽出フィールドをカーディナリティに応じて適切にラベルまたはstructured_metadataへ振り分けられるようになることを目指します。
+
+## 用語解説
+
+- **pipeline_stages**: Promtailがログ行を受信してからLokiへ送信するまでに、記述順に適用する変換ステージのリスト
+- **json / regexpステージ**: ログ本文からJSONパスまたは正規表現の名前付きキャプチャグループでフィールドを抽出するステージ
+- **timestampステージ**: 抽出済みフィールドをログのタイムスタンプとして採用するステージ。`source`と`format`の指定を誤るとパースに失敗し、Promtailの受信時刻がログ時刻として採用されてしまう
+- **labelsステージ**: 抽出済みフィールドをLokiのインデックス対象ラベルへ昇格するステージ
+- **structured_metadataステージ (Loki 3.0以降)**: 抽出済みフィールドをラベルとしてインデックスせず、ログエントリに紐づく構造化メタデータとして保持するステージ。LogQLでは`| json`等の展開後に参照でき、高カーディナリティな値（request_id, trace_id, user_idなど）をラベル化せずに検索できるようにする
+- **カーディナリティ**: ラベル値が取りうる異なる値の種類数。高カーディナリティな値をラベル化すると、Loki内部のストリーム数が爆発的に増加しインデックスが肥大化する
+- **templateステージ**: Goテンプレート構文で抽出済みフィールドの値を変換・正規化するステージ
+
+## シナリオ設定
+
+対象アプリケーションのJSON/アクセスログから {{ csv_rows | length }} 個のフィールドを抽出し、以下の方針で振り分けます。
+
+| stage_type | field | extract_to | rationale |
+| --- | --- | --- | --- |
+{% for r in csv_rows %}| {{ r["stage_type"] }} | {{ r["field"] }} | {{ r["extract_to"] }} | {{ r["rationale"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 現行ログフォーマットと既存パイプラインを確認する
+
+```bash
+sudo cat /etc/promtail/config.yml
+sudo journalctl -u promtail -n 50 --no-pager
+```
+
+### 2. json/regexpステージで対象フィールドを抽出する
+
+```yaml
+scrape_configs:
+  - job_name: app
+    pipeline_stages:
+      - json:
+          expressions:
+{% for r in csv_rows %}{% if r["stage_type"] == "json" %}            {{ r["field"] }}: {{ r["field"] }}
+{% endif %}{% endfor %}
+      - regex:
+          expression: '^(?P<status_code>\d{3})\s+(?P<response_time_ms>[0-9.]+)ms'
+```
+
+### 3. timestampステージでログ時刻を採用する
+
+```yaml
+      - timestamp:
+{% for r in csv_rows %}{% if r["stage_type"] == "timestamp" %}          source: {{ r["field"] }}
+{% endif %}{% endfor %}          format: RFC3339
+```
+
+`source`のフィールド名と`format`は実際のログ出力形式と一致させます。一致しない場合はパースに失敗し、注意事項に記載する時刻ずれが発生します。
+
+### 4. templateステージで値を正規化する
+
+```yaml
+{% for r in csv_rows %}{% if r["stage_type"] == "template" %}      - template:
+          source: {{ r["field"] }}
+          template: '{{ '{{' }} ToUpper .Value {{ '}}' }}'
+{% endif %}{% endfor %}```
+
+### 5. labelsステージで低カーディナリティフィールドをラベル化する
+
+```yaml
+      - labels:
+{% for r in csv_rows %}{% if r["extract_to"] == "label" %}          {{ r["field"] }}: {{ r["field"] }}
+{% endif %}{% endfor %}```
+
+以下のフィールドをラベルへ昇格します。
+
+```bash
+{% for r in csv_rows %}{% if r["extract_to"] == "label" %}echo "label: {{ r["field"] }} (stage={{ r["stage_type"] }})"
+{% endif %}{% endfor %}```
+
+### 6. structured_metadataステージで高カーディナリティフィールドをメタデータへ格納する
+
+```yaml
+      - structured_metadata:
+{% for r in csv_rows %}{% if r["extract_to"] == "metadata" %}          {{ r["field"] }}: {{ r["field"] }}
+{% endif %}{% endfor %}```
+
+以下のフィールドはラベル化せず、structured_metadataに格納します。
+
+```bash
+{% for r in csv_rows %}{% if r["extract_to"] == "metadata" %}echo "metadata: {{ r["field"] }} (stage={{ r["stage_type"] }})"
+{% endif %}{% endfor %}```
+
+### 7. dropとして扱うフィールドを確認する
+
+以下のフィールドはlabelsステージにもstructured_metadataステージにも記述せず、`| json`展開時のみ参照可能な状態にとどめます。
+
+```bash
+{% for r in csv_rows %}{% if r["extract_to"] == "drop" %}echo "drop(unindexed): {{ r["field"] }} (stage={{ r["stage_type"] }})"
+{% endif %}{% endfor %}```
+
+### 8. 設定をdry-runで検証してから適用する
+
+```bash
+promtail -config.file=/etc/promtail/config.yml -dry-run -log.level=debug 2>&1 | head -n 100
+sudo systemctl reload promtail || sudo systemctl restart promtail
+sudo systemctl status promtail --no-pager
+```
+
+## 動作確認
+
+1. Promtailが新パイプラインでログを送信できていることを確認します。
+
+```bash
+sudo journalctl -u promtail -f --no-pager
+```
+
+2. LogQLでラベルが正しく昇格していることを確認します。
+
+```bash
+logcli series '{job="app"}'
+```
+
+3. LogQLの`| json`展開でstructured_metadataフィールドが参照できることを確認します。
+
+```bash
+logcli query '{job="app"} | json' --limit 20
+```
+
+4. dropしたフィールド（{% for r in csv_rows %}{% if r["extract_to"] == "drop" %}{{ r["field"] }} {% endif %}{% endfor %}）がラベル一覧に含まれていないことを確認します。
+
+```bash
+logcli labels
+```
+
+## 注意事項
+
+- パース失敗時のドロップ挙動: json/regexpステージで対象フィールドの抽出に失敗すると、そのフィールドは空値または`__error__`ラベルとして扱われます。事前にサンプルログでdry-run検証し、想定外のドロップが起きていないか確認してください。
+- timestampパースミスでの時刻ずれ: `source`のフィールド名や`format`が実ログと一致しないとtimestampステージがパースに失敗し、Promtailの受信時刻がログ時刻として採用されます。新旧パイプラインを並行稼働させ、LogQLで時刻のずれがないことを確認してから旧設定を削除してください。
+- 高カーディナリティのラベル化回避: request_id/trace_id/user_idのような高カーディナリティな値は`labels`ステージに記述せず、必ず`structured_metadata`ステージまたはdrop（`| json`展開のみで参照）とします。誤ってラベル化するとLokiのストリーム数が急増し、メモリ枯渇やクエリ性能劣化を招きます。
+- パイプライン順序: `pipeline_stages`は記述順に適用されます。`json`/`regexp`で抽出 → `timestamp`で時刻採用 → `template`で正規化 → `labels`/`structured_metadata`で最終振り分け、の順序を守ってください。順序を誤ると未抽出のフィールドをラベル化しようとして失敗します。
+- 変更適用前に必ず`-dry-run`でパイプライン全体を検証し、設定ファイルのバックアップを取得したうえで、問題発生時は直前の設定ファイルへ即座に戻せるようにしてください。

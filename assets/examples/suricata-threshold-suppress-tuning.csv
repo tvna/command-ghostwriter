@@ -1,0 +1,3 @@
+sid,mode,track,ip_or_count,seconds,reason,review_date
+2100498,suppress,by_src,10.0.0.0/8,-,社内NATレンジからの誤検知(ET POLICY系)を送信元限定で抑制,2026-10-01
+9100101,threshold,by_src,1,3600,自作ルールの過剰アラートを送信元ごと1時間に1回へ制限,2026-10-01

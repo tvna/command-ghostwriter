@@ -1,0 +1,182 @@
+# OPNsenseによるVLANセグメント間分離ルール設計
+
+CSV で定義した {{ csv_rows | length }} 件の通信要件マトリクスに基づき、部門VLAN間の
+東西通信(east-west traffic)を既定拒否とし、Floating Rules で業務に必要な通信のみを
+明示的に許可するセグメント分離ルールを設計・適用します。
+
+## 目的
+
+複数VLANインターフェース間の東西通信を既定拒否した上で、業務に必要な通信のみを
+CSV のマトリクスから許可ルールとして起こし、ログのみの段階適用で業務断がないことを
+確認してから本番の遮断へ切り替えられるようになることを目指します。管理VLANから
+firewall自身のGUI/SSHへの経路は、いかなる段階でも遮断しないことを最優先します。
+
+## 用語解説
+
+- **東西通信(East-West Traffic)**: 同一組織内のVLAN(セグメント)間を横に流れる通信。外部との南北通信(North-South)と対比される
+- **Floating Rules**: 特定のインターフェースに縛られず、複数インターフェースへ横断的に適用できるルール群
+- **Group Rules / Interface Rules**: インターフェースグループ単位・個別インターフェース単位に設定するルール群
+- **評価順序(first match)**: OPNsenseは Floating → Group → Interface の順にルールを評価し、`quick`(既定で有効)が付いたルールは最初に一致した時点で即座に判定を確定する。既存のインターフェースタブの allow-any ルールより先に評価される Floating Rules を使うことで、既存ルールを消さずに新しいセグメント分離を優先させられる
+- **action=pass+log / action=block+log**: ルールを「通す/塞ぐ」の実効動作(pass/block)と、ログ記録の有無(log)を独立に組み合わせたもの。段階適用ではまず pass+log(実質許可のまま記録だけ取る)で観察し、問題がなければ block+log(実際に遮断しつつ記録も残す)へ切り替える
+- **ロックアウト**: 変更によって管理者自身の管理アクセス経路(GUI/SSH)を塞いでしまい、firewallを操作できなくなる状態
+
+## シナリオ設定
+
+今回設計する通信要件マトリクスは次の {{ csv_rows | length }} 件です。
+
+| segment | src_net | dst_net | proto | port | 用途 | action |
+|---------|---------|---------|-------|------|------|--------|
+{% for r in csv_rows %}| {{ r["segment"] }} | {{ r["src_net"] }} | {{ r["dst_net"] }} | {{ r["proto"] }} | {{ r["port"] }} | {{ r["purpose"] }} | {{ r["action"] }} |
+{% endfor %}
+
+表中の `-` は該当なし(例: ICMPや明示拒否行でポート指定が不要)を表します。
+
+## 手順
+
+### 1. 現状のルールと設定を退避する
+
+新しい Floating Rules を投入する前に、現行の config.xml をバックアップします。
+API 経由・コンソール経由のどちらでも取得できます。
+
+```bash
+export FW_HOST="10.0.0.1"
+export API_KEY="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+export API_SECRET="yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+
+curl -ks -u "${API_KEY}:${API_SECRET}" \
+  "https://${FW_HOST}/api/core/backup/download/this" \
+  -o "opnsense-config-backup-$(date +%Y%m%d%H%M).xml"
+```
+
+コンソールに直接ログインできる場合は `/conf/config.xml` を安全な場所へ `scp` で
+退避しておいてください。
+
+### 2. 管理アクセス経路を最優先で許可ルールとして投入する
+
+ロックアウト防止のため、管理VLANからfirewall自身への GUI(HTTPS)/SSH アクセスを
+最初に、かつ他のどのルールより先に評価される Floating Rules として投入します。
+
+```bash
+{% for r in csv_rows %}{% if r["segment"] == "mgmt-to-fw" %}curl -ks -u "${API_KEY}:${API_SECRET}" -X POST \
+  "https://${FW_HOST}/api/firewall/filter/addRule" \
+  -H "Content-Type: application/json" \
+  -d '{"rule":{"action":"{{ r["action"] }}","quick":"1","interface":"vlan_mgmt","direction":"in","ipprotocol":"inet","protocol":"{{ r["proto"] }}","source_net":"{{ r["src_net"] }}","destination_net":"{{ r["dst_net"] }}","destination_port":"{{ r["port"] }}","description":"{{ r["segment"] }}: {{ r["purpose"] }}","log":"1"}}'
+{% endif %}{% endfor %}
+curl -ks -u "${API_KEY}:${API_SECRET}" -X POST "https://${FW_HOST}/api/firewall/filter/apply"
+```
+
+**適用直後に、今まさに使っているセッションとは別に、新しいSSHセッションと新しい
+ブラウザタブでGUIログインを試み、管理VLANからの経路が生きていることを確認してから
+先へ進んでください。** 元のセッションは、確認が終わるまで切断しないでください。
+
+### 3. マトリクスの許可ルール(action=pass)を Floating Rules として投入する
+
+```bash
+{% for r in csv_rows %}{% if r["action"] == "pass" and r["segment"] != "mgmt-to-fw" %}curl -ks -u "${API_KEY}:${API_SECRET}" -X POST \
+  "https://${FW_HOST}/api/firewall/filter/addRule" \
+  -H "Content-Type: application/json" \
+  -d '{"rule":{"action":"pass","quick":"1","interface":"vlan_app,vlan_db,vlan_user,vlan_iot,vlan_guest,vlan_mon","direction":"in","ipprotocol":"inet","protocol":"{{ r["proto"] }}","source_net":"{{ r["src_net"] }}","destination_net":"{{ r["dst_net"] }}"{% if r["port"] != "-" %},"destination_port":"{{ r["port"] }}"{% endif %},"description":"{{ r["segment"] }}: {{ r["purpose"] }}","log":"1"}}'
+{% endif %}{% endfor %}
+curl -ks -u "${API_KEY}:${API_SECRET}" -X POST "https://${FW_HOST}/api/firewall/filter/apply"
+```
+
+### 4. マトリクスの明示拒否ルール(action=block)を投入する
+
+業務要件のない通信は、既定拒否に任せず明示的な block ルールとして記録に残します。
+
+```bash
+{% for r in csv_rows %}{% if r["action"] == "block" %}curl -ks -u "${API_KEY}:${API_SECRET}" -X POST \
+  "https://${FW_HOST}/api/firewall/filter/addRule" \
+  -H "Content-Type: application/json" \
+  -d '{"rule":{"action":"block","quick":"1","interface":"vlan_app,vlan_db,vlan_user,vlan_iot,vlan_guest,vlan_mon","direction":"in","ipprotocol":"inet","protocol":"{{ r["proto"] }}","source_net":"{{ r["src_net"] }}","destination_net":"{{ r["dst_net"] }}"{% if r["port"] != "-" %},"destination_port":"{{ r["port"] }}"{% endif %},"description":"{{ r["segment"] }}: {{ r["purpose"] }}","log":"1"}}'
+{% endif %}{% endfor %}
+curl -ks -u "${API_KEY}:${API_SECRET}" -X POST "https://${FW_HOST}/api/firewall/filter/apply"
+```
+
+### 5. 東西通信の既定拒否ルールを、まず「ログのみ」段階でFloating Rulesの最後に追加する
+
+マトリクスに載っていないすべての東西通信を捕捉する、いちばん優先度の低い
+キャッチオール行を追加します。ここではまだ実際には遮断せず、`action=pass` のまま
+`log=1` で記録だけを取り、既存のインターフェースタブの allow-any ルールへは
+そのまま素通りさせます。
+
+```bash
+curl -ks -u "${API_KEY}:${API_SECRET}" -X POST \
+  "https://${FW_HOST}/api/firewall/filter/addRule" \
+  -H "Content-Type: application/json" \
+  -d '{"rule":{"action":"pass","quick":"1","interface":"vlan_mgmt,vlan_app,vlan_db,vlan_user,vlan_iot,vlan_guest,vlan_mon","direction":"in","ipprotocol":"inet","protocol":"any","source_net":"10.0.0.0/16","destination_net":"10.0.0.0/16","description":"east-west-catchall-observe: マトリクス外の東西通信を観察のため記録","log":"1"}}'
+curl -ks -u "${API_KEY}:${API_SECRET}" -X POST "https://${FW_HOST}/api/firewall/filter/apply"
+```
+
+### 6. 1営業日観察し、業務通信への影響がないことをログで確認する
+
+pf のログインターフェース `pflog0` をリアルタイムで確認するか、フィルタログを
+`east-west-catchall-observe` のラベルで絞り込みます。
+
+```bash
+tcpdump -ni pflog0 -e -vv
+clog /var/log/filter/latest.log | grep "east-west-catchall-observe"
+```
+
+1営業日の間、`east-west-catchall-observe` に記録された通信の中に業務上必要な
+ものが残っていないか(=すべてマトリクスの許可行で説明できるか)を確認します。
+必要な通信が漏れていた場合は、手順3のCSVに行を追加してから再度投入してください。
+
+### 7. 影響がないことを確認できたら、既定拒否ルールを実際の遮断へ切り替える
+
+観察期間中に業務断の兆候がなければ、キャッチオール行の action を `pass` から
+`block` へ切り替えて本番適用します。切り替えの直前に、手順2と同様に別セッションで
+管理アクセス経路が生きていることを再確認してください。
+
+```bash
+CATCHALL_UUID=$(curl -ks -u "${API_KEY}:${API_SECRET}" -X POST \
+  "https://${FW_HOST}/api/firewall/filter/searchRule" \
+  -H "Content-Type: application/json" \
+  -d '{"searchPhrase":"east-west-catchall-observe"}' | python3 -c "import sys,json; print(json.load(sys.stdin)['rows'][0]['uuid'])")
+
+curl -ks -u "${API_KEY}:${API_SECRET}" -X POST \
+  "https://${FW_HOST}/api/firewall/filter/setRule/${CATCHALL_UUID}" \
+  -H "Content-Type: application/json" \
+  -d '{"rule":{"action":"block","quick":"1","interface":"vlan_mgmt,vlan_app,vlan_db,vlan_user,vlan_iot,vlan_guest,vlan_mon","direction":"in","ipprotocol":"inet","protocol":"any","source_net":"10.0.0.0/16","destination_net":"10.0.0.0/16","description":"east-west-catchall-enforce: マトリクス外の東西通信を既定遮断","log":"1"}}'
+curl -ks -u "${API_KEY}:${API_SECRET}" -X POST "https://${FW_HOST}/api/firewall/filter/apply"
+```
+
+### 8. 旧来の allow-any ルールを整理する
+
+Floating Rules が Interface タブのルールより先に評価されるため、旧来の
+allow-any ルールはこの時点ですでに実質的に無効化(シャドーイング)されています。
+さらに1営業日、想定外の影響が出ないことを確認したうえで、旧ルールを無効化
+(削除ではなくまず disable)し、最終的に整理してください。
+
+## 動作確認
+
+- 手順2直後に、別セッションで管理VLANから firewall の GUI(HTTPS)/SSH に接続でき、
+  ロックアウトが発生していないこと
+- `https://${FW_HOST}/api/firewall/filter/searchRule` で、マトリクスの全
+  {{ csv_rows | length }} 件に対応するルールが `pass`/`block` それぞれ意図通りに
+  登録されていること
+- 手順6の観察期間中、`east-west-catchall-observe` のログに業務上必要な通信が
+  残っていないこと
+- 手順7の切り替え後、マトリクスにない東西通信(例: user-to-db)が実際に失敗し、
+  マトリクスに許可した通信(例: app-to-db の 3306/tcp)は引き続き成功すること
+
+## 注意事項
+
+- 認証・ファイアウォール・SSH経路に関わる変更のため、各段階(手順2・手順7)で
+  必ず**別セッション**から管理アクセス経路が生きていることを確認してから次に
+  進むこと。確認が取れるまで元のセッションを切断しない。
+  ロックアウトした場合は、コンソール(シリアル/物理コンソール)から
+  `pfctl -d` による一時的なフィルタ無効化、または手順1で取得したconfig.xmlの
+  復元で復旧する。
+- `interface`一覧に指定した`vlan_*`は、環境ごとの実際のVLANインターフェース名
+  (例: `igc0_vlan10`)に読み替えること。ここでは説明のための仮称を用いている。
+- 段階適用(pass+log での観察 → block+log への切り替え)を省略し、いきなり
+  block で投入しないこと。観察期間を飛ばすと、洗い出せていない業務通信が
+  即座に断される。
+- Floating Rulesの`quick`を外すと「最後に一致したルールが勝つ」動作に変わり、
+  評価順序の前提が崩れるため、本手順のルールは必ず`quick=1`のまま運用すること。
+- 本手順の API エンドポイント・フィールド名は OPNsense のバージョンにより
+  変わることがあるため、投入前に自環境の `/api/firewall/filter/addRule` の
+  スキーマ(GUIのAPIドキュメントまたは`searchRule`のレスポンス)で確認すること。
+- CSVの`action=block`行は、既定拒否だけに頼らず監査ログに理由(`purpose`)を
+  残すための明示拒否であり、既定拒否ルールの代わりにはならない。

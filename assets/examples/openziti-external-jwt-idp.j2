@@ -1,0 +1,118 @@
+# OpenZiti外部IdP連携によるSSO認証
+
+証明書ベース認証に加えて、OIDC IdP(Keycloak等)が発行するJWTでOpenZitiのアイデンティティ認証を委譲できるようにします。
+
+## 目的
+
+コントローラ `{{ controller_name }}` に外部JWT署名者(ext-jwt-signer)を登録し、auth-policyでext-jwt認証を有効化した上で、既存アイデンティティを外部IdP側のユーザーへ紐付け、IdP発行トークンでのログインを成立させることを目指します。
+
+## 用語解説
+
+- **ext-jwt-signer**: OpenZitiが外部OIDC IdPの発行するJWTを検証するための設定オブジェクト。issuer(発行者)、jwksEndpoint(署名鍵検証用エンドポイント)、audience(想定する受信者)、claimsProperty(externalIdと突き合わせるクレーム名)を保持する
+- **auth-policy**: アイデンティティがどの認証方式(証明書 / パスワード / ext-jwt)を許可されるかを定義するポリシー。ext-jwt-signerを許可リストへ加えることでSSOログインを解禁する
+- **externalId**: OpenZitiのidentityオブジェクトに設定する外部識別子。IdP発行トークンのclaimsProperty値(本手順では `{{ claims_property }}` クレーム)と一致させることで、トークン主体とZitiアイデンティティを紐付ける
+- **証明書ベース認証との併用**: ext-jwt-signerを追加してもmTLS証明書認証は無効化されない。同一アイデンティティが認証方式を切り替えられる状態を維持したまま移行できる
+- **セッションTTL**: Zitiが発行するAPIセッションの有効期限。IdP側でのアカウント無効化・ロールアウトがZiti側へ即時反映されない間のリスクを、このTTLで実質的な上限として補完する
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| コントローラ | {{ controller_name }} |
+| 対象アイデンティティ | {{ identity_name }} |
+| externalId (IdP側識別子) | {{ external_id }} |
+| IdP issuer | {{ issuer }} |
+| jwks_endpoint | {{ jwks_endpoint }} |
+| audience | {{ audience }} |
+| claims_property | {{ claims_property }} |
+| ext-jwt-signer名 | {{ signer_name }} |
+| auth-policy名 | {{ auth_policy_name }} |
+| IdPクライアントID | {{ client_id }} |
+| セッションTTL(分) | {{ session_ttl_minutes }} |
+
+## 手順
+
+### 1. コントローラへログインし現状の認証設定を確認する
+
+```bash
+ziti edge login {{ controller_name }} --username admin --password ***
+ziti edge list ext-jwt-signers
+ziti edge list auth-policies
+```
+
+既存のauth-policyが証明書認証(`primaryCertAllowed`)のみを許可していないか、現状を必ず確認します。
+
+### 2. IdP側のJWKSエンドポイントと発行者情報を確認する
+
+```bash
+curl -s {{ jwks_endpoint }} | jq '.keys[].kid'
+curl -s {{ issuer }}/.well-known/openid-configuration | jq '.issuer, .jwks_uri'
+```
+
+`.well-known/openid-configuration` の `issuer` 値が、これから登録する `{{ issuer }}` と完全一致することを確認します。1文字でも不一致だとトークン検証が全断します。
+
+### 3. ext-jwt-signerを作成する
+
+```bash
+ziti edge create ext-jwt-signer {{ signer_name }} \
+  --issuer "{{ issuer }}" \
+  --jwks-endpoint "{{ jwks_endpoint }}" \
+  --audience "{{ audience }}" \
+  --claims-property "{{ claims_property }}" \
+  --client-id "{{ client_id }}" \
+  --use-external-id
+```
+
+`--use-external-id` を指定することで、claimsPropertyの値をidentityのexternalIdと突き合わせる動作になります。
+
+### 4. auth-policyでext-jwt認証を有効化する
+
+```bash
+ziti edge create auth-policy {{ auth_policy_name }} \
+  --primary-cert-allowed \
+  --primary-ext-jwt-allowed \
+  --primary-ext-jwt-allowed-signers {{ signer_name }}
+```
+
+既存の証明書認証(`--primary-cert-allowed`)を残したまま追加するため、移行期間中は両方式が併存します。
+
+### 5. 対象アイデンティティにexternalIdとauth-policyを紐付ける
+
+```bash
+ziti edge update identity {{ identity_name }} \
+  --external-id "{{ external_id }}" \
+  --auth-policy {{ auth_policy_name }}
+```
+
+### 6. IdP発行トークンでのSSOログインを検証する(証明書ログインを維持したまま)
+
+まず既存の証明書ログインが引き続き成立することを別セッションで確認します。
+
+```bash
+ziti edge login {{ controller_name }} --cert alice.cert --key alice.key
+```
+
+続けて、IdPからトークンを取得しext-jwtログインを試します。
+
+```bash
+ZITI_JWT=$(curl -s -X POST "{{ issuer }}/protocol/openid-connect/token" \
+  -d "client_id={{ client_id }}" \
+  -d "grant_type=password" | jq -r '.access_token')
+
+ziti edge login {{ controller_name }} --ext-jwt "$ZITI_JWT"
+```
+
+## 動作確認
+
+- ステップ2で `.well-known/openid-configuration` の `issuer` と `{{ issuer }}` が一致していること
+- ステップ6の証明書ログインが引き続き成功すること(既存経路が壊れていないことの確認)
+- ステップ6の `ziti edge login {{ controller_name }} --ext-jwt "$ZITI_JWT"` が成功し、`ziti edge list identities` で `{{ identity_name }}` のセッションが確立していること
+- `ziti edge list auth-policies` で `{{ auth_policy_name }}` に `{{ signer_name }}` が許可済みシグナーとして表示されること
+
+## 注意事項
+
+- issuerまたはaudienceが1文字でも不一致だと、そのext-jwt-signerを使う認証は全断する。ステップ2で`issuer`の完全一致を確認してから登録し、変更時はメンテナンスウィンドウで実施する。
+- jwks_endpointへの到達性が失われる(IdP側障害・ネットワーク分断)と、キャッシュされた鍵の期限切れ以降は新規ログインが全断する。IdPの可用性とネットワーク経路をZiti側の可用性要件に含めて評価する。
+- 移行手順の5番・6番は、必ず既存の証明書ログイン(手順6前段)が成功することを確認してから外部JWTログインを試す。ext-jwt認証を先行させ証明書認証を無効化すると、IdP側の不備でロックアウトする危険がある。
+- IdP側でユーザーを無効化・失効させても、Ziti側が保持するAPIセッションはセッションTTL(`{{ session_ttl_minutes }}`分)が切れるまで有効なままになる。即時失効が必要な場合はZiti側のセッション強制失効(`ziti edge delete api-session`相当の運用)を手順に含め、TTLを即時失効の代替とみなさない。
+- auth-policyを変更する際は、対象アイデンティティが他のセッションで証明書ログインしたまま作業し、変更後に想定外のロックアウトが起きていないかを別端末・別セッションで確認してから、旧auth-policyへの参照を持つ設定を整理する。

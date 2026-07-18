@@ -1,0 +1,136 @@
+# SuricataによるICMPトンネリング検知
+
+過大ペイロードや高頻度ICMPなど、ICMPトンネリング悪用の兆候を検知する
+Suricataルールを整備し、誤検知源となる監視ホストの死活監視pingを除外
+したうえで動作確認まで行う手順書です。ルールファイルは
+`{{ rule_file }}` に配置します。
+
+## 目的
+
+ICMPを使ったC2通信やデータ持ち出し（ICMPトンネリング）は、大きな
+ペイロードや高頻度のping送出という形で現れることが多く、これを
+`itype`/`dsize`/`threshold` を組み合わせたSuricataルールで検知できる
+ようにします。監視システムの死活監視pingやPath MTU探索による誤検知を
+防ぐため、`exempt_hosts` に列挙したホストは事前にpassルールで除外し、
+検知後は送信元ホストのプロセス調査へつなげられる状態を目指します。
+
+## 用語解説
+
+- **itype**: ICMPのtype値を指定するキーワード。type 8はecho request(ping)
+- **icode**: ICMPのcode値を指定するキーワード。itypeと組み合わせて絞り込む
+- **dsize**: パケットのペイロードサイズを指定するキーワード。`>512` は
+  512バイト超を意味する
+- **threshold**: 同一条件のマッチが一定時間内に一定回数発生した場合のみ
+  アラートするキーワード。高頻度ICMPの検知に用いる
+- **pass**: 該当パケットを以降のルール評価から除外するアクション。
+  正規の死活監視トラフィックの誤検知除外に使う
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| ルールファイル | `{{ rule_file }}` |
+| fast.logパス | `{{ fast_log_path }}` |
+| 監視対象ネットワーク | `{{ home_net }}` |
+| 外部ネットワーク | `{{ external_net }}` |
+| 過大ペイロード閾値(payload_size_threshold) | {{ payload_size_threshold }} バイト超 |
+| 高頻度検知回数(rate_count) | {{ rate_count }} 回 |
+| 高頻度検知時間窓(rate_seconds) | {{ rate_seconds }} 秒 |
+| 除外ホスト数(exempt_hosts) | {{ exempt_hosts | length }} 件 |
+| 模擬テスト対象ホスト | `{{ test_target_host }}` |
+| 模擬テストペイロードサイズ | {{ test_payload_size }} バイト |
+
+除外対象ホストは以下の {{ exempt_hosts | length }} 件です。
+
+{% for h in exempt_hosts %}- `{{ h }}`
+{% endfor %}
+
+## 手順
+
+### 1. 監視ホストの死活監視pingを除外するpassルールを追加する
+
+監視システムの死活監視pingやMTU探索が誤検知源になるため、検知ルードより
+先に評価されるpassルールとして除外ホストを登録します。
+
+```bash
+cat >> {{ rule_file }} <<'EOF'
+{% for h in exempt_hosts %}pass icmp {{ h }} any -> {{ external_net }} any (msg:"LOCAL ICMP exempt monitoring host"; itype:8; sid:{{ 9100400 + loop.index }}; rev:1;)
+{% endfor %}EOF
+```
+
+### 2. 過大ペイロードICMPの検知ルールを追加する
+
+```bash
+cat >> {{ rule_file }} <<'EOF'
+alert icmp {{ home_net }} any -> {{ external_net }} any (msg:"LOCAL ICMP large payload"; itype:8; dsize:>{{ payload_size_threshold }}; sid:9100501; rev:1; classtype:bad-unknown;)
+EOF
+```
+
+このルールは、type 8（echo request）かつペイロードが
+{{ payload_size_threshold }} バイトを超えるICMPパケットを検知します。
+ICMPトンネリングツールはデータを載せるためペイロードを拡大する傾向があり、
+通常のpingでは発生しない大きさとなります。
+
+### 3. 高頻度ICMPの検知ルールをthreshold付きで追加する
+
+```bash
+cat >> {{ rule_file }} <<'EOF'
+alert icmp {{ home_net }} any -> {{ external_net }} any (msg:"LOCAL ICMP high frequency tunneling"; itype:8; icode:0; threshold:type both, track by_src, count {{ rate_count }}, seconds {{ rate_seconds }}; sid:9100502; rev:1; classtype:bad-unknown;)
+EOF
+```
+
+`threshold:type both` により、送信元ごとに {{ rate_seconds }} 秒間で
+{{ rate_count }} 回を超えたタイミングで1回だけアラートし、以降は同じ
+時間窓の中では抑制されます。track by_src で送信元ホスト単位に集計します。
+
+### 4. ルール構文を検証してリロードする
+
+```bash
+suricata -T -c /etc/suricata/suricata.yaml -S {{ rule_file }}
+suricatasc -c "reload-rules"
+```
+
+### 5. 大容量ペイロードpingでトンネリングを模擬する
+
+```bash
+ping -s {{ test_payload_size }} -c 5 {{ test_target_host }}
+```
+
+`{{ test_payload_size }}` バイトのペイロードは
+`payload_size_threshold`（{{ payload_size_threshold }} バイト）を超えて
+いるため、sid:9100501 が発火するはずです。
+
+### 6. fast.logで検知結果を確認する
+
+```bash
+tail -n 50 {{ fast_log_path }} | grep -E "9100501|9100502"
+```
+
+sid:9100501（過大ペイロード）のアラートが記録され、
+`{{ exempt_hosts | join(', ') }}` からのpingではアラートが出ていない
+ことを確認します。
+
+## 動作確認
+
+- `suricata -T -c /etc/suricata/suricata.yaml -S {{ rule_file }}` が構文
+  エラーなく完了すること
+- `{{ fast_log_path }}` に sid:9100501 のアラートが記録されていること
+- 除外ホスト（{{ exempt_hosts | join(', ') }}）からのICMPではアラートが
+  発生しないこと（passルールが先に評価されていること）
+- 高頻度送信を模擬した場合、sid:9100502 が {{ rate_seconds }} 秒あたり
+  1回程度に抑制されていること（threshold機能の確認）
+
+## 注意事項
+
+- passルール（監視ホスト除外）は検知ルールより前に評価される順序で
+  ロードすること。順序を誤ると死活監視pingが誤検知として大量に記録される。
+- 除外設定を追加する際は、必ずステップ5・6の模擬テストで新しい検知ルール
+  自体が正しく発火することを確認してから、既存の監視や他の検知手段を
+  無効化・縮小すること。新ルールの動作確認前に旧来の監視を止めない。
+- アラート発生時は、`msg`に記録されたsidをもとに送信元ホスト
+  （{{ home_net }}側)のプロセス調査（`ss -p`や`lsof`でICMPソケットを
+  握っているプロセスの特定）につなげること。単なるアラート記録で
+  終わらせない。
+- `exempt_hosts` の一覧は監視システムの構成変更時に必ず見直すこと。
+  古い監視サーバIPが残っていると、そのIPを騙る攻撃者のトンネリング
+  トラフィックを誤って除外してしまう。

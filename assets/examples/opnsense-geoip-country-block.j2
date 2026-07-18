@@ -1,0 +1,142 @@
+# OPNsenseによるGeoIP国別アクセス制限手順
+
+MaxMind GeoLite2 データベースを用いた GeoIP 型エイリアス **{{ alias_name }}** を作成し、
+WAN インターフェース（{{ apply_interface }}）向けの着信のうち、指定した {{ blocked_countries | length }}
+か国（{{ blocked_countries | join(', ') }}）からのアクセスを遮断します。誤遮断を避けるため、
+遮断ルールを有効化する前にログのみで観察する段階を必ず経てください。
+
+## 目的
+
+このシナリオでは、OPNsense の GeoIP エイリアス機能を用いて特定国からの WAN 着信を遮断し、
+CDN や正規 SaaS の経由 IP を誤遮断しないよう、ログ観察による段階適用と許可例外エイリアスを
+組み合わせて安全に運用できるようになることを目指します。
+
+## 用語解説
+
+- **GeoIP エイリアス**: MaxMind の GeoLite2/GeoIP2 データベースを参照し、指定した ISO 国コードに
+  割り当てられた IP レンジ群を自動展開するエイリアス種別
+- **MaxMind ライセンスキー**: MaxMind アカウントで発行する API キー。GeoLite2 データベースの
+  ダウンロードに必須（[MaxMind 公式サイト](https://www.maxmind.com/)で取得）
+- **ISO 3166-1 alpha-2**: 国を2文字で表すコード（例: CN=中国, RU=ロシア, KP=北朝鮮）
+- **段階適用（ログのみ観察）**: 遮断（Block）ではなく通過（Pass）+ ログ有効のルールを先に適用し、
+  誤遮断対象がないかログで確認してから Block に切り替える手法
+- **許可例外エイリアス**: GeoIP 判定の粒度では区別できない CDN・正規 SaaS の経由 IP を、
+  ブロックより優先して通過させるための例外リスト
+
+## シナリオ設定
+
+| 項目 | 値 |
+|------|-----|
+| GeoIP エイリアス名 | {{ alias_name }} |
+| MaxMind ライセンスキー | {{ maxmind_license_key }} |
+| 遮断対象国（ISO コード） | {{ blocked_countries | join(', ') }} |
+| 適用インターフェース | {{ apply_interface }} |
+| ルールのログ記録 | {% if log_enabled %}有効{% else %}無効{% endif %} |
+| 許可例外エイリアス名 | {{ allow_exception_alias }} |
+
+## 1. MaxMind ライセンスキーを登録し GeoLite2 データを取得する
+
+Web GUI で **Firewall > Settings > Advanced** を開き、画面下部の GeoIP セクションに
+MaxMind のライセンスキーを登録します。
+
+1. **Firewall > Settings > Advanced** を開く
+2. GeoIP セクションの **IP Address Source** を `MaxMind DB (GeoLite2)` に設定する
+3. **License Key** 欄に発行済みのライセンスキーを入力する
+4. **Save** をクリックして設定を保存する
+
+保存後、データベースを取得します（GUI の Save で自動取得されない場合は CLI で明示的に取得します）。
+
+```bash
+configctl geoip download
+configctl geoip list
+```
+
+`configctl geoip list` の出力に `{{ blocked_countries | join(', ') }}` の各国コードに
+対応するエントリが含まれていることを確認してください。
+
+## 2. 許可例外エイリアスを先に用意する
+
+GeoIP 判定より優先して通過させたい CDN・正規 SaaS の IP レンジを、遮断ルールを作る前に
+登録しておきます。
+
+1. **Firewall > Aliases** を開き、**+** で新規エイリアスを追加する
+2. **Name** に `{{ allow_exception_alias }}` と入力する
+3. **Type** を `Host(s)` または `Network(s)` に設定し、既知の CDN・SaaS の IP レンジを登録する
+4. **Save** の後、画面上部の **Apply** をクリックして反映する
+
+## 3. GeoIP 型エイリアスを作成する
+
+1. **Firewall > Aliases** で **+** をクリックし新規エイリアスを追加する
+2. **Name** に `{{ alias_name }}` と入力する
+3. **Type** を `GeoIP` に設定する
+4. **Country Codes** に以下を1行1コードで入力する
+
+```text
+{% for cc in blocked_countries %}{{ cc }}
+{% endfor %}```
+
+5. **Save** の後、画面上部の **Apply** をクリックして反映する
+
+反映後、エイリアスが展開されるまで数分かかる場合があります。
+
+## 4. 段階適用: 遮断前にログのみで観察する
+
+いきなり Block ルールを追加すると、GeoIP 判定では区別できない CDN 経由の正規アクセスまで
+遮断してしまうおそれがあります。まず **Pass + ログ有効** のルールで観察期間を設けます。
+
+1. **Firewall > Rules > {{ apply_interface | upper }}** を開く
+2. **+** をクリックし、以下の内容で観察用ルールを一番上に追加する
+   - **Action**: `Pass`
+   - **Interface**: `{{ apply_interface }}`
+   - **Direction**: `in`
+   - **Source**: `{{ alias_name }}`
+   - **Description**: `[観察用] GeoIP遮断候補の通過状況をログ記録`
+   - **Log packets matched by this rule**: 有効にする
+3. **Save** の後、**Apply Changes** をクリックする
+
+数日程度、業務時間帯を含めて観察し、**Firewall > Log Files > Live View** で
+`{{ alias_name }}` からの通信に業務上必要なものが含まれていないかを確認します。
+含まれていた場合は、そのIPレンジを手順2の `{{ allow_exception_alias }}` へ追加してから
+次の手順に進んでください。
+
+## 5. 遮断ルールへ切り替える
+
+観察の結果、問題がないと判断できたら、手順4のルールを Block に切り替えます。
+このとき、許可例外エイリアスのルールが GeoIP 遮断ルールより **上位** にあることを
+必ず確認してください。
+
+1. **Firewall > Rules > {{ apply_interface | upper }}** を開く
+2. まだ無ければ、`{{ allow_exception_alias }}` を Source とする **Pass** ルールを
+   GeoIP ルールより上に追加する
+3. 手順4で作成した観察用ルールを開き、**Action** を `Pass` から `Block` に変更する
+   - **Log packets matched by this rule**: {% if log_enabled %}引き続き有効のままにする{% else %}運用方針に応じて無効化してよい{% endif %}
+   - **Description**: `GeoIP国別遮断: {{ blocked_countries | join(', ') }} からのWAN着信を遮断`
+4. **Save** の後、**Apply Changes** をクリックする
+
+## 動作確認
+
+1. **Firewall > Diagnostics > Aliases** を開き、`{{ alias_name }}` を検索してエイリアスが
+   展開されていること、および展開後の IP レンジ件数が 0 件でないことを確認する
+2. 同様に `{{ allow_exception_alias }}` も展開件数が期待通りであることを確認する
+3. **Firewall > Log Files > Live View** で `{{ apply_interface }}` インターフェースを絞り込み、
+   手順5で Block に切り替えたルールに一致した遮断ログが表示されることを確認する
+4. 許可例外エイリアスに含めた IP からのアクセスが遮断されず通過していることをログで確認する
+5. 業務で利用している正規サービスへの疎通に影響が出ていないことを、実際の利用者に確認する
+
+## 注意事項
+
+- **いきなり Block ルールを有効化しないこと。** CDN や正規 SaaS が遮断対象国のリージョンを
+  経由している場合、業務影響のある誤遮断が発生します。必ず手順4の「Pass + ログ有効」による
+  観察期間を経てから手順5で Block に切り替えてください。
+- GeoIP エイリアスは MaxMind データベースの更新に依存するため、`configctl geoip download` が
+  失敗するとエイリアスが空のまま反映される可能性があります。手順1実行後は必ず
+  `configctl geoip list` で該当国コードの展開結果を確認してください。
+- 許可例外エイリアス（`{{ allow_exception_alias }}`）のルールは、GeoIP 遮断ルールより
+  必ず**上位**に配置すること。順序を誤ると例外が機能せず、CDN 経由の正規アクセスまで
+  遮断されます。
+- ロールバックする場合は、手順5で Block に変更したルールを再度 `Pass` に戻すか、
+  ルール自体を無効化（Disable）した上で **Apply Changes** を実行してください。設定削除は
+  即座に反映されるため、変更前に必ず現在の設定のバックアップ（**System > Configuration >
+  Backups**）を取得しておくこと。
+- ライセンスキー（`{{ maxmind_license_key }}`）はダミー値です。実運用では実際の MaxMind
+  ライセンスキーに置き換え、設定ファイルや手順書の共有範囲を限定してください。

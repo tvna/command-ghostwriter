@@ -1,0 +1,96 @@
+# Velociraptor クライアント監視アーティファクト構成手順
+
+対象サーバ設定ファイル: `{{ server_config_path }}` を管理する Velociraptor サーバ管理者向けの手順書です。GUI 管理コンソール（管理者権限）から作業してください。
+
+## 目的
+
+client monitoring（常時イベント監視）アーティファクトをラベル対象のクライアントへ配布し、プロセス実行・SSH ログインなどのイベントストリームをサーバ側で継続収集できるようにすることを目指します。単発の collection（オンデマンド収集）とは異なり、client monitoring は接続中のクライアントに常駐し、条件発生の都度イベントをサーバへプッシュし続けます。
+
+## 用語解説
+
+- **client monitoring（常時イベント監視）**: クライアントに常駐させ、プロセス起動や認証イベントなど発生の都度サーバへストリーミングするアーティファクト種別。GUI の「Client Events」設定で対象アーティファクトとラベルを紐付ける。
+- **collection（単発収集）**: `Collected` タブや Hunt から都度実行する 1 回限りのアーティファクト収集。継続監視には使わない。
+- **eBPF ベースのイベント源**: `Linux.Events.ProcessExecutions` などが利用するカーネル内フックで、プロセス生成をオーバーヘッド少なく捕捉する。カーネルが対応しない環境では auditd ベースの収集にフォールバックする。
+- **audit ベースのイベント源**: `auditd` の exec/ログイン監査ログを `ausearch`/netlink 経由で読み取る収集方式。`Linux.Events.SSHLogin` はこの系統。
+- **ラベル（Label）**: クライアントに付与するタグ。client monitoring の配布対象はラベル単位で指定する。
+- **Notebook**: サーバ上で VQL を対話実行し、収集済みイベントを解析する画面。
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| サーバ設定ファイル | `{{ server_config_path }}` |
+| 配布対象ラベル | {{ target_labels | join(', ') }} |
+| ラベル付与元 CSV | `{{ label_source_csv }}` |
+| イベント保管期間 | {{ event_retention }} |
+| サーバ側解析(Notebook)利用 | {{ server_side_analysis }} |
+| データストア格納先 | `{{ datastore_location }}` |
+
+監視対象アーティファクト:
+
+| アーティファクト | イベント源 | 目的 |
+| --- | --- | --- |
+{% for a in monitoring_artifacts %}| `{{ a.name }}` | {{ a.event_source }} | {{ a.purpose }} |
+{% endfor %}
+
+## 1. 監視対象クライアントへラベルを付与する
+
+CSV に列挙したクライアント ID へラベルを付与します。既存ラベルの上書き事故を避けるため、まず `operation='add'` で追加のみ行います。
+
+```bash
+velociraptor --config {{ server_config_path }} query "
+SELECT label(client_id=ClientId, labels=split(string=Labels, sep=','), operation='add')
+FROM parse_csv(filename='{{ label_source_csv }}', accessor='fs')
+"
+```
+
+CSV の列は `ClientId,Labels` とし、`Labels` はカンマ区切りで `{{ target_labels | join(',') }}` のいずれかを指定します。
+
+## 2. Client Monitoring テーブルへアーティファクトを登録する
+
+GUI 管理コンソールの上部メニューから「Client Events」設定画面を開き、以下のアーティファクトを追加してから、配布対象ラベルを設定します。
+
+```text
+1. GUI 上部メニュー → Client Events を開く
+2. "Add Artifacts" で下記を追加する
+{% for a in monitoring_artifacts %}   - {{ a.name }}
+{% endfor %}3. 画面右側の Labels に {{ target_labels | join(' / ') }} を指定して保存する
+4. "Update Clients" を実行し、接続中クライアントへ設定を配信する
+```
+
+保存すると、対象ラベルを持つクライアントが次回チェックイン時に新しい monitoring テーブルを取得し、常時イベントストリームの送出を開始します。
+
+## 3. サーバ側の保管とアクセス制御を確認する
+
+イベントは `{{ datastore_location }}` 配下のデータストアに蓄積されます。保管期間 {{ event_retention }} を超える古いフローは、定期ジョブで棚卸し・削除する運用を組み込んでください（Velociraptor 自体には全アーティファクト共通の自動 TTL 機構はないため、運用側で削除対象を洗い出す仕組みが必要です）。
+
+```bash
+velociraptor --config {{ server_config_path }} query "
+SELECT client_id, flow_id, timestamp(epoch=create_time / 1000000) AS CreatedAt
+FROM flows(client_id='all')
+WHERE CreatedAt < now() - {{ event_retention_days }} * 86400
+"
+```
+
+データストアディレクトリのファイルパーミッションは Velociraptor サーバプロセスの実行ユーザーのみに読み書きを制限し、他ユーザーからのイベント内容(コマンドラインやログイン元 IP を含む)の閲覧を防いでください。
+
+## 動作確認
+
+- 対象ラベルを付与したクライアントで任意のプロセスを実行し、サーバの Notebook (`{{ notebook_id }}`) から以下を実行してイベント到着を確認する。
+
+```vql
+SELECT * FROM watch_monitoring(artifact='Linux.Events.ProcessExecutions')
+LIMIT 5
+```
+
+- 対象クライアントへ SSH ログインを行い、同様に `Linux.Events.SSHLogin` のイベントが Notebook 上に到着することを確認する。
+- サーバ側解析(Notebook)利用が {{ server_side_analysis }} の場合、上記クエリ結果を Notebook セルに保存し、解析担当者が参照できることを確認する。
+- `Client Events` 画面で対象ラベルに紐づく監視対象クライアント数が想定台数と一致することを確認する。
+
+## 注意事項
+
+- 常時イベント監視はクライアント・サーバ双方に継続的な負荷とデータ量増加をもたらす。ラベル付与前に対象範囲(台数・イベント種別)を絞り込み、段階的に展開すること。
+- 収集されるプロセスコマンドラインやログイン元情報は機微情報を含みうる。データストアへのアクセスは最小権限の運用アカウントに限定し、Notebook 共有範囲も必要な担当者のみに絞ること。
+- ラベル付与は必ず `operation='add'` から開始し、既存ラベルへの意図しない上書きがないことを一部クライアントで確認してから、対象範囲を広げること。
+- Client Events の設定変更は接続中の全対象クライアントへ配信されるため、変更前に少数のテスト用ラベル・クライアントで新しい監視アーティファクトの到着を確認し、問題なければ対象ラベルを本番範囲へ広げること。
+- 保管期間を超えたイベントの削除ジョブは、誤って必要なフローまで削除しないよう、実行前に対象件数を確認してから本番適用すること(ロールバックが効かない操作のため)。

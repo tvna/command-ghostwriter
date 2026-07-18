@@ -1,0 +1,118 @@
+# osquery自身の設定改ざん・停止の調査 — {{ host.hostname }}
+
+- **対象ホスト**: {{ host.hostname }}
+- **osqueryソケット**: {{ host.osquery_socket }}
+
+## 目的
+
+osqueryd（監視エージェント）自体が停止・設定改ざん・ログ欠落を起こしているかを、osquery_infoテーブルとsystemdのサービス状態から切り分け、攻撃者による防御回避（Defense Evasion）の可能性を判断できるようになることを目指します。
+
+## 用語解説
+
+- **osquery_infoテーブル**: osqueryd自身の稼働状態（起動時刻、config_hash、watcherの有無など）を保持する内部テーブル
+- **config_hash**: 現在読み込まれている設定ファイルの内容から算出されるハッシュ値。値が変わっていれば設定が書き換えられたことを示す
+- **watchdog**: osqueryd本体（watcher）が子プロセス（worker）のメモリ・CPU使用量を監視し、閾値超過時にworkerを強制終了・再起動させる仕組み
+- **防御回避（Defense Evasion）**: 攻撃者がEDR/監視エージェント自体を停止・改ざん・無力化して検知を逃れる攻撃手法。osquerydはまさにこの標的になり得るため、エージェント自身の異常を外部から監視する必要がある
+- **ログ送信途絶**: osqueryd結果ログ（result log）やTLSロガーへの送信が止まり、収集基盤側でイベントが欠落している状態
+
+## シナリオ設定
+
+{{ host.hostname }} でSIEM側のosqueryイベント受信が {{ baseline.log_gap_minutes }} 分以上途絶しているとのアラートが発報しました。osquerydの停止・設定改ざん・ログ経路障害のいずれかを切り分けてください。
+
+| 項目 | 値 |
+| --- | --- |
+| config_hashベースライン | `{{ baseline.config_hash_baseline }}` |
+| サービス死活監視の有無 | {{ baseline.service_check }} |
+| ログ欠落許容分数 | {{ baseline.log_gap_minutes }} 分 |
+| 直近のwatchdog強制終了回数 | {{ baseline.watchdog_kills }} 回 |
+| ロガー送信先 | {{ logging.logger_tls_endpoint }} |
+| 結果ログパス | {{ logging.results_log_path }} |
+
+## 手順
+
+### 1. サービスが稼働しているか確認する
+
+```bash
+systemctl status osqueryd
+```
+
+`inactive (dead)` や `failed` の場合は、停止（Defense Evasion）または異常終了を疑い、直近の終了コードと終了時刻を確認します。
+
+### 2. サービスのログから停止・再起動の履歴を確認する
+
+```bash
+journalctl -u osqueryd --since "2 hours ago" --no-pager
+```
+
+意図しない `stop`/`Stopped` や、管理者操作の記録がない `systemctl stop` の痕跡がないか確認します。
+
+### 3. osquery_infoテーブルでconfig_hashと稼働時間を確認する
+
+```bash
+osqueryi --json "select uuid, version, config_hash, config_valid, start_time, watcher from osquery_info;"
+```
+
+取得した `config_hash` をベースラインと比較します。
+
+```bash
+echo "baseline : {{ baseline.config_hash_baseline }}"
+```
+
+値が一致しない場合、設定ファイルが改ざんされた（または正規の変更管理を経ずに変更された）可能性があります。
+
+### 4. 設定ファイルの構文と読み込み結果を検証する
+
+```bash
+osqueryd --config_check --config_path=/etc/osquery/osquery.conf
+```
+
+`config_valid` が false、またはconfig_checkがエラー終了する場合は、改ざんまたは誤った編集による構文破壊を疑います。
+
+### 5. watchdogによる強制終了の有無を確認する
+
+```bash
+grep -i "watchdog" /var/log/osquery/osqueryd.INFO.* 2>/dev/null
+```
+
+`Memory limits exceeded` や `Watchdog killing worker` のような記録があれば、意図的な高負荷誘発によるworker停止（一種の可用性攻撃）の可能性を検討します。直近の強制終了回数のベースラインは {{ baseline.watchdog_kills }} 回です。
+
+### 6. ログ送信経路（TLSロガー）への到達性を確認する
+
+```bash
+curl -sS -o /dev/null -w "%{http_code}\n" {{ logging.logger_tls_endpoint }}
+```
+
+到達性に問題がなければ、結果ログファイル自体の更新時刻を確認します。
+
+```bash
+stat -c "%Y %n" {{ logging.results_log_path }}
+```
+
+現在時刻との差が {{ baseline.log_gap_minutes }} 分を超えている場合、osqueryd側でログ生成が止まっている（停止・改ざん・過負荷のいずれか）と判断します。
+
+### 7. 外部監視・systemd watchdogでの検知設定を確認する
+
+```bash
+systemctl show osqueryd -p WatchdogUSec -p Restart
+```
+
+`WatchdogUSec` が `0` のまま（未設定）の場合、systemd自身によるハングアップ検知が効かない状態であることを記録し、恒久対策として設定追加を検討します。
+
+### 8. 判断結果と証跡を記録する
+
+config_hashの差分、サービス停止履歴、watchdog強制終了ログ、ログ到達性の各結果を時系列でまとめ、防御回避の兆候か正規の運用変更かを判断し記録します。
+
+## 動作確認
+
+1. `osqueryi --json "select config_hash from osquery_info;"` の値がベースライン `{{ baseline.config_hash_baseline }}` と一致するか、差分が変更管理記録と整合していること
+2. `systemctl is-active osqueryd` が `active` であること
+3. `{{ logging.results_log_path }}` の更新時刻が現在時刻から {{ baseline.log_gap_minutes }} 分以内であること
+4. ロガー送信先への到達性確認（curlの応答）に問題がないこと
+
+## 注意事項
+
+- osqueryd自体がEDR/監視エージェントであるため、攻撃者による停止・改ざんは「検知システムの無力化」を意味します。**サービス死活監視（{{ baseline.service_check }}）は必ずosquery自身とは独立した外部監視（別ホストからのハートビート監視やsystemd watchdog）で行い、osqueryd内部の自己申告のみに依存しないこと。**
+- config_hashのベースラインは正規の設定変更のたびに更新し、変更管理台帳（Gitコミット等）と紐づけて管理する。ベースラインを更新せず放置すると、正規変更と改ざんの区別がつかなくなる。
+- 調査中にosqueryd停止期間があった場合、その間は監視の盲点（ログが一切残らない）になるため、停止時刻と再開時刻を必ず記録し、他の監視系（ホストのシステムログ、ネットワーク機器のログ等）で当該期間を補完調査する。
+- 復旧（再起動・設定復元）を行う前に、改ざんされた設定ファイルや異常なconfig_hashを生成した時点のファイルをコピーして証跡として保全すること。
+- 復旧後は必ず本手順の「動作確認」を実施し、config_hashの一致・サービスactive・ログ到達性のすべてを確認してからインシデント対応をクローズする。

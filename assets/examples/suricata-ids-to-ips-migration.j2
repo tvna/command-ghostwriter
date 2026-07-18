@@ -1,0 +1,175 @@
+# Suricata IDSからIPSモードへの移行変更手順書
+
+変更番号 `{{ change_id }}` に基づき、観察運用してきたSuricata IDS環境を
+インラインIPS(NFQUEUE + drop)へ切り替える変更作業を、メンテナンス窓
+`{{ cutover_window }}` 内で実施します。切替直後は必ず業務通信の疎通と
+レイテンシを確認し、異常時は速やかにIDSモードへ切り戻します。
+
+## 目的
+
+長期間IDSモード(検知のみ)で運用し誤検知チューニングを完了した
+Suricata環境を、影響を最小化した順序でインラインIPS(能動遮断)へ
+移行します。最初は重要度上位の少数SIDのみを`drop`対象とし、段階的に
+拡大することで、切替に伴う業務影響とロールバック範囲を限定します。
+
+## 用語解説
+
+- **カットオーバー(cutover)**: IDSからIPSへの切替作業そのもの。
+  `{{ cutover_window }}` のメンテナンス窓内に実施する
+- **kernel_drops**: `suricataasc`や`stats.log`で確認できる、カーネルが
+  Suricataの処理能力超過により取りこぼしたパケットの割合。この値が
+  高いと、IPSモードで正規の通信まで意図せずdropする恐れがある
+- **initial_drop_sids**: 段階拡大の最初のフェーズで`drop`アクションに
+  昇格させる、重要度(severity)上位の少数SID群
+- **fail_open / fail_close**: Suricataプロセス停止時にnftablesの
+  NFQUEUEが通信を素通しする(fail_open)か遮断する(fail_close)かの設定。
+  `fail_open: {{ fail_open }}` はこの変更票における決定値であり、
+  変更票本体に明記する
+- **rollback_trigger**: IPSモードからIDSモードへ切り戻す判断基準
+
+## シナリオ設定
+
+| 項目 | 値 |
+|------|-----|
+| 変更番号(change_id) | `{{ change_id }}` |
+| カットオーバー窓(cutover_window) | {{ cutover_window }} |
+| 対象インターフェース | `{{ nic_interface }}` |
+| nftablesテーブル/チェーン | `{{ nft_table }}` / `{{ nft_chain }}` |
+| NFQUEUE番号(queue_num) | `{{ queue_num }}` |
+| 保護対象ネットワーク(protected_net) | `{{ protected_net }}` |
+| suricata.yamlパス | `{{ suricata_yaml_path }}` |
+| fast.logパス | `{{ fast_log_path }}` |
+| kernel_drops許容閾値 | `{{ kernel_drops_threshold_pct }}` % |
+| fail_open設定 | {% if fail_open %}true(bypass: 停止時は素通し){% else %}false(bypassなし: 停止時は遮断){% endif %} |
+| 切り戻し判断基準(rollback_trigger) | {{ rollback_trigger }} |
+| 業務疎通確認先(business_test_host) | `{{ business_test_host }}` |
+| 事前計測ベースラインレイテンシ | `{{ baseline_latency_ms }}` ms |
+
+段階拡大フェーズ1で`drop`に昇格させるSID({{ initial_drop_sids | length }}件):
+
+| # | SID |
+|---|-----|
+{% for sid in initial_drop_sids %}| {{ loop.index }} | {{ sid }} |
+{% endfor %}
+
+## 1. 移行前提条件チェックリスト(メンテナンス窓の前に完了させる)
+
+以下をすべて満たしていることを確認してから、カットオーバー
+`{{ cutover_window }}` に進みます。いずれか未達の場合は変更を延期します。
+
+- [ ] `{{ initial_drop_sids | join(', ') }}` を含む重要シグネチャに対する
+      誤検知チューニングが完了している(過去30日間の`fast.log`で
+      業務通信に対する誤検知アラートが再発していない)
+- [ ] 直近の`kernel_drops`率が閾値`{{ kernel_drops_threshold_pct }}`%を
+      下回っている
+- [ ] 移行対象の`drop`ルール(初期SID)の選定がレビュー済みである
+- [ ] `fail_open: {{ fail_open }}` の決定が変更票`{{ change_id }}`に
+      明記され、承認されている
+
+```bash
+suricatasc -c dump-counters | jq '.message.capture.kernel_drops, .message.capture.kernel_packets'
+grep -c 'classification' {{ fast_log_path }}
+```
+
+## 2. カットオーバー窓の開始とベースライン計測
+
+`{{ cutover_window }}` の開始時点で、現行IDSモードでの業務通信の
+レイテンシと疎通状況を記録します。切替後の比較対象とします。
+
+```bash
+ping -c 20 {{ business_test_host }}
+```
+
+計測結果がベースライン`{{ baseline_latency_ms }}`msから大きく乖離
+していないことを記録してから、次に進みます。
+
+## 3. NFQUEUE経路をnftablesに投入する(この時点では未起動、素通し状態)
+
+```bash
+nft add table {{ nft_table }}
+nft add chain {{ nft_table }} {{ nft_chain }} '{ type filter hook forward priority 0 ; }'
+{% if fail_open %}nft add rule {{ nft_table }} {{ nft_chain }} ip protocol tcp queue num {{ queue_num }} bypass
+{% else %}nft add rule {{ nft_table }} {{ nft_chain }} ip protocol tcp queue num {{ queue_num }}
+{% endif %}```
+
+`bypass`{% if fail_open %}を付与しているため、この段階でSuricataが
+未起動でも通信は素通しされます。{% else %}を付与していないため、
+次の手順4でSuricataをインラインで起動するまでの間、対象経路の通信は
+遮断されます。速やかに手順4へ進んでください。{% endif %}
+
+## 4. af-packet copy-modeからNFQUEUEモードへ切り替えてSuricataを再起動する
+
+ロックアウト防止のため、対象インターフェース `{{ nic_interface }}` を
+経由しない**別セッション(コンソールまたは別回線のSSH)を確保した状態**
+で作業します。
+
+`{{ suricata_yaml_path }}`のaf-packet設定(`copy-mode: ips`または
+IDS用ミラーリング設定)を停止し、NFQUEUEで起動します。
+
+```bash
+systemctl stop suricata
+suricata -c {{ suricata_yaml_path }} -q {{ queue_num }} -D
+ps aux | grep '[s]uricata'
+```
+
+## 5. 初期フェーズのdropルールを有効化する
+
+`{{ suricata_yaml_path }}`が読み込むルールファイルのうち、初期SID
+({{ initial_drop_sids | join(', ') }})を`alert`から`drop`アクションへ
+書き換え、リロードします。他のSIDは引き続き`alert`のまま(段階拡大の
+対象外)とします。
+
+```bash
+{% for sid in initial_drop_sids %}sed -i 's/^alert\(.*sid:{{ sid }};\)/drop\1/' /etc/suricata/rules/local.rules
+{% endfor %}suricatasc -c reload-rules
+```
+
+## 動作確認
+
+1. 業務通信の疎通を確認します。切替直後にレイテンシがベースライン
+   `{{ baseline_latency_ms }}`msから急増していないか、パケットロスが
+   ないかを計測します。
+
+   ```bash
+   ping -c 20 {{ business_test_host }}
+   ```
+
+2. `kernel_drops`率が閾値`{{ kernel_drops_threshold_pct }}`%を超えて
+   いないことを継続監視します。
+
+   ```bash
+   watch -n5 "suricatasc -c dump-counters | jq '.message.capture.kernel_drops'"
+   ```
+
+3. 初期SID({{ initial_drop_sids | join(', ') }})に一致した通信が
+   実際に`drop`されていることを`fast.log`で確認します。
+
+   ```bash
+   grep 'Drop' {{ fast_log_path }}
+   ```
+
+4. `{{ rollback_trigger }}`に該当する事象が発生していないかを、
+   カットオーバー窓`{{ cutover_window }}`の終了まで監視します。
+
+## 注意事項
+
+- **本変更は、切替直後に一時的な通信断を伴う可能性がある。** 対象
+  インターフェース`{{ nic_interface }}`を利用する部門・システムには、
+  カットオーバー窓`{{ cutover_window }}`について事前告知を行うこと。
+- **fail_open設定(`{{ fail_open }}`)の有無で障害時の挙動が変わる。**
+  {% if fail_open %}bypass付きのため、Suricata停止時は通信が素通しされ
+  可用性は保たれるが、その間は検知・遮断が一切効かない。{% else %}
+  bypassなしのため、Suricata停止時は通信が遮断され可用性より遮断の
+  確実性を優先する。{% endif %}この挙動を変更票`{{ change_id }}`に
+  明記し、承認者と共有すること。
+- **手順4でSuricataを再起動する際は、必ず対象インターフェースを経由
+  しない別セッションを確保してから行う。** 現在の管理セッションが
+  切替対象経路を通る場合、再起動前後の疎通不良で操作不能になる恐れが
+  ある。
+- **段階拡大は初期SID({{ initial_drop_sids | join(', ') }})のみに限定
+  し、一度にすべてのシグネチャを`drop`化しない。** 誤検知が残存する
+  ルールを一括でdrop化すると、業務通信を広範囲に遮断するリスクがある。
+- 切り戻し条件(`{{ rollback_trigger }}`)に該当した場合は、手順5で
+  書き換えたルールを`alert`へ戻し`suricatasc -c reload-rules`を実行、
+  必要に応じて手順3のnftablesルールを`nft delete table {{ nft_table }}`
+  で撤去してIDSモード(ミラーリング)へ戻す。

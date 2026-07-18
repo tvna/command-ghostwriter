@@ -1,0 +1,91 @@
+# OpenZitiアイデンティティの発行とエンロール
+
+利用者・サービス用アイデンティティを発行し、エンドポイントへエンロールするまでの手順です。
+
+## 目的
+
+OpenZitiにおけるアイデンティティが「ポリシーの割当対象となる接続主体」であることを理解し、role attributesによるグループ化を踏まえて、JWTの発行からエンドポイントでのエンロールまでを安全に実施できるようになることを目指します。
+
+## 用語解説
+
+- **アイデンティティ(Identity)**: OpenZitiネットワークに接続する利用者・サービスそれぞれを表す主体。証明書ベースで認証され、Service Policy・Edge Router Policyなどポリシーの割当対象になる
+- **role attributes**: アイデンティティやサービスに付与するタグ。個々のIDを指定する代わりに`#erp-frontend`のようなタグでポリシーの対象範囲を指定でき、増減する対象を一括管理できる
+- **エンロールメントJWT**: コントローラがアイデンティティ作成時に発行する、一回限り・短寿命のトークン。エンドポイント側がこのJWTを使って証明書を取得し、以後はその証明書で相互TLS認証する
+- **id.json**: エンロール完了後にエンドポイント側に生成される、秘密鍵と発行済み証明書を含む設定ファイル。以後の接続に使う秘密情報そのもの
+- **ziti-edge-tunneler**: エンドポイントにインストールし、id.jsonを使ってOpenZitiネットワークへのトンネル接続を確立するクライアント(tunneler)
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| アイデンティティ名 | `{{ identity_name }}` |
+| role attributes | {% for attr in role_attributes %}`{{ attr }}`{% if not loop.last %}, {% endif %}{% endfor %} |
+| エンロールメントJWTの有効期限 | {{ enrollment_ttl }}秒 |
+| エンロールに使うtunneler種別 | `{{ tunneler_type }}` |
+
+## 手順
+
+### 1. アイデンティティを発行しエンロールメントJWTを出力する
+
+コントローラ管理端末で、対象の利用者・サービスに対応するアイデンティティを作成します。`-a`でrole attributesを付与することで、個々のIDではなくタグ単位でポリシーの割当対象にできます。
+
+```bash
+ziti edge login controller.example.internal:1280 -u admin
+
+ziti edge create identity user {{ identity_name }} \
+  -a "{% for attr in role_attributes %}{{ attr }}{% if not loop.last %},{% endif %}{% endfor %}" \
+  -o {{ identity_name }}.jwt
+```
+
+発行されたJWTはコントローラ設定のエンロールメント有効期限(本手順では{{ enrollment_ttl }}秒)を過ぎると失効し、再発行が必要になります。JWTは一回限りしか使えないため、複数端末へ同一JWTを使い回すことはできません。
+
+### 2. 発行済みJWTの内容を確認する
+
+配布前に、対象アイデンティティ名が正しいことをJWTのペイロードから確認します。
+
+```bash
+cut -d '.' -f2 {{ identity_name }}.jwt | base64 -d 2>/dev/null | python3 -m json.tool
+```
+
+`sub`または`iss`にアイデンティティ名・コントローラのエンドポイントが含まれていることを確認します。
+
+### 3. tunneler(`{{ tunneler_type }}`)でエンドポイントへエンロールする
+
+CLIタイプのtunnelerを使う場合、JWTを配布したエンドポイント上で以下を実行します。
+
+```bash
+ziti-edge-tunnel enroll --jwt {{ identity_name }}.jwt -i {{ identity_name }}.json
+```
+
+GUIタイプ(Ziti Desktop Edge)を使う場合は、アプリの「Add Identity」からJWTファイルを選択してインポートします。いずれの方式でも、エンロール完了時に秘密鍵を含む`{{ identity_name }}.json`(またはOS keychain相当)が生成されます。
+
+### 4. tunnelerサービスとして起動しトンネルを確立する
+
+```bash
+ziti-edge-tunnel run -i {{ identity_name }}.json &
+```
+
+常駐運用する場合はsystemdユニット化し、`{{ identity_name }}.json`のパーミッションを利用者以外読み取り不可(600)に設定します。
+
+```bash
+chmod 600 {{ identity_name }}.json
+```
+
+## 動作確認
+
+- コントローラ側で対象アイデンティティが登録済みであること
+
+  ```bash
+  ziti edge list identities 'name="{{ identity_name }}"'
+  ```
+
+- 同コマンドの出力で`ENROLLED`状態(`isEnrolled: true` / `Enrolled`列)になっており、`Not enrolled`のままJWT期限切れになっていないこと
+- 付与したrole attributes(`{% for attr in role_attributes %}{{ attr }}{% if not loop.last %}, {% endif %}{% endfor %}`)が一覧に反映されており、対象のService Policy・Edge Router Policyの対象範囲に含まれること
+- `{{ tunneler_type }}`経由でOpenZitiで公開された対象サービスへ実際に到達できること
+
+## 注意事項
+
+- エンロールメントJWTは一回限り・短寿命({{ enrollment_ttl }}秒)のトークンであり、Slackやメールなど平文経路で恒久的に保管・共有しない。配布は安全なチャネルに限定し、使用後は破棄する。
+- エンロール完了後に生成される`{{ identity_name }}.json`は秘密鍵を含む機密情報そのもの。バージョン管理システムに含めず、パーミッション600・アクセス制御されたディレクトリで保管する。
+- 既存の接続経路(旧VPN・旧アクセス経路)を廃止する前に、本手順でエンロールした新アイデンティティ経由で対象サービスへの到達を実際に確認すること。旧経路の停止は、動作確認の全項目を満たしてから行う。
+- 利用者の異動・退職やサービス廃止時は、role attributesの見直しだけでなく、`ziti edge delete identity {{ identity_name }}`でアイデンティティ自体を失効させる。role attributesを外すだけではアイデンティティ自体は有効なままであり、証明書が失効しない限り再接続され得る。

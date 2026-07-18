@@ -1,0 +1,8 @@
+log_dir: /opt/zeek/logs/current
+extract_mime_types:
+  - application/x-dosexec
+  - application/vnd.microsoft.portable-executable
+  - application/zip
+  - application/pdf
+max_extract_size: 52428800
+extract_dir: /opt/zeek/extract_files

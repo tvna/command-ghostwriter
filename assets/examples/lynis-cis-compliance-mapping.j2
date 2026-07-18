@@ -1,0 +1,83 @@
+# LynisによるCISベンチマーク適合確認
+
+Lynisの所見(`lynis audit system --pentest`及びカテゴリ別テスト)をCISベンチマーク項目へ対応付け、適合状況を可視化する監査手順書です。
+
+## 目的
+
+Lynisが検出した各テスト結果を、対応するCISベンチマーク項目(CIS Controls / CIS Benchmark for Linux)にマッピングし、pass/warn/failの適合状況と是正優先度を一覧化します。監査エビデンスとして保管できる形にまとめることを目指します。
+
+## 用語解説
+
+- **lynis audit system --pentest**: Lynisの全カテゴリ監査を、対話的な確認プロンプトなしで実行するモード。CI/監査バッチ実行に向く
+- **Lynisテストid**: `SSH-7408` のように「カテゴリ略号-連番」で構成される、Lynis内部の個別テスト識別子。`lynis show details <test-id>` で詳細を確認できる
+- **CIS Benchmark項目**: CIS(Center for Internet Security)が公開するOS/ミドルウェア別のセキュリティ設定基準書における章番号(例: `5.2.1`)
+- **compliance-oriented運用**: 単発の脆弱性スキャンではなく、監査項目ごとにテスト結果・証跡・是正優先度を継続的に記録し、監査人へ説明可能な状態を維持する運用形態
+- **is_pentest / hardening index**: Lynisが出力するリスクプロファイル。数値そのものはCIS適合率ではないため、本手順のマッピング表と併用して判断する
+
+## シナリオ設定
+
+以下の{{ csv_rows | length }}件についてLynis所見とCIS項目の対応を管理します。
+
+| CIS項目 | Lynisテストid | 状態 | エビデンス | 是正内容 | 優先度 |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["cis_control"] }} | {{ r["lynis_test_id"] }} | {{ r["status"] }} | {{ r["evidence"] }} | {{ r["remediation"] }} | {{ r["priority"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. Lynisで監査を実行する
+
+対話プロンプトを止めずに全テストを流し、レポートとログを保存します。
+
+```bash
+sudo lynis audit system --pentest --no-colors --quiet \
+  --logfile /var/log/lynis-audit-$(date +%Y%m%d).log \
+  --report-file /var/log/lynis-report-$(date +%Y%m%d).dat
+```
+
+特定カテゴリだけを再確認したい場合はテストidで絞り込みます。
+
+```bash
+{% for r in csv_rows %}sudo lynis show details {{ r["lynis_test_id"] }}
+{% endfor %}```
+
+### 2. レポートから該当テストの結果を抽出する
+
+`report-file` はキー・バリュー形式のため、`grep` でテストidに紐づく結果行を取り出します。
+
+```bash
+{% for r in csv_rows %}grep -E "^(test_category|suggestion|warning)\[\]=.*{{ r["lynis_test_id"] }}" /var/log/lynis-report-$(date +%Y%m%d).dat
+{% endfor %}```
+
+### 3. CISマッピング表を作成する
+
+上記シナリオ設定の表を監査エビデンスとしてMarkdown/CSVで保存します。CSV化する際の列は `cis_control,lynis_test_id,status,evidence,remediation,priority` に固定し、以後の監査でも同一スキーマで積み上げます。
+
+```bash
+sudo tee /var/log/cis-mapping-$(date +%Y%m%d).csv <<'EOF'
+cis_control,lynis_test_id,status,evidence,remediation,priority
+{% for r in csv_rows %}{{ r["cis_control"] }},{{ r["lynis_test_id"] }},{{ r["status"] }},{{ r["evidence"] }},{{ r["remediation"] }},{{ r["priority"] }}
+{% endfor %}EOF
+```
+
+### 4. fail項目を是正優先度順に抽出する
+
+`fail` の項目は監査上のギャップとして優先的に扱いますが、この手順書では抽出・記録までとし、実際の設定変更(是正)は別作業のチェンジチケットで実施します。
+
+```bash
+{% for r in csv_rows %}{% if r["status"] == "fail" %}echo "[fail][{{ r["priority"] }}] {{ r["cis_control"] }} ({{ r["lynis_test_id"] }}): {{ r["remediation"] }}"
+{% endif %}{% endfor %}```
+
+## 動作確認
+
+- シナリオ設定の表に、対象{{ csv_rows | length }}件すべてのCIS項目・Lynisテストid・状態・エビデンスが欠けなく記載されていること(このマッピング表自体が主要CIS項目に対するLynisテスト結果の確認結果です)
+- 手順3で保存したCSVを再度開き、ヘッダ`cis_control,lynis_test_id,status,evidence,remediation,priority`と行数が一致していること
+- 手順4で抽出した`fail`項目それぞれについて、担当者・是正予定日を別途の是正チケットに記録できていること
+- SSHやファイアウォールに関する是正(`remediation`列にsshd_config変更やufw変更が含まれる行)は、実施前に別セッションで現在の接続経路が維持されることを確認する運用になっていること
+
+## 注意事項
+
+- Lynisは網羅的なCIS完全準拠確認ツールではなく、あくまで補完的なチェックです。`hardening index`やpass判定を鵜呑みにせず、CIS Benchmark原文と突き合わせて最終判断してください。
+- `fail`項目は本手順のCSVで優先度(`priority`列)を付けるのみに留め、実際の是正(sshd_config変更、ufw有効化などの構成変更)は本手順の対象外です。別作業として実施し、変更後に影響確認を行ってください。
+- SSH設定(`PermitRootLogin`等)やファイアウォール設定(`ufw`等)を変更する是正を行う場合は、変更前に必ず別のSSHセッションを維持したまま新しい設定を検証し、疎通が失われないことを確認してから旧設定を無効化・削除してください。設定ミスによるロックアウトを防ぐためです。
+- 監査エビデンス(Lynisログ・レポート・CISマッピングCSV)は改ざん防止のため、監査対象サーバとは別の保管先(ログ集約サーバやオブジェクトストレージ)に定期的にコピーし、保管期間を監査要件に合わせて設定してください。

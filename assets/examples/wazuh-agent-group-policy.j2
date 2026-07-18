@@ -1,0 +1,99 @@
+# Wazuhエージェントグループ別設定配布
+
+Wazuh Managerの集中管理機能を用い、サーバ種別ごとのグループにagent.confを配布して監視設定（syscheck/localfile/sca）を一括適用します。
+
+## 目的
+
+エージェントをサーバ種別ごとのグループに分類し、グループ単位の集中設定（Shared Configuration）でsyscheck・localfile・SCAの監視方針を配布できるようになることを目指します。設定変更がグループ内の全エージェントへ波及することを理解した上で、安全に配布・検証する手順を身につけます。
+
+## 用語解説
+
+- **グループ (agent group)**: `/var/ossec/etc/shared/<group>/` に対応する、エージェントの集合単位。同一グループのエージェントは同じ集中設定を受け取る
+- **集中設定 (Shared Configuration)**: マネージャーがグループごとに保持し、エージェントへ自動配布する `agent.conf`
+- **ローカル設定**: 各エージェントの `/var/ossec/etc/ossec.conf` に個別に記述された設定
+- **マージ順序**: エージェントは起動時に ローカル設定 → 集中設定(agent.conf) の順で読み込み、同じセクションが重複する場合は集中設定が後勝ちで上書きする（完全な置換ではなくブロック単位の追記・上書き）
+- **default group**: 明示的にグループ割り当てされていないエージェントが自動的に所属する既定グループ。ここへの設定変更は未分類の全エージェントに影響する
+- **agent_groups**: エージェントのグループ作成・割り当て・一覧確認を行うCLIツール
+- **agent_control**: エージェントの状態・グループ同期状況を確認するCLIツール
+
+## シナリオ設定
+
+| group_name | server_role | syscheck_dirs | sca_policies | agent_count |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["group_name"] }} | {{ r["server_role"] }} | {{ r["syscheck_dirs"] }} | {{ r["sca_policies"] }} | {{ r["agent_count"] }} |
+{% endfor %}
+
+## 1. グループを作成する
+
+```bash
+{% for r in csv_rows %}{% if r["group_name"] != "default" %}sudo /var/ossec/bin/agent_groups -a -g {{ r["group_name"] }}
+{% endif %}{% endfor %}```
+
+`default` はWazuhにあらかじめ存在する既定グループのため、作成不要です（後述の注意事項を参照）。
+
+## 2. グループ別の集中設定（agent.conf）を配置する
+
+グループごとに `/var/ossec/etc/shared/<group_name>/agent.conf` を作成し、syscheck・localfile・SCAを定義します。
+
+{% for r in csv_rows %}### {{ r["group_name"] }}（{{ r["server_role"] }} / 対象 {{ r["agent_count"] }} 台）
+
+`/var/ossec/etc/shared/{{ r["group_name"] }}/agent.conf`:
+
+```xml
+<agent_config>
+  <syscheck>
+    <directories check_all="yes" report_changes="yes" realtime="yes">{{ r["syscheck_dirs"] }}</directories>
+  </syscheck>
+  <localfile>
+    <log_format>syslog</log_format>
+    <location>/var/log/syslog</location>
+  </localfile>
+{% if r["sca_policies"] != "-" %}  <sca>
+    <enabled>yes</enabled>
+    <scan_on_start>yes</scan_on_start>
+    <interval>12h</interval>
+    <policies>
+      <policy>/var/ossec/ruleset/sca/{{ r["sca_policies"] }}.yml</policy>
+    </policies>
+  </sca>
+{% endif %}</agent_config>
+```
+
+{% endfor %}## 3. エージェントをグループへ割り当てる
+
+エージェントIDは事前に `sudo /var/ossec/bin/agent_control -l` で確認しておきます。
+
+```bash
+{% for r in csv_rows %}{% if r["group_name"] != "default" %}# {{ r["group_name"] }} に所属させるエージェントIDを1件ずつ指定（例: 001）
+sudo /var/ossec/bin/agent_groups -a -i <agent_id> -g {{ r["group_name"] }}
+{% endif %}{% endfor %}```
+
+## 4. グループ設定を確認し、配布を反映させる
+
+```bash
+sudo /var/ossec/bin/agent_groups -l
+{% for r in csv_rows %}sudo /var/ossec/bin/agent_groups -s -g {{ r["group_name"] }}
+{% endfor %}sudo systemctl restart wazuh-manager
+```
+
+マネージャー再起動、またはエージェント側の定期同期（既定では数十秒〜数分間隔）により、`agent.conf` が各エージェントへ配布されます。
+
+## 動作確認
+
+1. `sudo /var/ossec/bin/agent_control -i <agent_id>` を実行し、対象エージェントの `Group` 欄が意図したグループ名（{% for r in csv_rows %}{{ r["group_name"] }}{% if not loop.last %} / {% endif %}{% endfor %}）になっていることを確認する。
+2. エージェント側で `sudo cat /var/ossec/logs/ossec.log | grep -i "group synchronization"` を確認し、集中設定の同期完了ログが出力されていることを確認する。
+3. エージェント側で反映済みのマージ結果を確認する。
+
+```bash
+sudo cat /var/ossec/etc/shared/merged.mg
+```
+
+`merged.mg` に手順2で配置した `<syscheck>` `<localfile>` `<sca>` の内容が含まれていれば、ローカル設定への集中設定のマージが正しく反映されています。
+
+## 注意事項
+
+- グループの `agent.conf` を変更すると、そのグループに所属する **全エージェント** に即座に影響します。一部エージェントのみを対象にした変更をしたい場合は、専用のサブグループを新設してから所属を移すこと。
+- `default` グループは未割り当てエージェントの受け皿であり、ここへの変更は分類漏れの全エージェントに波及する。原則として `default` への設定追加は避け、必ず用途別グループを新設して割り当てる。
+- 設定配布はマネージャー再起動または定期同期のタイミングに依存するため、即時反映を確認したい場合は「動作確認」の手順1〜3を必ず実施し、`Group`表示とmerged.mgの内容が意図通りであることを確かめてから本番エージェント全体へ展開すること。先に少数のエージェント（1台）で反映を検証してから、グループ全体へ展開する。
+- syscheckの`realtime="yes"`は監視対象ディレクトリ数やファイル変更頻度によりエージェントの負荷が上がるため、対象ディレクトリは業務上必要な範囲に限定する。
+- SCAポリシー（`sca_policies`が`-`のグループを除く）は`/var/ossec/ruleset/sca/`配下に該当ファイルが存在することを事前に確認してから配布する。存在しないポリシーファイルを指定すると当該エージェントでSCAスキャンが起動しない。

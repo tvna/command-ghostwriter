@@ -1,0 +1,86 @@
+# Lynisによるシステム監査ベースライン取得 — {{ report_path }}
+
+Lynis で全体スキャンを実行し、ハードニングインデックス（hardening index）のベースラインを取得します。以後の定期監査は、このベースラインとの差分で劣化・改善を判断します。
+
+## 目的
+
+`lynis audit system` の実行から、レポート（`{{ report_path }}`）の解析、warnings/suggestions の分類、`{{ audit_profile }}` によるテスト調整までを一巡し、継続的な監査運用の起点となるベースラインを安全に記録できるようになることを目指します。
+
+## 用語解説
+
+- **hardening index**: Lynis が実施したテストのうち、合格したセキュリティ対策の割合から算出する 0-100 のスコア。値が高いほどハードニングが進んでいることを示す指標であり、単体の絶対評価ではなく経時比較のためのベースラインとして使う
+- **warning**: 明確なリスクがあると Lynis が判定した項目（例: 認証設定の不備、既知の脆弱なパッケージ）
+- **suggestion**: リスクは断定できないが改善余地がある提案（例: 追加の監査ツール導入、設定の明示化）
+- **テストカテゴリ**: Lynis は `AUTH`（認証）、`KRNL`（kernel/カーネル設定）、`NETW`（networking/ネットワーク）、`FILE`（ファイルシステム）、`FIRE`（ファイアウォール）、`HTTP`（Webサーバ）などのカテゴリに分けてテストを実施する
+- **profile (`custom.prf`)**: Lynis のデフォルト挙動を上書きする設定ファイル。特定テストの除外（`skip-test`）や重み付けの調整をここで行う
+- **skip-test**: 環境に合わず誤検知（false positive）となるテストIDを、根拠を残した上で明示的に除外する仕組み
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| profile | `{{ audit_profile }}` |
+| report_path | `{{ report_path }}` |
+| baseline_hardening_index | {{ baseline_hardening_index }} |
+| skip_tests件数 | {{ skip_tests | length }} |
+
+## 1. Lynis のバージョンと現在の profile を確認する
+
+```bash
+lynis show version
+lynis show profiles
+cat {{ audit_profile }}
+```
+
+## 2. custom.prf でテストを調整する（誤検知の除外）
+
+環境に合わず誤検知となるテストのみを、判断根拠をコメントで残した上で除外します。全テストを無条件に除外しないこと。
+
+```bash
+sudo tee {{ audit_profile }} <<'EOF'
+# custom.prf: 環境固有の誤検知除外
+# 各 skip-test には除外理由をコメントで残すこと
+{% for t in skip_tests %}skip-test={{ t }}
+{% endfor %}EOF
+```
+
+## 3. audit system を実行する
+
+```bash
+sudo lynis audit system --profile {{ audit_profile }} --cronjob | tee -a /var/log/lynis-audit-run.log
+```
+
+`--cronjob` は非対話モードでの実行を意味し、確認プロンプトを出さずに完走させます。
+
+## 4. レポートから hardening index を取得する
+
+```bash
+grep '^hardening_index=' {{ report_path }}
+```
+
+取得した値を、今回のベースライン（`{{ baseline_hardening_index }}`）として記録します。次回以降の監査結果はこの値との差分で評価します。
+
+## 5. warnings と suggestions を分類して抽出する
+
+```bash
+echo "== warnings =="
+grep '^warning\[\]=' {{ report_path }}
+echo "== suggestions =="
+grep '^suggestion\[\]=' {{ report_path }}
+```
+
+warning は放置するとリスクが顕在化しうる項目、suggestion は任意の改善候補として扱い、優先度を分けて対応計画（別issue等）に落とし込みます。
+
+## 動作確認
+
+1. `lynis audit system --cronjob` がエラー終了せず完了し、`{{ report_path }}` が更新されていること
+2. `grep '^hardening_index=' {{ report_path }}` でスコアが取得でき、`{{ baseline_hardening_index }}` として台帳に記録したこと
+3. `grep '^warning\[\]=' {{ report_path }}` と `grep '^suggestion\[\]=' {{ report_path }}` の出力をそれぞれ分類・記録したこと
+4. `{{ audit_profile }}` に登録した skip-test（{{ skip_tests | length }}件）それぞれについて、除外理由のコメントが残っていること
+
+## 注意事項
+
+- Lynis はリスクの検出と改善提案を行うのみで、自動修正は一切行わない。warnings/suggestions への対応（設定変更・パッケージ更新など）は、個別に手順を確認したうえで人手で実施すること。
+- `{{ audit_profile }}`（custom.prf）での skip-test は、真の誤検知にのみ限定して使う。安易な除外はハードニングインデックスの水増しになり、実際のリスクを見えなくする。除外時は理由と判断者をコメントで残し、定期的に見直すこと。
+- `{{ report_path }}` にはOS・パッケージバージョン・設定内容などの構成情報が平文で含まれる。攻撃者に渡れば既知脆弱性の特定に利用されうるため、ファイル権限を制限し（例: root以外読み取り不可）、保管場所へのアクセスを最小権限にすること。
+- 今回取得したベースライン（hardening index = {{ baseline_hardening_index }}）を起点に、`lynis audit system` を定期実行（例: 週次cron）し、スコアの推移とwarnings/suggestionsの新規発生を継続的に追跡する運用に接続すること。単発の実行で終わらせない。

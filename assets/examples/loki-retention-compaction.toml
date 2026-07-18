@@ -1,0 +1,13 @@
+cluster_name = "loki-prod"
+compactor_working_directory = "/data/loki/compactor"
+storage_bucket = "s3://loki-prod-chunks"
+retention_enabled = true
+retention_period = "744h"
+compaction_interval = "10m"
+delete_delay = "2h"
+delete_request_cancel_period = "24h"
+verify_before_date = "2026-07-24"
+
+[per_tenant_retention]
+tenant-billing = "2160h"
+tenant-app-logs = "168h"

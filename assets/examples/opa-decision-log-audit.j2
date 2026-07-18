@@ -1,0 +1,130 @@
+# OPA Decision Logによる認可監査
+
+OPA(Open Policy Agent)のdecision log(判定ログ)を集約し、認可判定(input/result/timestamp)の証跡を残しつつ、異常な拒否急増・想定外許可を監視する運用手順です。
+
+## 目的
+
+decision_logsプラグインの設定からLoki等への集約、異常判定の監視ルール整備までを行い、認可判定の完全な監査証跡を継続的に確認できるようになることを目指します。
+
+## 用語解説
+
+- **decision log**: OPAが各認可判定ごとに出力する記録。input(判定に使った入力)、result(許可/拒否の結果)、timestampなどを含み、認可の完全な監査証跡となる
+- **decision_logsプラグイン**: OPA本体に組み込まれた機能で、console出力・リモートservice送信・カスタムpluginのいずれかでdecision logを出力する
+- **masking(マスキング)**: decision logのinputに含まれる機微情報(ユーザーID・メールアドレス・resource属性など)を、保存前にremove/upsertでredaction(削除・置換)すること
+- **拒否急増(deny spike)**: 短時間にresult=falseの件数が急増する状態。設定ミスやポリシー変更の副作用、あるいは攻撃の兆候の可能性がある
+- **想定外許可(unexpected allow)**: 本来拒否されるべき経路(管理者専用パスなど)でresult=trueが記録される状態。ポリシーの穴や誤設定を示す
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| decision log出力先 | `{{ decision_log_target }}` |
+| マスキング対象フィールド | {{ mask_fields | join("、") }} |
+| ログ集約先 | `{{ ship_to }}` |
+| 監視ルール数 | {{ alert_rules | length }} |
+
+## 手順
+
+### 1. decision_logsプラグインを設定する
+
+OPAの設定ファイルにdecision_logsセクションを追加し、`{{ decision_log_target }}`への出力を有効化します。
+
+```yaml
+# opa-config.yaml
+decision_logs:
+  {{ decision_log_target }}: true
+  reporting:
+    min_delay_seconds: 5
+    max_delay_seconds: 10
+```
+
+```bash
+opa run --server --config-file opa-config.yaml --set decision_logs.console=true
+```
+
+### 2. マスキングポリシーを定義する
+
+decision logのinputには認可判定に使ったユーザー情報・リソース属性がそのまま記録されるため、保存前に`system.log.mask`ポリシーでredactionします。
+
+```rego
+package system.log
+
+{% for field in mask_fields %}mask contains {"op": "remove", "path": "{{ field }}"}
+{% endfor %}
+```
+
+```bash
+opa test system-log-mask.rego -v
+```
+
+### 3. decision logをLoki/SIEMへ集約する
+
+console出力を`promtail`等で拾い、`{{ ship_to }}`へ転送します。
+
+```yaml
+# promtail-config.yaml
+scrape_configs:
+  - job_name: opa
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: opa
+          __path__: /var/log/opa/decision.log
+clients:
+  - url: http://{{ ship_to }}/loki/api/v1/push
+```
+
+```bash
+systemctl restart promtail
+curl -s "http://{{ ship_to }}/loki/api/v1/query_range" --data-urlencode 'query={job="opa"}' | head
+```
+
+### 4. 異常判定の監視ルールを設定する
+
+拒否急増・想定外許可を検知するルールをLokiのruler(またはSIEMの相関ルール)に登録します。
+
+```yaml
+# loki-rules.yaml
+groups:
+  - name: opa-decision-log-audit
+    rules:
+{% for rule in alert_rules %}      - alert: {{ rule.name }}
+        expr: sum(rate({job="opa"} | json | result="{{ rule.result_value }}"{% if rule.path_filter != "-" %}, path=~"{{ rule.path_filter }}"{% endif %} [{{ rule.window }}])) > {{ rule.threshold }}
+        for: {{ rule.window }}
+        labels:
+          severity: warning
+        annotations:
+          summary: OPA decision log異常検知 {{ rule.name }}
+{% endfor %}
+```
+
+```bash
+curl -s -X POST "http://{{ ship_to }}/loki/api/v1/rules/opa-decision-log-audit" \
+  --data-binary @loki-rules.yaml
+```
+
+## 動作確認
+
+1. OPAに対して認可判定を1件発生させ、decision logがinput/result/timestamp付きで出力されることを確認する
+
+   ```bash
+   curl -s -X POST http://localhost:8181/v1/data/authz/allow -d '{"input": {"user": "alice", "action": "read"}}'
+   tail -n 1 /var/log/opa/decision.log
+   ```
+
+2. `{{ ship_to }}`側で当該判定ログを検索できることを確認する
+
+   ```bash
+   curl -s "http://{{ ship_to }}/loki/api/v1/query_range" --data-urlencode 'query={job="opa"} | json' | grep -c "result"
+   ```
+
+3. マスキング対象フィールドが集約先ではredaction済みであること(平文のユーザーID・メールアドレス・resource属性が含まれていないこと)を確認する
+4. 拒否件数を意図的に増やし(テスト用に不正な入力を連続送信)、`deny_spike`ルールが規定の`window`内に発報することを確認する
+
+## 注意事項
+
+- decision logのinputにはユーザー識別子やresource属性など機微情報がそのまま含まれるため、マスキングポリシーを本番投入前に必ずテストし、集約先へ送る前段(console/service双方)でredactionが効いていることを確認する。
+- 集約先(`{{ ship_to }}`)への保存後もアクセス制御を徹底し、認可監査ログの閲覧権限をセキュリティ担当・監査担当など必要最小限に限定する。
+- 拒否急増(`deny_spike`)を検知した際は、直近のポリシー変更・デプロイ履歴を確認し、攻撃(ブルートフォース的な認可試行)か設定ミス(誤ったポリシー配布)かを切り分けてから対応する。誤って拒否ルールを緩めると認可制御そのものを弱めるため、まず影響範囲の確認を優先する。
+- decision logの保持期間は監査要件・法令要件に従って定め、保持期限を超えたログの削除は関係者の承認を得てから行う。
+- マスキングポリシーやdecision_logs設定を変更する際は、既存の監視ルール(alert_rules)が新しい出力形式でも検知できることを確認してから旧設定を無効化する。

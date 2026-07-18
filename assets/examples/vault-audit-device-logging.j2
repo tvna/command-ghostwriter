@@ -1,0 +1,119 @@
+# Vault監査デバイスの有効化とログ保全
+
+HashiCorp Vault の audit device を有効化し、全リクエスト・レスポンスを改ざん検知可能な形で記録・保全します。監査ログはシークレット値をHMAC化して記録するため平文は残りませんが、その前提を崩す設定（log_raw=true）が存在することにも注意します。
+
+## 目的
+
+Vault の監査デバイス（audit device）を有効化し、全操作の記録がHMAC化された状態で保全されることを確認します。単一デバイス障害時の記録断絶を防ぐため、複数デバイスによる冗長化と、ローテーション・オフサイト保全までを一気通貫で実施できるようになることを目指します。
+
+## 用語解説
+
+- **audit device（監査デバイス）**: Vaultへのすべてのリクエスト・レスポンスを記録する出力先。file / syslog / socket の3種類がある
+- **HMAC化**: 監査ログに書き込む前に、シークレット値などの機微情報をHMAC(Hash-based Message Authentication Code)へ変換する仕組み。値そのものではなく `hmac-sha256:...` 形式のハッシュが記録され、元の値には戻せない
+- **log_raw**: HMAC化を無効化し、機微値を平文のまま記録するオプション。既定値は `false` であり、意図的に有効化しない限り原則 `true` にしてはならない
+- **フェイルセーフ設計**: Vaultは有効な監査デバイスへの書き込みに一つでも失敗すると、そのリクエスト自体を拒否する。記録漏れを許さない設計だが、全デバイス障害時はVault自体が機能停止する
+- **冗長化**: 種類の異なる複数の監査デバイス（例: file と syslog）を併用し、片方の障害時でも記録を継続できるようにすること
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| Vaultアドレス | {{ vault_addr }} |
+| 主デバイス種別 | {{ audit_type }} |
+| 主デバイス出力先 | {{ audit_path }} |
+| 主デバイス log_raw | {% if log_raw %}true{% else %}false{% endif %} |
+| 副デバイス種別 | {{ secondary_audit.audit_type }} |
+| 副デバイス facility | {{ secondary_audit.facility }} |
+| 副デバイス tag | {{ secondary_audit.tag }} |
+| ローテーション設定ファイル | {{ rotation.logrotate_path }} |
+| ローテーション周期 | {{ rotation.schedule }} |
+| 保持日数 | {{ rotation.retain_days }} |
+| オフサイト保全先 | {{ offsite_target }} |
+| 検証用シークレットパス | {{ probe_secret.mount }}/{{ probe_secret.path }} |
+
+## 1. 監査ログ保存先を準備する
+
+file デバイスの出力先ディレクトリを作成し、Vaultプロセスの実行ユーザーのみが読める権限に絞ります。
+
+```bash
+sudo mkdir -p $(dirname {{ audit_path }})
+sudo touch {{ audit_path }}
+sudo chown vault:vault {{ audit_path }}
+sudo chmod 600 {{ audit_path }}
+```
+
+## 2. fileデバイスを有効化する
+
+```bash
+vault audit enable -path={{ audit_type }} file file_path={{ audit_path }} log_raw={% if log_raw %}true{% else %}false{% endif %}
+vault audit list -detailed
+```
+
+`vault audit list -detailed` の出力で `{{ audit_type }}` が `enabled` になっていることを確認します。
+
+## 3. syslog/socketデバイスを追加し冗長化する
+
+file デバイスのみでは、そのディスクや権限に問題が生じた際に記録が途絶えます。種類の異なる syslog デバイスを追加し、片方が停止しても記録を継続できるようにします。
+
+```bash
+vault audit enable -path={{ secondary_audit.audit_type }} syslog facility={{ secondary_audit.facility }} tag={{ secondary_audit.tag }}
+vault audit list -detailed
+```
+
+出力に主デバイス（{{ audit_type }}）と副デバイス（{{ secondary_audit.audit_type }}）の両方が並んで表示されることを確認します。
+
+## 4. HMAC化されていることを確認する
+
+検証用のシークレットを書き込み、監査ログ中でその値が平文のまま記録されていないこと（HMAC化されていること）を確認します。
+
+```bash
+vault kv put {{ probe_secret.mount }}/{{ probe_secret.path }} {{ probe_secret.key }}={{ probe_secret.value }}
+sudo tail -n 20 {{ audit_path }} | jq -r 'select(.request.path == "{{ probe_secret.mount }}/data/{{ probe_secret.path }}") | .request.data'
+```
+
+`{{ probe_secret.key }}` の値が `hmac-sha256:` から始まるハッシュ文字列として記録され、投入した平文値そのものではないことを確認します。念のため、監査ログ全体に平文値が含まれていないことも確認します。
+
+```bash
+sudo grep -c "{{ probe_secret.value }}" {{ audit_path }} || echo "平文が0件であることを確認 (grepの終了コード1が正常)"
+```
+
+## 5. ログローテーションとオフサイト保全を設定する
+
+```bash
+sudo tee {{ rotation.logrotate_path }} > /dev/null <<'EOF'
+{{ audit_path }} {
+    {{ rotation.schedule }}
+    rotate {{ rotation.retain_days }}
+    compress
+    missingok
+    notifempty
+    create 0600 vault vault
+    postrotate
+        systemctl kill --signal HUP vault.service
+    endscript
+}
+EOF
+sudo logrotate -d {{ rotation.logrotate_path }}
+```
+
+`-d` (dry-run) で設定ファイルの構文とローテーション条件に問題がないことを確認してから、実際のローテーションを待つか `sudo logrotate -f {{ rotation.logrotate_path }}` で強制実行して動作を確認します。ローテーション済みログはオフサイトへ複製します。
+
+```bash
+sudo aws s3 sync $(dirname {{ audit_path }}) {{ offsite_target }} --exclude "*" --include "*.gz"
+```
+
+## 動作確認
+
+1. `vault audit list -detailed` で `{{ audit_type }}` と `{{ secondary_audit.audit_type }}` の両方が `enabled` と表示されること（冗長化の確認）
+2. Step 4 で書き込んだシークレットの値が監査ログ中で `hmac-sha256:` 形式のハッシュとして記録されていること
+3. Step 4 の `grep -c` で平文値が0件であること
+4. `sudo logrotate -d {{ rotation.logrotate_path }}` がエラーなく完了すること
+5. オフサイト保全先（{{ offsite_target }}）にローテーション済みログが複製されていること
+
+## 注意事項
+
+- `log_raw=true` はシークレット値を平文のまま監査ログへ記録するため、原則として使用を禁止する。デバッグ目的で一時的に有効化した場合は、作業終了後ただちに `false` へ戻し、その間のログを隔離・破棄すること。
+- Vaultは有効化された監査デバイスへの書き込みに一つでも成功しないと、そのリクエスト自体を拒否するフェイルセーフ設計になっている。これは記録漏れを防ぐ一方、監査デバイスが全滅（file/syslog/socketすべて書き込み不能）するとVault自体が全リクエストを拒否し停止したのと同じ状態になる。可用性と監査完全性のトレードオフを理解した上で、種類・保存先の異なる複数デバイスを冗長化しておくこと。
+- 監査ログには機微値のHMAC自体に加え、パスやポリシー名などの構造情報も含まれるため、読み取り権限は運用担当者に限定し、`{{ audit_path }}` のパーミッションは `600`、所有者は Vault 実行ユーザーに限定する。
+- 保持期間（{{ rotation.retain_days }}日）とオフサイト保全先（{{ offsite_target }}）は組織のコンプライアンス要件に合わせて設定し、転送経路・保管先双方で暗号化されていることを確認する。
+- Step 3 で副デバイスを追加する際は、主デバイスを無効化する前に副デバイスが `enabled` になっていることを必ず確認してから作業を終えること。

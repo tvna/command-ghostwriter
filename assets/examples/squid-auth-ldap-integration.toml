@@ -1,0 +1,8 @@
+[squid]
+ldap_host = "ldap01.internal.example.co.jp"
+base_dn = "ou=people,dc=example,dc=co,dc=jp"
+bind_dn = "cn=squid-bind,ou=svc,dc=example,dc=co,dc=jp"
+uid_attr = "uid"
+object_class = "posixAccount"
+auth_realm = "Proxy access requires corporate LDAP credentials"
+bind_password_file = "/etc/squid/ldap_bind.secret"

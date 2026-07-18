@@ -1,0 +1,105 @@
+# Lynis複数ホスト監査結果の集約
+
+複数ホストで取得した Lynis の `lynis-report.dat` を1台の集約先に集め、hardening index の分布・共通する warning/suggestion の頻度・ホスト別スコアを可視化します。Lynis Enterprise（有償の中央管理機能）を使わず、自前のシェルスクリプトで集約する手順です。
+
+## 目的
+
+各ホストの Lynis 監査結果（`lynis-report.dat`）を集約し、hardening index の分布と頻出 warning/suggestion を可視化することで、優先的に是正すべき弱点とホストを特定できるようになることを目指します。
+
+## 用語解説
+
+- **Lynis**: Linux/Unix 向けのセキュリティ監査ツール。`lynis audit system` の実行結果として `hardening_index`（0-100 のスコア）や warning・suggestion を出力する
+- **lynis-report.dat**: Lynis が監査後に `/var/log/lynis-report.dat` へ出力する結果ファイル。1行が `キー=値` 形式で、同じキーが複数回出現する項目（`warning[]` など）は配列的に繰り返される
+- **key=value 形式のパース**: `report.dat` の各行を `=` で分割し、キー名でフィルタして値を取り出す方式。例えば `grep '^hardening_index=' report.dat` で hardening index の値だけを抜き出せる
+- **hardening index**: Lynis が算出する 0-100 のスコアで、値が高いほど推奨設定への準拠度が高い
+- **横断集約**: 複数ホストの `report.dat` を1箇所に集め、キー単位で結合・集計すること。ホスト個別の監査結果だけでは見えない「共通する弱点」を見つけるために行う
+- **Lynis Enterprise非依存の自前集約**: Lynis Enterprise（有償の中央ダッシュボード製品）を使わず、シェルスクリプトの `grep`/`awk`/`sort` だけで集約・集計を行う方式
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 集約先ディレクトリ | {{ report_source_dir }} |
+| 対象ホスト数 | {{ hosts | length }} |
+| hardening index 閾値(これ未満を要対応とする) | {{ index_threshold }} |
+| 共通warning上位表示件数 | {{ common_warning_top_n }} |
+
+| ホスト名 | report.dat ファイル名 |
+| --- | --- |
+{% for host in hosts %}| {{ host.name }} | {{ host.report_file }} |
+{% endfor %}
+## 1. 各ホストでLynis監査を実行する
+
+対象の各ホストに SSH で接続し、`lynis audit system` を実行します（`--cronjob` を付けると対話プロンプトなしで完走し、`/var/log/lynis-report.dat` へ結果が出力されます）。
+
+```bash
+{% for host in hosts %}ssh {{ host.name }} 'sudo lynis audit system --cronjob'
+{% endfor %}```
+
+## 2. report.datを集約先ホストへ収集する
+
+各ホストの `/var/log/lynis-report.dat` を、ホスト名を付けたファイル名で集約先ディレクトリへ集めます。
+
+```bash
+sudo mkdir -p {{ report_source_dir }}
+{% for host in hosts %}scp {{ host.name }}:/var/log/lynis-report.dat {{ report_source_dir }}/{{ host.report_file }}
+{% endfor %}```
+
+## 3. hardening index分布を集計する
+
+`report.dat` は `キー=値` 形式のテキストなので、`grep '^hardening_index='` でキーを絞り込み、`cut` で値部分だけを取り出します。
+
+```bash
+echo "host,hardening_index"
+{% for host in hosts %}grep '^hardening_index=' {{ report_source_dir }}/{{ host.report_file }} | cut -d= -f2 | sed "s/^/{{ host.name }},/"
+{% endfor %}```
+
+出力を昇順ソートすれば、スコアの低いホストが先頭に並びます。
+
+```bash
+(echo "host,hardening_index"; {% for host in hosts %}grep '^hardening_index=' {{ report_source_dir }}/{{ host.report_file }} | cut -d= -f2 | sed "s/^/{{ host.name }},/"; {% endfor %}) | sort -t, -k2 -n
+```
+
+## 4. 共通warning/suggestionの頻度を集計する
+
+`report.dat` では同じ項目が `warning[]=` や `suggestion[]=` のように繰り返し出現するため、全ホスト分をキー単位でまとめて `sort | uniq -c` で頻度を数えます。
+
+```bash
+{% for host in hosts %}grep '^warning\[\]=' {{ report_source_dir }}/{{ host.report_file }}
+{% endfor %}```
+
+上記を全ホスト分まとめて頻度集計し、上位 {{ common_warning_top_n }} 件を表示します。
+
+```bash
+{% for host in hosts %}grep '^warning\[\]=' {{ report_source_dir }}/{{ host.report_file }}
+{% endfor %}| cut -d= -f2- | sort | uniq -c | sort -rn | head -n {{ common_warning_top_n }}
+```
+
+同様に `suggestion[]=` についても集計します。
+
+```bash
+{% for host in hosts %}grep '^suggestion\[\]=' {{ report_source_dir }}/{{ host.report_file }}
+{% endfor %}| cut -d= -f2- | sort | uniq -c | sort -rn | head -n {{ common_warning_top_n }}
+```
+
+## 5. 閾値未満のホストを特定する
+
+hardening index が閾値（{{ index_threshold }}）未満のホストだけを抽出します。
+
+```bash
+{% for host in hosts %}grep '^hardening_index=' {{ report_source_dir }}/{{ host.report_file }} | cut -d= -f2 | awk -v h="{{ host.name }}" -v t="{{ index_threshold }}" '{ if ($1+0 < t+0) print h, $1 }'
+{% endfor %}```
+
+## 動作確認
+
+- Step 3 の集計結果に、対象ホストすべての `hardening_index` が過不足なく1行ずつ表示されること
+- Step 3 のソート結果で、スコアの低いホストが先頭に来ていること
+- Step 4 の頻度集計結果に、`件数 内容` の形式で共通する warning/suggestion が件数の多い順に並んでいること
+- Step 5 の抽出結果に、hardening index が {{ index_threshold }} 未満のホストだけが列挙されること（該当なしなら出力が空であること）
+
+## 注意事項
+
+- この集約作業（Step 1〜5）は定期実行（cron や CI）を前提に設計してあるが、本テンプレートはコマンドの手動実行手順のみを示す。自動化する場合は集計結果の差分をSlack通知等に流すより前に、まず手動実行で1サイクル分の出力を目視確認すること。
+- `report.dat` には稼働中のパッケージバージョン・カーネル設定・ネットワーク構成など、攻撃者にとって有用な機微情報が含まれる。集約先ディレクトリ（`{{ report_source_dir }}`）は攻撃対象の隣に置かず、アクセス権限を監査担当者のみに限定し、保管場所自体もバックアップ・保持期間のポリシー対象に含めること。
+- Step 4 で頻出した共通warningは、原因ホストを1台ずつ個別対応するのではなく、Ansible等の構成管理で横断適用できるものは一括是正計画としてまとめ、是正後は再度 Step 1〜3 を回して改善を確認すること。
+- ホストの増減（新規追加・廃止）があった場合は、本テンプレートの `hosts` 一覧を都度更新すること。更新を怠ると、廃止済みホストの古い `report.dat` が集計に混ざり込んだり、新規ホストが集計から漏れたまま気づかれない状態になる。

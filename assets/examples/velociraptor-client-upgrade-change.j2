@@ -1,0 +1,153 @@
+# Velociraptorクライアント更新の変更実施
+
+クライアントバイナリを {{ current_version }} から {{ target_version }} へ、pilotラベルへの先行配布 → 動作確認 → 全体展開の順で段階的に更新し、接続維持とCA互換を確認する手順です。
+
+## 目的
+
+全クライアント同時更新によるロックアウト（大量オフライン化・収集断）を避けるため、まずpilotグループにのみ新バイナリを配布してオンライン維持とアーティファクト動作を確認し、問題がなければ全体展開する変更フローを身につけることを目指します。
+
+## 用語解説
+
+- **current_version / target_version**: 更新前後のクライアントバイナリのバージョン番号。更新後は `agent_information.version` として各クライアントから報告される
+- **pilot_labels**: 先行配布の対象を絞り込むために付与するVelociraptorクライアントラベル。全体展開前の被験グループを表す
+- **cutover_window**: pilot確認が完了した後、残り全クライアントへ展開してよいと定めたメンテナンス時間帯
+- **rollback_step**: pilotまたは全体展開後に問題が判明した場合に実行する、旧バイナリへの切り戻し手順
+- **config/CA互換**: クライアント設定(`client.config.yaml`)に埋め込まれたCA証明書・フロントエンド情報はバイナリのみの更新では変更されないため、旧バイナリ・新バイナリの双方が同一のCAでサーバに接続できること
+- **オフライン中クライアントの追随**: 展開時点でオフラインだったクライアントは、config/CAが変わらない限り再登録不要で、次回チェックイン時に新バイナリの起動状態（既に配布済みのパッケージ）を反映して追随すること
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 現行バージョン (current_version) | {{ current_version }} |
+| 更新先バージョン (target_version) | {{ target_version }} |
+| pilotラベル (pilot_labels) | {% for label in pilot_labels %}`{{ label }}`{% if not loop.last %}, {% endif %}{% endfor %} |
+| 全体展開の実施時間帯 (cutover_window) | {{ cutover_window }} |
+| ロールバック手順 (rollback_step) | {{ rollback_step }} |
+
+## 1. 新クライアントバイナリの検証
+
+配布前に、リリースページで公開されているチェックサムと突き合わせてバイナリの完全性を確認します。
+
+```bash
+sha256sum velociraptor-v{{ target_version }}-linux-amd64
+# 公開チェックサム（例: velociraptor-v{{ target_version }}-linux-amd64.sha256）と一致することを確認する
+```
+
+新バイナリが単体で起動しバージョン表示できることを確認します。
+
+```bash
+./velociraptor-v{{ target_version }}-linux-amd64 --version
+```
+
+config/CA互換を確認します。バイナリのみの更新であれば `client.config.yaml` は再生成せず流用できるため、既存configに埋め込まれたCA証明書がサーバ側のCAと一致していることを確認します。
+
+```bash
+velociraptor --config server.config.yaml config show client.config.yaml | grep -A2 "ca_certificate"
+diff <(openssl x509 -in ca.pem -noout -fingerprint) \
+     <(velociraptor --config server.config.yaml config show client.config.yaml | grep -A20 "ca_certificate" | openssl x509 -noout -fingerprint)
+```
+
+差分が出ないことを確認し、新バイナリでもconfigの再生成・再登録が不要であることを担保します。
+
+## 2. pilotラベルへの先行配布
+
+VQLの `label()` 関数で、先行配布対象のクライアントに {{ pilot_labels[0] }} / {{ pilot_labels[1] }} ラベルを付与します（対象クライアントIDは事前にホスト一覧から特定しておきます）。
+
+```bash
+velociraptor --config server.config.yaml query \
+  'SELECT label(client_id=client_id, labels=["{{ pilot_labels[0] }}"], op="add")
+   FROM clients() WHERE client_id IN ("C.1a2b3c4d5e6f7081")'
+```
+
+ラベル付与済みクライアントの一覧をエクスポートし、既存のパッケージ配布経路（Ansible等）で新バイナリのみを配布します。全クライアントへ同時展開しないよう、対象をpilotラベルに限定します。
+
+```bash
+velociraptor --config server.config.yaml query \
+  'SELECT client_id, os_info.hostname AS hostname
+   FROM clients() WHERE "{{ pilot_labels[0] }}" in Labels' > pilot_hosts_linux.json
+
+ansible -i pilot_hosts_linux.ini pilot_linux -m apt \
+  -a "deb=/opt/packages/velociraptor_{{ target_version }}_amd64.deb state=present"
+```
+
+Windows側の {{ pilot_labels[1] }} 対象ホストにも同様にMSIパッケージのみを配布します。
+
+```powershell
+Invoke-Command -ComputerName (Get-Content pilot_hosts_windows.txt) -ScriptBlock {
+  msiexec /i C:\packages\velociraptor_{{ target_version }}_amd64.msi /quiet
+}
+```
+
+## 3. pilotでの動作確認（オンライン維持とバージョン更新）
+
+pilotラベルのクライアントが更新後もオンラインを維持し、バージョンが {{ target_version }} に上がっていることを確認します。
+
+```bash
+velociraptor --config server.config.yaml query \
+  'SELECT client_id, Online, agent_information.version AS client_version
+   FROM clients() WHERE "{{ pilot_labels[0] }}" in Labels OR "{{ pilot_labels[1] }}" in Labels'
+```
+
+`client_version` が `{{ target_version }}` であり、かつ `Online` が真であることを全pilot対象で確認します。続いて主要アーティファクトが更新後も正常に動作することを確認します。
+
+```bash
+velociraptor --config server.config.yaml query \
+  'SELECT collect_client(client_id=client_id, artifacts=["Generic.Client.Info"])
+   FROM clients() WHERE "{{ pilot_labels[0] }}" in Labels OR "{{ pilot_labels[1] }}" in Labels'
+```
+
+収集結果が空でなく、`Generic.Client.Info` がエラーなく完了していることを確認します。
+
+## 4. 全体展開（cutover_window内）
+
+pilotでの確認が完了したら、{{ cutover_window }} の枠内で残りの全クライアントへ展開します。全クライアント同時更新は接続断が同時多発するリスクがあるため、pilot確認が完了するまでは実施しません。
+
+```bash
+ansible -i all_hosts.ini "all:!pilot_linux" -m apt \
+  -a "deb=/opt/packages/velociraptor_{{ target_version }}_amd64.deb state=present"
+```
+
+全体展開後、全クライアントのバージョンが {{ target_version }} に揃ったことを確認します。
+
+```bash
+velociraptor --config server.config.yaml query \
+  'SELECT count(*) AS total,
+          count(*) AS upgraded
+   FROM clients() WHERE agent_information.version = "{{ target_version }}"'
+```
+
+## 5. 問題発生時のロールバック
+
+pilotまたは全体展開後にオフライン増加やアーティファクト失敗が確認された場合は、直ちに旧バイナリへ切り戻します。
+
+{{ rollback_step }}
+
+```bash
+ansible -i pilot_hosts_linux.ini pilot_linux -m apt \
+  -a "deb=/opt/packages/velociraptor_{{ current_version }}.deb state=present force=yes"
+```
+
+切り戻し後、バージョンが {{ current_version }} に戻り、オンライン状態が回復していることを確認します。
+
+```bash
+velociraptor --config server.config.yaml query \
+  'SELECT client_id, Online, agent_information.version AS client_version
+   FROM clients() WHERE "{{ pilot_labels[0] }}" in Labels OR "{{ pilot_labels[1] }}" in Labels'
+```
+
+## 動作確認
+
+- pilotラベル（{% for label in pilot_labels %}`{{ label }}`{% if not loop.last %}, {% endif %}{% endfor %}）配布後、`agent_information.version` が `{{ target_version }}` に上がっていること
+- pilot配布後も対象クライアントの `Online` が真のまま維持されていること（大量オフライン化が発生していないこと）
+- `Generic.Client.Info` などの主要アーティファクトがpilot配布後もエラーなく収集完了すること
+- 全体展開後、全クライアントの `agent_information.version` が `{{ target_version }}` に揃っていること
+- ロールバック実施後は `{{ current_version }}` に戻り、`Online` が真であることを再確認すること
+
+## 注意事項
+
+- 全クライアントを同時更新しないこと。必ずpilotラベル（{% for label in pilot_labels %}`{{ label }}`{% if not loop.last %}, {% endif %}{% endfor %}）へ先行配布し、オンライン維持とアーティファクト動作を確認してから {{ cutover_window }} の枠内で全体展開する。
+- config/CA互換を事前に確認すること。バイナリのみの更新であれば `client.config.yaml` の再生成・再登録は不要だが、CA証明書やフロントエンド設定を同時に変更する場合は互換性が崩れ、旧クライアントが接続不能になるおそれがある。
+- 更新中は対象クライアントで収集タスクが一時的に中断する。進行中のハント・収集がある場合は完了または再実行可能であることを確認してから展開すること。
+- オフライン中のクライアントはconfig/CAが変わらない限り再登録不要で、次回チェックイン時に既配布のパッケージを反映して追随する。ただし長期間オフラインのホストは棚卸しし、想定外の旧バージョン残留がないか後日 `agent_information.version` で確認すること。
+- 展開作業の実施記録（対象ラベル、実施時刻、旧/新バージョン、ロールバック有無）を残し、{{ rollback_step }} を実施した場合はその理由も記録すること。

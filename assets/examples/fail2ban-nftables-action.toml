@@ -1,0 +1,18 @@
+[jail]
+name = "sshd"
+port = "ssh"
+logpath = "/var/log/auth.log"
+bantime = "1h"
+findtime = "10m"
+maxretry = 5
+banaction = "nftables-multiport"
+block_type = "multiport"
+table_family = "inet"
+persistent = true
+
+[[ignoreip]]
+address = "192.168.10.5"
+label = "管理端末A"
+
+[test]
+attacker_ip = "203.0.113.50"

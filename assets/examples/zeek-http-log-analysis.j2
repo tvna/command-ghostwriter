@@ -1,0 +1,99 @@
+# Zeekのhttp.logによるWebアクセス分析
+
+Zeekの`http.log`からUser-Agent・URI・ステータスコードを集計し、自動化ツール由来の通信や探索行為(スキャン)の兆候を洗い出す分析手順です。
+
+## 目的
+
+`http.log`を`zeek-cut`で抽出・集計することで、curl/sqlmapなどの自動化ツールによるアクセス、4xx/5xx多発の探索行為、長大URIによる攻撃ペイロードの疑いを検出できるようになることを目指します。
+
+## 用語解説
+
+- **zeek-cut**: Zeekログ(TSV形式)から指定フィールドのみをタブ区切りで抽出するコマンドラインツール
+- **http.log**: ZeekがHTTPリクエスト/レスポンスごとに1行で記録するログ。`ts`(時刻)、`id.orig_h`(送信元IP)、`host`、`uri`、`method`、`user_agent`、`status_code`等のフィールドを持つ
+- **resp_mime_types / orig_mime_types**: レスポンス/リクエストのボディから推定されたMIMEタイプを記録するフィールド。実行ファイルや想定外の形式が配信されていないかの確認に使う
+- **TLS化とssl.logへの移行**: HTTPS通信はTCPペイロードが暗号化されるため、Zeekは`http.log`ではなく`ssl.log`にSNI(サーバ名指示)やJA3/JA3Sフィンガープリントを記録する。サイト全体がHTTPS化されると`http.log`のレコード数は減少し、以降の不審通信分析はURI/ステータスコードではなく`ssl.log`のSNI・証明書情報を軸にした分析へ切り替える必要がある
+- **contains(判定方式)**: `pattern`列の文字列がuser_agentフィールドに部分一致するかどうかで判定する集計方式
+- **rate_over_20pct / rate_over_10pct**: 同一送信元(`id.orig_h`)からの全リクエストに対する該当ステータスコード帯の割合が閾値を超えているかの判定基準
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 件の検知パターンを分析基準とします。
+
+| metric | pattern | threshold | note |
+|---|---|---|---|
+{% for r in csv_rows %}| {{ r["metric"] }} | {{ r["pattern"] }} | {{ r["threshold"] }} | {{ r["note"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. http.logから必要フィールドを抽出する
+
+```bash
+zeek-cut ts id.orig_h host uri method user_agent status_code < http.log > http-extracted.tsv
+```
+
+抽出結果はタブ区切りで、以降の集計コマンドはこのファイルを対象とします。
+
+### 2. User-Agent別に集計し自動化ツール由来の通信を検出する
+
+以下のパターンで`user_agent`列に部分一致する行数を集計します。
+
+```bash
+{% for r in csv_rows %}{% if r["metric"] == "user_agent" %}echo -n "{{ r["pattern"] }}: "; awk -F'\t' '$5 ~ /{{ r["pattern"] }}/' http-extracted.tsv | wc -l
+{% endif %}{% endfor %}```
+
+ヒットした送信元IP(`id.orig_h`)とhost・uriの組を確認します。
+
+```bash
+{% for r in csv_rows %}{% if r["metric"] == "user_agent" %}awk -F'\t' '$5 ~ /{{ r["pattern"] }}/ {print $2, $3, $4, $5}' http-extracted.tsv
+{% endif %}{% endfor %}```
+
+### 3. ステータスコード多発(探索行為)を検出する
+
+送信元IPごとに4xx/5xx応答の件数と全体件数を突合し、閾値を超える送信元を抽出します。
+
+```bash
+{% for r in csv_rows %}{% if r["metric"] == "status_code" %}echo "=== {{ r["pattern"] }} (threshold: {{ r["threshold"] }}) === {{ r["note"] }}"
+awk -F'\t' -v code="{{ r["pattern"] }}" '{
+  total[$2]++;
+  if (substr($6,1,1) == substr(code,1,1)) hit[$2]++;
+} END {
+  for (ip in total) if (hit[ip] > 0) printf "%s: %d/%d\n", ip, hit[ip], total[ip];
+}' http-extracted.tsv
+{% endif %}{% endfor %}```
+
+### 4. 長大URIの抽出
+
+```bash
+{% for r in csv_rows %}{% if r["metric"] == "uri_length" %}awk -F'\t' -v maxlen={{ r["pattern"] }} 'length($4) > maxlen {print length($4), $2, $3, $4}' http-extracted.tsv | sort -rn
+{% endif %}{% endfor %}```
+
+`{{ csv_rows[6]["pattern"] }}`文字を超えるURIは、`{{ csv_rows[6]["note"] }}`ため優先的に精査します。
+
+### 5. resp_mime_types/orig_mime_typesでファイル種別を把握する
+
+```bash
+zeek-cut ts id.orig_h host uri resp_mime_types orig_mime_types < http.log > http-mime.tsv
+{% for r in csv_rows %}{% if r["metric"] == "mime_type" %}grep -E 'application/x-(dosexec|executable|sh)' http-mime.tsv
+{% endif %}{% endfor %}```
+
+想定外の実行形式(`application/x-dosexec`等)が配信・アップロードされていないかを確認します。
+
+### 6. 検出結果を除外リストと照合し記録する
+
+```bash
+{% for r in csv_rows %}echo "{{ r["metric"] }}/{{ r["pattern"] }}: {{ r["note"] }}" >> /var/log/http-log-analysis-findings.log
+{% endfor %}```
+
+## 動作確認
+
+- 検証用にブラウザまたは`curl`で対象Webサーバへアクセスし、`http.log`に`host`・`uri`・`user_agent`付きの新規レコードが記録されることを確認する
+- 上記の`curl`アクセスが手順2の集計コマンドで`user_agent`列に検出されることを確認する(正規の検証アクセスであることを記録した上で除外リストに追加する)
+- `/var/log/http-log-analysis-findings.log`に今回分の検出結果が追記されていること
+
+## 注意事項
+
+- 監視ツール・ヘルスチェック・社内APIクライアント等、`curl`や`python-requests`を使う正規の自動化通信が存在する。検出時は即座に遮断せず、送信元IP・host・uriの組み合わせを除外リスト(許可リスト)と照合してから対応方針を決定すること
+- HTTPS化が進むと`http.log`への記録が減り、`ssl.log`のSNIベース分析への切替が必要になる。切替時は一定期間`http.log`と`ssl.log`の両方を並行して監視し、`ssl.log`側の分析で同等の検知ができることを確認したうえで`http.log`ベースの検知ルールを廃止すること
+- 本手順はログの読み取り専用の分析であり、遮断等の是正操作を行う場合は別途ファイアウォール変更の手順と承認プロセスに従うこと
+- `http-extracted.tsv`・`http-mime.tsv`等の中間ファイルにはアクセス元IPやURIなどの情報が含まれるため、分析終了後は保存場所と保持期間を管理し、不要になれば削除する

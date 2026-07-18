@@ -1,0 +1,8 @@
+fw_host: fw.example.internal
+api_user: automation-api
+privileges:
+  - "Firewall: Alias"
+  - "Firewall: Diagnostics: Reload Filter"
+  - "Status: Firmware"
+alias_name: automation_blocklist
+test_entry: 203.0.113.10

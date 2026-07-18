@@ -1,0 +1,135 @@
+# osqueryによるファイル整合性監視(FIM)
+
+osquery の `file_paths` / `file_accesses` / `exclude_paths` を設定し、`file_events` テーブルへの定期クエリで重要ファイルの変更を検知する構成手順です。
+
+## 目的
+
+osquery の FIM(File Integrity Monitoring)機能を用いて、監視対象ファイルの作成・更新・削除を `file_events` テーブル経由で検知できるようになることを目指します。
+
+## 用語解説
+
+- **FIM(File Integrity Monitoring)**: ファイルの内容や属性の変更を検知する仕組み全般
+- **file_paths**: 監視対象パスを category ごとにグルーピングした glob パターンのマップ。osquery はこのカテゴリ名を `file_events.category` に記録する
+- **file_events テーブル**: inotify(Linux)ベースのファイルシステムイベントを記録するosqueryの仮想テーブル。`action` 列に `CREATED` / `UPDATED` / `DELETED` / `ATTRIBUTE_MODIFIED` などが入る
+- **file_accesses**: `file_paths` のカテゴリのうち、読み取りアクセス(open/read)まで監視対象に含めるカテゴリを列挙する設定。有効化には auditd 連携(`--enable_file_events` に加え Linux では audit 経由の read 監視)が必要で、書き込み系イベントより負荷が高い
+- **exclude_paths**: `file_paths` に一致しても監視対象から除外する glob パターンのリスト。ノイズの多いディレクトリを除くために使う
+- **inotify watch 上限**: Linuxカーネルが1ホストで生成できる inotify watch 数の上限(`fs.inotify.max_user_watches`)。監視対象glob数が多いと枯渇し、以降のイベントを取りこぼす
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| osquery.conf パス | `{{ osquery_conf_path }}` |
+| osqueryi パス | `{{ osqueryi_path }}` |
+| file_events スケジュール間隔(秒) | `{{ interval }}` |
+| 動作確認用ファイル | `{{ watch_test_file }}` |
+
+### file_paths (category → glob)
+
+| category | globs |
+| --- | --- |
+{% for category, globs in file_paths.items() %}| `{{ category }}` | {% for g in globs %}`{{ g }}`{% if not loop.last %}, {% endif %}{% endfor %} |
+{% endfor %}
+
+### file_accesses (読み取りアクセスも監視するcategory)
+
+{% for category in file_accesses %}- `{{ category }}`
+{% endfor %}
+
+### exclude_paths
+
+{% for p in exclude_paths %}- `{{ p }}`
+{% endfor %}
+
+## 1. inotify watch 上限を確認・引き上げる
+
+監視対象glob数が多い場合、事前に上限を確認しておきます。
+
+```bash
+sysctl fs.inotify.max_user_watches
+echo "fs.inotify.max_user_watches=524288" | sudo tee /etc/sysctl.d/99-osquery-fim.conf
+sudo sysctl --system
+```
+
+## 2. osquery.conf にFIM設定を追記する
+
+`{{ osquery_conf_path }}` に `file_paths` / `file_accesses` / `exclude_paths` セクションを追加します。既存の設定がある場合は `file_paths` 以下のカテゴリをマージしてください(上書きしない)。
+
+```json
+{
+  "options": {
+    "disable_events": "false",
+    "enable_file_events": "true"
+  },
+  "file_paths": {
+{% for category, globs in file_paths.items() %}    "{{ category }}": [
+{% for g in globs %}      "{{ g }}"{% if not loop.last %},{% endif %}
+{% endfor %}    ]{% if not loop.last %},{% endif %}
+{% endfor %}  },
+  "file_accesses": [
+{% for category in file_accesses %}    "{{ category }}"{% if not loop.last %},{% endif %}
+{% endfor %}  ],
+  "exclude_paths": {
+    "all": [
+{% for p in exclude_paths %}      "{{ p }}"{% if not loop.last %},{% endif %}
+{% endfor %}    ]
+  },
+  "schedule": {
+    "file_events": {
+      "query": "SELECT * FROM file_events;",
+      "interval": {{ interval }}
+    }
+  }
+}
+```
+
+上記のJSONブロックを `{{ osquery_conf_path }}` の該当セクションへ反映したら、構文を検証してからosquerydを再起動します。
+
+```bash
+sudo osqueryd --config_path={{ osquery_conf_path }} --config_check
+sudo systemctl restart osqueryd
+sudo systemctl status osqueryd --no-pager
+```
+
+## 3. 反映されたスケジュールクエリを確認する
+
+```bash
+{{ osqueryi_path }} --line "SELECT name, query, interval FROM osquery_schedule WHERE name = 'file_events';"
+```
+
+## 動作確認
+
+監視対象ファイルを実際に変更し、`file_events` テーブルの `action` 列で検知できることを確認します。
+
+1. 動作確認用ファイルを更新する
+
+```bash
+echo "# fim-test $(date -Iseconds)" | sudo tee -a {{ watch_test_file }}
+```
+
+2. `file_events` テーブルを直接クエリし、`action` が `UPDATED` になっていることを確認する
+
+```bash
+{{ osqueryi_path }} --line "SELECT target_path, category, action, time FROM file_events WHERE target_path = '{{ watch_test_file }}' ORDER BY time DESC LIMIT 5;"
+```
+
+3. 動作確認用ファイルを削除し、`action` が `DELETED` になることを確認する(検証後は速やかに復元する)
+
+```bash
+sudo cp {{ watch_test_file }} /tmp/fim-test.bak
+sudo rm {{ watch_test_file }}
+{{ osqueryi_path }} --line "SELECT target_path, category, action, time FROM file_events WHERE target_path = '{{ watch_test_file }}' ORDER BY time DESC LIMIT 5;"
+sudo cp /tmp/fim-test.bak {{ watch_test_file }}
+```
+
+- `action` 列に `CREATED` / `UPDATED` / `DELETED` が、変更内容に応じて正しく記録されていること
+- `category` 列に設定した category 名(例: `{{ file_accesses[0] }}`)が記録されていること
+
+## 注意事項
+
+- glob の対象範囲を広げすぎるとイベント量とinotify watch数が急増する。`{{ file_paths.keys() | list | join(", ") }}` のようにcategoryを分け、必要最小限のパスに絞ること。
+- `fs.inotify.max_user_watches` の上限に達すると、それ以降のファイル変更イベントは取りこぼされ、検知漏れになる。上限引き上げ後は `sysctl fs.inotify.max_user_watches` の値と実際の監視対象数を照合すること。
+- `file_accesses` は読み取り(open/read)まで監視するため、対象を広げるとI/O負荷とログ量が大きく増える。読み取り監視が本当に必要なcategoryのみ列挙すること。
+- 頻繁に書き換わるディレクトリ(一時ファイル、キャッシュ、ログ出力先など)を監視対象に含めると大量のノイズイベントが発生する。`exclude_paths` で明示的に除外すること。
+- `file_events` の収集結果(ログ・監査証跡)はアクセス制御された場所に保全し、閲覧・改変できる利用者を最小限に絞ること。
+- 設定変更(`osqueryd --config_check` を含む)は既存の監視を止めずに検証してから反映し、`systemctl restart osqueryd` 後は `systemctl status` で異常終了していないことを必ず確認すること。

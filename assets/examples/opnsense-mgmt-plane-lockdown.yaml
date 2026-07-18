@@ -1,0 +1,7 @@
+mgmt_networks:
+  - 10.0.99.0/24
+  - 10.0.99.10/32
+gui_port: 8443
+ssh_port: 2202
+ssh_pubkey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGZ3k9FQe1n8mVxHqYb3s0m2pR5tLq7wA4cDzXoP6uKa mgmt-admin@bastion"
+disable_password_auth: true

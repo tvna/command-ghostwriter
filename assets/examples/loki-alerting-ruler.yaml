@@ -1,0 +1,20 @@
+title: Loki rulerによるログベースアラート構築
+hostname: loki-01
+loki_host: 127.0.0.1:3100
+ruler_storage_path: /loki/rules
+alertmanager_url: http://alertmanager.internal:9093
+eval_interval: 1m
+notify_channel: sec-alerts (Slack, Alertmanager receiver経由)
+rule_groups:
+  - name: auth-failure-spike
+    query: 'count_over_time({job=`auth`} |= `failed` [5m])'
+    threshold: 10
+    for: 5m
+    severity: critical
+    summary: 認証失敗が5分間でしきい値を超えました(ブルートフォースの疑い)
+  - name: app-error-rate-high
+    query: 'rate({job=`app`} |= `ERROR` [5m])'
+    threshold: 0.5
+    for: 10m
+    severity: warning
+    summary: アプリケーションのエラー発生率が閾値を超えました

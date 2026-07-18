@@ -1,0 +1,4 @@
+log_dir = "/opt/zeek/logs/current"
+loss_percent_threshold = 1.0
+mem_mb_threshold = 4096
+check_interval_minutes = 15

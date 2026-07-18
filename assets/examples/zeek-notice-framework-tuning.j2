@@ -1,0 +1,112 @@
+# Zeek Notice フレームワーク 通知調整手順
+
+notice.log に記録される Notice 種別 {{ csv_rows | length }} 件について、
+Notice::policy hook と Notice::type_suppression_intervals を使って
+通知アクション（ACTION_LOG / ACTION_EMAIL / ACTION_ALARM）と抑制間隔を
+調整し、過剰通知を抑えます。対象は zeekctl で運用中の Zeek クラスタです。
+
+## 目的
+
+notice.log に大量に出力される Notice 種別を洗い出し、種別ごとに適切な
+アクション（ログのみ／メール通知／警報）と抑制間隔を local.zeek 上の
+policy で定義し、重要な検知を埋もれさせずに過剰通知を削減できるように
+なることを目指します。
+
+## 用語解説
+
+- **Notice::Info**: notice.log の 1 レコードに対応するレコード型。`note` フィールドに Notice 種別が入る
+- **hook Notice::policy**: Notice が生成されるたびに呼ばれ、`n$actions` を書き換えてアクションを決定できる拡張ポイント
+- **Notice::ACTION_LOG / ACTION_EMAIL / ACTION_ALARM**: それぞれ「ログ記録のみ」「メール通知」「notice_alarm.log への警報記録」を表す組み込みアクション
+- **Notice::type_suppression_intervals**: Notice 種別ごとに同一 identifier の再通知を抑制する間隔（秒）を上書きするテーブル
+- **Notice::ignored_types**: この集合に含めた種別は Notice 自体が生成されず完全に握りつぶされる
+
+## シナリオ設定
+
+| notice_type | 現状アクション | 変更後アクション | 抑制間隔(秒) | 変更理由 |
+|-------------|----------------|-------------------|---------------|----------|
+{% for r in csv_rows %}| {{ r["notice_type"] }} | {{ r["current_action"] }} | {{ r["new_action"] }} | {{ r["suppress_interval"] }} | {{ r["reason"] }} |
+{% endfor %}
+
+## 1. local.zeek に policy hook を追加する
+
+`/opt/zeek/share/zeek/site/local.zeek` に以下を追記します。CSV の
+`new_action` に応じて `n$actions` を書き換える `switch` 文を、Notice 種別
+ごとに分岐させます。メール送信先はあらかじめ `redef Notice::mail_dest`
+で指定してください。
+
+```zeek
+redef Notice::mail_dest = "soc-notify@example.com";
+
+hook Notice::policy(n: Notice::Info)
+{
+    switch ( n$note )
+    {
+{% for r in csv_rows %}    case {{ r["notice_type"] }}:
+{% if r["new_action"] == "ACTION_EMAIL" %}        delete n$actions[Notice::ACTION_ALARM];
+        delete n$actions[Notice::ACTION_LOG];
+        add n$actions[Notice::ACTION_EMAIL];
+{% elif r["new_action"] == "ACTION_ALARM" %}        delete n$actions[Notice::ACTION_LOG];
+        add n$actions[Notice::ACTION_ALARM];
+{% else %}        delete n$actions[Notice::ACTION_ALARM];
+        delete n$actions[Notice::ACTION_EMAIL];
+        add n$actions[Notice::ACTION_LOG];
+{% endif %}        break;
+{% endfor %}    }
+}
+```
+
+## 2. Notice 種別ごとの抑制間隔を設定する
+
+同一 identifier（送信元・宛先等から生成される識別子）で短時間に繰り返し
+発生する Notice を抑制するため、`Notice::type_suppression_intervals` に
+種別ごとの秒数を登録します。既定値（1 時間）より短くする種別は迅速な
+連続検知のため、長くする種別は重複通知の削減のためです。
+
+```zeek
+redef Notice::type_suppression_intervals += {
+{% for r in csv_rows %}    [{{ r["notice_type"] }}] = {{ r["suppress_interval"] }} secs,
+{% endfor %}};
+```
+
+## 3. zeekctl に反映する
+
+構文チェックを行ってから deploy し、稼働中クラスタへ反映します。
+
+```bash
+zeekctl check
+zeekctl deploy
+zeekctl status
+```
+
+## 動作確認
+
+1. `zeekctl deploy` がエラーなく完了し、`zeekctl status` で全ワーカーが running であることを確認する
+2. 反映後、一定時間（抑制間隔以上）ログを収集してから notice.log の note 列を集計し、調整意図どおりに件数が変化しているか確認する
+
+```bash
+zeek-cut note < /opt/zeek/logs/current/notice.log | sort | uniq -c | sort -rn
+```
+
+3. `notice_alarm.log` を確認し、ACTION_ALARM に設定した種別（例: `Scan::Address_Scan`）のみが警報として記録されていることを確認する
+
+```bash
+zeek-cut note < /opt/zeek/logs/current/notice_alarm.log | sort | uniq -c
+```
+
+## 注意事項
+
+- 抑制間隔（suppression interval）を延ばす、またはアクションを
+  ACTION_LOG に格下げする調整は、種別単位で「本当に重要度が低いか」を
+  個別に判断してから適用すること。まとめて一括抑制すると、侵害の予兆
+  となる重要な検知（例: `HTTP::SQL_Injection_Attacker` や
+  `Scan::Address_Scan`）まで一緒に埋もれてしまう恐れがある。
+- 本手順はメール通知先（`Notice::mail_dest`）や警報の判定条件という
+  検知経路そのものを変更するため、既存の通知経路を止める前に新しい
+  policy を検証環境またはトラフィックミラー上で先に適用し、意図した
+  種別が意図したアクションで記録されることを「動作確認」の手順で確認
+  してから、本番の zeekctl deploy に適用すること。
+- `Notice::ignored_types` に追加する運用は本手順では扱っていない。
+  Notice 自体が生成されなくなり後から調査もできなくなるため、安易に
+  種別を握りつぶさないこと。
+- `zeekctl deploy` は全ワーカーの Zeek プロセスを再起動するため、瞬間的
+  にログ欠落が発生し得る。トラフィックが多い時間帯を避けて実施する。

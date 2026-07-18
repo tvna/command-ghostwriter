@@ -1,0 +1,162 @@
+# OPAポリシーの単体テストとCI検証
+
+Rego で書いた OPA ポリシーをアプリケーションコードと同様にテスト対象とみなし、`opa test` によるユニットテストとカバレッジ測定、`opa fmt` / `opa check` による静的検証を CI のゲートに組み込むための手順です。
+
+## 目的
+
+Rego ポリシーの変更が意図しない許可・拒否の回帰を生まないよう、`allow` 系と `deny` 系の双方をカバーする単体テストを整備し、カバレッジ閾値と構文チェックを CI の必須チェックとして運用できるようになることを目指します。
+
+## 用語解説
+
+- **Rego 単体テスト**: ファイル名または規則名が `test_` で始まる規則として書くテストケース。`opa test` が自動的に検出して実行する
+- **`with input as { ... }`**: テスト内でポリシーが参照する `input` をモックするための構文。実際のリクエストを用意せずに任意の入力パターンを再現できる
+- **カバレッジ (coverage)**: `opa test --coverage` で計測される、Rego ソースのうちテスト実行中に評価された行の割合。未評価の行があれば分岐の考慮漏れを示す
+- **`opa fmt`**: Rego のフォーマッタ。`--list` で差分ファイル一覧、`--diff` で差分内容を確認できる
+- **`opa check`**: Rego の構文・型エラーを実行せずに検証する静的チェック
+- **allow系 / deny系テスト**: 許可されるべき入力が実際に許可されること（allow系）と、拒否されるべき入力が実際に拒否されること（deny系）の両方を確認するテスト観点
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| テストディレクトリ | `{{ test_dir }}` |
+| カバレッジ閾値 | {{ coverage_threshold }}% |
+| `opa fmt` チェックを必須化 | {{ fmt_check }} |
+| CI 必須チェックとして運用 | {{ ci_required }} |
+
+## 1. ポリシー本体とテストファイルを配置する
+
+対象ポリシーとテストファイルは `{{ test_dir }}` 配下に置き、テストファイル名は対象ポリシーに `_test.rego` を付けて対応関係を明確にします。
+
+```bash
+{{ test_dir }}/
+  example.authz.rego
+  example.authz_test.rego
+```
+
+## 2. allow系・deny系の双方をカバーするテストを書く
+
+`example.authz_test.rego` に `test_` prefix の規則としてテストケースを書きます。`with input as { ... }` で許可されるべき入力と拒否されるべき入力の両方をモックします。
+
+```rego
+package example.authz_test
+
+import data.example.authz.allow
+
+# allow系: 正しい役割とトークンを持つリクエストは許可される
+test_allow_admin_with_valid_token {
+    allow with input as {
+        "method": "DELETE",
+        "path": ["users", "42"],
+        "user": {"role": "admin"},
+        "token_valid": true,
+    }
+}
+
+# deny系: 役割が不足しているリクエストは拒否される（allowがfalse）
+test_deny_viewer_cannot_delete {
+    not allow with input as {
+        "method": "DELETE",
+        "path": ["users", "42"],
+        "user": {"role": "viewer"},
+        "token_valid": true,
+    }
+}
+
+# deny系: トークンが無効なリクエストは役割によらず拒否される
+test_deny_invalid_token {
+    not allow with input as {
+        "method": "GET",
+        "path": ["users", "42"],
+        "user": {"role": "admin"},
+        "token_valid": false,
+    }
+}
+```
+
+## 3. ユニットテストとカバレッジを実行する
+
+`opa test` でテストを実行し、`--coverage` で行カバレッジを計測します。閾値（{{ coverage_threshold }}%）を下回った場合は失敗として扱います。
+
+```bash
+opa test {{ test_dir }} -v
+
+opa test {{ test_dir }} --coverage --format json > coverage.json
+
+python3 - <<'PYEOF'
+import json
+with open("coverage.json") as f:
+    cov = json.load(f)
+covered = cov["coverage"]
+threshold = {{ coverage_threshold }}
+print(f"coverage: {covered}% (threshold: {threshold}%)")
+if covered < threshold:
+    raise SystemExit(1)
+PYEOF
+```
+
+## 4. フォーマットと構文を静的検証する
+
+`opa fmt` で差分の有無を確認し、`opa check` で構文・型エラーを検出します。フォーマットチェックは `{{ fmt_check }}` の運用方針に沿って CI で必須化します。
+
+```bash
+# フォーマット崩れがあるファイル一覧を表示する（差分があれば非ゼロ終了）
+opa fmt --list {{ test_dir }}
+
+# 構文・型エラーを実行せずに検証する
+opa check {{ test_dir }}
+```
+
+## 5. CI パイプラインでポリシー変更をゲートする
+
+CI 必須チェックとしての運用（`{{ ci_required }}`）に沿って、ポリシー変更を含む Pull Request では以下のジョブを必須ステータスチェックに設定します。
+
+```yaml
+# .github/workflows/opa-policy-check.yml
+name: opa-policy-check
+on:
+  pull_request:
+    paths:
+      - '{{ test_dir }}/**'
+jobs:
+  opa-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install OPA
+        run: |
+          curl -L -o opa https://openpolicyagent.org/downloads/latest/opa_linux_amd64_static
+          chmod +x opa
+          sudo mv opa /usr/local/bin/opa
+      - name: opa fmt check
+        run: |
+          test -z "$(opa fmt --list {{ test_dir }})"
+      - name: opa check
+        run: opa check {{ test_dir }}
+      - name: opa test with coverage
+        run: opa test {{ test_dir }} --coverage --format json > coverage.json
+      - name: enforce coverage threshold
+        run: |
+          COVERAGE=$(python3 -c "import json;print(json.load(open('coverage.json'))['coverage'])")
+          echo "coverage=$COVERAGE"
+          python3 -c "import sys;sys.exit(0 if $COVERAGE >= {{ coverage_threshold }} else 1)"
+```
+
+このワークフローをリポジトリのブランチ保護ルールで必須ステータスチェックに指定し、`{{ test_dir }}` 配下の変更を含む Pull Request はこのジョブが成功するまでマージできないようにします。
+
+## 動作確認
+
+1. `opa test {{ test_dir }} -v` が全テストで `PASS` と表示され、失敗（`FAIL`）が無いこと
+2. `opa test {{ test_dir }} --coverage` の結果、カバレッジが `{{ coverage_threshold }}` %以上であること
+3. `opa fmt --list {{ test_dir }}` の出力が空であること（フォーマット崩れが無いこと）
+4. `opa check {{ test_dir }}` がエラーなく終了すること
+5. CI 上で `opa-policy-check` ワークフローが実行され、上記すべてが成功として記録されること。ブランチ保護ルールで必須ステータスチェックに設定されており、失敗時は Pull Request がマージ不可になること
+
+## 注意事項
+
+- ポリシーもアプリケーションコードと同様にテスト対象である、という原則を徹底する。テストの無い Rego ルールの変更はレビューで指摘し、マージしない
+- allow系（許可されるべき入力が許可される）と deny系（拒否されるべき入力が拒否される）の双方を必ずテストする。allow系のみのテストでは、意図せず誰でも許可してしまう回帰を検知できない
+- カバレッジ閾値（{{ coverage_threshold }}%）は「テストされている行の割合」であり「ポリシーの正しさ」そのものを保証しない。閾値達成後もallow/deny双方の観点レビューを省略しない
+- ポリシー変更を含む Pull Request は必ずレビュー必須（コードオーナーレビューなど）にする。CI が緑でも、認可ロジックの変更は人によるレビューを経てからマージする
+- 本手順は既存の認可判断（現行ポリシー）を置き換える変更を含みうる。新しいポリシーロジックをテスト・CIで検証し終える前に、現行のポリシー適用を無効化・削除しない。新ポリシーは一旦 dry-run（decision log の記録のみで実際の拒否は行わないモードなど）で並行稼働させ、想定通りの判定になることを確認してから本適用に切り替える
+- `opa fmt` と `opa check` は CI で自動化し、レビューアがフォーマット崩れや構文エラーを手動指摘する負担を無くす

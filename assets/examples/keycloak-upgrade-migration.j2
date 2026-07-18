@@ -1,0 +1,113 @@
+# Keycloakバージョンアップグレードの実施 — {{ current_version }} → {{ target_version }}
+
+DBマイグレーションを伴うKeycloakのバージョンアップグレードを、バックアップとステージング検証つきで実施します。対象は `{{ current_version }}` から `{{ target_version }}` への切り替えで、カットオーバー窓は「{{ cutover_window }}」です。
+
+## 目的
+
+Keycloakのアップグレードに伴う自動DBマイグレーションの非可逆性を理解したうえで、事前バックアップ・ステージング先行検証・切り戻し手順を備えて安全に本番アップグレードを実施し、ログイン/OIDC/フェデレーションといった主要フローの回帰がないことを確認できるようになることを目指します。
+
+## 用語解説
+
+- **kc.sh build**: 新バージョンのKeycloak Quarkus distributionで設定を反映した起動用ビルドを作成するコマンド。アップグレード時は新バージョンで再実行する必要がある
+- **自動DBマイグレーション**: Keycloakが起動時にスキーマバージョンを検知し、Liquibaseベースの変更セットを自動適用する仕組み。適用後は不可逆で、旧バージョンのKeycloakは新しいスキーマを読めなくなる
+- **realmエクスポート**: `kc.sh export` でrealm設定(クライアント・ロール・フェデレーション設定含む)をJSONへ書き出す機能。DBリストアとは別に構成の可搬なバックアップとして保持する
+- **フェデレーション**: LDAP/Active Directoryなどの外部ID基盤とKeycloakを連携させる設定。バージョン間で非互換な変更が入ることがあるため個別確認が必要
+- **ステージング先行マイグレーション**: 本番と同一のDBコピーに対して先にアップグレードを実施し、マイグレーション結果とアプリ動作を検証しておく手法
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 現行バージョン | {{ current_version }} |
+| 移行先バージョン | {{ target_version }} |
+| DBバックアップ実施 | {{ db_backup }} |
+| カットオーバー窓 | {{ cutover_window }} |
+| ロールバック手順 | {{ rollback_step }} |
+
+## 手順
+
+### 1. リリースノートと非互換事項を確認する
+
+`{{ current_version }}` から `{{ target_version }}` の間のリリースノートを確認し、非推奨機能の廃止・設定キー変更・証明書やhostname設定周りの互換性への影響を洗い出します。
+
+```bash
+curl -fsSL https://www.keycloak.org/docs/latest/upgrading/index.html -o /tmp/kc-upgrade-notes-{{ target_version }}.html
+grep -iE "deprecat|breaking|removed" /tmp/kc-upgrade-notes-{{ target_version }}.html
+```
+
+### 2. アップグレード前のDBバックアップとrealmエクスポートを取得する
+
+自動DBマイグレーションは不可逆のため、失敗時にリストアできるようDBバックアップを取得します(db_backup: {{ db_backup }})。あわせてrealm構成もJSONで退避します。
+
+```bash
+pg_dump -h kc-db-01 -U keycloak -Fc keycloak_db > /backup/keycloak/pre_upgrade_{{ target_version }}.dump
+/opt/keycloak-{{ current_version }}/bin/kc.sh export --dir /backup/keycloak/realm-export-{{ target_version }} --users realm_file
+```
+
+### 3. ステージング環境で同一DBコピーへ先行マイグレーションする
+
+本番へ適用する前に、ステージングへ復元したDBコピーに対して新バージョンのマイグレーションを先に流し、結果を確認します。
+
+```bash
+pg_restore -h kc-stg-db-01 -U keycloak -d keycloak_db_staging --clean /backup/keycloak/pre_upgrade_{{ target_version }}.dump
+```
+
+### 4. 新バージョンでkc.sh buildを実行する
+
+新バージョンのdistributionを展開し、現行の設定(データベース接続・hostname・証明書設定など)を引き継いだうえで `kc.sh build` を実行します。
+
+```bash
+tar xzf keycloak-{{ target_version }}.tar.gz -C /opt
+cp /opt/keycloak-{{ current_version }}/conf/keycloak.conf /opt/keycloak-{{ target_version }}/conf/keycloak.conf
+/opt/keycloak-{{ target_version }}/bin/kc.sh build
+```
+
+### 5. ステージングで新バージョンを起動し自動マイグレーションを検証する
+
+起動時にKeycloakがスキーマバージョンを検知し、Liquibaseの変更セットを自動適用します。適用は不可逆なため、まずステージングで確認します。
+
+```bash
+/opt/keycloak-{{ target_version }}/bin/kc.sh start --optimized --db-url-host=kc-stg-db-01
+tail -f /opt/keycloak-{{ target_version }}/data/log/keycloak.log | grep -i "migrat"
+```
+
+ステージングでログイン・OIDCトークン発行・フェデレーション(LDAP/AD連携)が正常に動作することを確認してから、本番作業(手順6)に進みます。
+
+### 6. 本番環境をカットオーバー窓内でアップグレードする
+
+カットオーバー窓「{{ cutover_window }}」の中で、本番Keycloakを停止し、新バージョンへ切り替えます。DBは手順2で取得済みのバックアップから即時リストア可能な状態にしておきます。
+
+```bash
+systemctl stop keycloak
+/opt/keycloak-{{ target_version }}/bin/kc.sh start --optimized
+```
+
+起動ログで自動DBマイグレーションが完了したことを確認します。
+
+```bash
+grep -i "migrat" /opt/keycloak-{{ target_version }}/data/log/keycloak.log | tail -n 20
+```
+
+### 7. 万一の失敗時はロールバック手順を実施する
+
+新バージョンでの起動やマイグレーションが失敗した場合は、直ちに以下のロールバック手順を実施します。旧バージョンは新スキーマを読めないため、DBは必ずバックアップからの復元が前提になります。
+
+```
+{{ rollback_step }}
+```
+
+## 動作確認
+
+- 管理コンソールでバージョン表示が `{{ target_version }}` になっていること
+- 主要ログインフロー(ユーザー名/パスワード認証)が成功すること
+- OIDCクライアントのトークン発行・リフレッシュが正常に行えること
+- フェデレーション連携(LDAP/AD)のユーザー同期・ログインが正常に行えること
+- 起動ログにマイグレーションエラーが出力されていないこと
+
+## 注意事項
+
+- 自動DBマイグレーションは不可逆です。新バージョンで一度マイグレーションされたDBを旧バージョンのKeycloakで読み込むことはできません。切り戻しは必ずDBバックアップからの復元(`{{ rollback_step }}`)で行います。
+- ロックアウト防止のため、本番へ適用する前に必ずステージングの同一DBコピーで先行マイグレーションと主要フロー(ログイン/OIDC/フェデレーション)の回帰確認を行い、問題がないことを確認してからカットオーバー窓内で本番作業を実施してください。
+- マイグレーション所要時間はrealm数・ユーザー数に比例して増加するため、カットオーバー窓「{{ cutover_window }}」は事前のステージング検証時間を参考に十分な余裕を確保してください。
+- 非推奨機能の廃止(deprecated/removed設定)がある場合、`{{ target_version }}` の起動に失敗することがあるため、手順1で洗い出した内容をkeycloak.confへ反映してから手順4を実施してください。
+- 証明書とhostname設定は新バージョンの `conf/keycloak.conf` へ引き継ぎ済みであることを手順4完了時点で必ず確認してください。設定漏れは外部からのアクセス不能につながります。

@@ -1,0 +1,93 @@
+# OPNsenseファイアウォールログのノイズ削減
+
+Live Viewで頻出する無害なブロードキャストログや既定拒否のインターネットスキャンを集計し、意味のある遮断ログだけを残すための定期運用手順です。
+
+## 目的
+
+Firewall > Log Files > Live View に頻出する定常ノイズ(NetBIOS/SSDPブロードキャスト、既定拒否のインターネットスキャン等)を洗い出し、当該通信のみを明示的にログ無効で遮断するルールへ切り出すことで、意味のある遮断ログの可読性を回復できるようになることを目指します。
+
+## 用語解説
+
+- **Live View**: Firewall > Log Files > Live View に表示されるリアルタイムのフィルタログ
+- **no-log-rule**: 該当通信を明示的に Block しつつ、ルール自体の `Log` オプションを無効化したルール
+- **既定拒否 (default deny)**: どの許可/拒否ルールにもマッチしなかった通信を落とす、ルールセット末尾の暗黙ルール
+- **Log packets matched by default rules**: Firewall > Settings > Advanced にある設定項目。既定拒否ルールにマッチした通信までログに残すかどうかを制御する
+- **decision(判定)**: no-log-rule(ログを無効化した明示遮断ルールを追加する)/ keep(現状どおりログを残す)の判定
+- **rationale**: その判定を下した理由
+
+## シナリオ設定
+
+今回のログ調整対象は {{ csv_rows | length }} パターンです。台帳には `noise_pattern` / `src_net` / `dst_port` / `decision` / `rationale` を記録します。
+
+| noise_pattern | src_net | dst_port | decision | rationale |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["noise_pattern"] }} | {{ r["src_net"] }} | {{ r["dst_port"] }} | {{ r["decision"] }} | {{ r["rationale"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. Live Viewで頻出ノイズログを確認する
+
+Firewall > Log Files > Live View を開き、Interface と Protocol でフィルタしながら頻出パターンを集計します。
+
+```bash
+{% for r in csv_rows %}echo "{{ r["noise_pattern"] }}: src={{ r["src_net"] }} dst_port={{ r["dst_port"] }} -> {{ r["decision"] }}"
+{% endfor %}```
+
+### 2. 調整前のログ量を記録する
+
+no-log-ruleを投入する前に、現在のログ量をベースラインとして記録します。
+
+```bash
+clog /var/log/filter/latest.log | wc -l
+date "+%Y-%m-%d %H:%M:%S" > /tmp/opnsense-lognoise-before.txt
+clog /var/log/filter/latest.log | wc -l >> /tmp/opnsense-lognoise-before.txt
+```
+
+### 3. no-log-rule対象を明示遮断ルールとして既定拒否の手前に追加する
+
+decisionが `no-log-rule` のパターンのみ、Firewall > Rules > (該当インターフェース) で Action=Block, Log=(チェックを外す) のルールを作成し、既定拒否ルールの直前に配置します。GUIでの操作後、`/conf/config.xml` 上では対象ルールに `<log>` タグが存在しない(または `0`)ことを確認します。
+
+```bash
+{% for r in csv_rows %}{% if r["decision"] == "no-log-rule" %}echo "投入対象: {{ r["noise_pattern"] }} (src={{ r["src_net"] }}, dst_port={{ r["dst_port"] }}) -> Block / Log無効ルールを既定拒否の手前に追加"
+{% endif %}{% endfor %}grep -A3 "<interface>wan</interface>" /conf/config.xml | grep -c "<log>"
+```
+
+### 4. Advanced設定「Log packets matched by default rules」の扱いを決める
+
+Firewall > Settings > Advanced の「Log packets matched by default rules」は、既定拒否ルール自体のログ出力可否を制御する全体設定です。手順3の個別ルールを追加してもなお既定拒否ログが多い場合のみ、この設定を無効化することを検討し、有効・無効いずれの場合も判断理由を記録します。
+
+```bash
+echo "Log packets matched by default rules: 現状維持(有効) - 個別no-log-ruleで十分抑制できているため"
+grep -A1 "<filter>" /conf/config.xml | grep "logdefaultblock" || echo "logdefaultblock未設定(既定=有効)"
+```
+
+### 5. keep対象(認証系・DMZ)がログ抑制対象外であることを確認する
+
+```bash
+{% for r in csv_rows %}{% if r["decision"] == "keep" %}echo "抑制対象外(監視継続): {{ r["noise_pattern"] }} (src={{ r["src_net"] }}, dst_port={{ r["dst_port"] }}) - {{ r["rationale"] }}"
+{% endif %}{% endfor %}```
+
+### 6. 調整後のログ量を比較する
+
+no-log-rule投入後、一定時間(目安24時間)経過後に再度ログ量を採取し、投入前と比較します。
+
+```bash
+date "+%Y-%m-%d %H:%M:%S" > /tmp/opnsense-lognoise-after.txt
+clog /var/log/filter/latest.log | wc -l >> /tmp/opnsense-lognoise-after.txt
+diff /tmp/opnsense-lognoise-before.txt /tmp/opnsense-lognoise-after.txt
+```
+
+## 動作確認
+
+- 全 {{ csv_rows | length }} パターンについて `decision`(no-log-rule/keep)が確認できていること
+- `no-log-rule` 判定のパターンすべてに対し、既定拒否の手前に Block / Log無効ルールが投入されていること
+- 手順2・6で採取したログ量が、調整後に有意に減少していること(ノイズパターン分のみ減少し、他の遮断ログ件数は変化していないこと)
+- `keep` 判定の認証系・DMZ通信が、手順5でログ抑制の対象から明示的に除外されていることを確認できること
+
+## 注意事項
+
+- decisionが `keep` の認証系(SSHブルートフォース試行等)・DMZ向け通信は、セキュリティ監視対象のためログ抑制の対象外とすること。誤って no-log-rule 化しない。
+- no-log-ruleは「ログを残さない」設定であり、「通信を許可する」設定ではない。Action は必ず Block のまま Log のみを無効化する。Pass に変更しない。
+- 既定拒否ルールの手前にno-log-ruleを追加した直後は、当該ルールが意図した通信のみを遮断し、他の正当な通信を誤って遮断していないことを、Live View または `clog` で一定時間監視してから運用に移行する。誤設定に気づいた場合は速やかにルールを無効化(Disable)し、既定拒否によるログ記録に戻せることを確認しておく。
+- Firewall > Settings > Advanced の「Log packets matched by default rules」を無効化する場合、既定拒否にマッチする想定外の通信(誤設定や新規の攻撃パターン)も一切ログに残らなくなるため、無効化は最終手段とし、変更前後で監視体制側の合意を得ること。

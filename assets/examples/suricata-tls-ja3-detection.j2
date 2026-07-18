@@ -1,0 +1,98 @@
+# SuricataによるTLSフィンガープリント検知
+
+JA3ハッシュとTLS SNIを用いて、既知マルウェアのTLS通信をSuricataで検知するルールを構成します。
+
+## 目的
+
+TLSの暗号化ペイロードを復号せずに、ClientHelloの特徴から算出されるJA3フィンガープリントと、平文で送られるSNI(Server Name Indication)を突き合わせることで、既知の不審なTLS通信を検知できるようにすることを目指します。
+
+## 用語解説
+
+- **JA3**: TLS ClientHelloに含まれるTLSバージョン・暗号スイート・拡張・楕円曲線等の値からMD5ハッシュを算出した指紋。マルウェアのTLSライブラリ実装に固有の値になりやすい
+- **JA4**: JA3の後継フィンガープリント方式。JA3よりハッシュ衝突が少なく、より詳細な情報を含むが、本手順ではまずJA3を有効化する
+- **SNI(Server Name Indication)**: TLSハンドシェイクのClientHelloに平文で含まれる接続先ホスト名。通信内容は暗号化されてもSNIは可視である
+- **eve.json**: Suricataがアラートやプロトコルイベントを出力するJSON形式のログファイル
+- **sid/rev/classtype**: Suricataルールの一意識別子(sid)、改訂番号(rev)、攻撃分類(classtype)を表すルールオプション
+
+## シナリオ設定
+
+`app-layer.protocols.tls`配下の`ja3-fingerprints`を有効化し{% if ja3_enabled %}(本手順では有効にする){% endif %}、以下のJA3ハッシュとSNIパターンを監視対象とします。
+
+| 種別 | 値 | sid |
+|------|-----|-----|
+{% for h in watch_ja3_hashes %}| JA3ハッシュ | `{{ h }}` | {{ sid_base + loop.index0 }} |
+{% endfor %}{% for s in watch_sni_patterns %}| SNIパターン | `{{ s }}` | {{ sid_base + (watch_ja3_hashes | length) + loop.index0 }} |
+{% endfor %}
+
+## 手順
+
+### 1. suricata.yamlでJA3フィンガープリントを有効化する
+
+`app-layer.protocols.tls`配下に以下を設定します。
+
+```yaml
+app-layer:
+  protocols:
+    tls:
+      enabled: yes
+      ja3-fingerprints: yes
+      # JA4を併用する場合は下記も有効化する
+      # ja4-fingerprints: yes
+```
+
+設定後、構文チェックを行ってから再起動します。
+
+```bash
+suricata -T -c /etc/suricata/suricata.yaml -v
+systemctl restart suricata
+```
+
+### 2. JA3ハッシュ照合ルールを作成する
+
+`/etc/suricata/rules/local.rules`に、既知マルウェアのJA3ハッシュと一致するTLS通信を検知するルールを追加します。
+
+```
+{% for h in watch_ja3_hashes %}alert tls $HOME_NET any -> $EXTERNAL_NET any (msg:"LOCAL JA3 known-bad {{ h }}"; ja3.hash; content:"{{ h }}"; sid:{{ sid_base + loop.index0 }}; rev:1; classtype:trojan-activity;)
+{% endfor %}```
+
+### 3. SNIパターン照合ルールを作成する
+
+同じく`local.rules`に、既知の不審ホスト名へのSNIを検知するルールを追加します。
+
+```
+{% for s in watch_sni_patterns %}alert tls $HOME_NET any -> $EXTERNAL_NET any (msg:"LOCAL suspicious SNI {{ s }}"; tls.sni; content:"{{ s }}"; sid:{{ sid_base + (watch_ja3_hashes | length) + loop.index0 }}; rev:1; classtype:trojan-activity;)
+{% endfor %}```
+
+### 4. ルールを読み込んで再起動する
+
+```bash
+suricata -T -c /etc/suricata/suricata.yaml -v
+systemctl restart suricata
+```
+
+## 動作確認
+
+1. テスト用にいずれかのSNIパターン宛のTLS接続を発生させ、`eve.json`にtlsイベントが記録されることを確認します。
+
+```bash
+tail -n 50 /var/log/suricata/eve.json | jq 'select(.event_type=="tls")'
+```
+
+2. `tls`イベントに`ja3`フィールドが出力されていることを確認します。
+
+```bash
+tail -n 50 /var/log/suricata/eve.json | jq '.tls.ja3'
+```
+
+3. `fast.log`または`eve.json`のalertイベントに、設定したsidでアラートが記録されていることを確認します。
+
+```bash
+grep -E "{% for h in watch_ja3_hashes %}sid:{{ sid_base + loop.index0 }}{% if not loop.last %}|{% endif %}{% endfor %}" /var/log/suricata/fast.log
+```
+
+## 注意事項
+
+- JA3ハッシュはTLSライブラリのバージョン更新で変化することがあり、正規のクライアントが偶然同一のJA3を持つ場合もある。JA3/JA4は単独でブロック判断の根拠にせず、アラートを起点とした調査(接続先IP・SNI・通信量等との突き合わせ)に用いる。
+- ルール追加直後は`drop`ではなく`alert`アクションで運用し、誤検知が多発しないことを一定期間確認してから遮断へ移行する。
+- ルール変更後は必ず`suricata -T`で構文チェックを行い、既存の検知が壊れていないことを確認してから本番反映する。
+- sidは組織内で一意である必要がある。既存のsid割当表と重複していないことを事前に確認する。

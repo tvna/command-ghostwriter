@@ -1,0 +1,151 @@
+# Suricata ルールセット定期更新の運用
+
+suricata-update による週次のルール更新を、検証・無瞬断リロード・stats 確認・
+失敗時の切り戻しまで一気通貫で定型化します。root または sudo 権限で実施してください。
+
+## 目的
+
+Suricata の検知ルールセットを週次で最新化しつつ、投入前検証と失敗時の
+自動切り戻しを組み込むことで、誤ったルール投入によって検知が止まったり
+過検知が急増したりするリスクを抑えた運用を確立できるようになることを
+目指します。
+
+## 用語解説
+
+- **suricata-update**: 有効化した rule source から最新ルールを取得し、
+  ローカルの `disable.conf` 等のポリシーをマージしたうえで
+  `/var/lib/suricata/rules/suricata.rules` を生成するツール
+- **マージ順序**: suricata-update は「ダウンロード → ローカル調整ファイル
+  (disable.conf/enable.conf/modify.conf/drop.conf) の適用 → 出力」の順で
+  毎回処理するため、ローカルの調整はダウンロード元の内容そのものではなく
+  実行のたびに再適用される。取得元ファイルを直接編集しても次回更新で
+  上書きされて消える
+- **reload-rules**: Suricata を再起動せずに稼働中のワーカーへ新しいルール
+  セットを読み込ませる `suricatasc` コマンド。パケット処理を止めないため
+  無瞬断でルールを反映できる
+- **ruleset-stats**: `suricatasc` で取得できる、読み込み済み/失敗した
+  ルール数などのランタイム統計
+- **enabled 数の差分ガード**: 更新前後で有効化されたルール数の増減率が
+  `{{ max_rule_delta_percent }}%` を超える場合、想定外の大量追加・大量失効の
+  可能性があるため自動反映を止め、人手レビューに回す運用ガード
+- **検証失敗時の安全性**: `suricata -T` による設定検証に失敗した場合は
+  reload を実行せず、稼働中の旧ルールセットで検知を継続する。トラフィックの
+  少ない時間帯に実行するのはリスク低減のためであり、検証失敗時の安全性は
+  時間帯に依存しない
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 更新スケジュール | {{ update_schedule }} |
+| バックアップ格納先 | {{ backup_dir }} |
+| 検証コマンド | `{{ verify_command }}` |
+| 失敗時の通知先 | {{ notify_channel }} |
+| enabled 数差分の許容上限 | {{ max_rule_delta_percent }}% |
+
+## 手順
+
+### 1. 現行ルールセットをバックアップする
+
+更新前に、現在有効な `suricata.rules` と enabled 数を記録します。
+
+```bash
+sudo mkdir -p {{ backup_dir }}
+sudo cp /var/lib/suricata/rules/suricata.rules \
+  {{ backup_dir }}/suricata.rules.$(date +%Y%m%d)
+grep -c '^alert\|^drop\|^pass\|^reject' \
+  /var/lib/suricata/rules/suricata.rules \
+  > {{ backup_dir }}/enabled_count.prev
+```
+
+### 2. suricata-update を実行する
+
+`{{ update_schedule }}` のタイミングで cron/systemd timer から起動します。
+ローカルの `disable.conf`/`enable.conf`/`modify.conf`/`drop.conf` は
+`/etc/suricata/` 配下に置いたまま変更しません(マージ順序により毎回自動適用)。
+
+```bash
+sudo suricata-update --no-reload 2>&1 | tee {{ backup_dir }}/update.log
+```
+
+### 3. enabled 数の差分を計算し、閾値超過なら人手レビューに回す
+
+```bash
+NEW_COUNT=$(grep -c '^alert\|^drop\|^pass\|^reject' \
+  /var/lib/suricata/rules/suricata.rules)
+OLD_COUNT=$(cat {{ backup_dir }}/enabled_count.prev)
+DELTA=$(awk -v n="$NEW_COUNT" -v o="$OLD_COUNT" \
+  'BEGIN { if (o == 0) { print 100 } else { d = (n - o) / o * 100; if (d < 0) d = -d; printf "%.1f", d } }')
+echo "旧enabled=$OLD_COUNT 新enabled=$NEW_COUNT delta=${DELTA}%"
+
+if awk -v d="$DELTA" -v t="{{ max_rule_delta_percent }}" \
+  'BEGIN { exit !(d > t) }'; then
+  echo "差分が許容上限{{ max_rule_delta_percent }}%を超過。自動反映を停止し{{ notify_channel }}へ人手レビューを依頼する。"
+  exit 1
+fi
+```
+
+### 4. 反映前に設定を検証する
+
+```bash
+sudo {{ verify_command }}
+```
+
+`Configuration provided was successfully loaded. Exiting.` が出力される
+ことを確認します。エラーが出た場合は手順 6 の切り戻しへ進み、reload は
+実行しません(旧ルールセットのまま検知を継続)。
+
+### 5. 稼働中のプロセスへ無瞬断でルールを反映する
+
+```bash
+sudo suricatasc -c reload-rules
+sudo suricatasc -c ruleset-stats
+```
+
+`ruleset-stats` の出力で `rules_loaded` が増加し `rules_failed` が 0(または
+既知の許容値)であることを確認します。この操作はパケット処理スレッドを
+停止させないため、通信の瞬断は発生しません。
+
+### 6. 失敗時にバックアップから切り戻す
+
+手順 4 の検証、または手順 5 の反映結果が異常だった場合に実施します。
+
+```bash
+sudo cp {{ backup_dir }}/suricata.rules.$(date +%Y%m%d) \
+  /var/lib/suricata/rules/suricata.rules
+sudo {{ verify_command }}
+sudo suricatasc -c reload-rules
+sudo suricatasc -c ruleset-stats
+```
+
+切り戻し後も `{{ verify_command }}` による検証が通ることを必ず確認して
+から reload します。
+
+## 動作確認
+
+- 手順 2 の `update.log` に `suricata-update` の正常終了ログが記録されていること
+- 手順 3 の `DELTA` が `{{ max_rule_delta_percent }}%` 以下、または超過時に
+  `{{ notify_channel }}` へレビュー依頼が飛んでいること
+- 手順 4 の `{{ verify_command }}` が成功終了(exit 0)していること
+- 手順 5 の `ruleset-stats` で `rules_loaded` が更新後の期待値と一致し、
+  `rules_failed` が異常値でないこと
+- 切り戻しを行った場合、切り戻し後も `{{ verify_command }}` が成功し、
+  `reload-rules` が正常に反映されていること
+
+## 注意事項
+
+- ローカル調整ファイル(`disable.conf`/`enable.conf`/`modify.conf`/`drop.conf`)
+  はダウンロードされたルールファイルそのものを書き換えるのではなく、
+  suricata-update 実行のたびに再適用される仕組みのため、直接
+  `suricata.rules` を編集して調整しても次回更新で失われる。調整は必ず
+  `/etc/suricata/` 配下の調整ファイル側に対して行うこと
+- 手順 4 の検証(`{{ verify_command }}`)に失敗した場合は reload-rules を
+  実行しないこと。検証を経ずに反映すると、構文異常なルールで
+  Suricata プロセスそのものが不安定になる可能性がある
+- enabled 数の差分が `{{ max_rule_delta_percent }}%` を超える場合は自動反映
+  を止め、`{{ notify_channel }}` 経由で人手レビューを経てから反映すること
+- `{{ backup_dir }}` のバックアップは最低 2 世代以上保持し、切り戻し後も
+  必ず `{{ verify_command }}` で再検証してから `reload-rules` を実行すること
+- 本手順はトラフィックの少ない時間帯(`{{ update_schedule }}`)を狙って実行
+  するが、これはリスク低減のためであり、検証失敗時に旧ルールで安全に
+  稼働し続けられる設計そのものが安全性の根拠であることに留意する

@@ -1,0 +1,7 @@
+rule_order,acl_name,action,hit_count,disposition,note
+1,localhost,allow,15234,keep,管理端末からの許可・先頭配置を維持
+2,allowed_subnet,allow,982345,keep,社内主要許可ルール
+3,allow_all_legacy,allow,12,remove,移行時の暫定any許可が残存・過剰許可
+4,blocked_category,deny,45210,keep,カテゴリフィルタによる拒否
+5,CONNECT_ssl_ports,deny,0,review,ヒット0・用途不明ACLのため要確認
+6,all,deny,305,keep,末尾deny all必須ルール

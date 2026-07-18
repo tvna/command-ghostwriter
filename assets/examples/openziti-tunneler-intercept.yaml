@@ -1,0 +1,10 @@
+service_name: internal-crm
+intercept_addresses:
+  - crm.internal.corp
+  - 10.20.30.0/24
+port_ranges:
+  - low: 443
+    high: 443
+  - low: 8443
+    high: 8449
+identity_file: /opt/ziti/identities/crm-tunneler.json

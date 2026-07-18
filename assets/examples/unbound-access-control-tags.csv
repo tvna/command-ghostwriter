@@ -1,0 +1,7 @@
+client_net,tag,zone,policy,note
+10.0.10.0/24,staff,.,allow,社内網はデフォルトで全ドメインの再帰解決を許可する
+192.168.50.0/24,guest,.,refuse,ゲスト網はデフォルトで遮断し許可したゾーンのみ解決させる
+192.168.50.0/24,guest,ads.example.com.,redirect,ゲストの広告ドメインを社内案内ページへ誘導する
+192.168.60.0/24,iot,.,refuse,IoT網はデフォルトで遮断し許可したドメインのみ解決させる
+192.168.60.0/24,iot,iot-cloud.example.com.,allow,IoTクラウドAPI向けドメインのみ再帰解決を許可する
+192.168.60.0/24,iot,corp.internal.,refuse,IoT網から社内ゾーンへの到達を明示的に遮断する

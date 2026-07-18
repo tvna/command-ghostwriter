@@ -1,0 +1,121 @@
+# Keycloakクラスタ構成による高可用性化 — {{ hostname }}
+
+複数の Keycloak ノードを Infinispan の分散キャッシュ（`cache=ispn`）でクラスタ化し、単一ノード障害時にもログインセッションを維持できる高可用性構成を構築します。
+
+## 目的
+
+Keycloak を複数ノードでクラスタ化し、Infinispan によるセッションレプリケーション/分散と JGroups ディスカバリの仕組みを理解した上で、ノード障害時にもセッションが失われないことを検証できるようになることを目指します。
+
+## 用語解説
+
+- **cache=ispn**: Keycloak の起動時キャッシュプロファイル。単一ノード用の `local` ではなく、Infinispan によるクラスタキャッシュを有効化するモード
+- **Infinispanセッションレプリケーション/分散**: 認証セッション・ユーザーセッションのキャッシュを複数ノード間で複製（replication）または分散（distribution）して保持する仕組み。ノードが1台停止しても、他ノードが同じセッション情報を保持しているためログインをやり直す必要がない
+- **JGroups discovery（{{ discovery_protocol }}）**: クラスタノード同士がお互いを発見し合うプロトコル。`{{ discovery_protocol }}` は共有DBのテーブルにノード情報を書き込み・参照することで到達性を確保する方式で、マルチキャストが使えない環境でも動作する
+- **cache-stack（{{ cache_stack }}）**: JGroups のどの到達性メカニズムを使うかを指定する設定名。`{{ cache_stack }}` は共有DBを経由したディスカバリを行うスタック
+- **sticky session不要**: Infinispanでセッションが複製/分散されているため、ロードバランサが同一クライアントを常に同じノードへ振り分ける「sticky session」を設定しなくても、どのノードでリクエストを受けてもセッションを参照できる
+- **hostname統一設定**: 全ノードで発行者（issuer）URLを一致させるため、`--hostname` に共通のFQDNを設定すること。ノードごとに異なるホスト名になっていると、トークンのissuerクレームが不一致となり検証エラーになる
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| discovery_protocol | {{ discovery_protocol }} |
+| cache_stack | {{ cache_stack }} |
+| shared_db.host | {{ shared_db.host }} |
+| shared_db.port | {{ shared_db.port }} |
+| shared_db.name | {{ shared_db.name }} |
+| shared_db.user | {{ shared_db.user }} |
+| hostname | {{ hostname }} |
+| lb_endpoint | {{ lb_endpoint }} |
+
+| ノード名 | IPアドレス |
+| --- | --- |
+{% for n in nodes %}| {{ n.name }} | {{ n.ip }} |
+{% endfor %}
+
+## 1. 共有DBへの疎通と時刻同期を確認する
+
+JDBC_PINGディスカバリはノード情報を共有DBのテーブルへ書き込むため、共有DBに全ノードから到達できることが前提です。あわせて、トークンの有効期限判定やクラスタのタイムスタンプ整合のため、全ノードでNTP同期が取れていることを確認します。
+
+```bash
+{% for n in nodes %}echo "--- {{ n.name }} ({{ n.ip }}) ---"
+ssh {{ n.ip }} "pg_isready -h {{ shared_db.host }} -p {{ shared_db.port }} -d {{ shared_db.name }}"
+ssh {{ n.ip }} "chronyc tracking | grep 'Leap status'"
+{% endfor %}```
+
+## 2. 各ノードでKeycloakをcache=ispnで起動する
+
+全ノードで同じ `--cache-stack` と共有DB接続情報、共通の `--hostname` を指定して起動します。`--hostname` を統一しないと、ノードによって発行されるトークンのissuerが異なってしまいます。
+
+```bash
+{% for n in nodes %}echo "--- {{ n.name }} を起動 ---"
+ssh {{ n.ip }} "KC_DB=postgres \
+  KC_DB_URL=jdbc:postgresql://{{ shared_db.host }}:{{ shared_db.port }}/{{ shared_db.name }} \
+  KC_DB_USERNAME={{ shared_db.user }} \
+  /opt/keycloak/bin/kc.sh start \
+  --cache=ispn \
+  --cache-stack={{ cache_stack }} \
+  --hostname={{ hostname }} \
+  --proxy-headers=xforwarded \
+  --http-enabled=true &"
+{% endfor %}```
+
+## 3. クラスタ形成をログで確認する
+
+各ノードの起動ログに、JGroupsチャネルへの参加通知（`ISPN000094`）とクラスタビューのメンバー数が全ノード分そろって出力されることを確認します。
+
+```bash
+{% for n in nodes %}ssh {{ n.ip }} "journalctl -u keycloak -n 200 --no-pager | grep -E 'ISPN000094|ISPN000079|view'"
+{% endfor %}```
+
+期待するログの例（3ノード構成の場合、最後に起動したノードで表示される）:
+
+```
+ISPN000094: Received new cluster view for channel ISPN: [kc-node1|2] (3) [kc-node1, kc-node2, kc-node3]
+```
+
+## 4. ロードバランサ経由でのアクセスとhostname統一を確認する
+
+ロードバランサ（`{{ lb_endpoint }}`）から到達した際に、どのノードが応答してもissuerが `{{ hostname }}` に統一されていることを確認します。Infinispanでセッションが複製/分散されているため、sticky sessionの設定は不要です。
+
+```bash
+curl -s {{ lb_endpoint }}realms/master/.well-known/openid-configuration | grep -o '"issuer":"[^"]*"'
+{% for n in nodes %}curl -s -H "Host: {{ hostname }}" http://{{ n.ip }}:8080/realms/master/.well-known/openid-configuration | grep -o '"issuer":"[^"]*"'
+{% endfor %}```
+
+## 5. ノード障害時のセッション継続を検証する
+
+既存の単一ノード構成をロードバランサから外す前に、必ずこの手順でクラスタ経由のログインとフェイルオーバーが正常に機能することを検証します。
+
+```bash
+# ロードバランサ経由でログインし、セッションCookieを保存する
+curl -s -c /tmp/kc-session-cookies.txt -i {{ lb_endpoint }}realms/master/protocol/openid-connect/auth \
+  --data-urlencode "client_id=account-console" \
+  --data-urlencode "response_type=code" \
+  --data-urlencode "redirect_uri={{ lb_endpoint }}"
+
+# 1台目のノードを停止する
+ssh {{ nodes[0].ip }} "sudo systemctl stop keycloak"
+
+# 停止後もロードバランサ経由で同じセッションが有効であることを確認する
+curl -s -b /tmp/kc-session-cookies.txt -o /dev/null -w "%{http_code}\n" {{ lb_endpoint }}realms/master/account/
+
+# 検証後、停止したノードを復帰させる
+ssh {{ nodes[0].ip }} "sudo systemctl start keycloak"
+```
+
+## 動作確認
+
+- Step 3のログに、全ノード（{{ nodes | length }}台）がそろったクラスタビュー（`ISPN000094`）が出力されること
+- Step 4で、ロードバランサ経由・各ノード直接アクセスのいずれでも issuer が `{{ hostname }}` に統一されていること
+- Step 5で、1ノード停止後もロードバランサ経由のセッションアクセスが `200` を返し、再ログインなしで継続できること
+- 復帰させたノードが再度クラスタビューに参加し、ノード数が元の{{ nodes | length }}台に戻ること
+
+## 注意事項
+
+- 既存の単一ノードKeycloakをロードバランサから外す・停止するのは、Step 5でクラスタ経由のログインとフェイルオーバーが正常に確認できた後に限る。新しい経路を検証する前に旧経路を無効化しない。
+- `{{ discovery_protocol }}` は共有DBのテーブルを介してノードを発見するため、全ノードから共有DB（`{{ shared_db.host }}:{{ shared_db.port }}`）への到達性が必須。ファイアウォールやセキュリティグループで疎通がブロックされているとクラスタが形成されない。
+- 共有DB（`{{ shared_db.name }}`）は全ノードで同一のインスタンスを参照する必要がある。ノードごとに異なるDBを向けると、セッションやレルム設定が分裂し整合性が崩れる。
+- 全ノードでの時刻同期（NTP/chrony）を維持すること。時刻がずれるとトークン有効期限の判定やクラスタメンバーシップの安定性に影響する。
+- `--hostname` を全ノードで統一しないと、ノードによって発行されるトークンのissuerが異なり、他ノードやクライアントでの検証が失敗する。設定変更後はStep 4の確認を必ず再実施する。
+- ノード停止はメンテナンス手順に従い、必ずロードバランサから切り離してから行う。切り離さずに停止すると、ロードバランサが一時的にヘルスチェック失敗ノードへ振り分け続ける可能性がある。

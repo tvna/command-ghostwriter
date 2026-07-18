@@ -1,0 +1,14 @@
+cluster_name: "wazuh-prod-cluster"
+nodes:
+  - name: "wazuh-master01"
+    type: "master"
+    host: "10.0.1.10"
+  - name: "wazuh-worker01"
+    type: "worker"
+    host: "10.0.1.11"
+  - name: "wazuh-worker02"
+    type: "worker"
+    host: "10.0.1.12"
+cluster_key_set: true
+cutover_window: "2026-07-20 02:00-04:00 JST"
+rollback_step: "workerのossec.confでcluster設定をdisabled=yesに戻し、agentのmanager指定をmaster1台のみに戻す"

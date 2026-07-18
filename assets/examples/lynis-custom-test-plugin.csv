@@ -1,0 +1,5 @@
+test_id,category,check_logic,expected,suggestion_text
+CUST-8801,auth,grep -q PermitRootLogin.no /etc/ssh/sshd_config,0,PermitRootLoginをnoに設定し次回監査までに反映してください
+CUST-8802,network,pidof sshd,0,SSHデーモンが稼働していることを確認してください
+CUST-8803,file_integrity,test -f /etc/myorg/policy-baseline.sha256,0,ポリシーベースラインのハッシュファイルを配置してください
+CUST-8804,logging,test -w /var/log/myorg-audit.log,0,監査ログファイルへの書き込み権限を確認してください

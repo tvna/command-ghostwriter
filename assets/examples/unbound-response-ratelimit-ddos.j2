@@ -1,0 +1,105 @@
+# Unboundレートリミットによる増幅攻撃緩和
+
+オープンリゾルバとして悪用され DNS 増幅攻撃(DNS Amplification Attack)の踏み台にされるリスクを、Unbound の `ratelimit` / `ip-ratelimit` によるレート制限で緩和する手順です。
+
+## 目的
+
+Unbound をDNS増幅攻撃の踏み台として悪用されるリスクから守るため、ドメイン単位のレスポンスレートリミット(`ratelimit`)と送信元単位のレートリミット(`ip-ratelimit`)を導入し、正常なクエリを維持しながら異常な高頻度クエリのみを制限できるようになることを目指します。
+
+## 用語解説
+
+- **DNS増幅攻撃(DNS Amplification Attack)**: 送信元IPを詐称した小さなクエリで、応答サイズの大きいDNS応答を被害者へ大量に送りつけるDDoS手法。オープンリゾルバが踏み台にされる
+- **オープンリゾルバ**: 送信元を問わず誰からの再帰問い合わせにも応答してしまう設定不備のDNSサーバ
+- **ratelimit**: ドメイン単位(1秒あたりの同一ドメインへの問い合わせ数)で応答レートを制限するUnboundの機能
+- **ip-ratelimit**: 送信元クライアントIP単位で問い合わせレートを制限するUnboundの機能
+- **ratelimit-factor**: レート超過時に一定割合のクエリを通過させる仕組み。0にすると完全遮断、値が大きいほど通過率が下がる(例: 10なら約1/10だけ通過)
+- **access-control**: 問い合わせを許可するクライアント範囲を制限するUnboundの設定項目。オープンリゾルバ化を防ぐ根本的な対策
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| ratelimit(ドメイン単位, qps) | {{ ratelimit_qps }} |
+| ip-ratelimit(送信元単位, qps) | {{ ip_ratelimit_qps }} |
+| ratelimit-factor | {{ ratelimit_factor }} |
+| 許可クライアント(allowed_clients) | {{ allowed_clients | join(", ") }} |
+
+## 手順
+
+### 1. 現在の access-control 設定を確認する
+
+```bash
+unbound-control -c /etc/unbound/unbound.conf list_local_zones > /dev/null
+grep -A5 '^server:' /etc/unbound/unbound.conf.d/*.conf | grep 'access-control'
+```
+
+access-control による許可範囲の限定が最優先の対策であり、レートリミットはその上に重ねる多層防御であることを確認してから次に進みます。
+
+### 2. ratelimit / ip-ratelimit を設定する
+
+```bash
+cat > /etc/unbound/unbound.conf.d/ratelimit.conf <<'EOF'
+server:
+{% for c in allowed_clients %}    access-control: {{ c }} allow
+{% endfor %}    ratelimit: {{ ratelimit_qps }}
+    ratelimit-size: 4m
+    ratelimit-slabs: 4
+    ratelimit-factor: {{ ratelimit_factor }}
+    ip-ratelimit: {{ ip_ratelimit_qps }}
+    ip-ratelimit-size: 4m
+    ip-ratelimit-slabs: 4
+EOF
+```
+
+### 3. 構文を検証してから反映する
+
+```bash
+unbound-checkconf /etc/unbound/unbound.conf
+```
+
+新設定は `unbound-checkconf` で構文検証してから反映する。access-control の許可範囲を書き換える場合は、許可済みクライアントからの疎通が確立していることを次の手順で確認するまで、既存の access-control 行を削除しないこと。
+
+### 4. 再起動して統計をリセットし稼働を確認する
+
+```bash
+systemctl restart unbound
+systemctl status unbound --no-pager
+unbound-control stats_noreset | grep -E 'ratelimit|ip_ratelimit'
+```
+
+### 5. 正常クエリが通過することを確認する(許可クライアントから)
+
+```bash
+# allowed_clients に含まれるクライアントから、通常頻度で実行し正常応答を確認する
+dig @127.0.0.1 example.com A +short
+```
+
+### 6. 高頻度クエリでレート制限の発動を確認する
+
+```bash
+# ratelimit_qps を超える頻度で同一ドメインへ問い合わせ、一部がSERVFAILまたは無応答になることを確認する
+for i in $(seq 1 2000); do dig @127.0.0.1 example.com A +short +time=1 +tries=1 > /dev/null; done
+unbound-control stats_noreset | grep -E 'num.query.ratelimited|ip_ratelimit.exceeded'
+```
+
+### 7. access-control 外のクライアントからの問い合わせが拒否されることを確認する
+
+```bash
+# allowed_clients に含まれない送信元から実行し、REFUSED になることを確認する
+dig @127.0.0.1 example.com A
+```
+
+## 動作確認
+
+- `unbound-checkconf /etc/unbound/unbound.conf` がエラーなく通ること
+- `systemctl status unbound` が `active (running)` であること
+- 許可クライアントからの通常頻度クエリが正常応答(NOERROR)を返すこと
+- `ratelimit_qps` / `ip_ratelimit_qps` を超える高頻度クエリで `unbound-control stats_noreset` の ratelimit 系カウンタが増加し、一部応答が制限されること
+- access-control の許可範囲外のクライアントからの問い合わせが REFUSED になること
+
+## 注意事項
+
+- レートリミットは対症療法であり、`access-control` によるオープンリゾルバ化の防止(許可範囲の限定)が根本対策として最優先である。レートリミットだけに頼って access-control を緩めないこと。
+- access-control の許可範囲を変更する場合は、変更前に許可済みクライアントからの疎通確認(手順5)を行ってから、不要になった古い許可行を削除すること。先に許可を絞ってしまうと正規クライアントが遮断される。
+- `ratelimit-factor` を 0 に設定すると超過時に完全遮断となり、正規の大量アクセスも巻き込んで解決できなくなる。ゾーン更新後のキャッシュ再構築時など正規の大量クエリが発生する場面を想定し、完全遮断は避け、一定割合を通過させる値を設定すること。
+- レートリミットの発動状況は `unbound-control stats_noreset` の `num.query.ratelimited` / `ip_ratelimit.exceeded` などのカウンタを定期的に監視し、しきい値が実運用に対して適切かを継続的に見直すこと。

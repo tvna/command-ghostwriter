@@ -1,0 +1,8 @@
+kubernetes_host: "https://10.96.0.1:443"
+role_name: payments-api-reader
+bound_sa_names:
+  - payments-api
+bound_namespaces:
+  - payments-prod
+token_policies:
+  - payments-secrets-ro

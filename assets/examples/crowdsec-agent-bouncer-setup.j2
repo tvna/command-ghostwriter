@@ -1,0 +1,117 @@
+# CrowdSecエージェントとbouncer構築
+
+CrowdSecの検知エージェント（agent）と、実際に遮断を実行するbouncerを分離して構築します。**自組織のIPをwhitelistへ登録してからbouncerを有効化し**、自己ロックアウトを防ぎます。
+
+## 目的
+
+ログ解析エージェント（cscli/CrowdSec本体）と、遮断を実行するremediation bouncer（{{ bouncer_type }}）を分けて構築し、コミュニティCTIによる協調的なIP遮断を導入できるようになることを目指します。bouncerを有効化する前に自組織IPをwhitelistへ登録し、誤遮断を防ぐ設計を理解します。
+
+## 用語解説
+
+- **agent（エージェント）**: ログを解析し、シナリオに合致する攻撃パターンを検知して「decision（遮断などの判断）」を生成するCrowdSec本体
+- **bouncer（バウンサー）**: agentが生成したdecisionを受け取り、nftables/iptables等で実際に遮断を実行するコンポーネント。agentとbouncerはローカルAPI（LAPI）経由で分離されており、bouncerを止めても検知は継続する
+- **collection（コレクション）**: parsers・scenarios・postoverflowsをまとめたパッケージ（例: `crowdsecurity/sshd`）
+- **scenario（シナリオ）**: 「10秒間に5回SSH認証失敗」のような攻撃パターン定義
+- **decision（ディシジョン）**: agentが下した「このIPをNh遮断する」等の判断。bouncerはこれを取得して反映する
+- **CTI（Central/Cyber Threat Intelligence）・クラウド連携**: CrowdSecのコミュニティ間でIPレピュテーション（悪性判定情報）を共有する仕組み。自組織のdecisionも匿名化のうえ共有され得るため、共有範囲の把握が必要
+- **whitelist（ホワイトリスト）**: `parsers/s02-enrich/whitelists.yaml` に登録し、遮断対象から常に除外するIP/範囲の一覧
+
+## 1. CrowdSecエージェントを導入し、collectionを有効化する
+
+```bash
+curl -s https://install.crowdsec.net | sudo sh
+sudo apt-get install -y crowdsec
+{% for c in collections %}sudo cscli collections install {{ c }}
+{% endfor %}```
+
+## 2. acquis.yamlでログソースを定義する
+
+```bash
+sudo tee /etc/crowdsec/acquis.yaml <<'EOF'
+{% for src in log_sources %}filenames:
+  - {{ src.path }}
+labels:
+  type: {{ src.label }}
+---
+{% endfor %}EOF
+sudo systemctl restart crowdsec
+```
+
+## 3. parsers/scenariosの有効状態を確認する
+
+```bash
+sudo cscli parsers list
+sudo cscli scenarios list
+sudo cscli collections list
+```
+
+有効化した{% for c in collections %}`{{ c }}`{% if not loop.last %}、{% endif %}{% endfor %}が `Status: enabled` になっていることを確認します。
+
+## 4. 自組織IPをwhitelistへ登録する（bouncer有効化前に必須）
+
+`cscli decisions list` でまずagent単体の挙動を観察し、誤検知や想定外のdecisionが自組織IPに出ていないかを確認します。
+
+```bash
+sudo cscli decisions list
+```
+
+続けて、自組織の管理端末を `whitelists.yaml` に登録します。
+
+```bash
+sudo tee /etc/crowdsec/parsers/s02-enrich/whitelists.yaml <<'EOF'
+name: local/admin-whitelist
+description: "管理端末を遮断対象から除外する"
+whitelist:
+  reason: "自組織の管理端末"
+  ip:
+{% for ip in whitelist %}    - {{ ip.address }}
+{% endfor %}EOF
+sudo systemctl restart crowdsec
+sudo cscli decisions list
+```
+
+whitelist登録後に管理端末（{% for ip in whitelist %}{{ ip.address }} ({{ ip.label }}){% if not loop.last %}, {% endif %}{% endfor %}）に対するdecisionが出ていないことを確認してから、次のステップでbouncerを有効化します。
+
+## 5. firewall-bouncerを導入し、API keyを登録する
+
+```bash
+curl -s https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.deb.sh | sudo bash
+sudo apt-get install -y crowdsec-{{ bouncer_type }}
+sudo cscli bouncers add {{ bouncer_type }}-01
+```
+
+コマンド出力に表示されるAPI keyを `/etc/crowdsec/bouncers/crowdsec-{{ bouncer_type }}.yaml` の `api_key` に設定します。
+
+```bash
+sudo systemctl enable --now crowdsec-{{ bouncer_type }}
+sudo cscli bouncers list
+```
+
+`cscli bouncers list` に登録したbouncerが表示され、api_key_registeredが `{{ api_key_registered }}` の状態から実際の登録完了（true相当）に変わっていることを確認します。
+
+## 6. 模擬攻撃でdecision生成と実遮断を確認する
+
+`{{ test.attacker_ip }}` はwhitelistに含まれない外部攻撃想定の例示IPです。手動でdecisionを追加し、agentの検知からbouncerの遮断までの一連の流れを確認します。
+
+```bash
+sudo cscli decisions add --ip {{ test.attacker_ip }} --duration 1h --reason "manual-test"
+sudo cscli decisions list
+sudo nft list ruleset | grep {{ test.attacker_ip }}
+sudo cscli decisions delete --ip {{ test.attacker_ip }}
+sudo cscli decisions list
+```
+
+## 動作確認
+
+- `cscli metrics` にparsers/scenariosのヒット数と、bouncerからのdecision取得件数が表示されること
+- `cscli alerts list` に模擬攻撃に対応するalertが記録されていること
+- Step 6で `{{ test.attacker_ip }}` を手動追加した際に `nft list ruleset` へルールが反映され、削除後にルールが消えること
+- 管理端末（{% for ip in whitelist %}{{ ip.address }}{% if not loop.last %}, {% endif %}{% endfor %}）に対してはStep 4以降decisionが生成されないこと
+
+## 注意事項
+
+- bouncerを有効化する前に、必ずStep 4で自組織IPを `whitelists.yaml` に登録し、`cscli decisions list` で誤遮断が発生しないことを確認する。登録漏れは自己ロックアウト（管理アクセス遮断）に直結する。
+- `cscli bouncers add` で発行されるAPI keyは再表示できない機微情報であり、bouncer設定ファイル以外に平文で残さない。漏洩時は `cscli bouncers delete` で失効させ再発行する。
+- whitelistには自組織が確実に管理する範囲のみを登録する。広すぎる範囲（大きなCIDR等）を登録すると、遮断すべき攻撃元を見逃す原因になる。
+- クラウド連携（CTI共有）を有効にする場合、自組織で生成したdecisionが匿名化のうえコミュニティに共有され得る。共有される情報の範囲（IP・シナリオ種別等）を事前に把握し、機微な内部情報を含むログソースを不用意に対象へ含めない。
+- agentとbouncerは分離アーキテクチャのため、bouncerを停止しても検知（agent）は継続する。遮断のみを一時停止したい場合はbouncerサービスを止め、検知自体を止めたい場合はcrowdsecサービスを止める、という違いを区別する。

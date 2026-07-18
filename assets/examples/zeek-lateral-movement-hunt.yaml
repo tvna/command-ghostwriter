@@ -1,0 +1,15 @@
+local_networks:
+  - 10.20.0.0/16
+  - 192.168.100.0/24
+watch_ports:
+  - port: 445
+    proto: tcp
+    service: SMB
+  - port: 3389
+    proto: tcp
+    service: RDP
+  - port: 5985
+    proto: tcp
+    service: WinRM
+pivot_host: 10.20.5.17
+timeframe: "2026-07-17T09:00:00 〜 2026-07-17T09:15:00"

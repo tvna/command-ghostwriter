@@ -1,0 +1,105 @@
+# Wazuh FIM改ざん検知時の初動対応
+
+Wazuhのファイル整合性監視(FIM/syscheck)がrule 550/554等の改ざんアラートを発生させた際に、変更内容・実行者・影響範囲を確認し、正当な変更か侵害かを判定したうえで封じ込めまで行う初動対応手順です。
+
+## 目的
+
+syscheckアラートを起点として、変更されたファイルの差分・実行者・変更時刻を特定し、正当な変更管理に基づくものか侵害によるものかを判定します。侵害が疑われる場合は速やかにホストを隔離し、証跡を保全した状態で調査に引き継げるようになることを目指します。
+
+## 用語解説
+
+- **syscheck**: Wazuhのファイル整合性監視(FIM)モジュール。監視対象ファイルのハッシュ・パーミッション・所有者等を定期スキャンし、変更を検知する
+- **rule 550/554**: Wazuhの標準ルールセットにおける「ファイル整合性チェックの変更を検知(550)」「root所有ファイルの追加/変更を検知(554)」に対応するルールID。アラートの深刻度判定の起点になる
+- **report_changes / diff**: syscheckの設定で`report_changes: yes`を有効にした監視対象について、Wazuhが変更前後のテキスト差分を`/var/ossec/queue/diff/local/`配下に保存する機能
+- **who-data**: syscheckの拡張監査機能。auditd(Linux)やSACL(Windows)と連携し、ファイルを実際に変更したプロセス名・実行ユーザー・PIDを特定する
+- **baselineとの差分**: 直近の正常なファイル内容・パーミッション・所有者(baseline)と、アラート発生時点の状態を比較すること。who-dataで得た実行者情報と組み合わせ、変更が承認済みの変更管理プロセス(パッチ適用・デプロイ等)によるものか、想定外の第三者・プロセスによるものかを切り分ける
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 変更されたファイル数 | {{ changed_files | length }} |
+| 変更されたファイル | {% for f in changed_files %}`{{ f }}`{% if not loop.last %}, {% endif %}{% endfor %} |
+| who-dataによる実行者 | {{ changed_by }} |
+| 変更時刻 | {{ change_time }} |
+| 変更管理での承認有無 | {{ legitimate_change }} |
+| 証跡保全先ディレクトリ | {{ evidence_dir }} |
+
+## 手順
+
+### 1. syscheckアラートの内容を確認する
+
+```bash
+grep -A 20 '"rule":{"level":.*,"id":"55[04]"' /var/ossec/logs/alerts/alerts.json | tail -n 60
+/var/ossec/bin/agent_control -i <agent_id>
+```
+
+→ rule 550/554のアラートから、監視対象パス・イベント種別(added/modified/deleted)・アラートレベルを確認します。
+
+### 2. report_changesの差分を確認する
+
+```bash
+{% for f in changed_files %}
+sudo cat "/var/ossec/queue/diff/local$(dirname {{ f }})/$(basename {{ f }})/last-entry.gz" | zcat
+{% endfor %}
+```
+
+→ 各対象ファイルについて変更前後の差分を確認し、追加・削除された行を特定します。差分が取得できないファイル(report_changes未設定)は、後述の証跡取得コマンドでのハッシュ照合のみで判断します。
+
+### 3. who-dataで実行者・プロセスを特定する
+
+```bash
+grep -B 5 -A 30 '"syscheck":{"path":' /var/ossec/logs/alerts/alerts.json | grep -E '"audit_name"|"process_name"|"uid"|"ppid"'
+sudo ausearch -f {{ changed_files[0] }} -ts recent
+```
+
+→ who-dataに含まれる`audit.effective_user`(実行ユーザー)、`audit.process.name`(プロセス名)を確認します。今回の特定結果は **{{ changed_by }}**、変更時刻は **{{ change_time }}** です。
+
+### 4. 変更管理と照合し正当性を判定する
+
+```bash
+echo "対象ユーザー/プロセス: {{ changed_by }}"
+echo "変更時刻: {{ change_time }}"
+# チケット管理システムやcronジョブ台帳で、この時刻・実行者による承認済み変更が存在するか照合する
+```
+
+→ 承認済みの変更管理チケット・デプロイ記録・cronジョブ台帳と、実行者・時刻を突き合わせます。今回の判定は **legitimate_change: {{ legitimate_change }}** です。false(侵害疑い)の場合は次の手順に進みます。
+
+### 5. 侵害疑いの場合はホストを隔離する
+
+```bash
+sudo /var/ossec/active-response/bin/firewall-drop.sh add - {{ changed_by }} 0 -
+sudo iptables -I INPUT -j DROP ! -s <管理端末のIPアドレス>
+sudo iptables -I OUTPUT -j DROP ! -d <管理端末のIPアドレス>
+```
+
+→ 管理端末からのSSHアクセスのみを許可した状態で、他の全通信を遮断します。**管理端末からの新しい隔離ルールでの疎通を実際に確認してから**、既存の通信経路を全面遮断してください(先に全面遮断すると管理アクセスも失い復旧不能になります)。
+
+```bash
+ssh -o ConnectTimeout=5 <管理端末のIP経由でホストへ接続確認>
+```
+
+### 6. 証跡を保全する
+
+```bash
+sudo mkdir -p {{ evidence_dir }}
+{% for f in changed_files %}
+sudo cp --preserve=all "{{ f }}" "{{ evidence_dir }}/$(basename {{ f }})"
+sha256sum "{{ f }}" | sudo tee -a "{{ evidence_dir }}/sha256sums.txt"
+{% endfor %}
+sudo cp /var/ossec/logs/alerts/alerts.json {{ evidence_dir }}/alerts.json
+```
+
+→ 変更されたファイルの実体コピーと、その時点でのsha256ハッシュを固定します。以降の調査・復旧作業でファイルを上書きしても、この時点の状態を後から検証できます。
+
+## 動作確認
+
+1. {{ evidence_dir }}/sha256sums.txt に記載のハッシュ値と、手順3で特定した実行者({{ changed_by }})・変更時刻({{ change_time }})が、report_changesの差分内容(追加/削除された行)と矛盾なく対応していることを突き合わせて確認する
+2. legitimate_changeが false の対象について、隔離後も管理端末からの疎通(手順5のssh確認)が維持できていることを確認する
+
+## 注意事項
+
+- **{{ changed_files | length }}件**のうち `authorized_keys`・cronジョブ・Webルート配下・バイナリを含む変更は特に高リスク(永続化・バックドア設置に直結)であり、正当性が確認できるまで復旧作業を保留する
+- 変更管理(チケット・デプロイ記録)と実行者・時刻が一致しない限り`legitimate_change`をtrueと判定しない。照合を飛ばした自己判断は避ける
+- 証跡は必ずsha256ハッシュとともに固定してから復旧・削除作業に着手する。ハッシュ取得前の上書きは事後調査を不可能にする
+- ホスト隔離は、管理端末からの新しい通信経路(許可ルール)が実際に機能することを確認したうえで、既存の全経路遮断に進む。確認前に全遮断すると隔離自体が復旧不能な事故になる

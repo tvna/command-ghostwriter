@@ -1,0 +1,156 @@
+# Velociraptorカスタムアーティファクト(VQL)作成
+
+自組織向けのVQL(Velociraptor Query Language)アーティファクトを作成し、Notebookで検証したうえでHuntから再利用できるようにする手順です。
+
+## 目的
+
+Velociraptorの標準アーティファクトでは検知・収集できない自組織固有の観点(独自の疑わしいプロセス名パターン、独自ディレクトリの改ざん検知、配布済みYARAルールでのスキャンなど)を、カスタムVQLアーティファクトとして作成・検証・登録し、Huntで組織全体に安全に展開できるようになることを目指します。
+
+## 用語解説
+
+- **VQL(Velociraptor Query Language)**: `SELECT ... FROM plugin(...) WHERE ...` の形式でエンドポイントから情報を取得するVelociraptor独自のクエリ言語
+- **artifact YAML**: `name` / `parameters` / `sources[].query` を持つYAML定義。1つの`.yaml`ファイルが1つのアーティファクトになる
+- **parameters(パラメータ化)**: アーティファクト実行時に呼び出し側が値を渡せる変数定義。VQL内では定義した変数名でそのまま参照できる
+- **glob**: 指定したパスパターンに一致するファイルを列挙するVQLプラグイン
+- **stat**: ファイルのサイズ・タイムスタンプ等のメタデータを取得するVQLプラグイン
+- **pslist**: 実行中プロセスの一覧(Pid/Ppid/Name/CommandLine等)を取得するVQLプラグイン
+- **yara**: 指定したファイル集合に対してYARAルールを適用し、マッチ結果(Rule/Meta/Strings)を返すVQLプラグイン
+- **artifact editor**: Velociraptor GUI上でartifact YAMLを編集し、その場でVQLを試験実行できる画面
+- **notebook**: GUI上でVQLを対話的に実行し、結果を確認・保存できるノートブック機能
+- **Hunt**: 登録済みアーティファクトを複数エンドポイントに一括配布・実行する機能
+- **Server metadata(アーティファクトリポジトリ)**: サーバに登録され、Huntやartifact editorから呼び出せるようになったアーティファクトの集合
+
+## シナリオ設定
+
+作成対象のカスタムアーティファクトは次の3件です。
+
+| artifact_name | parameter | vql_query_summary | precondition | output_columns |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["artifact_name"] }} | {{ r["parameter"] }} | {{ r["vql_query_summary"] }} | {{ r["precondition"] }} | {{ r["output_columns"] }} |
+{% endfor %}
+
+## 1. artifact YAML(name/parameters/sources)を作成する
+
+まず `Custom.Linux.Detection.SuspiciousProcess` のartifact YAMLを作成します。`name`・`parameters`・`sources.query`の3要素が最低限必要です。
+
+```yaml
+name: Custom.Linux.Detection.SuspiciousProcess
+description: |
+  自組織で禁止しているプロセス名パターンに一致する実行中プロセスを検出する。
+parameters:
+  - name: ProcessNameRegex
+    default: "(?i)(nc|ncat|socat|mimikatz)"
+    description: 検知対象のプロセス名/コマンドラインの正規表現
+sources:
+  - query: |
+      SELECT Pid, Ppid, Name, CommandLine
+      FROM pslist()
+      WHERE CommandLine =~ ProcessNameRegex
+```
+
+同様に `Custom.Linux.Detection.SuspiciousFile` と `Custom.Linux.Detection.YaraScan` のYAMLも用意します。
+
+```yaml
+name: Custom.Linux.Detection.SuspiciousFile
+description: |
+  対象ディレクトリ配下の不審なファイルパスとメタデータを列挙する。
+parameters:
+  - name: SearchGlob
+    default: "/tmp/**"
+    description: 走査対象のglobパターン
+sources:
+  - query: |
+      LET files = SELECT FullPath
+                   FROM glob(globs=SearchGlob)
+      SELECT FullPath, Size, Mtime
+      FROM stat(filename=files.FullPath)
+```
+
+```yaml
+name: Custom.Linux.Detection.YaraScan
+description: |
+  配布済みYARAルールで対象ファイル群をスキャンする。
+parameters:
+  - name: YaraRulePath
+    default: "/opt/velociraptor/rules/custom.yar"
+    description: 適用するYARAルールファイルのパス
+  - name: TargetGlob
+    default: "/opt/app/**"
+    description: スキャン対象ファイルのglobパターン
+sources:
+  - query: |
+      LET targets = SELECT FullPath
+                    FROM glob(globs=TargetGlob)
+      SELECT File.FullPath AS File, Rule, Meta, Strings
+      FROM yara(files=targets.FullPath, rules=YaraRulePath)
+```
+
+## 2. VQLクエリの構文を確認する(glob/stat/pslist/yaraの組み合わせ)
+
+各アーティファクトのVQL本体は次の観点で組み立てます。
+
+- `pslist()` はパラメータを取らず、`WHERE`句でフィルタする(正規表現一致には `=~` を使う)
+- `glob(globs=...)` は列挙結果を `LET` で一旦保存し、後段の `stat()` や `yara()` にファイルパス列として渡す
+- `stat(filename=...)` は1件ずつファイルメタデータ(Size/Mtime等)を返す
+- `yara(files=..., rules=...)` はマッチしたファイルごとにRule/Meta/Stringsを返す
+
+```bash
+# 上記YAML(3ファイル)を作業用ディレクトリに保存しておく
+mkdir -p ~/velociraptor-custom-artifacts
+$EDITOR ~/velociraptor-custom-artifacts/Custom.Linux.Detection.SuspiciousProcess.yaml
+$EDITOR ~/velociraptor-custom-artifacts/Custom.Linux.Detection.SuspiciousFile.yaml
+$EDITOR ~/velociraptor-custom-artifacts/Custom.Linux.Detection.YaraScan.yaml
+```
+
+## 3. GUIのartifact editorで試験実行する
+
+1. Velociraptor GUIで「View Artifacts」→「New Artifact」を開く
+2. 上記YAMLの内容を貼り付けて保存する(パラメータ`default`値のまま一旦保存する)
+3. artifact editor右上の「Run on client」で自分の管理端末など1台に対して試験実行し、エラーなくVQLが評価されることを確認する
+
+## 4. notebookでVQL実行結果を検証する
+
+Server管理者権限のNotebookから、パラメータを指定してVQLを直接実行し、期待どおりの列(`output_columns`)が返ることを確認します。
+
+```bash
+# notebook上のVQLセルで実行するクエリの例(Custom.Linux.Detection.SuspiciousProcess相当)
+```
+
+```text
+SELECT Pid, Ppid, Name, CommandLine
+FROM pslist()
+WHERE CommandLine =~ "(?i)(nc|ncat|socat|mimikatz)"
+```
+
+同様に `Custom.Linux.Detection.SuspiciousFile` と `Custom.Linux.Detection.YaraScan` のクエリもnotebook上で実行し、`FullPath/Size/Mtime` および `File/Rule/Meta/Strings` が想定どおり出力されることを確認します。
+
+## 5. Server metadataへ登録しHuntで再利用する
+
+notebookでの検証が問題なければ、Server上のアーティファクトリポジトリに正式登録します。
+
+```bash
+# Velociraptor CLIでアーティファクトリポジトリに直接登録する場合
+velociraptor --config server.config.yaml artifacts collect \
+  Custom.Linux.Detection.SuspiciousProcess --dump_dir /tmp/verify
+```
+
+```bash
+# 正式運用ではGUIの「View Artifacts」→「Save」で
+# Server metadataに登録してからHuntを作成する(以下は確認用コマンド)
+velociraptor --config server.config.yaml artifacts list | grep Custom.Linux.Detection
+```
+
+登録後、GUIの「New Hunt」で対象アーティファクトを選択し、まず少数台(検証グループ)にのみ配布して結果を確認してから対象範囲を広げます。
+
+## 動作確認
+
+- Step 4のnotebook実行で、各アーティファクトが`output_columns`どおりの列を返すこと
+- Step 5の `velociraptor artifacts list` にアーティファクト名(`artifact_name`)が表示されること
+- 検証グループ向けのHuntが完了し、結果テーブルに想定件数の行が返ること(0件の場合はテスト対象データの有無を確認する)
+
+## 注意事項
+
+- カスタムVQLは任意のプラグイン(`execve`等)を通じてクライアント上でコマンド実行やファイルアクセスを行えるため、**未レビューのVQL(untrusted VQL)をHuntで実行してはならない**。必ずartifact editor/notebookでの単体端末への試験実行(Step 3・4)を経てから登録・展開する。
+- 収集結果に機微データ(認証情報・個人情報・ファイル内容そのもの等)が含まれないよう、`SELECT`で返す列を`output_columns`の必要最小限に絞り、`yara(files=...)`のマッチ箇所以外の生データを収集しない。
+- サーバmetadataへの登録・変更はGit等でバージョン管理し、いつ・誰が・どのVQLを登録したかを追跡できるようにする。
+- 既存の検知アーティファクト(旧バージョン)を無効化・削除する前に、新アーティファクトをHuntの検証グループで実行し、期待どおりの検知結果(動作確認のとおり)が得られることを確認してから切り替える。

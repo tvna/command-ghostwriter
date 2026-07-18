@@ -1,0 +1,9 @@
+hunt_name,osquery_table,query,indicator,note
+永続化(cron),crontab,"SELECT * FROM crontab;",見慣れないcommand値や/tmpや/dev/shm配下を指すパス,rootだけでなく全ユーザーのcrontabを横断して確認する
+永続化(systemd unit),systemd_units,"SELECT id, description, load_state, active_state, fragment_path FROM systemd_units WHERE fragment_path LIKE '/etc/systemd/system/%' OR fragment_path LIKE '/home/%';",fragment_pathが/homeや/tmp配下、または見慣れないunit名,正規unitの多くは/usr/lib/systemd/system配下にあることと比較する
+永続化(startup_items),startup_items,"SELECT name, path, status, username FROM startup_items;",見慣れない実行ファイルパスや不審な名称のログイン時起動項目,ログイン時に自動実行される項目を横断的に確認する
+削除済みバイナリの実行,processes,"SELECT pid, name, path, cmdline, on_disk FROM processes WHERE on_disk = 0;",on_disk=0(実行ファイル本体が既にディスク上から削除されている),自身を削除して痕跡を消すマルウェアの典型パターン
+外部への不審な接続,process_open_sockets,"SELECT p.pid, p.name, p.path, s.remote_address, s.remote_port, s.state FROM process_open_sockets s JOIN processes p ON p.pid = s.pid WHERE s.remote_address NOT IN ('127.0.0.1','0.0.0.0') AND s.state = 'ESTABLISHED';",業務で使わない宛先ポートや海外IP、pathが/tmp等の一時領域を指すプロセス,processesとJOINしプロセス名とパスまで相関させて確認する
+shell履歴の不審操作,shell_history,"SELECT uid, command, history_file FROM shell_history WHERE command LIKE '%curl%' OR command LIKE '%wget%' OR command LIKE '%base64%';",base64デコードを伴うダウンロード実行や難読化されたワンライナー,history_fileは対象ユーザーの実行権限で読めるものに限られる点に注意する
+authorized_keysの点検,authorized_keys,"SELECT uid, algorithm, key_file, key FROM authorized_keys;",台帳にない公開鍵や見慣れないkey_fileパス,usersテーブルとJOINしuidを実ユーザー名に変換すると識別しやすい
+SUIDバイナリの点検,suid_bin,"SELECT path, username, groupname, permissions FROM suid_bin;",/usr/bin等の標準パス以外にあるSUIDバイナリやパッケージ管理外の追加バイナリ,定期実行し前回結果との差分を取ると新規追加を検知しやすい

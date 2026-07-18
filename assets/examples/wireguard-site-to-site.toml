@@ -1,0 +1,23 @@
+[site_a]
+name = "Tokyo-HQ"
+local_subnet = "10.10.0.0/24"
+remote_subnet = "10.20.0.0/24"
+local_endpoint = "203.0.113.10:51820"
+remote_endpoint = "198.51.100.20:51820"
+local_pubkey = "aBcDeFgHiJkLmNoPqRsTuVwXyZ1234567890abcA="
+remote_pubkey = "zYxWvUtSrQpOnMlKjIhGfEdCbA0987654321zyxB="
+mtu = 1420
+
+[site_b]
+name = "Osaka-Branch"
+local_subnet = "10.20.0.0/24"
+remote_subnet = "10.10.0.0/24"
+local_endpoint = "198.51.100.20:51820"
+remote_endpoint = "203.0.113.10:51820"
+local_pubkey = "zYxWvUtSrQpOnMlKjIhGfEdCbA0987654321zyxB="
+remote_pubkey = "aBcDeFgHiJkLmNoPqRsTuVwXyZ1234567890abcA="
+mtu = 1420
+
+[verify]
+site_a_test_host = "10.10.0.100"
+site_b_test_host = "10.20.0.100"

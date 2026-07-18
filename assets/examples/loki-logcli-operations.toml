@@ -1,0 +1,10 @@
+loki_addr = "https://loki.internal.example.com:3100"
+org_id = "team-platform"
+export_format = "jsonl"
+time_window = "1h"
+
+query_examples = [
+  '{job="nginx"} |= "error"',
+  '{job="app-api"} | json | status_code >= 500',
+  '{job="nginx"} |= "error" | logfmt | line_format "{{.time}} {{.msg}}"',
+]

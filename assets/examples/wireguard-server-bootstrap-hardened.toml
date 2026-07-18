@@ -1,0 +1,17 @@
+[server]
+hostname = "vpn01"
+interface = "wg0"
+tunnel_address = "10.10.0.1/24"
+listen_port = 51820
+external_iface = "eth0"
+firewall_backend = "nftables"
+
+[admin_access]
+allowed_admin_net = "203.0.113.0/24"
+ssh_port = 22
+
+[key_paths]
+dir = "/etc/wireguard"
+private_key_path = "/etc/wireguard/wg0_private.key"
+public_key_path = "/etc/wireguard/wg0_public.key"
+conf_path = "/etc/wireguard/wg0.conf"

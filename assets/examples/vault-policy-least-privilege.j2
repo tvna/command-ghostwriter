@@ -1,0 +1,151 @@
+# Vaultポリシーによる最小権限アクセス設計
+
+CSV で定義した {{ csv_rows | length }} 件のパス単位ルールから、HashiCorp Vault の
+ACL ポリシー（HCL）を最小権限（least privilege）の原則に沿って設計し、
+`vault policy write` での投入から token・auth role への割当までを手順化します。
+
+## 目的
+
+パス単位に capabilities を必要最小限へ絞り込んだ Vault ポリシーを設計し、
+KV v2 の `data/` と `metadata/` の権限を分離した上で、意図した token でのみ
+許可パスへアクセスできることを確認できるようになることを目指します。
+
+## 用語解説
+
+- **capabilities**: パスに対して許可する操作の種類。`create`（新規作成）、
+  `read`（読み取り）、`update`（更新）、`delete`（削除）、`list`（一覧）、
+  `sudo`（root 保護エンドポイントの操作。通常は付与しない）、
+  `deny`（他の全許可より優先して明示的に拒否）の7種類がある。
+- **deny の優先順位**: 同じパスに複数ポリシーがアタッチされた場合、
+  いずれか1つでも `deny` を含めば、他のポリシーが `read` 等を許可していても
+  そのパスへのアクセスは拒否される。
+- **KV v2 の data/ と metadata/ の分離**: KV v2 では実データへの
+  create/read/update/delete は `secret/data/<path>` に対する capabilities で、
+  バージョン一覧・destroy・メタデータ操作は `secret/metadata/<path>` に対する
+  capabilities で別々に制御される。`data/` に read を与えても `metadata/` の
+  list 権限は自動では付与されない。
+- **root相当の操作**: `sys/` 配下の一部エンドポイントや `sudo` capability は
+  root token またはそれに準ずる強い権限が必要な操作を指し、通常のアプリ用
+  ポリシーには含めない。
+- **auth role**: AppRole 等の認証方式で、ログイン後に払い出す token へ
+  紐付けるポリシー集合を定義する設定。
+
+## シナリオ設定
+
+| policy_name | path | capabilities | consumer | justification |
+|-------------|------|---------------|----------|----------------|
+{% for r in csv_rows %}| {{ r["policy_name"] }} | `{{ r["path"] }}` | {{ r["capabilities"] }} | {{ r["consumer"] }} | {{ r["justification"] }} |
+{% endfor %}
+
+## 1. ポリシー(HCL)ファイルを作成する
+
+ポリシーごとに、対象パスと capabilities のみを列挙した HCL ファイルを作成します。
+CSV に無い capability（update/delete 等)は一切書き加えないことが最小権限の要点です。
+
+`app-readonly.hcl` — アプリが KV v2 の実データを読み取るための最小権限ポリシー:
+
+```bash
+cat <<'EOF' > app-readonly.hcl
+{% for r in csv_rows %}{% if r["policy_name"] == "app-readonly" %}path "{{ r["path"] }}" {
+  capabilities = ["{{ r["capabilities"] }}"]
+}
+{% endif %}{% endfor %}EOF
+```
+
+`app-deploy.hcl` — CI がデプロイ用パスにのみ書き込み、本番配下は deny で明示的に閉じるポリシー:
+
+```bash
+cat <<'EOF' > app-deploy.hcl
+path "secret/data/app/deploy/*" {
+  capabilities = [{% for r in csv_rows if r["policy_name"] == "app-deploy" and r["path"] == "secret/data/app/deploy/*" %}"{{ r["capabilities"] }}"{% if not loop.last %}, {% endif %}{% endfor %}]
+}
+{% for r in csv_rows if r["policy_name"] == "app-deploy" and r["path"] != "secret/data/app/deploy/*" %}path "{{ r["path"] }}" {
+  capabilities = ["{{ r["capabilities"] }}"]
+}
+{% endfor %}EOF
+```
+
+> 上記の `app-deploy.hcl` の `secret/data/app/deploy/*` は CSV に `create` と
+> `update` の2行があるため `capabilities = ["create", "update"]` のように
+> 1つの path ブロックへまとめてください（同じ path を複数の path ブロックへ
+> 分けて書くと、後勝ちで上書きされ意図した capabilities になりません）。
+
+`db-rotator.hcl` — DB動的シークレットの払い出しとリース失効のみを許可するポリシー:
+
+```bash
+cat <<'EOF' > db-rotator.hcl
+{% for r in csv_rows %}{% if r["policy_name"] == "db-rotator" %}path "{{ r["path"] }}" {
+  capabilities = ["{{ r["capabilities"] }}"]
+}
+{% endif %}{% endfor %}EOF
+```
+
+## 2. ポリシーを Vault へ書き込む
+
+```bash
+vault policy write app-readonly app-readonly.hcl
+vault policy write app-deploy app-deploy.hcl
+vault policy write db-rotator db-rotator.hcl
+vault policy read app-readonly
+```
+
+## 3. token・auth role へ割り当てる
+
+まず、動作確認用に短命の token をポリシー単位で発行します。
+
+```bash
+vault token create -policy="app-readonly" -ttl=1h -format=json > /tmp/app-readonly.json
+export APP_RO_TOKEN=$(jq -r '.auth.client_token' /tmp/app-readonly.json)
+```
+
+本番運用では AppRole の role にポリシーを紐付け、token 発行を自動化します。
+
+```bash
+vault auth enable approle
+vault write auth/approle/role/app-role token_policies="app-readonly" token_ttl=1h token_max_ttl=4h
+vault write auth/approle/role/ci-role token_policies="app-deploy" token_ttl=15m token_max_ttl=1h
+vault write auth/approle/role/rotator-role token_policies="db-rotator" token_ttl=1h token_max_ttl=4h
+```
+
+## 動作確認
+
+- 発行した `APP_RO_TOKEN` で許可パスの read が成功すること:
+  ```bash
+  VAULT_TOKEN=$APP_RO_TOKEN vault kv get secret/app/config
+  ```
+- 同じ token で非許可パス（例: 書き込みや prod 配下）へのアクセスが
+  `permission denied` になること:
+  ```bash
+  VAULT_TOKEN=$APP_RO_TOKEN vault kv put secret/app/config foo=bar
+  VAULT_TOKEN=$APP_RO_TOKEN vault kv get secret/app/prod/config
+  ```
+- `vault token capabilities $APP_RO_TOKEN secret/data/app/config` の出力が
+  `read` のみであり、`update` や `delete` が含まれていないこと。
+- `vault policy read app-deploy` の出力に `secret/data/app/prod/*` への
+  `deny` が含まれていること。
+
+## 注意事項
+
+- **deny の優先**: 別ポリシーが同じパスに `read` 等を許可していても、
+  いずれかのポリシーに `deny` があればそのパスは拒否される。deny を追加した
+  ときは、意図せず他ポリシーの許可を無効化していないか `vault policy read`
+  で必ず確認すること。
+- **sudo/root相当の限定**: `sudo` capability や `sys/` 配下の root 保護
+  エンドポイントは、通常運用のポリシーには含めない。付与が必要な場合は
+  対象を最小限に絞り、理由を justification 列と同様に記録すること。
+- **KV v2 の data/ と metadata/ を両方意識する**: `secret/data/*` の read
+  だけでは一覧取得やバージョン管理はできない。`secret/metadata/*` への
+  capability を分けて設計し、必要な操作（list/destroy 等）だけを個別に
+  与えること。
+- **ワイルドカードの範囲**: `secret/data/app/*` は `app/` 配下すべてに
+  一致するため、`secret/data/app/prod/*` のような機微なサブパスを別ポリシーの
+  `deny` で明示的に除外しない限り、意図せず広い範囲へアクセスが及ぶ。
+  ワイルドカードを使う前に対象範囲を必ず書き出して確認すること。
+- **過剰な capability を避ける**: CSV の justification に無い
+  capability（特に update/delete）を「念のため」で追加しないこと。それが
+  最小権限の原則の要点であり、追加が必要になった時点で justification を
+  更新してから変更する。
+- 既存の広いポリシー（既存の管理者ポリシー等）を無効化・剥奪する前に、
+  新しいポリシーを割り当てた token で許可パスの read が成功し、かつ
+  非許可パスで `permission denied` になることを本手順の「動作確認」で
+  確認してから、旧ポリシーの剥奪を行うこと。

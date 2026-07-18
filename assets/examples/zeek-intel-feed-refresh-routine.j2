@@ -1,0 +1,151 @@
+# Zeek Intelフィードの定期更新運用
+
+Zeek Intelフレームワークが参照するIoCフィードを定期的に取得・整形・再読込し、鮮度を保つための運用手順書です。Zeek実行ユーザ(通常`zeek`または`root`)権限で実施してください。
+
+## 目的
+
+外部脅威フィードを許可された宛先からのみ取得し、内容を検証したうえでIntelフレームワーク形式に整形・重複排除・期限切れパージを行い、`zeekctl deploy`(またはInput frameworkの自動再読込)で反映することで、Intelデータの鮮度と信頼性を維持できるようになることを目指します。
+
+## 用語解説
+
+- **Intelフレームワーク**: Zeekが持つIoC(indicator)照合機能。`intel_file`で指定したファイルを`Intel::read_files`で読み込み、通信内容と突合してヒットを`intel.log`に記録する
+- **Intel形式**: タブ区切りで`#fields	indicator	indicator_type	meta.source`のヘッダ行から始まるIntelデータファイルの形式。1行目が`#fields`で始まらないとZeekはファイルを正しく読み込めない
+- **Input framework**: Zeekが実行中にファイルの変更を検知して自動的に再読込する仕組み。`Intel::read_files`に追加したファイルはこの仕組みで反映される
+- **TLP(Traffic Light Protocol)**: 脅威情報の共有範囲を色分けで示す規約(RED/AMBER/GREEN/CLEAR)。取得したフィードのTLP区分を確認し、区分を超えた共有・転載をしない
+- **IoC(Indicator of Compromise)**: 侵害の痕跡となるIPアドレス・ドメイン・URL・ハッシュ値などの指標
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| Intelファイル | `{{ intel_file }}` |
+| 更新スケジュール | `{{ refresh_schedule }}` (cron形式) |
+| 期限切れ日数 | {{ expire_days }}日 |
+| 通知先チャンネル | {{ notify_channel }} |
+
+取得対象フィード:
+
+| フィード名 | 取得先URL | source_tag |
+| --- | --- | --- |
+{% for f in feed_sources %}| {{ f.name }} | {{ f.url }} | {{ f.source_tag }} |
+{% endfor %}
+
+## 手順
+
+### 1. 取得先URLが許可リストに含まれることを確認する
+
+取得データは非信頼の外部入力です。事前に許可した宛先以外へは取得に行かないよう、実行前に許可リストと突合します。
+
+```bash
+sudo install -d -m 0750 /opt/zeek/intel/allowlist /opt/zeek/intel/fetch_tmp /opt/zeek/intel/quarantine
+cat <<'EOF' | sudo tee /opt/zeek/intel/allowlist/feed_domains.txt
+urlhaus.abuse.ch
+otx.alienvault.com
+intel.internal.example.co.jp
+EOF
+
+{% for f in feed_sources %}echo "{{ f.url }}" | grep -Eqf <(sed 's#^#https\?://#' /opt/zeek/intel/allowlist/feed_domains.txt) \
+  && echo "OK: {{ f.name }} は許可リスト内" || { echo "NG: {{ f.name }} は許可リスト外のため中止"; exit 1; }
+{% endfor %}
+```
+
+許可リストに無いURLが1件でもあれば処理を中止し、フィード追加の正当性をレビューしてから許可リストを更新してください。
+
+### 2. フィードを取得し検証してから作業領域に置く
+
+```bash
+{% for f in feed_sources %}curl -fsS --max-time 30 -o /opt/zeek/intel/fetch_tmp/{{ f.source_tag }}.raw "{{ f.url }}"
+file /opt/zeek/intel/fetch_tmp/{{ f.source_tag }}.raw
+test -s /opt/zeek/intel/fetch_tmp/{{ f.source_tag }}.raw || { echo "NG: {{ f.source_tag }} が空です。取り込みを中止"; exit 1; }
+{% endfor %}
+```
+
+`file`コマンドでテキスト形式(CSV/プレーンテキスト)であることを目視確認し、想定外のバイナリや空ファイルの場合は取り込みを中止します。取得データはこの時点ではまだ`{{ intel_file }}`に反映しません。
+
+### 3. Intel形式へ整形する
+
+```bash
+sudo tee /opt/zeek/intel/fetch_tmp/build_intel.sh <<'EOF'
+#!/bin/bash
+set -euo pipefail
+OUT="/opt/zeek/intel/fetch_tmp/intel.new"
+printf '#fields\tindicator\tindicator_type\tmeta.source\n' > "$OUT"
+
+{% for f in feed_sources %}# {{ f.name }} ({{ f.source_tag }})
+awk -F',' 'NR>1 && $1!="" {print $1"\tIntel::URL\t{{ f.source_tag }}"}' \
+  /opt/zeek/intel/fetch_tmp/{{ f.source_tag }}.raw >> "$OUT"
+{% endfor %}
+
+# 重複排除(ヘッダ行を除いて indicator+source の組で一意化)
+{
+  head -n1 "$OUT"
+  tail -n +2 "$OUT" | sort -u
+} > "${OUT}.dedup"
+mv "${OUT}.dedup" "$OUT"
+EOF
+sudo chmod +x /opt/zeek/intel/fetch_tmp/build_intel.sh
+sudo /opt/zeek/intel/fetch_tmp/build_intel.sh
+```
+
+`awk`の変換ルールはフィードごとの実際のCSV列構成に合わせて調整してください。ここでは1列目をindicatorとして扱う想定です。
+
+### 4. 期限切れIoCをパージする
+
+```bash
+sudo find /opt/zeek/intel -maxdepth 1 -name 'intel.dat.*.bak' -mtime +{{ expire_days }} -print -delete
+```
+
+`{{ intel_file }}`本体はIntelフレームワークの仕様上レコードに有効期限を持たないため、フィード自体を`{{ expire_days }}`日ごとに全量入れ替える運用とし、世代バックアップ(`.bak`)側を期限切れパージの対象にします。
+
+### 5. 検証してから本番ファイルへ反映する
+
+```bash
+head -n1 /opt/zeek/intel/fetch_tmp/intel.new | grep -q '^#fields	indicator	indicator_type	meta.source$' \
+  || { echo "NG: ヘッダ不正のため反映を中止"; exit 1; }
+
+BEFORE=$(($(wc -l < {{ intel_file }} 2>/dev/null || echo 1) - 1))
+AFTER=$(($(wc -l < /opt/zeek/intel/fetch_tmp/intel.new) - 1))
+echo "現行件数=${BEFORE} 新件数=${AFTER}"
+
+sudo cp {{ intel_file }} {{ intel_file }}.$(date +%Y%m%d%H%M%S).bak 2>/dev/null || true
+sudo cp /opt/zeek/intel/fetch_tmp/intel.new {{ intel_file }}
+```
+
+件数が前回比で急増・急減している場合は、そのまま反映せず担当者による目視確認を経てから次のステップに進んでください(件数急増はフィード側の異常や取得ミスの兆候であり得ます)。
+
+### 6. Zeekへ反映する
+
+Input frameworkによる自動再読込を使っている場合はファイル更新のみで反映されますが、確実に反映したい場合は`zeekctl deploy`で明示的に反映します。
+
+```bash
+sudo zeekctl check
+sudo zeekctl deploy
+```
+
+`zeekctl check`で構成エラーが無いことを確認してから`deploy`を実行します。エラーが出た場合は`deploy`を実行せず、直前にバックアップした`{{ intel_file }}.*.bak`へ戻してください。
+
+### 7. 更新結果を通知する
+
+```bash
+echo "Zeek Intelフィード更新完了: 新件数=${AFTER} (許可リスト対象元: {% for f in feed_sources %}{{ f.source_tag }}{% if not loop.last %}, {% endif %}{% endfor %})" \
+  | tee /opt/zeek/intel/fetch_tmp/notify_message.txt
+# 実際の通知はSlack Webhook等、{{ notify_channel }} 宛の既存の通知経路にnotify_message.txtの内容を送信する
+```
+
+## 動作確認
+
+- `zeekctl deploy`(または自動再読込)後、`/opt/zeek/logs/current/intel.log`に今回追加したIoCとの新規一致(`indicator`列が一致するレコード)が記録されること
+- `intel.log`が生成されない・一致が確認できない場合は`{{ intel_file }}`のヘッダ行と`Intel::read_files`の設定を再確認する
+
+```bash
+tail -n 20 /opt/zeek/logs/current/intel.log
+zeek-cut indicator indicator_type sources < /opt/zeek/logs/current/intel.log | grep -F "$(awk -F'\t' 'NR==2{print $1}' /opt/zeek/intel/fetch_tmp/intel.new)"
+```
+
+## 注意事項
+
+- フィード取得は手順1で許可リストと突合した宛先のみに限定すること。取得データは非信頼の外部入力であるため、手順2で形式・非空チェックを行い、検証に失敗したデータは`{{ intel_file }}`へ絶対に反映しないこと。
+- 取得したフィードのTLP区分(RED/AMBER/GREEN/CLEAR)を必ず確認し、区分を超えた範囲(社外・上位のTLP区分を要求する相手など)への共有・転載・{{ notify_channel }}以外のチャンネルへの転記をしないこと。
+- 手順5で件数が前回比で急増・急減した場合は自動反映せず、担当者が目視でフィード内容を確認してから反映すること。異常なIoC急増はフィード汚染やスクレイピングミスの兆候であり得る。
+- `zeekctl deploy`実行前に`zeekctl check`で構成エラーが無いことを確認すること。エラー発生時やintel.logで想定したヒットが確認できない場合は、直前に取得した`{{ intel_file }}.*.bak`へ速やかに切り戻すこと。
+- 許可リスト(`/opt/zeek/intel/allowlist/feed_domains.txt`)へのフィード追加は、担当者レビューを経てから恒久的な変更として行うこと。
