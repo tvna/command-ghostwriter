@@ -1,0 +1,158 @@
+# Unbound設定・公開範囲の定期監査
+
+access-control・転送先・待受インターフェースの公開範囲・RPZ/blocklistの鮮度を定期的に棚卸しし、オープンリゾルバ化や過剰な外部公開を是正するための監査手順です。
+
+## 目的
+
+Unbound の設定を定期的に棚卸しし、`access-control` の許可範囲が広がりすぎていないか、53/853番ポートが不要に外部公開されていないか、転送先やブロックリストが陳腐化していないかを検出・是正できるようになることを目指します。是正の際は、既存の名前解決経路を止める前に新しい制限設定が意図通り機能することを必ず確認します。
+
+## 用語解説
+
+- **オープンリゾルバ**: `access-control` の許可範囲が広すぎるため、インターネット上の誰からの再帰問い合わせにも応答してしまうDNSキャッシュサーバ。DNS増幅攻撃の踏み台に悪用される
+- **access-control**: 問い合わせを許可するクライアントの範囲を制限するUnboundの設定項目。範囲・動作（allow/refuse/deny等）の組で指定する
+- **forward-zone / forward-addr**: 自身では解決せず上位のDNSサーバへ問い合わせを転送する設定。転送先が未検証・非暗号化だと盗聴や偽装応答のリスクがある
+- **RPZ (Response Policy Zone) / blocklist**: 既知の悪性ドメインへの応答を書き換えるための参照ゾーン。ソースの更新が止まると新しい脅威に追随できず鮮度が落ちる
+- **harden-glue / harden-below-nxdomain**: キャッシュポイズニング対策として、信頼できないグルーレコードの受け入れ拒否やNXDOMAIN配下の追加解決抑止を行うUnboundの堅牢化オプション
+- **unbound-checkconf**: 設定ファイルの構文を反映前に検証するコマンド
+
+## シナリオ設定
+
+今回の監査で棚卸しした {{ csv_rows | length }} 件の項目は次のとおりです。
+
+| 監査項目 | 現在の設定 | 期待値 | リスク | 是正判定 |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["audit_item"] }} | {{ r["current_config"] }} | {{ r["expected"] }} | {{ r["risk"] }} | {{ r["disposition"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 現在の設定値を取得する
+
+`unbound-checkconf -o` で実効値を確認し、監査項目の実測値として記録します。
+
+```bash
+mkdir -p /var/log/unbound-audit
+DATE=$(date +%Y%m%d)
+{
+{% for r in csv_rows %}  echo "=== {{ r["audit_item"] }} ==="
+{% endfor %}  unbound-checkconf -o access-control
+  unbound-checkconf -o interface
+  unbound-checkconf -o forward-addr
+  unbound-checkconf -o forward-tls-upstream
+  unbound-checkconf -o harden-glue
+  unbound-checkconf -o harden-below-nxdomain
+  unbound-checkconf -o auto-trust-anchor-file
+  ss -tulnp | grep -E ':(53|853)\b'
+  stat -c '%y %n' /var/lib/unbound/rpz.zone
+} > /var/log/unbound-audit/audit-$DATE.txt
+```
+
+### 2. 是正が必要な項目のバックアップを取得する
+
+是正判定が `是正` の項目について、変更前の設定ファイルを控えます。
+
+```bash
+cp /etc/unbound/unbound.conf.d/local.conf \
+   /etc/unbound/unbound.conf.d/local.conf.bak-$(date +%Y%m%d)
+```
+
+### 3. 新しい許可範囲を既存設定に「追加」してから検証する（既存経路は残したまま）
+
+いきなり `{{ csv_rows[0]["current_config"] }}` を削除すると、設定ミス時に社内クライアントも含めて全解決不能になる。まず期待値の許可行を既存の広い許可設定と併存させて追加し、社内クライアントから解決できることを確認してから、広い許可設定を削除します。
+
+```bash
+cat >> /etc/unbound/unbound.conf.d/local.conf <<'EOF'
+    access-control: 10.0.20.0/24 allow
+    access-control: 127.0.0.0/8 allow
+EOF
+unbound-checkconf
+systemctl reload unbound
+```
+
+```bash
+# 社内クライアント(10.0.20.0/24)から新しい許可設定だけで解決できることを先に確認する
+dig @10.0.20.1 example.com A +short
+```
+
+内部クライアントからの解決が正常に確認できた後に、初めて古い広範囲許可（`{{ csv_rows[0]["current_config"] }}`）と待受範囲（`{{ csv_rows[1]["current_config"] }}` での全interface待受）を除去します。
+
+```bash
+sed -i '/access-control: 0.0.0.0\/0 allow/d' /etc/unbound/unbound.conf.d/local.conf
+sed -i 's/^    interface: 0.0.0.0$/    interface: 10.0.20.1\n    interface: 127.0.0.1/' /etc/unbound/unbound.conf.d/local.conf
+unbound-checkconf
+systemctl reload unbound
+```
+
+### 4. 転送先をTLS検証済みの上位リゾルバへ是正する
+
+`{{ csv_rows[2]["current_config"] }}` は上位リゾルバとの通信が暗号化・検証されていない状態です。`forward-tls-upstream` を有効にして是正します。
+
+```bash
+cat >> /etc/unbound/unbound.conf.d/local.conf <<'EOF'
+forward-zone:
+    name: "."
+    forward-tls-upstream: yes
+    forward-addr: 9.9.9.9@853#dns.quad9.net
+EOF
+unbound-checkconf
+systemctl reload unbound
+```
+
+### 5. 53/UDP・853/TCP(DoT)の公開範囲を内部セグメントへ限定する
+
+現在ファイアウォールで全世界からアクセス可能になっている状態を、内部セグメントのみへ限定します。
+
+```bash
+# 現状のルールを確認（{{ csv_rows[3]["risk"] }}リスク: {{ csv_rows[3]["current_config"] }}）
+iptables -L INPUT -n --line-numbers | grep -E 'dpt:(53|853)'
+
+# 内部セグメントのみ許可するルールを先頭に追加してから全世界許可ルールを削除する
+iptables -I INPUT 1 -p udp --dport 53 -s 10.0.20.0/24 -j ACCEPT
+iptables -I INPUT 1 -p tcp --dport 853 -s 10.0.20.0/24 -j ACCEPT
+```
+
+内部セグメントからの疎通を確認できてから、全世界許可のルールを削除します（手順6で外部からの非応答を確認した後に実施）。
+
+### 6. RPZ/blocklistの鮮度を確認し更新する
+
+```bash
+stat -c '%Y %n' /var/lib/unbound/rpz.zone
+find /var/lib/unbound/rpz.zone -mtime +1 -print
+
+# 鮮度が24時間を超えている場合は取得し直して反映する
+curl -fsSL https://example-threatfeed.internal/rpz/rpz.zone -o /var/lib/unbound/rpz.zone.new
+mv /var/lib/unbound/rpz.zone.new /var/lib/unbound/rpz.zone
+unbound-checkconf
+unbound-control rpz_enable rpz.example.com
+```
+
+### 7. 外部からの非応答を確認し、旧ルールを撤去する
+
+社内セグメント外（インターネット側や別セグメント）のホストから問い合わせ、REFUSEDまたは無応答になることを確認します。この確認が取れて初めて、手順5で保留していた全世界許可のファイアウォールルールを削除します。
+
+```bash
+# 外部ホストから実行し、応答が得られない（timeoutまたはREFUSED）ことを確認する
+dig @<unbound-external-ip> example.com A +time=3 +tries=1
+
+# 確認できたら全世界許可ルールを削除する
+iptables -D INPUT -p udp --dport 53 -j ACCEPT
+iptables -D INPUT -p tcp --dport 853 -j ACCEPT
+```
+
+## 動作確認
+
+- `unbound-checkconf` がエラーなく通ること
+- 社内セグメント（10.0.20.0/24）からの `dig` が正常に応答を返すこと
+- 外部ホストからの `dig` が無応答またはREFUSEDになること（access-control是正の効果）
+- `stat` で確認したRPZ/blocklistの最終更新が24時間以内であること
+- `harden-glue` / `harden-below-nxdomain` / `auto-trust-anchor-file` が引き続き有効のままであること
+- 監査結果（`/var/log/unbound-audit/audit-YYYYMMDD.txt`）が保存されていること
+
+## 注意事項
+
+- 是正対象のアクセス制御・待受範囲・ファイアウォールルールは、必ず新しい制限設定を追加して社内クライアントからの疎通を確認した後に、古い広範囲の許可設定を削除すること。先に古い設定を削除すると、設定ミス時に社内も含めて全解決不能になる。
+- `access-control` の許可範囲を全世界（`0.0.0.0/0 allow`）のままにするとオープンリゾルバ化し、DNS増幅攻撃の踏み台に悪用される。是正後は必ず外部ホストからの無応答/REFUSEDを確認すること。
+- 53/UDP・853/TCPの公開範囲を制限する際は、ファイアウォール変更後すぐに外部からの非応答を確認し、社内側の疎通に影響が出ていないことも合わせて確認すること。
+- DNSSECバリデーション(`auto-trust-anchor-file`)と `harden-glue` / `harden-below-nxdomain` は是正作業の前後を通じて維持し、誤って無効化しないこと。
+- ブロックリスト(RPZ)の鮮度が落ちると新しい脅威ドメインに追随できなくなるため、更新の自動化が止まっていないか毎回確認すること。
+- 監査記録は改ざん防止のためアクセス制御されたログ領域に保管し、監査項目・現在値・期待値・是正内容を毎回残すこと。
