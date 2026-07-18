@@ -1,0 +1,5 @@
+tenant,ingest_gb,stream_count,top_label,anomaly,disposition
+team-web,42,1800,pod,-,監視継続
+team-batch,315,26400,job_id,取り込み急増,デバッグログ放置を是正しlimits調整
+team-payments,58,3100,namespace,-,対応不要
+team-ml,89,142000,trace_id,高カーディナリティ,ラベル設計見直しとmax_streams調整

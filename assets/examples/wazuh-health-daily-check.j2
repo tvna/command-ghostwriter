@@ -64,7 +64,7 @@ df -h /var/ossec
 取得した値を `today_value` / `status` としてCSV台帳に追記し、証跡として保管します。
 
 ```bash
-sudo tee -a /var/log/wazuh-health-daily.csv <<'EOF'
+sudo tee -a /var/log/wazuh-health-daily.csv <<EOF
 $(date +%Y-%m-%d),agent_connection_rate,<取得値>,<ok または warn>
 $(date +%Y-%m-%d),analysisd_dropped_events,<取得値>,<ok または warn>
 $(date +%Y-%m-%d),remoted_queue_usage,<取得値>,<ok または warn>
