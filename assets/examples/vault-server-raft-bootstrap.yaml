@@ -1,0 +1,11 @@
+storage_type: "raft"
+node_id: "vault-node-1"
+raft_path: "/opt/vault/data"
+tls_cert_path: "/etc/vault.d/tls/vault-cert.pem"
+tls_key_path: "/etc/vault.d/tls/vault-key.pem"
+listener_address: "0.0.0.0:8200"
+api_addr: "https://vault1.internal.example.com:8200"
+cluster_addr: "https://vault1.internal.example.com:8201"
+unseal_key_shares: 5
+unseal_threshold: 3
+admin_policy_name: "admin-bootstrap"

@@ -1,0 +1,153 @@
+# Squid PAC/WPAD 自動プロキシ配布手順 — {{ proxy_host }}
+
+社内端末に対し、PAC ファイルと WPAD（Web Proxy Auto-Discovery Protocol）を用いて
+プロキシ設定（`{{ proxy_host }}:{{ proxy_port }}`）を自動配布する手順です。
+
+## 目的
+
+Squid プロキシ（`{{ proxy_host }}:{{ proxy_port }}`）への転送を PAC ファイルで宛先別に制御し、
+WPAD（DNS / DHCP）でクライアントに自動検出させることで、端末ごとの手動プロキシ設定を不要にします。
+社内ドメインおよび localhost はプロキシを経由せず直結させます。
+
+## 用語解説
+
+- **PAC（Proxy Auto-Config）**: `FindProxyForURL(url, host)` 関数を実装した JavaScript ファイル。ブラウザがアクセス先ごとにプロキシ経由か直結かを判定するために呼び出す。
+- **WPAD（Web Proxy Auto-Discovery Protocol）**: クライアントが PAC ファイルの URL を DNS または DHCP から自動的に発見する仕組み。`http://wpad.<domain>/wpad.dat` への到達性を DNS（`wpad.<domain>` の名前解決）または DHCP オプション 252 で案内する。
+- **直結除外（direct exclusion）**: 社内ドメインや `localhost` など、プロキシを経由せず直接接続すべき宛先をあらかじめ除外リスト化すること。内部システムの往復遅延やプロキシ側の不要な負荷を避ける目的がある。
+- **MIME タイプ `application/x-ns-proxy-autoconfig`**: PAC ファイルをブラウザに正しく認識させるために Web サーバが返すべき Content-Type。
+- **DHCP オプション 252**: `wpad-file`(`http://<host>/wpad.dat` の URL) をクライアントに配布する DHCP のベンダー拡張オプション。
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| プロキシホスト | {{ proxy_host }} |
+| プロキシポート | {{ proxy_port }} |
+| WPAD ホスト | {{ wpad_host }} |
+| 直結除外ドメイン | {{ direct_domains | join(', ') }} |
+| DHCP オプション 252 配布 | {{ dhcp_option_enabled }} |
+
+## 1. proxy.pac を作成する
+
+`FindProxyForURL` で直結除外ドメインを判定し、それ以外は Squid へ転送する PAC ファイルを作成します。
+
+```javascript
+function FindProxyForURL(url, host) {
+    // 直結除外: 社内ドメイン・localhost はプロキシを経由しない
+{% for domain in direct_domains %}
+    if (dnsDomainIs(host, "{{ domain }}") || shExpMatch(host, "*.{{ domain }}")) {
+        return "DIRECT";
+    }
+{% endfor %}
+    // ローカル IP レンジも直結
+    if (isInNet(host, "127.0.0.0", "255.0.0.0")) {
+        return "DIRECT";
+    }
+
+    // 上記以外は Squid プロキシ経由
+    return "PROXY {{ proxy_host }}:{{ proxy_port }}; DIRECT";
+}
+```
+
+作成した `proxy.pac` を Web サーバの公開ディレクトリ（例: `/var/www/wpad/wpad.dat`）へ配置します。
+WPAD 規約上、ファイル名は `wpad.dat` とします。
+
+```bash
+sudo install -o root -g root -m 0644 proxy.pac /var/www/wpad/wpad.dat
+```
+
+## 2. Web サーバで MIME タイプを設定する
+
+`wpad.dat` を誤った Content-Type で配信すると、ブラウザが PAC として認識せず読み込みに失敗します。
+Apache の場合は次の設定を追加します。
+
+```apache
+# /etc/apache2/conf-available/wpad.conf
+AddType application/x-ns-proxy-autoconfig .dat
+<Directory "/var/www/wpad">
+    Require all granted
+</Directory>
+```
+
+```bash
+sudo a2enconf wpad
+sudo systemctl reload apache2
+```
+
+Nginx の場合は次の設定を追加します。
+
+```nginx
+# /etc/nginx/conf.d/wpad.conf
+types {
+    application/x-ns-proxy-autoconfig dat;
+}
+```
+
+```bash
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+## 3. DNS で WPAD ホストを公開する（信頼できる社内 DNS のみ）
+
+クライアントは `http://wpad.<domain>/wpad.dat` を既定で問い合わせます。社内で権威を持つ DNS サーバにのみ
+`{{ wpad_host }}` の A/CNAME レコードを追加してください。既存のプロキシ経路（直接プロキシ設定や既存 PAC 配布）は
+この変更を切り戻すまで残しておき、新しい WPAD 経路が機能することを確認してから外します。
+
+```bash
+# 権威 DNS ゾーンに追記する例（BIND ゾーンファイル）
+{{ wpad_host }}.    IN  A    192.0.2.10
+```
+
+```bash
+# 反映後、社内の信頼できるリゾルバから名前解決できることを確認
+dig @192.0.2.1 {{ wpad_host }} A +short
+```
+
+## 4. DHCP オプション 252 で配布する
+
+{% if dhcp_option_enabled %}
+本環境では DHCP オプション 252（`wpad-file`）による配布も併用します。ISC DHCP サーバの設定に以下を追加します。
+
+```conf
+# /etc/dhcp/dhcpd.conf
+option wpad-url code 252 = text;
+subnet 192.0.2.0 netmask 255.255.255.0 {
+    option wpad-url "http://{{ wpad_host }}/wpad.dat";
+}
+```
+
+```bash
+sudo systemctl restart isc-dhcp-server
+```
+{% else %}
+本環境では DHCP オプション 252 は使用せず、DNS ベースの WPAD 検出のみを利用します。
+{% endif %}
+
+## 動作確認
+
+1. 試験端末を新しいネットワークセグメントに接続し、ブラウザのプロキシ設定を「自動検出」にした状態で
+   `http://wpad.{{ wpad_host }}/` 相当の内部サイトへアクセスし、Squid のアクセスログ（`/var/log/squid/access.log`）に
+   到達履歴が記録されることを確認する（旧来の手動プロキシ設定はこの時点ではまだ無効化しない）。
+2. PAC 構文検証: `pacparser` または Node.js の `pac-resolver` で構文エラーがないことを確認する。
+
+   ```bash
+   node -e "require('pac-resolver')(require('fs').readFileSync('proxy.pac','utf8'))"
+   ```
+
+3. 直結除外先の非プロキシ確認: 直結除外ドメイン宛の通信が Squid アクセスログに現れず、かつ到達できることを確認する。
+
+   ```bash
+{% for domain in direct_domains %}
+   curl -sv --resolve {{ domain }}:443:203.0.113.5 https://{{ domain }}/ 2>&1 | grep -i "Connected to"
+{% endfor %}
+   ```
+
+4. 上記すべてで新しい WPAD 経路の動作が確認できた後に限り、手動プロキシ設定や暫定的な代替配布手段を無効化する。
+
+## 注意事項
+
+- **WPAD の DNS ハイジャックリスク**: `{{ wpad_host }}` の名前解決が信頼できない DNS サーバや外部から書き換え可能な経路に委ねられると、悪意ある PAC を配布されて通信を盗聴・改ざんされる恐れがある。WPAD レコードは必ず社内で管理する権威 DNS サーバでのみ公開し、外部から解決できないことを確認すること。
+- **PAC 更新時のキャッシュ**: ブラウザおよび OS は PAC ファイルをキャッシュすることがある。更新後は反映まで時間がかかる場合があるため、端末側のキャッシュクリアや再起動が必要になることを利用者へ周知する。
+- **MIME 設定誤りによる読込失敗**: `application/x-ns-proxy-autoconfig` 以外の Content-Type（`text/plain` など）で配信すると、ブラウザによっては PAC を無視し直結扱いになる。設定変更後は必ず `curl -I` でヘッダを確認すること。
+- DNS（手順3）や DHCP（手順4）は端末の既定の名前解決・プロキシ経路に影響するため、動作確認（手順1〜3）で新しい WPAD 経路が機能することを確認するまでは、既存の手動プロキシ設定や旧 PAC 配布経路を無効化・撤去しないこと。

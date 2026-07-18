@@ -1,0 +1,135 @@
+# Keycloakアカウント侵害時の封じ込め対応 — {{ user_id }}
+
+Keycloakレルム {{ realm }} 上のユーザー {{ user_id }} について、アカウント乗っ取りが疑われる兆候が確認されました。kcadm.shを用いてセッション・リフレッシュトークンを失効させ、認証情報をリセットし、被害範囲をイベントログから確認する初動対応の手順です。
+
+## 目的
+
+不審ログインの疑いが生じたKeycloakアカウントについて、無効化・全セッション（リフレッシュトークン含む）の失効・認証情報の強制リセット・被害範囲調査を、迷わず順序立てて実施できるようになることを目指します。
+
+## 用語解説
+
+- **セッション失効(logout-all)**: ブラウザ等で確立済みのSSOセッションを終了させること。実行後もクライアント側が保持する既存のリフレッシュトークンは無効化されない場合がある。
+- **リフレッシュトークン**: アクセストークンの有効期限が切れても再発行を可能にするトークン。セッションだけを切ってもこのトークンが生きていれば、攻撃者は新しいアクセストークンを取得して再侵入できてしまうため、セッション失効とリフレッシュトークン失効は必ず両方行う。
+- **required action**: 次回ログイン時にユーザーへ強制する追加操作。UPDATE_PASSWORDはパスワード再設定、CONFIGURE_TOTPはワンタイムパスワード(OTP)の再登録を強制する。
+- **offline token**: 通常のセッション期限に縛られず長期間有効なリフレッシュトークン。offline_accessスコープの同意(consent)が生きている限り再発行され続けるため、同意の取り消しが別途必要。
+- **service account**: クライアントに紐づく非対話型アカウント。侵害されたユーザーが管理・所有していたservice accountの認証情報も、あわせて侵害範囲の点検対象になる。
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| Keycloak URL | {{ keycloak_url }} |
+| 対象レルム | {{ realm }} |
+| 対象ユーザー | {{ user_id }} |
+| アカウント無効化を実施するか | {{ disable }} |
+| 全セッション/リフレッシュトークン失効を実施するか | {{ logout_all }} |
+| 認証情報の強制リセットを実施するか | {{ reset_credentials }} |
+| エスカレーション先 | {{ escalation }} |
+
+## 手順
+
+### 1. kcadm.shで管理APIにログインする
+
+```bash
+kcadm.sh config credentials \
+  --server {{ keycloak_url }} \
+  --realm {{ admin_realm }} \
+  --client {{ admin_client }} \
+  --user admin
+```
+
+対話式でパスワード入力を求められます。管理者アカウント自体のパスワードは平文で残さないこと。
+
+### 2. 対象ユーザーを特定し、ユーザーIDを控える
+
+```bash
+kcadm.sh get users -r {{ realm }} -q username={{ user_id }} \
+  --fields id,username,enabled,email,emailVerified
+```
+
+出力される `id`（UUID形式）を、以降のコマンドの `<USER_UUID>` として使用します。
+
+{% if disable %}
+### 3. アカウントを無効化する
+
+```bash
+kcadm.sh update users/<USER_UUID> -r {{ realm }} -s enabled=false
+```
+
+無効化すると新規ログインはできなくなりますが、既に発行済みのセッションやトークンはこれだけでは失効しません。次の手順と必ずセットで行います。
+{% endif %}
+
+{% if logout_all %}
+### 4. 全セッションとリフレッシュトークンを失効させる(logout-all)
+
+```bash
+kcadm.sh update users/<USER_UUID>/logout -r {{ realm }}
+```
+
+これはKeycloak管理REST APIの `POST /admin/realms/{{ realm }}/users/<USER_UUID>/logout` に相当し、当該ユーザーの全セッションと発行済みリフレッシュトークンをまとめて失効させます。ブラウザのセッションのみを切る操作（管理コンソールの「Sessions」タブからの個別セッション削除）だけでは、他クライアントに渡ったリフレッシュトークンが生き残る点に注意してください。
+
+続けて、offline_accessスコープの同意を取り消し、offline tokenも失効させます。
+
+```bash
+kcadm.sh get users/<USER_UUID>/consents -r {{ realm }}
+kcadm.sh delete users/<USER_UUID>/consents/reporting-connector -r {{ realm }}
+```
+
+同意(consent)を取り消すと、そのクライアントに対して発行済みのoffline tokenも合わせて無効化されます。
+{% endif %}
+
+{% if reset_credentials %}
+### 5. パスワードを強制リセットし、次回ログイン時の追加認証を要求する
+
+```bash
+kcadm.sh set-password -r {{ realm }} --username {{ user_id }} \
+  --new-password "$(openssl rand -base64 24)" --temporary
+kcadm.sh update users/<USER_UUID> -r {{ realm }} \
+  -s 'requiredActions=["UPDATE_PASSWORD","CONFIGURE_TOTP"]'
+```
+
+`--temporary` を付けることで、生成した一時パスワードは次回ログイン時に本人が必ず変更する扱いになります。あわせて `CONFIGURE_TOTP` を要求し、既存のOTPシークレットが漏えいしていた場合の再登録を強制します。
+{% endif %}
+
+### 6. イベントログから被害範囲を調査する
+
+```bash
+kcadm.sh get events -r {{ realm }} -q user=<USER_UUID> \
+  -q dateFrom=2026-07-15 --fields time,type,clientId,ipAddress
+```
+
+以下の証跡を出発点に、時系列で操作履歴を洗い出します。
+
+{% for e in evidence_events %}
+- {{ e }}
+{% endfor %}
+
+`LOGIN`/`CODE_TO_TOKEN`/`UPDATE_PROFILE`/`UPDATE_PASSWORD` など、なりすましによる操作が疑われるイベント種別を重点的に確認してください。管理コンソールの権限操作は管理イベント（Admin Events）側にも記録されるため、`kcadm.sh get admin-events -r {{ realm }} -q authUser=<USER_UUID>` もあわせて確認します。
+
+### 7. 関連するservice accountを点検する
+
+{% for s in service_accounts %}
+- {{ s }}
+{% endfor %}
+
+上記のservice accountについて、当該ユーザーが認証情報の管理権限を持っていないか、不審なクライアントシークレットのローテーション操作がないかを確認します。侵害が疑われる場合はクライアントシークレットを再生成してください。
+
+```bash
+kcadm.sh get clients -r {{ realm }} -q clientId=batch-sync-service --fields id
+kcadm.sh update clients/<CLIENT_UUID>/client-secret -r {{ realm }}
+```
+
+## 動作確認
+
+- Step 2で特定した `<USER_UUID>` に対し `kcadm.sh get users/<USER_UUID>/sessions -r {{ realm }}` が空配列を返し、既存セッションが残っていないこと。
+- 旧パスワードおよび旧リフレッシュトークンでのログイン・トークンリフレッシュがいずれも失敗すること（`invalid_grant` 等のエラーになること）。
+- Step 6で洗い出したイベントについて、不審アクセスの範囲（ログイン元・操作内容・時系列）が一覧化され、{{ escalation }} と共有できる状態になっていること。
+- Step 7のservice accountについて、シークレット再生成またはレビュー結果が記録されていること。
+
+## 注意事項
+
+- 本人の正当な出張・リモートワークによるログインである可能性も残るため、無効化・リセットを断定的に進める前に、可能であれば本人へ一次確認を試みる。ただし応答が得られない、または応答内容が不審な場合は被害拡大防止を優先して手順を進める。
+- Step 3のアカウント無効化とStep 4のセッション/リフレッシュトークン失効は必ずセットで実施すること。無効化のみではセッションが生き残り、失効のみでは再ログインが可能なままとなり、いずれも再侵入を許す。
+- パスワードリセット後は、Step 6のイベント確認で新しい資格情報でのログインが本人によるものか改めて確認するまで、当該アカウントを通常運用に戻さない。
+- offline tokenとservice account点検を怠ると、UI上の再ログインを防いでもバックグラウンドの自動処理経由で侵害が継続する恐れがあるため、Step 4・Step 7を省略しない。
+- 調査に用いたコマンド出力・イベントログはインシデント対応記録として保全し、{{ escalation }} および関係者と共有する。ログの改変・削除は行わない。

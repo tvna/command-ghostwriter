@@ -1,0 +1,129 @@
+# WireGuardハブ&スポーク型VPN構築
+
+中央ハブに複数拠点(スポーク)を収容するWireGuard VPNを構築します。鍵生成からトンネル確立、疎通検証まで、ハブ側の作業として手順化します。
+
+## 目的
+
+WireGuardの鍵ペアと`AllowedIPs`の役割を理解した上で、ハブ&スポーク型のオーバーレイVPNを構築し、スポーク間通信がハブ経由で正しく疎通することを検証できるようになることを目指します。
+
+## 用語解説
+
+- **WireGuard**: UDPベースの軽量VPNプロトコル。公開鍵暗号による認証と、カーネル内実装による高速な暗号化通信を特徴とする
+- **PrivateKey / PublicKey**: `wg genkey`で生成する秘密鍵と、そこから`wg pubkey`で導出する公開鍵のペア。対向ノードへは公開鍵のみを渡す
+- **Peer**: `wg0.conf`内で対向ノードごとに定義するブロック。相手の`PublicKey`・許可する経路(`AllowedIPs`)・接続先(`Endpoint`)を記述する
+- **AllowedIPs**: 暗号ルーティングと実ルーティングの両方を兼ねるパラメータ。受信時は「このPeerからの通信としてどの送信元IPを許可するか」を、送信時は「どの宛先IPをこのPeer経由で暗号化して送るか」を同時に決める。ハブ側では各スポークのブロックに対してそのスポーク自身のネットワークのみを記載し、スポーク側では`0.0.0.0/0`やハブ配下の集約網を記載することで、スポーク同士の通信もハブを経由するよう強制する
+- **PersistentKeepalive**: NAT配下のスポークがハブとのUDPセッションを維持するため、指定秒数ごとに疎通確認パケットを送る設定。NATの外側にあるハブ側では通常不要
+- **wg-quick**: `wg0.conf`からインターフェースの作成・アドレス設定・ルーティング・`wg syncconf`適用までを一括で行うヘルパースクリプト
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| ハブ内部アドレス(Address) | {{ hub_address }} |
+| ハブ待受ポート(ListenPort) | {{ listen_port }} |
+{% for s in spokes %}| スポーク: {{ s.name }} | pubkey={{ s.pubkey }} / AllowedIPs={{ s.allowed_ips }} / Endpoint={{ s.endpoint }} |
+{% endfor %}
+
+## 手順
+
+### 1. ハブとスポークの鍵ペアを生成する
+
+ハブおよび各スポークのノード上で、それぞれ秘密鍵と公開鍵を生成します。秘密鍵は生成した端末の外へ持ち出しません。
+
+```bash
+umask 077
+wg genkey | tee /etc/wireguard/privatekey | wg pubkey > /etc/wireguard/publickey
+cat /etc/wireguard/publickey
+```
+
+生成した公開鍵(`publickey`の内容)だけを、対向拠点の管理者と交換します。秘密鍵(`privatekey`)は絶対に送信しません。
+
+### 2. ハブ側のwg0.confを作成する
+
+ハブの`/etc/wireguard/wg0.conf`に、自身の`[Interface]`と各スポークの`[Peer]`を記述します。`PrivateKey`にはハブ自身の秘密鍵を設定します。
+
+```ini
+[Interface]
+Address = {{ hub_address }}
+ListenPort = {{ listen_port }}
+PrivateKey = <hub側のprivatekeyファイルの内容をここに貼り付け>
+{% for s in spokes %}
+[Peer]
+# {{ s.name }}
+PublicKey = {{ s.pubkey }}
+AllowedIPs = {{ s.allowed_ips }}
+Endpoint = {{ s.endpoint }}
+{% endfor %}
+```
+
+各スポークの`AllowedIPs`にはそのスポーク自身のネットワークのみを指定します。ここに他拠点の網まで含めてしまうと、ハブが経路を誤って学習し疎通できなくなります。
+
+### 3. IPフォワーディングを有効化する
+
+スポーク間通信をハブが中継できるよう、カーネルのIPフォワーディングを恒久的に有効化します。
+
+```bash
+echo 'net.ipv4.ip_forward = 1' | sudo tee /etc/sysctl.d/99-wireguard-forward.conf
+sudo sysctl --system
+sysctl net.ipv4.ip_forward
+```
+
+`net.ipv4.ip_forward = 1`と表示されることを確認します。
+
+### 4. wg-quickでインターフェースを起動する
+
+```bash
+sudo chmod 600 /etc/wireguard/wg0.conf
+sudo wg-quick up wg0
+```
+
+既存の管理経路(SSH接続元など)を巻き込むファイアウォールルールを変更する場合は、現在のSSHセッションを維持したまま別セッションで`wg-quick up wg0`後の疎通を確認し、既存経路を無効化するのはその後にします。
+
+### 5. スポーク側のwg0.confを作成し起動する
+
+各スポークの`/etc/wireguard/wg0.conf`にも同様に`[Interface]`とハブの`[Peer]`を記述します。スポーク側の`AllowedIPs`はハブ配下の集約網または`0.0.0.0/0`とし、他スポーク宛の通信もハブ経由で暗号化されるようにします。
+
+```ini
+[Interface]
+Address = 10.100.0.2/24
+PrivateKey = <スポーク自身のprivatekeyファイルの内容をここに貼り付け>
+
+[Peer]
+# hub
+PublicKey = <ハブのpublickeyファイルの内容をここに貼り付け>
+AllowedIPs = 0.0.0.0/0
+Endpoint = <ハブのグローバルIP>:{{ listen_port }}
+PersistentKeepalive = 25
+```
+
+```bash
+sudo chmod 600 /etc/wireguard/wg0.conf
+sudo wg-quick up wg0
+```
+
+## 動作確認
+
+1. ハブ側で`wg show`を実行し、各スポークの`latest handshake`が数十秒以内であること、`transfer`のRX/TXが増加していることを確認します。
+
+```bash
+sudo wg show wg0
+```
+
+2. 一方のスポークからもう一方のスポークへ、ハブを経由してpingが疎通することを確認します。
+
+```bash
+ping -c 4 {{ spokes[1].allowed_ips }}
+```
+
+3. 経路がWireGuardトンネル経由になっていることを、送信元スポークで確認します。
+
+```bash
+ip route get {{ spokes[1].allowed_ips }}
+```
+
+## 注意事項
+
+- 秘密鍵は各ノードのroot専用ディレクトリに600権限で保管し(`umask 077`で生成した時点の権限を維持)、`wg0.conf`自体も平文で秘密鍵を含むため600権限を徹底します。バックアップや構成管理システムへコミットする場合も暗号化した状態でのみ保存します。
+- ファイアウォールやルーティングを変更してハブ経由の新経路に切り替える際は、既存の直接経路やSSH管理経路を無効化する前に、必ず`wg show`のhandshake成立とスポーク間pingの疎通を確認します。特にリモート管理中のホストでは、新経路の疎通確認が取れるまで旧経路(既存のVPNや直接接続)を残しておきます。
+- `AllowedIPs`の設定ミス(ハブ側に他拠点網を含めてしまう、スポーク側の集約網が狭すぎる等)は、暗号ルーティングの誤りとして即座に疎通断につながります。変更時は必ず本手順の動作確認を再実施します。
+- スポークがNAT配下にある場合、`PersistentKeepalive`を設定しないとNATセッションのタイムアウトでhandshakeが途切れることがあります。

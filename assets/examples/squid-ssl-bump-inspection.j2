@@ -1,0 +1,125 @@
+# Squid SSL Bump によるHTTPS復号検査手順 — {{ global.hostname }}
+
+対象プロキシ **{{ global.hostname }}** で SslBump 機能を有効化し、HTTPS 通信を復号して検査します。証明書配布と検査除外対象の設定を含めて手順化します。
+
+## 目的
+
+このシナリオでは、Squid の SslBump（SSL Bump）機能を用いて HTTPS トラフィックを中間者として復号検査し、マルウェア通信や情報漏えいを検知できる状態を構築することを目指します。あわせて、復号すべきでない通信（オンラインバンキング等）を確実にバイパスする設定も行います。
+
+## 用語解説
+
+- **SslBump**: Squid がクライアントと宛先サーバの間に入り、独自に発行したサーバ証明書をクライアントへ提示することで TLS 通信を復号・検査する機能
+- **peek / bump / splice**: `ssl_bump` ディレクティブが取りうる動作。`peek` は SNI 等を覗き見るだけで復号しない、`bump` は復号して検査する、`splice` は復号せずそのまま中継する
+- **step1**: TLS ハンドシェイクの最初の段階（ClientHello 受信時点）を指す `at_step` の値。ここで splice/bump を判定する
+- **sslcrtd_program (security_file_certgen)**: クライアント向けの偽装サーバ証明書をその場で動的に生成・キャッシュするヘルパープロセス
+- **自己署名CA**: 社内で発行し、Squid がなりすまし証明書の署名に使う認証局証明書。クライアント端末の信頼ストアに事前配布しておく必要がある
+- **splice対象（検査除外）**: オンラインバンキングや医療系サイトなど、法令・プライバシー・証明書ピン留めの都合で復号検査してはならない通信先。ドメインリストで明示的に除外する
+- **プライバシー・法務上の配慮**: HTTPS 復号は通信内容の可視化を伴うため、就業規則・プライバシーポリシーへの明記と従業員への事前告知、監査ログの適切な保管が必須となる
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| プロキシホスト名 | {{ global.hostname }} |
+| SslBump 有効化 | {{ global.bump_enabled }} |
+| Bump 用リスンポート | {{ global.bump_port }} |
+| CA証明書パス | {{ global.ca_cert_path }} |
+| CA秘密鍵パス | {{ global.ca_key_path }} |
+| CA有効期間（日） | {{ global.ca_days }} |
+| 証明書キャッシュDB | {{ global.db_dir }} |
+| splice対象ドメイン | {{ global.splice_domains | join(', ') }} |
+
+## 1. 自己署名CA証明書を作成する
+
+Squid が動的に発行する偽装サーバ証明書に署名するための、内部専用CAを作成します。秘密鍵は生成後に権限を絞ります。
+
+```bash
+mkdir -p $(dirname {{ global.ca_key_path }})
+openssl genrsa -out {{ global.ca_key_path }} 4096
+openssl req -x509 -new -nodes \
+  -key {{ global.ca_key_path }} \
+  -sha256 -days {{ global.ca_days }} \
+  -out {{ global.ca_cert_path }} \
+  -subj "/CN=Internal HTTPS Inspection CA/O=Example Corp"
+chown squid:squid {{ global.ca_key_path }} {{ global.ca_cert_path }}
+chmod 600 {{ global.ca_key_path }}
+chmod 644 {{ global.ca_cert_path }}
+```
+
+## 2. 証明書キャッシュDBを初期化する
+
+動的に発行した証明書を保存するデータベースを用意します。
+
+```bash
+/usr/lib/squid/security_file_certgen -c -s {{ global.db_dir }} -M 4MB
+chown -R squid:squid {{ global.db_dir }}
+```
+
+## 3. splice対象ドメインのリストを配置する
+
+復号検査から除外するドメインを一覧ファイルにまとめます。
+
+```bash
+cat <<'EOF' > /etc/squid/splice_domains.txt
+{% for domain in global.splice_domains %}
+{{ domain }}
+{% endfor %}
+EOF
+```
+
+## 4. squid.conf にSslBumpを設定する
+
+`http_port` に `ssl-bump` を付与し、証明書生成ヘルパーと `ssl_bump` の判定ルールを追加します。バンキング等の除外対象は `splice`、それ以外は `bump` とし、判定前段階では `peek` で SNI のみを確認します。
+
+```bash
+cat <<'EOF' >> /etc/squid/squid.conf
+http_port {{ global.bump_port }} ssl-bump \
+    tls-cert={{ global.ca_cert_path }} \
+    tls-key={{ global.ca_key_path }} \
+    generate-host-certificates=on dynamic_cert_mem_cache_size=8MB
+
+sslcrtd_program /usr/lib/squid/security_file_certgen -s {{ global.db_dir }} -M 8MB
+sslcrtd_children 5
+
+acl step1 at_step SslBump1
+acl splice_sites ssl::server_name "/etc/squid/splice_domains.txt"
+
+ssl_bump peek step1
+ssl_bump splice splice_sites
+ssl_bump bump all
+EOF
+```
+
+## 5. 設定を検証し、Squidへ反映する
+
+構文チェックの後、既存セッションを切断しないよう再起動ではなく再読み込みで反映します。
+
+```bash
+squid -k parse
+systemctl reload squid
+```
+
+## 6. クライアントへCA証明書を配布する
+
+クライアント端末が Squid の偽装証明書を信頼できるよう、CA証明書を配布して信頼ストアへ登録します。GPOやMDM等の配布基盤がない場合は、対象端末ごとに以下を実施します。
+
+```bash
+# Linux クライアントの例
+cp {{ global.ca_cert_path }} /usr/local/share/ca-certificates/internal-inspection-ca.crt
+update-ca-certificates
+```
+
+## 動作確認
+
+1. bump対象サイト（splice対象外のドメイン）へブラウザでアクセスし、証明書の発行者が Squid の内部CA（`Internal HTTPS Inspection CA`）になっていることを確認する。
+2. `tail -f /var/log/squid/access.log` を実施しながら同アクセスを行い、`CONNECT` ではなく復号後のフルHTTPS URLがログに記録されることを確認する。
+3. splice対象ドメイン（例: `global.splice_domains` に登録した銀行サイト）へアクセスし、証明書の発行者が元のサーバ証明書のままであること（Squidの内部CAに置き換わっていないこと）を確認する。
+4. アクセスログで splice対象の通信は URL がホスト名までしか記録されず、復号されていないことを確認する。
+
+## 注意事項
+
+- CA秘密鍵（`{{ global.ca_key_path }}`）は漏えいすると任意サイトへのなりすましが可能になるため、Squidホスト内でも `chmod 600` を維持し、バックアップも暗号化した上でアクセス制限された場所に保管する。
+- 証明書ピン留め（certificate pinning）を実装したアプリ（一部の銀行アプリ、決済アプリ等）は、SslBumpで復号すると証明書検証エラーで通信が破綻する。事前にsplice対象へ確実に追加し、変更前に対象アプリでの疎通を確認すること。
+- HTTPS復号はプライバシー・法令上の影響が大きいため、就業規則・利用規程に検査の実施を明記し、従業員へ事前告知した上で実施する。労務・法務部門の承認を得ること。
+- 本番展開前に、一部の試験端末のみでCA証明書配布とSslBump設定を先行適用し、splice対象を含めて意図通りの挙動になることを確認してから全社展開する。既存の非SslBump運用（従来の透過プロキシ設定）は、試験結果が確認できるまで無効化しない。
+- `systemctl reload squid` は既存コネクションを維持したまま設定を反映するが、`ssl_bump` ルールの誤りは全社員のHTTPS通信断につながるため、変更前に `squid -k parse` で構文検証を必ず行う。

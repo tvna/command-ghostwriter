@@ -1,0 +1,4 @@
+scanner_ip,role,action,note
+198.51.100.10,vuln-scanner,exempt,月次脆弱性診断ツールの固定送信元
+203.0.113.5,monitor,exempt,外形監視サービスのヘルスチェック送信元
+198.51.100.200,unknown,investigate,NAT背後からの多数ポートアクセス、送信元集約の疑い

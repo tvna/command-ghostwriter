@@ -1,0 +1,6 @@
+subject,subject_type,assigned_roles,expected,drift,disposition
+tanaka,user,realm-admin manage-users,viewer,excess-role,revoke-excess-role
+kobayashi,user,viewer,-,leaver,disable-account
+svc-billing-api,service-account,realm-admin,billing-write,excess-role,revoke-excess-role
+legacy-report-client,client,-,-,unused-client,disable-client
+partner-portal-client,client,-,-,redirect-uri-too-broad,tighten-redirect-uri

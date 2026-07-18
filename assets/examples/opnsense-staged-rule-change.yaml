@@ -1,0 +1,15 @@
+change_id: CHG-2026-0713
+target_rules:
+  - interface: LAN
+    action: pass
+    src: 10.10.20.0/24
+    dst: 10.10.5.50
+    port: 443
+  - interface: LAN
+    action: block
+    src: 10.10.20.0/24
+    dst: 10.10.5.50
+    port: 3389
+observation_period: 72時間
+rollback_trigger: 対象セグメントで新規に到達不能・応答遅延の申告が2件以上、またはlive-logで意図しないdrop/passが1件でも確認された場合
+approver: 山田 太郎(ネットワーク運用責任者)

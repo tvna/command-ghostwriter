@@ -1,0 +1,7 @@
+check_item,expected,actual,gap,action
+cron_execution,直近7日間 毎日03:00に実行完了(exit 0),直近7日間で6回完了・1回記録なし(07/15分が欠落),cronジョブが07/15に無音停止した可能性,systemdジャーナルでlynis-audit.serviceの07/15分の起動有無を確認する
+report_retention_7gen,過去7世代分のレポートが/var/backups/lynis/reportsに存在,過去6世代のみ存在(07/15分が欠落),cron欠落と一致してレポートも1世代分欠落,cron是正後に再監査を実施し欠落世代を埋める
+new_warning_triage,新規warningは24時間以内に是正チケット化,新規warning2件のうち1件が3日間チケット未起票,1件のwarningの是正追跡が放置されている,即時に是正チケットを起票し担当者をアサインする
+ticket_linkage_rate,全warningにチケットIDが紐付く(100%),過去30日のwarning5件中4件のみ紐付け(80%),1件が追跡漏れ,remediation-tickets.csv台帳と最新レポートを突合し漏れを起票する
+report_integrity_hash,最新レポートのSHA256が台帳記録と一致,一致,-,不要
+drill_record_retention,訓練実施記録を90日以上保管,直近の訓練記録が保管期間90日以内に存在,-,不要

@@ -1,0 +1,127 @@
+# Zeekスキャン検知の調整と誤検知抑制手順
+
+Zeek 標準のスキャン検知（`Scan::Address_Scan` / `Scan::Port_Scan`）が
+notice.log に発生する誤検知を抑制するため、閾値と除外設定（source 限定）を
+調整します。対象スキャナは {{ csv_rows | length }} 件です。
+
+## 目的
+
+notice.log 上の Scan::Address_Scan / Scan::Port_Scan の発生状況を確認したうえで、
+正規のスキャナ・監視サーバを送信元限定で除外し、実際の攻撃スキャンの検知精度を
+落とさずに誤検知を抑制できるようになることを目指します。
+
+## 用語解説
+
+- **Scan::Address_Scan**: 1 送信元が多数の宛先ホストへ接続を試みた場合に上がる Notice（水平スキャン）
+- **Scan::Port_Scan**: 1 送信元が 1 宛先の多数ポートへ接続を試みた場合に上がる Notice（垂直スキャン）
+- **閾値（threshold）/ 時間窓（interval）**: 一定時間内の接続数が閾値を超えるとNoticeが発生する、Scan::*_scan_threshold と Scan::*_scan_interval の組
+- **Scan::skip_scan_sources**: スキャン検知の対象から送信元アドレスを除外する set[subnet]（除外は送信元アドレス限定であり、閾値そのものは変えない）
+- **誤検知の主因**: 正規の脆弱性スキャナ、外形監視サービスのヘルスチェック、NAT背後での複数ホスト集約（1 グローバルIPから接続が多重化されて見える）が代表例
+
+## シナリオ設定
+
+| scanner_ip | role | action | note |
+|------------|------|--------|------|
+{% for r in csv_rows %}| {{ r["scanner_ip"] }} | {{ r["role"] }} | {{ r["action"] }} | {{ r["note"] }} |
+{% endfor %}
+
+## 1. 現状のScan Notice発生をnotice.logで確認する
+
+まず、対象期間の notice.log から Scan 関連の Notice のみを抽出します。
+
+```bash
+zeek-cut -m ts uid id.orig_h id.resp_h note msg < notice.log \
+  | awk -F'\t' '$4 ~ /^Scan::/'
+```
+
+`id.orig_h` の欄に、シナリオ設定の scanner_ip と一致するアドレスが
+繰り返し出ている場合は、そのアドレスが誤検知の候補です。
+
+## 2. 現在の閾値設定を確認する
+
+`local.zeek` に scan ポリシーを読み込んでいるか、また現在の閾値を確認します。
+
+```bash
+zeek -e 'load policy/misc/scan; print Scan::addr_scan_threshold, Scan::addr_scan_interval;'
+zeek -e 'load policy/misc/scan; print Scan::port_scan_threshold, Scan::port_scan_interval;'
+```
+
+閾値が環境の通常トラフィックに対して厳しすぎる（正規スキャナやヘルスチェックで
+頻繁に超過する）場合のみ、次のように緩和します。緩和は最小限にとどめ、
+実際の攻撃スキャンを見逃す閾値まで緩めないでください。
+
+```bash
+cat >> /opt/zeek/share/zeek/site/local.zeek <<'EOF'
+@load policy/misc/scan
+
+# 閾値をわずかに緩和する場合の例（現場の正常値を計測してから調整すること）
+redef Scan::addr_scan_threshold = 100;
+redef Scan::port_scan_threshold = 20;
+EOF
+```
+
+## 3. 正規スキャナ・監視サーバを送信元限定で除外する
+
+CSV で `action` が `exempt` の行（脆弱性スキャナ・監視サーバ）のみを
+`Scan::skip_scan_sources` に `/32` で個別に追加します。除外は該当アドレス限定であり、
+全体の閾値を緩めるものではありません。
+
+```bash
+cat >> /opt/zeek/share/zeek/site/local.zeek <<'EOF'
+redef Scan::skip_scan_sources += {
+{% for r in csv_rows %}{% if r["action"] == "exempt" %}    {{ r["scanner_ip"] }}/32,  # role={{ r["role"] }} note={{ r["note"] }}
+{% endif %}{% endfor %}};
+EOF
+
+zeekctl deploy
+```
+
+## 4. investigate対象の扱い
+
+`action` が `investigate` の行は除外せず、手動調査対象として残します。
+
+```bash
+{% for r in csv_rows %}{% if r["action"] == "investigate" %}zeek-cut -m ts uid id.orig_h id.resp_h id.resp_p < conn.log \
+  | awk -F'\t' '$3 == "{{ r["scanner_ip"] }}"' | sort | uniq -c | sort -rn | head -20
+{% endif %}{% endfor %}```
+
+上位の宛先ポート・宛先ホストの分布から、NAT背後での複数ホスト集約か、
+単一ホストによる実際のスキャンかを切り分けたうえで、除外の可否を判断してください。
+
+## 動作確認
+
+1. 変更前に、除外対象ではない検証用ホストから `nmap -sS` でポートスキャンを行い、
+   Scan Notice が上がることを確認します（検知そのものが機能していることの確認）。
+
+   ```bash
+   nmap -sS -p1-1000 <検証対象ホスト>
+   zeek-cut -m ts id.orig_h note msg < notice.log | awk -F'\t' '$3 ~ /^Scan::/'
+   ```
+
+2. `zeekctl deploy` で除外設定を反映したうえで、除外対象アドレス（例:
+   シナリオ設定の 198.51.100.10）から同じスキャンを再実行し、
+   その送信元では Scan Notice が出なくなることを確認します。
+
+   ```bash
+   zeekctl status
+   nmap -sS -p1-1000 <検証対象ホスト>   # 198.51.100.10 から実行
+   zeek-cut -m ts id.orig_h note msg < notice.log | awk -F'\t' '$2 == "198.51.100.10"'
+   ```
+
+3. 除外対象ではない別ホストから同じスキャンを実行し、Scan Notice が
+   引き続き上がることを確認します（除外設定が送信元限定であり、
+   検知全体が無効化されていないことの確認）。
+
+## 注意事項
+
+- 除外（`Scan::skip_scan_sources`）は必ず送信元アドレス限定（`/32` など最小範囲）で行うこと。
+  `Scan::addr_scan_threshold` / `Scan::port_scan_threshold` を全体的に緩めすぎると、
+  実際の攻撃によるスキャンを見逃す。
+- 除外設定を反映した後は、動作確認の手順3で「除外対象以外からのスキャンは
+  引き続き検知されること」を必ず確認してから運用に反映する。除外対象からの
+  Notice 消失だけを確認して終わらせないこと。
+- `action` が `investigate` の行は自動では除外しない。NAT背後の集約か
+  実際の攻撃かを人手で切り分けるまでは監視対象のまま残すこと。
+- `local.zeek` 変更後は `zeekctl deploy` を必ず実行し、`zeekctl status` で
+  ワーカーが正常に再起動していることを確認する。反映されない場合は
+  変更前の設定にロールバックできるよう、変更前の `local.zeek` を保存しておくこと。

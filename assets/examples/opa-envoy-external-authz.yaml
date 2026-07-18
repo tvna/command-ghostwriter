@@ -1,0 +1,7 @@
+ext_authz_cluster: "ext-authz-opa"
+policy_package: "envoy.authz"
+jwt_verification: true
+default_decision: "data.envoy.authz.allow"
+allowed_headers:
+  - "x-user-id"
+  - "x-user-role"

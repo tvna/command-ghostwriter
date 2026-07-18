@@ -1,0 +1,12 @@
+instance_name: "hq-branch-wg1"
+listen_port: 51820
+tunnel_address: "10.66.10.1/24"
+peers:
+  - name: "osaka-branch-gw"
+    public_key: "PLACEHOLDER_OSAKA_BRANCH_PUBKEY_REPLACE_ME="
+    allowed_ips: "10.66.10.2/32"
+    endpoint: "203.0.113.20:51820"
+  - name: "remote-admin-laptop"
+    public_key: "PLACEHOLDER_REMOTE_ADMIN_PUBKEY_REPLACE_ME="
+    allowed_ips: "10.66.10.10/32"
+    endpoint: "-"

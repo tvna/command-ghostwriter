@@ -1,0 +1,105 @@
+# Lynisハードニングindex低下の原因調査 — {{ scenario.hostname }}
+
+- **前回監査**: {{ scenario.audit_date_prev }}（index {{ scenario.index_prev }}）
+- **今回監査**: {{ scenario.audit_date_current }}（index {{ scenario.index_current }}）
+- **低下幅**: {{ scenario.index_drop }} ポイント
+
+## 目的
+
+前回より Lynis のハードニングindexが低下した事象について、`lynis-report.dat` の warning/suggestion 差分から新規に発生した項目を洗い出し、原因となった設定変更を特定した上で、それが意図した変更（トレードオフ）か、劣化か、侵害の兆候かを切り分けられるようになることを目指します。
+
+## 用語解説
+
+- **ハードニングindex**: Lynisが各testの合否を重み付け集計して算出する0〜100のスコア。SSH/認証/カーネルパラメータ/ファイル権限/パッケージ管理など、testカテゴリごとに寄与度が異なり、重要度の高いtest（例: 認証まわり）ほど失敗時の減点が大きい
+- **lynis-report.dat**: 監査実行のたびに `/var/log/` に出力されるキー・バリュー形式のレポートファイル。`warning[]` と `suggestion[]` の配列に検出項目が記録される
+- **warning**: 即座にリスクとなりうる設定不備。indexへの減点が大きい
+- **suggestion**: 改善余地はあるが緊急性の低い推奨事項。indexへの影響はwarningより小さい
+- **test ID**: `SSH-7408` や `KRNL-6000` のように、カテゴリ略号＋番号で管理されるLynisの個別検査項目の識別子
+- **差分調査**: 前回reportと今回reportの `warning[]`/`suggestion[]` 配列を突合し、新規に出現した項目だけを抽出する手法。indexの変動要因を人手の記憶に頼らず機械的に特定できる
+- **変更管理記録**: いつ・誰が・何の目的で設定を変更したかを記録した台帳。差分調査で見つかった新規warningが「承認済みの変更」か「未承認の変化」かを判定する一次情報源
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| ホスト名 | {{ scenario.hostname }} |
+| 前回レポート | {{ scenario.prev_report }} |
+| 今回レポート | {{ scenario.current_report }} |
+| 前回index | {{ scenario.index_prev }} |
+| 今回index | {{ scenario.index_current }} |
+| 低下幅 | {{ scenario.index_drop }} |
+| 変更管理記録の参照先 | {{ scenario.change_log_source }} |
+
+## 手順
+
+### 1. 前回・今回レポートのwarning/suggestion配列を差分抽出する
+
+Lynisは監査ごとにレポートを上書きするため、前回分は別名で退避しておく運用を前提とします。
+
+```bash
+grep '^warning\[\]=' {{ scenario.prev_report }} | sort > /tmp/warnings_prev.txt
+grep '^warning\[\]=' {{ scenario.current_report }} | sort > /tmp/warnings_current.txt
+diff /tmp/warnings_prev.txt /tmp/warnings_current.txt
+
+grep '^suggestion\[\]=' {{ scenario.prev_report }} | sort > /tmp/suggestions_prev.txt
+grep '^suggestion\[\]=' {{ scenario.current_report }} | sort > /tmp/suggestions_current.txt
+diff /tmp/suggestions_prev.txt /tmp/suggestions_current.txt
+```
+
+`diff` の `>` 側（今回にのみ存在する行）が新規発生項目です。
+
+### 2. 新規warningごとにtest IDと該当設定領域を特定する
+
+今回の差分抽出で、以下の新規warningが確認されました。
+
+{% for w in new_warnings %}
+#### {{ w.test_id }}（{{ w.category }}）
+
+- 内容: {{ w.message }}
+- Lynis推奨対処: {{ w.suggestion }}
+
+```bash
+lynis show details {{ w.test_id }}
+```
+{% endfor %}
+
+### 3. 該当設定の現在値をホスト上で直接確認する
+
+Lynisのtest結果だけでなく、実機の現在の設定値を必ず自分の目で確認します。
+
+```bash
+sshd -T | grep -i allowtcpforwarding
+sysctl net.ipv4.conf.all.accept_redirects
+stat -c '%a %U:%G' /etc/shadow
+dpkg -l | grep telnet-server
+```
+
+### 4. 変更管理記録と突合し、原因区分を判定する
+
+新規warningごとに `change_ticket` の有無を確認し、下表の基準で判定します。
+
+| change_ticket | 判定 |
+| --- | --- |
+| チケット番号あり | 意図した変更（トレードオフとして許容するか、再評価するかをチーム判断） |
+| `unmanaged`（記録なし） | 劣化（作業ミス・設定巻き戻し）または侵害の兆候。個別に深掘り調査が必要 |
+
+```bash
+{% for w in new_warnings %}
+echo "{{ w.test_id }}: change_ticket={{ w.change_ticket }}"
+{% endfor %}
+```
+
+`unmanaged` と判定された項目は、直近の `/var/log/auth.log` のログイン記録、`last`コマンドの結果、および対象ファイルの更新時刻（`stat`の`Modify`欄）を突合し、想定外のアカウントやタイミングでの変更でないかを確認してください。侵害の兆候（不審なログイン元・見覚えのない変更時刻）が見つかった場合は、この調査手順を中断し、インシデント対応手順に切り替えます。
+
+## 動作確認
+
+- 手順1の `diff` 出力から、今回のみに存在する新規warning/suggestion行がすべて洗い出されていること
+- 手順2で洗い出した各 `test_id` について、対応する設定領域（SSH/sysctl/権限/パッケージ）が特定できていること
+- 手順4の突合により、新規warning全件が「意図した変更」「劣化」「侵害の兆候」のいずれかに分類されていること
+
+## 注意事項
+
+- 本手順はあくまで原因の切り分け・調査であり、設定の是正そのものは行いません。是正には `lynis-hardening-remediation` の手順書を用い、SSHの`AllowTcpForwarding`のような接続性に影響する設定を変更する場合は、必ず既存のSSHセッションを維持したまま別セッションで新しい設定を検証し、接続できることを確認してから元の設定を無効化してください。既存セッションを閉じる前に検証を終えないと、ロックアウトのリスクがあります。
+- `unmanaged` 判定の項目は、原因が判明するまで自己判断で「問題なし」と結論づけず、必ずチームレビューを経てください。侵害の兆候がある場合はインシデント対応プロセスへエスカレーションします。
+- 調査で判明した事実（差分内容、突合結果、判定理由、対応チケット番号）は変更管理記録に追記し、次回監査時の差分調査で参照できる状態にしてください。
+- `lynis-report.dat` の前回分退避を運用に組み込んでいない場合、この差分調査自体が実行できません。監査実行後に必ず日付付きでレポートを退避する運用を先に整備してください。

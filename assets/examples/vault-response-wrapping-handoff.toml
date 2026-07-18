@@ -1,0 +1,4 @@
+wrap_ttl_seconds = 120
+secret_path = "secret/data/prod/db-credentials"
+recipient = "bob"
+single_use = true

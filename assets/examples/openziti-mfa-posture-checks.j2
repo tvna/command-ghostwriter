@@ -1,0 +1,138 @@
+# OpenZiti MFAとポスチャチェックの適用
+
+CSV で定義した {{ csv_rows | length }} 件のポスチャ要件を OpenZiti の
+posture-check として登録し、TOTP MFA とデバイス条件（OS/ドメイン/プロセス/MAC）を
+満たす接続のみをサービスポリシーで許可します。`ziti` CLI がコントローラへログイン
+済みであることを前提に、上から順に実行してください。
+
+## 目的
+
+アイデンティティに TOTP MFA とポスチャチェック（OS・ドメイン参加・常駐プロセス・
+MAC アドレス）を課し、条件を満たす接続だけがサービスへ到達できる状態を作ります。
+ポスチャ未達になった時点で既存セッションが自動的に遮断されることを含めて理解し、
+安全に本番導入できるようになることを目指します。
+
+## 用語解説
+
+- **posture-check（ポスチャチェック）**: 接続元デバイスやアイデンティティの状態
+  （MFA 済みか、OS バージョン、ドメイン参加、特定プロセス稼働、MAC アドレス等）を
+  検証する OpenZiti のオブジェクト。`ziti edge create posture-check <type> ...`
+  で作成する。
+- **posture-check-roles / service-policy**: サービスポリシー
+  (`ziti edge create service-policy`) に `--posture-check-roles` を指定すると、
+  紐付いたポスチャチェックを全て満たすセッションのみダイヤルを許可する。
+- **role-attributes**: posture-check や identity に付与するタグ。service-policy
+  側は `#タグ名` で参照するため、posture-check 作成時と service-policy 更新時で
+  同じ role-attributes を使う。
+- **ziti-edge-tunnel enable_mfa**: トンネラー（エンドポイント側エージェント）で
+  TOTP シークレットを生成し、認証アプリに登録するためのコマンド。登録後は
+  `verify_mfa` でコードを検証し、以降の接続時は `ziti-edge-tunnel mfa` で
+  TOTP コードを都度提示する。
+- **自動切断の仕組み**: OpenZiti はセッション確立後も定期的にポスチャ状態を再評価
+  する。MFA 未認証への遷移や OS/プロセス条件の不一致を検知すると、コントローラは
+  該当セッションを即座に無効化し、既存の通信も切断される。
+
+## シナリオ設定
+
+| check_type | parameter | applied_service | enforcement |
+|------------|-----------|------------------|--------------|
+{% for r in csv_rows %}| {{ r["check_type"] }} | {{ r["parameter"] }} | {{ r["applied_service"] }} | {{ r["enforcement"] }} |
+{% endfor %}
+
+## 1. ポスチャチェックを作成する
+
+行ごとの check_type に応じて、対応する posture-check を作成します。
+role-attributes は後段のサービスポリシーから参照するタグです。
+
+```bash
+{% for r in csv_rows %}{% if r["check_type"] == "mfa" %}
+# {{ r["applied_service"] }} 向け MFA チェック（{{ r["parameter"] }}）
+ziti edge create posture-check mfa mfa-check \
+  --timeout-seconds 90 --prompt-on-wake \
+  --role-attributes mfa-required
+{% elif r["check_type"] == "os" %}
+# {{ r["applied_service"] }} 向け OS チェック（許可 OS: {{ r["parameter"] }}）
+ziti edge create posture-check os os-check \
+  --os-type Windows --os-versions 10,11 \
+  --os-type macOS --os-versions 13,14,15 \
+  --os-type Linux \
+  --role-attributes corp-os
+{% elif r["check_type"] == "domain" %}
+# {{ r["applied_service"] }} 向けドメイン参加チェック
+ziti edge create posture-check domain domain-check {{ r["parameter"] }} \
+  --role-attributes corp-domain
+{% elif r["check_type"] == "process" %}
+# {{ r["applied_service"] }} 向け常駐プロセスチェック
+ziti edge create posture-check process process-check \
+  --os-type Windows --path '{{ r["parameter"] }}' \
+  --hashes <CORPAV_BINARY_SHA512_HASH> \
+  --role-attributes corp-av
+{% elif r["check_type"] == "mac" %}
+# {{ r["applied_service"] }} 向け MAC アドレスチェック
+ziti edge create posture-check mac mac-check {{ r["parameter"] }} \
+  --role-attributes corp-device
+{% endif %}
+{% endfor %}```
+
+作成済みのポスチャチェックは以下で確認できます。
+
+```bash
+ziti edge list posture-checks
+```
+
+## 2. サービスポリシーにポスチャチェックを適用する
+
+既存の Dial ポリシーへ `--posture-check-roles` を追加し、MFA と該当するデバイス
+条件をすべて満たすセッションのみ許可する状態にします（追加は上書きではなく
+`update` で既存ロールに統合してください）。
+
+```bash
+{% for r in csv_rows %}ziti edge update service-policy svc-policy-{{ r["applied_service"] }} \
+  --posture-check-roles '#mfa-required,#corp-os,#corp-domain,#corp-av,#corp-device'
+{% endfor %}```
+
+## 3. トンネラー側で TOTP MFA を登録する
+
+エンドユーザーの端末で `ziti-edge-tunnel` を使い、TOTP シークレットを登録します。
+
+```bash
+# 1) MFA 登録を開始し、QRコード/シークレットを表示する
+ziti-edge-tunnel enable_mfa -i identity.json
+
+# 2) 認証アプリ（Google Authenticator 等）で読み取ったコードで登録を確定する
+ziti-edge-tunnel verify_mfa -i identity.json -c 123456
+
+# 3) 以降の接続時に TOTP コードを提示する
+ziti-edge-tunnel mfa -i identity.json -c 123456
+```
+
+## 動作確認
+
+1. MFA 未認証の状態でサービスへダイヤルし、`posture-checks` を満たしていない
+   ため接続が確立できない（不通になる）ことを確認する。
+2. `ziti-edge-tunnel mfa -i identity.json -c <TOTPコード>` を実行後、同じ
+   ダイヤルが成功し疎通できることを確認する。
+3. 許可 OS 一覧に含まれないバージョン（例: サポート外の OS）の端末から接続を
+   試み、`os` ポスチャチェック不一致により拒否されることを確認する。
+4. `ziti edge list posture-check-failures` （または対象アイデンティティの
+   `ziti edge list identities <id> posture-data`）で、どのチェックが未達かを
+   確認できることを確認する。
+
+## 注意事項
+
+- 本手順はサービスポリシーの更新前に、既存のダイヤル経路（ポスチャチェックなし）
+  を残したまま検証用のロールで新ポリシーを並行稼働させ、TOTP 登録済み端末で
+  疎通が確立できることを確認してから、既存経路の許可を外す段階導入を行うこと。
+  いきなり本番ポリシーへ `--posture-check-roles` を適用すると、MFA 未登録の
+  利用者が即座に締め出される。
+- TOTP シークレットは端末の `ziti-edge-tunnel enable_mfa` 実行時にのみ表示される
+  ため、リカバリコードまたはシークレットを安全な方法（パスワードマネージャ等）で
+  必ずバックアップしておくこと。端末紛失時の再登録手順（管理者による
+  `ziti edge update identity <id> --mfa-enabled=false` 等での MFA リセット）も
+  事前に確立しておく。
+- ポスチャチェックが厳しすぎる（対応外の OS バージョンや旧プロセス名を指定した
+  等）と、正規利用者が広範囲でロックアウトされる。まず一部の identity
+  role-attributes にのみ適用し、`posture-check-failures` を監視しながら段階的に
+  対象を拡大すること。
+- OS/ドメイン/プロセス/MAC の各パラメータは自己申告可能な値を含むため、これらは
+  多層防御の一部であり、単体でデバイス真正性を保証するものではない。

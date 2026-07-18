@@ -1,0 +1,6 @@
+timeline_source,artifact,time_field,event_type,relevance
+MFT,Windows.NTFS.MFT,FileNameModified,file_created,high
+イベントログ,Windows.EventLogs.Sysmon,EventTime,process_creation,high
+イベントログ,Windows.EventLogs.RDPAuth,EventTime,logon,high
+レジストリ,Windows.Registry.UserAssist,LastExecuted,execution,medium
+シェルバッグ,Windows.Forensics.Shellbags,LastWriteTime,folder_access,low

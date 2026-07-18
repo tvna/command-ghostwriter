@@ -1,0 +1,11 @@
+controller_name: ziti-ctrl01
+identity_name: alice-laptop
+external_id: alice@example.com
+issuer: "https://keycloak.example.com/realms/corp"
+jwks_endpoint: "https://keycloak.example.com/realms/corp/protocol/openid-connect/certs"
+audience: "ziti-edge-api"
+claims_property: "email"
+auth_policy_name: ext-jwt-sso-policy
+signer_name: keycloak-corp-signer
+client_id: ziti-edge-client
+session_ttl_minutes: 30

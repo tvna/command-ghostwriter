@@ -1,0 +1,95 @@
+# Keycloakアクセス権限の定期棚卸し訓練
+
+realm 内のユーザー・サービスアカウント・クライアントの権限を `kcadm.sh` でエクスポートし、想定権限台帳と突合して過剰付与や不要なクライアントを是正する定期訓練です。
+
+## 目的
+
+Keycloak の realm に蓄積した権限が「今も業務上必要か」を定期的に洗い出し、退職者アカウント・過剰ロール・未使用クライアント・広すぎる redirect URI を最小権限の観点で是正できるようになることを目指します。棚卸しは削除や無効化を即断せず、突合結果をレビューしたうえで変更管理に回すプロセスであることを理解します。
+
+## 用語解説
+
+- **kcadm.sh**: Keycloak 同梱の管理 CLI。realm・ユーザー・ロール・クライアントを REST 経由で操作する
+- **service account**: クライアントに紐づく機械間認証用の擬似ユーザー（`serviceAccountsEnabled=true` のクライアントが持つ）
+- **realm ロールと client ロール**: realm 全体に効くロールと、特定クライアントのスコープに閉じたロール
+- **federation ユーザー**: LDAP/AD 等の外部ディレクトリと同期されたユーザー。Keycloak 側では削除・パスワード変更ができない場合がある
+- **redirect URI**: OIDC クライアントがログイン後にリダイレクトを許可する URL パターン。ワイルドカードが広すぎると認可コード横取りのリスクになる
+- **drift（逸脱）**: 台帳上の想定権限（`expected`）と実際の付与（`assigned_roles`）の差分。最小権限からの逸脱として扱う
+
+## シナリオ設定
+
+| subject | subject_type | assigned_roles | expected | drift | disposition |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["subject"] }} | {{ r["subject_type"] }} | {{ r["assigned_roles"] }} | {{ r["expected"] }} | {{ r["drift"] }} | {{ r["disposition"] }} |
+{% endfor %}
+
+## 1. 現状をエクスポートする
+
+realm 名は `corp` とし、事前に `kcadm.sh config credentials` で認証済みであることを前提とします。
+
+```bash
+kcadm.sh config credentials --server https://idp.example.com --realm master --user review-auditor
+kcadm.sh get users -r corp --fields id,username,enabled,federationLink > export_users.json
+kcadm.sh get clients -r corp --fields id,clientId,enabled,serviceAccountsEnabled,redirectUris > export_clients.json
+kcadm.sh get groups -r corp --fields id,name,path > export_groups.json
+{% for r in csv_rows %}{% if r["subject_type"] == "user" %}kcadm.sh get-roles -r corp --uusername {{ r["subject"] }} >> export_role_assignments.json
+{% elif r["subject_type"] == "service-account" %}kcadm.sh get-roles -r corp --cclientid {{ r["subject"] }} >> export_role_assignments.json
+{% endif %}{% endfor %}```
+
+## 2. 想定権限台帳と突合する
+
+シナリオ設定の表を基準台帳として、CSV の `assigned_roles` 列と `expected` 列を突合します。差分がある行は `drift` 列に理由を記録済みです。
+
+```bash
+{% for r in csv_rows %}{% if r["drift"] != "-" %}echo "DRIFT: {{ r["subject"] }} ({{ r["subject_type"] }}) assigned=[{{ r["assigned_roles"] }}] expected=[{{ r["expected"] }}] reason={{ r["drift"] }}"
+{% endif %}{% endfor %}```
+
+## 3. 過剰ロールを是正する（is-current で影響確認してから剥奪）
+
+過剰ロールを剥奪する前に、剥奪後も対象者が業務に必要な最小権限（`expected` 列）を保持できることを別セッションで確認します。管理者ロールを扱う場合は、剥奪前に break-glass 用の別管理者アカウントでログインできることを必ず確認してください。
+
+```bash
+{% for r in csv_rows %}{% if r["disposition"] == "revoke-excess-role" and r["subject_type"] == "user" %}kcadm.sh remove-roles -r corp --uusername {{ r["subject"] }} --rolename realm-admin
+{% elif r["disposition"] == "revoke-excess-role" and r["subject_type"] == "service-account" %}kcadm.sh remove-roles -r corp --cclientid {{ r["subject"] }} --rolename realm-admin
+{% endif %}{% endfor %}```
+
+## 4. 退職者アカウントを無効化する
+
+削除ではなく `enabled=false` による無効化とし、監査証跡（作成日・所属グループ）を残します。
+
+```bash
+{% for r in csv_rows %}{% if r["disposition"] == "disable-account" %}kcadm.sh update users/$(kcadm.sh get users -r corp -q username={{ r["subject"] }} --fields id --format csv --noquotes | tail -n1) -r corp -s enabled=false
+{% endif %}{% endfor %}```
+
+## 5. 未使用クライアントを無効化し、広すぎる redirect URI を是正する
+
+無効化・URI 変更の前に、新しい設定でも正規の連携先が動作することをステージング環境か並行のテストクライアントで確認してから本番 realm に適用します。
+
+```bash
+{% for r in csv_rows %}{% if r["disposition"] == "disable-client" %}kcadm.sh update clients/$(kcadm.sh get clients -r corp -q clientId={{ r["subject"] }} --fields id --format csv --noquotes | tail -n1) -r corp -s enabled=false
+{% elif r["disposition"] == "tighten-redirect-uri" %}kcadm.sh update clients/$(kcadm.sh get clients -r corp -q clientId={{ r["subject"] }} --fields id --format csv --noquotes | tail -n1) -r corp -s 'redirectUris=["https://partner.example.com/callback"]'
+{% endif %}{% endfor %}```
+
+## 6. 是正記録を証跡として保存する
+
+是正前後のエクスポート差分を、日付入りファイル名で改変不可なストレージ（WORM バケット等）に保存し、変更管理チケットに添付します。
+
+```bash
+mkdir -p audit/$(date +%Y%m%d)
+cp export_users.json export_clients.json export_role_assignments.json audit/$(date +%Y%m%d)/
+sha256sum audit/$(date +%Y%m%d)/*.json > audit/$(date +%Y%m%d)/checksums.txt
+```
+
+## 動作確認
+
+- Step 1 のエクスポートと Step 2 の突合スクリプトを再実行し、`disposition` が処置済みの行で `DRIFT` 出力が消えていること
+- 是正対象外だった行（`drift` が `-` の行）の権限が変化していないこと
+- 剥奪後も対象ユーザー・service account が `expected` 列の権限で想定業務（ログイン、API 呼び出し等）を実行できること
+- 無効化したクライアント・アカウントに対する新規ログイン・トークン発行が拒否されること
+
+## 注意事項
+
+- **認証経路の事前確認**: ロール剥奪・アカウント無効化・クライアント無効化・redirect URI 変更はいずれも認証経路に影響するため、旧経路を止める前に新経路（縮小後の権限、または是正後のクライアント設定）が動作することを別セッションやステージング環境で必ず検証してから本番に適用する。特に管理者ロールの剥奪は、剥奪前に break-glass 管理者アカウントでのログインを確認する。
+- **service account の扱い**: service account はクライアント無効化に連動して失効するため、他のシステムから参照されていないか棚卸し前に依存関係を確認する。
+- **federation 由来ユーザー**: LDAP/AD 同期ユーザーは Keycloak 側の `enabled=false` だけでは不十分な場合がある。無効化は必ず外部ディレクトリ側の状態とあわせて確認し、片方だけの処置で終わらせない。
+- **棚卸し記録の証跡保管**: エクスポート・突合結果・是正コマンドの実行ログはハッシュ付きで改変不可なストレージに保存し、次回棚卸しとの比較に使えるようにする。
+- **変更管理連携**: 是正（ロール剥奪・無効化・URI変更）は棚卸しスクリプト単独で完結させず、変更管理チケットを起票してレビュー・承認を経てから本番 realm に適用する。

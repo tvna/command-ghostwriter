@@ -1,0 +1,25 @@
+[branch]
+hostname = "squid-branch-01"
+listen_port = 3128
+
+[parent_primary]
+host = "proxy-hq-01.example.internal"
+port = 8080
+login_credentials = "svc_proxy_branch:ChangeMe123!"
+
+[parent_secondary]
+host = "proxy-hq-02.example.internal"
+port = 8080
+login_credentials = "svc_proxy_branch:ChangeMe123!"
+
+[routing]
+never_direct = true
+direct_domains = [
+  ".windowsupdate.com",
+  ".microsoft.com",
+  "intranet.example.internal",
+]
+
+[verification]
+access_log_path = "/var/log/squid/access.log"
+cache_manager_url = "http://localhost:3128/squid-internal-mgr/info"

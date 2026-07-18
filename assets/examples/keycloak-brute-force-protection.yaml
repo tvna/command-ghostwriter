@@ -1,0 +1,21 @@
+kc:
+  server_url: "https://idp.example.com"
+  realm: "corp"
+  admin_user: "admin-cli-svc"
+
+security:
+  brute_force_enabled: true
+  failure_factor: 5
+  wait_increment_seconds: 60
+  max_failure_wait_seconds: 900
+  max_delta_time_seconds: 43200
+  permanent_lockout: false
+  quick_login_check_milli_seconds: 1000
+  minimum_quick_login_wait_seconds: 60
+
+test:
+  username: "test-user01"
+  client_id: "account-console"
+
+admin_account:
+  username: "admin-break-glass"

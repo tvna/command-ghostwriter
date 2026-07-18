@@ -1,0 +1,7 @@
+pki_mount: pki_int
+intermediate_common_name: Example Internal Intermediate CA
+allowed_domains:
+  - internal.example.com
+  - svc.internal.example.com
+max_ttl: 720h
+key_type: rsa

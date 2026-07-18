@@ -1,0 +1,105 @@
+# Keycloakクライアントスコープとクレーム設計
+
+client scope（default/optional）とprotocol mapperを使い、アクセストークン/IDトークンに載せるクレームを必要最小限に設計します。
+
+## 目的
+
+client scopeとprotocol mapperの役割分担を理解し、user attribute・group membership・hardcoded・audienceの各mapperで「本当に認可判定に必要なクレームだけ」をトークンに載せられるようになることを目指します。あわせて、audience mapperによるトークンの誤用防止（想定外のAPIへの使い回し防止）を身につけます。
+
+## 用語解説
+
+- **client scope**: クライアントに割り当てる「トークンに含めるクレームの集合」の単位。protocol mapperをまとめて管理する
+- **default client scope**: 認可リクエストにscopeパラメータを指定しなくても自動的に付与されるscope
+- **optional client scope**: `scope=`パラメータで明示的に要求したときだけ付与されるscope
+- **protocol mapper**: client scope（またはクライアント）に紐づき、ユーザー属性やグループ等をトークンのクレームに変換する設定
+- **user attribute mapper (oidc-usermodel-attribute-mapper)**: ユーザー属性を任意のクレーム名でトークンに載せる
+- **group membership mapper (oidc-group-membership-mapper)**: 所属グループ一覧をクレームとして載せる
+- **hardcoded claim mapper (oidc-hardcoded-claim-mapper)**: 固定値を常にクレームとして載せる
+- **audience mapper (oidc-audience-mapper)**: `aud`クレームに対象APIの識別子を追加し、そのトークンが想定外のAPIで受理されることを防ぐ
+- **クレーム最小化**: 認可判定に不要な属性（PIIや権限情報）をトークンに含めないことで、漏えい時の被害面を減らす原則
+- **access token / id token**: access tokenはAPI呼び出しの認可に使い、id tokenはクライアント側でのユーザー識別（ログイン確認）に使う。用途が違うため載せるクレームも区別する
+
+## シナリオ設定
+
+| scope_name | scope_type | mapper_type | claim_name | token_target |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["scope_name"] }} | {{ r["scope_type"] }} | {{ r["mapper_type"] }} | {{ r["claim_name"] }} | {{ r["token_target"] }} |
+{% endfor %}
+
+以降、`REALM=zt-realm` / `CLIENT_ID`はクレーム設計対象のクライアントのUUIDとします。
+
+## 1. client scopeを作成する（default/optional）
+
+```bash
+export REALM=zt-realm
+
+# default client scope: 何も指定せずログインすれば自動付与される
+kcadm.sh create client-scopes -r $REALM -s name=profile-min -s protocol=openid-connect -s 'attributes."include.in.token.scope"=true'
+kcadm.sh create client-scopes -r $REALM -s name=groups-role -s protocol=openid-connect -s 'attributes."include.in.token.scope"=true'
+kcadm.sh create client-scopes -r $REALM -s name=audience-api -s protocol=openid-connect -s 'attributes."include.in.token.scope"=true'
+
+# optional client scope: scope=reports-readを明示要求したときだけ付与される
+kcadm.sh create client-scopes -r $REALM -s name=reports-read -s protocol=openid-connect -s 'attributes."include.in.token.scope"=true'
+```
+
+## 2. protocol mapperでトークンクレームを設計する
+
+シナリオ設定の各行に対応するprotocol mapperを、対象のclient scopeへ追加します。`SCOPE_ID`は`kcadm.sh get client-scopes -r $REALM`で事前に取得しておきます。
+
+```bash
+{% for r in csv_rows %}# scope={{ r["scope_name"] }} claim={{ r["claim_name"] }} target={{ r["token_target"] }}
+SCOPE_ID=$(kcadm.sh get client-scopes -r $REALM --fields id,name --format csv --noquotes | awk -F, '$2=="{{ r["scope_name"] }}"{print $1}')
+{% if r["mapper_type"] == "user-attribute" %}kcadm.sh create client-scopes/$SCOPE_ID/protocol-mappers/models -r $REALM \
+  -s name=map-{{ r["claim_name"] }} -s protocol=openid-connect -s protocolMapper=oidc-usermodel-attribute-mapper \
+  -s config='{"user.attribute":"{{ r["claim_name"] }}","claim.name":"{{ r["claim_name"] }}","jsonType.label":"String","access.token.claim":"{% if r["token_target"] == "access" %}true{% else %}false{% endif %}","id.token.claim":"{% if r["token_target"] == "id" %}true{% else %}false{% endif %}","userinfo.token.claim":"false"}'
+{% elif r["mapper_type"] == "group-membership" %}kcadm.sh create client-scopes/$SCOPE_ID/protocol-mappers/models -r $REALM \
+  -s name=map-{{ r["claim_name"] }} -s protocol=openid-connect -s protocolMapper=oidc-group-membership-mapper \
+  -s config='{"full.path":"false","claim.name":"{{ r["claim_name"] }}","access.token.claim":"{% if r["token_target"] == "access" %}true{% else %}false{% endif %}","id.token.claim":"{% if r["token_target"] == "id" %}true{% else %}false{% endif %}","userinfo.token.claim":"false"}'
+{% elif r["mapper_type"] == "hardcoded" %}kcadm.sh create client-scopes/$SCOPE_ID/protocol-mappers/models -r $REALM \
+  -s name=map-{{ r["claim_name"] }} -s protocol=openid-connect -s protocolMapper=oidc-hardcoded-claim-mapper \
+  -s config='{"claim.value":"standard","claim.name":"{{ r["claim_name"] }}","jsonType.label":"String","access.token.claim":"{% if r["token_target"] == "access" %}true{% else %}false{% endif %}","id.token.claim":"{% if r["token_target"] == "id" %}true{% else %}false{% endif %}","userinfo.token.claim":"false"}'
+{% elif r["mapper_type"] == "audience" %}kcadm.sh create client-scopes/$SCOPE_ID/protocol-mappers/models -r $REALM \
+  -s name=map-{{ r["claim_name"] }} -s protocol=openid-connect -s protocolMapper=oidc-audience-mapper \
+  -s config='{"included.custom.audience":"reports-api","access.token.claim":"{% if r["token_target"] == "access" %}true{% else %}false{% endif %}"}'
+{% endif %}
+{% endfor %}
+```
+
+## 3. クライアントへclient scopeを割り当てる
+
+```bash
+kcadm.sh update clients/$CLIENT_ID -r $REALM -s 'defaultClientScopes=["profile-min","groups-role","audience-api"]'
+kcadm.sh update clients/$CLIENT_ID -r $REALM -s 'optionalClientScopes=["reports-read"]'
+```
+
+## 動作確認
+
+1. 通常ログイン（optional scope未要求）でトークンを取得し、デコードして意図したクレームのみが含まれることを確認する。
+
+```bash
+curl -s -X POST "https://idp.example.com/realms/zt-realm/protocol/openid-connect/token" \
+  -d grant_type=password -d client_id=$CLIENT_ID -d username=alice -d password=$PASSWORD \
+  | jq -r '.access_token' | cut -d. -f2 | base64 -d 2>/dev/null | jq .
+```
+
+期待結果: `department` / `groups` / `aud`（`reports-api`を含む）は含まれるが、`scope_level`や`report_region`（optional scope由来）は含まれないこと。
+
+2. `scope=reports-read`を明示要求して再取得し、追加クレームが載ることを確認する。
+
+```bash
+curl -s -X POST "https://idp.example.com/realms/zt-realm/protocol/openid-connect/token" \
+  -d grant_type=password -d client_id=$CLIENT_ID -d username=alice -d password=$PASSWORD -d scope="openid reports-read" \
+  | jq -r '.access_token' | cut -d. -f2 | base64 -d 2>/dev/null | jq .
+```
+
+期待結果: `scope_level`と`report_region`が追加され、他のユーザーには影響が出ないこと（optional scopeは要求したセッションのみに限定される）。
+
+3. id tokenをデコードし、`employee_id`のようにid token向けに設計したクレームのみがid token側に含まれ、access token側には含まれないことを確認する（access/id混同がないかの最終チェック）。
+
+## 注意事項
+
+- クレームは認可判定に必要な最小限のみを載せる。PIIや権限を過剰に含めると、トークン漏えい時の被害面が拡大する。
+- audience mapperで`aud`を明示的に絞り込み、そのトークンが想定外のAPI（別サービス）で受理されないようにする。`aud`を絞らないと、あるAPI向けに発行したトークンが別のAPIでも通ってしまう「トークン濫用」につながる。
+- access tokenとid tokenの用途を混同しない。id tokenはクライアントでのログイン確認専用であり、API呼び出しの認可に使ってはならない。
+- 既存のprotocol mapper設定を変更・削除する前には、変更後のclient scope構成を新規クライアントやステージング環境で並行検証し、想定外のクレーム欠落でAPI呼び出しが失敗しないことを確認してから本番クライアントに適用する。
+- optional client scopeとして設計したクレームをdefaultに変更すると、既存の全クライアントのトークンサイズ・内容が変わるため、影響範囲（下流のAPI・キャッシュ）を洗い出してから変更する。

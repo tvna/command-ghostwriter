@@ -1,0 +1,5 @@
+ioc_value,ioc_type,detection_artifact,scope,hit_hosts,followup
+44d88612fea8a8f36de82e1278abb02f,hash,Custom.IOC.Sweep.Hash,fleet全台,DESKTOP-A1B2C3;FILESRV01,quarantine
+svchost32.exe,filename,Custom.IOC.Sweep.Filename,fleet全台,-,-
+evil-c2.example.net,domain,Custom.IOC.Sweep.Network,fleet全台,WKS-0042,triage
+203.0.113.77,ip,Custom.IOC.Sweep.Network,fleet全台,-,-

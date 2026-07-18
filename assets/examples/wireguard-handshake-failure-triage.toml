@@ -1,0 +1,23 @@
+[wireguard]
+interface = "wg0"
+listen_port = 51820
+rekey_interval_seconds = 120
+nat_binding_timeout_seconds = 30
+
+[[peers]]
+peer_name = "mobile-tanaka"
+keepalive_current = 0
+endpoint_dynamic = true
+loss_check = false
+
+[[peers]]
+peer_name = "branch-gw-osaka"
+keepalive_current = 25
+endpoint_dynamic = false
+loss_check = true
+
+[[peers]]
+peer_name = "home-suzuki"
+keepalive_current = 0
+endpoint_dynamic = true
+loss_check = true

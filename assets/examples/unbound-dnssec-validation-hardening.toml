@@ -1,0 +1,4 @@
+trust_anchor_file = "/var/lib/unbound/root.key"
+permissive_mode = false
+harden_dnssec_stripped = true
+anchor_update_schedule = "0 3 * * *"

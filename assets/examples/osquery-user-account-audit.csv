@@ -1,0 +1,7 @@
+audit_item,osquery_table,query,red_flag,note
+UID0の重複(裏口root),users,"SELECT username, uid, gid, shell FROM users WHERE uid = 0;",rootという名前以外にuid=0の行が存在する,正規のroot(uid=0)は1行のみのはず。2行以上出たら侵害を疑い最優先で調査する
+未管理authorized_keysの検出,authorized_keys,"SELECT uid, key_file, algorithm, key FROM authorized_keys;",台帳(社内鍵管理台帳)にないkey_fileや見慣れないalgorithmの行がある,usersテーブルとuidでJOINして実ユーザー名に変換してから台帳と突合する
+sudoers過剰付与の検出,sudoers,"SELECT header, rule_details FROM sudoers WHERE rule_details LIKE '%NOPASSWD%' OR rule_details LIKE '%ALL%';",対象ユーザーの業務範囲を超えたNOPASSWDやALL=(ALL:ALL)指定がある,visudo管理外のドロップインファイルが紛れていないかheader列でも確認する
+空パスワード・アカウントの検出,shadow,"SELECT username, password_status FROM shadow WHERE password_status = 'empty';",password_statusがemptyの行が1件でも出る,検出したら緊急扱いでロックまたはパスワード強制設定を行う
+退職者・休眠アカウントのログイン確認,last,"SELECT username, tty, host, time FROM last ORDER BY time DESC;",退職済み・長期休眠のはずのアカウントに新しいログイン記録がある,lastは/var/log/wtmpが基点のためログローテーション設定で参照可能期間が変わる
+特権グループ所属の突合,user_groups,"SELECT u.username, g.groupname FROM user_groups ug JOIN users u ON u.uid = ug.uid JOIN groups g ON g.gid = ug.gid WHERE g.groupname IN ('wheel','sudo','adm','docker');",台帳にない特権グループ所属ユーザーがいる,グループ名はディストリビューションにより異なるためwheel/sudo双方を確認する

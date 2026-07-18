@@ -1,0 +1,79 @@
+# osquery永続化痕跡の定期ハンティング訓練
+
+crontab・systemdユニット・起動項目・authorized_keys・カーネルモジュール・/etc/hosts・DNSリゾルバといった永続化関連テーブルをosqueryで横断的に問い合わせ、四半期ごとに全ホストへ展開して前回ベースラインとの差分を洗い出す訓練手順です。
+
+## 目的
+
+代表的な永続化メカニズム(cron、systemdユニット、起動スクリプト、SSH鍵、カーネルモジュール、hostsファイル、DNS設定)を網羅的にosqueryで問い合わせ、正常なベースラインとの差分から不審な変化を検知できるようになることを目指します。
+
+## 用語解説
+
+- **永続化メカニズム(Persistence)**: 攻撃者が再起動やログオフをまたいでアクセスを維持するために悪用する仕組み。cron、systemdユニット、起動項目、SSH鍵、カーネルモジュール、hostsファイル改ざん、DNS設定改ざんなどが代表例。
+- **ベースライン差分検出**: 事前に取得した「正常な状態」の記録(ベースライン)と現在の実行結果を突き合わせ、増減・変更があった行だけを抽出する手法。差分そのものが不審かどうかは人による判断が必要。
+- **osqueryi**: osqueryのインタラクティブシェル。SQLライクなクエリでホストの状態を1回だけ問い合わせる際に使う。
+- **osqueryd / distributed query**: osqueryの常駐デーモン。TLS/PubSub経由で複数ホストに同一クエリを配布し、結果を集約できる。
+- **crontab / systemd_units / startup_items**: それぞれcron予約実行、systemdサービス・タイマー、rc.local等のレガシー起動項目を保持するosqueryテーブル。
+- **authorized_keys**: 各ユーザーの`~/.ssh/authorized_keys`に登録された公開鍵を横断的に一覧できるosqueryテーブル。
+- **kernel_modules**: ロード済みカーネルモジュール(LKM)を一覧するテーブル。`lsmod`に出ない隠しモジュールの検知にも使う。
+- **etc_hosts / dns_resolvers**: 静的な名前解決エントリ(/etc/hosts)と、実際に使われているDNSリゾルバ設定を確認するテーブル。DNSハイジャックの痕跡確認に使う。
+
+## シナリオ設定
+
+| hunt_id | osquery_table | query | baseline_note | tested_at |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["hunt_id"] }} | {{ r["osquery_table"] }} | `{{ r["query"] }}` | {{ r["baseline_note"] }} | {{ r["tested_at"] }} |
+{% endfor %}
+
+## 1. 対象ホストで永続化関連クエリを実行する
+
+各ホストにログインするか、osqueryd経由のdistributed queryで以下を実行し、JSON結果をハンティング記録ディレクトリに保存します。
+
+```bash
+sudo mkdir -p /var/log/osquery-hunt/$(date +%Y-%m-%d)
+{% for r in csv_rows %}sudo osqueryi --json "{{ r["query"] }}" > /var/log/osquery-hunt/$(date +%Y-%m-%d)/{{ r["hunt_id"] }}_{{ r["osquery_table"] }}.json
+{% endfor %}```
+
+全ホストへの定期展開が必要な場合は、osqueryd の distributed query パックとして同じクエリ群を配布します。
+
+```bash
+sudo osqueryctl config-check
+sudo systemctl restart osqueryd
+sudo osqueryi --line "SELECT * FROM osquery_schedule;"
+```
+
+## 2. 前回ベースラインとの差分を抽出する
+
+各hunt_idごとに、前回取得した正常状態のスナップショット(`baseline/<hunt_id>.json`)と今回の結果を比較します。
+
+```bash
+{% for r in csv_rows %}diff <(jq -S . baseline/{{ r["hunt_id"] }}.json) <(jq -S . /var/log/osquery-hunt/$(date +%Y-%m-%d)/{{ r["hunt_id"] }}_{{ r["osquery_table"] }}.json) > /var/log/osquery-hunt/$(date +%Y-%m-%d)/{{ r["hunt_id"] }}_diff.txt
+echo "---- {{ r["hunt_id"] }} ({{ r["osquery_table"] }}) diff件数: $(wc -l < /var/log/osquery-hunt/$(date +%Y-%m-%d)/{{ r["hunt_id"] }}_diff.txt) ----"
+{% endfor %}```
+
+## 3. 差分をベースラインノートと突き合わせて判定する
+
+差分が出た行を、シナリオ設定表の`baseline_note`列に記載した「正常として許容される範囲」と突き合わせ、正当な構成変更(パッケージ更新に伴うcron追加など)は除外し、説明のつかない新規永続化候補だけを残します。
+
+```bash
+{% for r in csv_rows %}echo "{{ r["hunt_id"] }}: baseline_note = {{ r["baseline_note"] }}"
+{% endfor %}```
+
+- 差分がゼロ件: 正常。台帳の`tested_at`を本日日付で更新します。
+- 差分はあるが`baseline_note`の許容範囲内: 正当な構成変更として記録し、ベースラインを更新します。
+- 差分が`baseline_note`の許容範囲を超える(未知のcronジョブ、未登録のSSH鍵、未知のカーネルモジュール、`/etc/hosts`への外部ドメイン追加、未知のDNSリゾルバ等): 要調査案件としてエスカレーションします。
+
+## 動作確認
+
+1. Step 1 のコマンドが全hunt_idについてエラーなく完了し、`/var/log/osquery-hunt/$(date +%Y-%m-%d)/`配下に7件のJSONファイルが生成されていること。
+2. Step 2 のdiffコマンドが全hunt_idについて実行でき、diff件数がログに出力されていること。
+3. Step 3 で全ての差分が「許容範囲内」または「要調査」のいずれかに分類され、未分類のまま放置されている行がないこと。
+4. 要調査に分類した項目が、後述のosquery-compromise-investigation手順に引き渡されていること。
+
+## 注意事項
+
+- 本手順は読み取り専用のosqueryクエリのみで構成され、対象ホストの設定を変更しません。ただし調査の結果、不審なcronジョブ・SSH鍵・カーネルモジュールを実際に除去する場合は、本手順の範囲外の是正作業として別途扱います。
+- 新規の永続化候補(未知のcron/systemdユニット/起動項目/SSH鍵/カーネルモジュール/hostsエントリ/DNSリゾルバ)は、削除や無効化を即断せず、`osquery-compromise-investigation`手順に引き継いで詳細調査してから対処を判断すること。
+- `authorized_keys`の疑わしい鍵を除去する場合は、必ず別セッション(別端末またはコンソール)で正規の鍵によるSSHログインが確立できることを事前に確認してから、疑わしい鍵を削除すること。正規経路の生存確認前に鍵を消すとロックアウトの危険がある。
+- `dns_resolvers`の疑わしいリゾルバ設定を是正する場合も、新しいリゾルバ設定で名前解決が正常に行えることを`resolvectl query`等で確認してから、旧設定を無効化すること。
+- パッケージ更新やメンテナンス作業に伴う正当な構成変更は、`baseline_note`の許容範囲として記録し、ベースラインファイル(`baseline/<hunt_id>.json`)を更新すること。安易にベースラインを更新して差分を握りつぶさないよう、更新には作業記録との突合を必須とする。
+- 本訓練の実行ログ・diff結果・判定結果(Step 3の分類)は、監査証跡として`/var/log/osquery-hunt/`配下に最低1年間保管すること。

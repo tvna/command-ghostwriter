@@ -1,0 +1,41 @@
+[lynis]
+audit_index_before = 66
+audit_index_after_target = 74
+sysctl_conf_file = "/etc/sysctl.d/60-lynis-hardening.conf"
+rollback_file = "/etc/sysctl.d/60-lynis-hardening.conf.bak"
+verify_command = "sysctl -p /etc/sysctl.d/60-lynis-hardening.conf"
+
+[[sysctl_settings]]
+key = "kernel.randomize_va_space"
+current_value = 0
+recommended_value = 2
+suggestion_id = "KRNL-5820"
+impact_note = "ASLR(アドレス空間配置のランダム化)を有効化。既存プロセスの再現性を前提にしたデバッグ手順が変わる可能性がある以外、通常サービスへの影響は小さい。"
+
+[[sysctl_settings]]
+key = "net.ipv4.conf.all.rp_filter"
+current_value = 0
+recommended_value = 1
+suggestion_id = "NETW-3200"
+impact_note = "Strict Reverse Path Filteringを有効化。非対称経路(マルチホーム/ポリシールーティング)構成のホストでは正規パケットが破棄される恐れがあるため、経路構成を事前に確認する。"
+
+[[sysctl_settings]]
+key = "net.ipv4.conf.default.rp_filter"
+current_value = 0
+recommended_value = 1
+suggestion_id = "NETW-3200"
+impact_note = "以後作成されるインターフェースにもrp_filterのデフォルト値として適用される。"
+
+[[sysctl_settings]]
+key = "net.ipv4.tcp_syncookies"
+current_value = 0
+recommended_value = 1
+suggestion_id = "NETW-3208"
+impact_note = "SYN floodへの耐性を高めるSYN cookiesを有効化。高負荷時に一部TCPオプション(ウィンドウスケーリング等)が制限される場合があるが、通常運用への影響は小さい。"
+
+[[sysctl_settings]]
+key = "net.ipv4.conf.all.accept_source_route"
+current_value = 1
+recommended_value = 0
+suggestion_id = "NETW-3204"
+impact_note = "送信元ルーティングされたパケットの受理を無効化。ソースルーティングに依存した特殊な運用がある場合のみ影響し得る。"

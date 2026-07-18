@@ -1,0 +1,6 @@
+cell_purpose,vql_summary,pivot,finding,note
+収集結果の母集団確認,"SELECT count(*) AS Total FROM source(artifact='Windows.System.Pslist', client_id=ClientId, hunt_id=HuntId)",-,収集件数のベースラインを把握する,最初のセルでは絞り込みをせず全体件数のみ確認する
+不審プロセスの絞り込み,"SELECT Name, CommandLine, Pid, Ppid FROM source(artifact='Windows.System.Pslist', client_id=ClientId, hunt_id=HuntId) WHERE NOT CommandLine =~ 'C:\\\\Windows\\\\System32'",Pid,正規パス外から起動されたsvchost.exe偽装プロセスを検出,allowlist条件は別セルで管理し本セルには埋め込まない
+ネットワーク接続との相関,"SELECT * FROM source(artifact='Windows.Network.Netstat', client_id=ClientId, hunt_id=HuntId) WHERE Pid in suspicious_pids",Pid,外部IPへの持続接続を確認,前セルの結果をVQLのLETで変数化し本セルから参照する
+タイムライン統合,"SELECT Timestamp, ClientId, Artifact, Details FROM source(artifact='Windows.Forensics.Prefetch', client_id=ClientId, hunt_id=HuntId) ORDER BY Timestamp",Timestamp,初回侵害時刻の推定,複数アーティファクトのタイムスタンプはUTCへ統一してから結合する
+所見のMarkdown文書化,"SELECT format(format='Finding: %v (Pid=%v)', args=[Name, Pid]) AS FindingText FROM suspicious_pids",-,所見文をMarkdownセルへ引用として転記,根拠となったVQLクエリ文字列を省略せずそのまま記録する

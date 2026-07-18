@@ -1,0 +1,111 @@
+# OpenZitiポリシー構成のドリフト監査
+
+`ziti edge list services / service-policies / identities -j` でエクスポートしたJSONを、宣言済みの基準構成（role attribute割当・Dial/Bindの対応）と突合し、意図しない乖離（ドリフト）を検出する定期監査手順です。
+
+## 目的
+
+OpenZitiのZTNAオーバーレイでは、Service・Service Policy・Identityにroleを付与した宣言的な設計を前提としますが、運用の中で手作業による例外追加（過剰なService Policy）や利用終了後の放置（孤立identity）が積み重なり、意図した最小権限構成から静かに乖離（ドリフト）していくことがあります。本手順は、定期的に構成をエクスポートし、基準台帳（本CSV）と機械的に突合することで、こうしたドリフトを早期に検出し、是正の変更管理に橋渡しできるようにすることを目指します。
+
+## 用語解説
+
+- **ドリフト（drift）**: 現在の実構成（actual_attr）が、宣言済みの基準構成（expected_attr）と一致していない状態。本手順ではCSVの `drift` 列に `true`/`false` で記録する
+- **role attribute**: identity・service・edge routerに付与するタグ（例: `role.env=prod`）。Service PolicyのidentityRoles/serviceRolesはrole attributeで対象を選択する
+- **Dial/Bind**: Service Policyの `type` フィールド。Dialは接続元（クライアント）としての利用許可、Bindはサービス提供元（ターミネーター登録）としての利用許可を表す
+- **過剰ポリシー**: 想定より広いidentityRoles/serviceRolesを持つ、または `#all` のような包括roleを含むService Policy。手作業での緊急対応が是正されずに残存したものが典型
+- **孤立identity（orphan identity）**: 利用終了（契約終了・異動）後もdept等のrole attributeが更新・削除されず残っているidentity。棚卸し対象として `quarantine-identity` の是正が必要になる
+
+## シナリオ設定
+
+今回の監査対象は {{ csv_rows | length }} 件のオブジェクト（service / service-policy / identity）です。基準台帳には `object_type` / `name` / `expected_attr` / `actual_attr` / `drift` / `action` を記録します。
+
+| object_type | name | expected_attr | actual_attr | drift | action |
+| --- | --- | --- | --- | --- | --- |
+{% for r in csv_rows %}| {{ r["object_type"] }} | {{ r["name"] }} | {{ r["expected_attr"] }} | {{ r["actual_attr"] }} | {{ r["drift"] }} | {{ r["action"] }} |
+{% endfor %}
+## 手順
+
+### 1. controllerへログインし、現状構成をJSONでエクスポートする
+
+```bash
+ziti edge login localhost:1280 -u drift-auditor -p "$ZITI_AUDIT_PW" -y
+
+mkdir -p /var/audit/ziti-drift/$(date +%Y%m%d)
+ziti edge list services -j       > /var/audit/ziti-drift/$(date +%Y%m%d)/services.json
+ziti edge list service-policies -j > /var/audit/ziti-drift/$(date +%Y%m%d)/service-policies.json
+ziti edge list identities -j     > /var/audit/ziti-drift/$(date +%Y%m%d)/identities.json
+```
+
+### 2. 台帳に載っている各オブジェクトの現況を個別に確認する
+
+```bash
+{% for r in csv_rows %}{% if r["object_type"] == "service" %}ziti edge list services 'name="{{ r["name"] }}"' -j
+{% elif r["object_type"] == "service-policy" %}ziti edge list service-policies 'name="{{ r["name"] }}"' -j
+{% elif r["object_type"] == "identity" %}ziti edge list identities 'name="{{ r["name"] }}"' -j
+{% endif %}{% endfor %}```
+
+### 3. エクスポートJSONと基準台帳を突合するスクリプトを実行する
+
+`jq` でエクスポート結果からrole attribute相当の値を抽出し、台帳の `expected_attr` と比較します。
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+EXPORT_DIR="/var/audit/ziti-drift/$(date +%Y%m%d)"
+
+{% for r in csv_rows %}echo "--- {{ r["object_type"] }}: {{ r["name"] }} ---"
+echo "expected: {{ r["expected_attr"] }}"
+{% if r["object_type"] == "service" %}jq -r --arg n "{{ r["name"] }}" '.data[] | select(.name==$n) | .roleAttributes // [] | join(",")' "$EXPORT_DIR/services.json"
+{% elif r["object_type"] == "service-policy" %}jq -r --arg n "{{ r["name"] }}" '.data[] | select(.name==$n) | (.serviceRoles + .identityRoles) | join(",")' "$EXPORT_DIR/service-policies.json"
+{% elif r["object_type"] == "identity" %}jq -r --arg n "{{ r["name"] }}" '.data[] | select(.name==$n) | .roleAttributes // [] | join(",")' "$EXPORT_DIR/identities.json"
+{% endif %}{% endfor %}```
+
+### 4. drift=trueの行を分類し、是正アクションを割り当てる
+
+```bash
+{% for r in csv_rows %}{% if r["drift"] == "true" %}echo "ドリフト検出: {{ r["object_type"] }} {{ r["name"] }} (expected={{ r["expected_attr"] }}, actual={{ r["actual_attr"] }}, action={{ r["action"] }})"
+{% endif %}{% endfor %}```
+
+手作業追加による過剰ポリシー（`action` が `remove-policy` のもの）と、利用終了後に残った孤立identity（`action` が `quarantine-identity` のもの）を優先的に確認します。
+
+### 5. 過剰ポリシーは、新しい構成での正規アクセス成立を確認してから旧ポリシーを外す
+
+過剰なService Policy（例: `#all` を含むもの）を削除する前に、想定どおりのrole attribute構成だけで正規のDial/Bindが成立するかを別途確認します。確認前に削除すると、正規利用者の通信を止めるおそれがあります。
+
+```bash
+{% for r in csv_rows %}{% if r["object_type"] == "service-policy" and r["action"] == "remove-policy" %}# 是正後の想定roleだけでpolicy-advisorが許可を返すことを先に確認する
+ziti edge policy-advisor services "$(echo '{{ r["expected_attr"] }}' | cut -d'#' -f1 | sed 's/role\.env=//')-svc" -q || true
+echo "上記で正規アクセスの成立を確認できてから、以下でポリシーを削除する"
+echo "ziti edge delete service-policy '{{ r["name"] }}'"
+{% endif %}{% endfor %}```
+
+### 6. 孤立identityは即時削除せず、まず認証を無効化して隔離する
+
+```bash
+{% for r in csv_rows %}{% if r["object_type"] == "identity" and r["action"] == "quarantine-identity" %}ziti edge update identity "{{ r["name"] }}" --role-attributes "role.dept=quarantine"
+ziti edge policy-advisor identities "{{ r["name"] }}" -q
+echo "隔離後もdial/bindがNOになっていることを確認してから、変更管理の承認を経て削除する"
+{% endif %}{% endfor %}```
+
+### 7. 監査結果を台帳として保存する
+
+```bash
+mkdir -p /var/audit/ziti-drift/reports
+{% for r in csv_rows %}echo "{{ r["object_type"] }},{{ r["name"] }},{{ r["expected_attr"] }},{{ r["actual_attr"] }},{{ r["drift"] }},{{ r["action"] }}" >> /var/audit/ziti-drift/reports/drift-audit-$(date +%Y%m%d).csv
+{% endfor %}```
+
+## 動作確認
+
+- 全 {{ csv_rows | length }} 件について、エクスポートJSON（services.json / service-policies.json / identities.json）から突合スクリプト（手順3）でactual_attr相当の値を取得できていること
+- 台帳の `drift` 列と、手順3で得られた実測値の一致・不一致が対応していること
+- `drift=true` の各行が `action`（remove-policy / quarantine-identity 等）に沿って分類され、対応する是正手順が特定できていること
+- 過剰ポリシーの是正では、削除前にpolicy-advisor等で新しい構成でも正規アクセスが成立することを確認済みであること
+- 監査結果CSVが `/var/audit/ziti-drift/reports/` に保存されていること
+
+## 注意事項
+
+- エクスポートしたJSON（services.json / service-policies.json / identities.json）にはidentity名やrole attributeなどの識別情報が含まれるため、`/var/audit/ziti-drift/` はアクセス制御された保管場所に置き、閲覧権限を監査担当者に限定すること。
+- ドリフト是正（Service Policyの削除、identityのrole変更など）は、必ず変更管理（チケット起票・承認）と連携させ、本手順の実行だけで直接本番構成を変更しないこと。是正適用は承認後、別の変更作業として行う。
+- 過剰ポリシーを削除する場合は、手順5のように是正後の想定role attributeだけで正規アクセス（Dial/Bind）が成立することを先に確認してから、旧ポリシーを削除すること。確認前に削除すると正規利用者の通信を止める可能性がある。
+- 孤立identityは即座に削除せず、手順6のようにまずquarantine相当のrole変更で認証・到達性を無効化し、一定期間の様子見と変更管理の承認を経てから削除する。
+- 本手順による突合はあくまでスナップショット監査であり、恒常的なドリフト防止には `ziti CLI` スクリプトによる宣言的管理（IaC化）とCI/CDでの適用を推奨する。基準台帳（本CSV相当のソース）はIaCのコードと同じリポジトリで一元管理し、変更はレビューを経て反映すること。
+- 基準台帳（expected_attr）は、正当なポリシー変更を行った際に必ず更新すること。更新を怠ると、次回監査で正当な変更が誤ってドリフトとして検出される。

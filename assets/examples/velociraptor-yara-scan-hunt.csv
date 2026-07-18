@@ -1,0 +1,5 @@
+yara_rule_name,scan_target,rule_summary,hit_action,note
+EICAR_Test_File,file,EICARテスト文字列に一致する既知の無害なテスト検体,escalate,動作確認用の既知パターン
+Cobalt_Strike_Beacon_Config,process,Cobalt StrikeのデフォルトBeacon設定に含まれる文字列とAPIコールパターンに一致,isolate,-
+Mimikatz_Strings,process,Mimikatz由来のsekurlsa/lsadump関数名と特徴文字列に一致,isolate,-
+Suspicious_Base64_PE_Dropper,file,Base64エンコードされたPEヘッダ(MZ)を含むドロッパー系スクリプトに一致,quarantine,誤検知が多いため要精査

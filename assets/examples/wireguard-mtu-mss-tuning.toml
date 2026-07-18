@@ -1,0 +1,4 @@
+interface = "wg0"
+mtu = 1420
+mss_clamp = 1380
+test_target = "10.10.0.1"

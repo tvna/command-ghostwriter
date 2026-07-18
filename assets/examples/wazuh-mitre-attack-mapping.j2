@@ -1,0 +1,104 @@
+# WazuhルールへのMITRE ATT&CK対応付け
+
+検知ルールに ATT&CK の技術ID（Technique ID）を付与し、Wazuhダッシュボードの MITRE ATT&CK モジュールで戦術（Tactic）別の検知カバレッジを可視化します。
+
+## 目的
+
+`local_rules.xml` の各ルールに `<mitre><id>` タグで ATT&CK 技術IDを紐付け、どの戦術・技術に対して検知ルールが存在するか（＝カバレッジ）をダッシュボードから一覧できるようにします。あわせて、検知ルールが存在しない技術（カバレッジの穴）を洗い出す運用の起点を作ることを目指します。
+
+## 用語解説
+
+- **MITRE ATT&CK**: 実際の攻撃で観測された戦術（Tactic）と技術（Technique）を体系化したナレッジベース。戦術は「なぜ」（例: Credential Access）、技術は「どうやって」（例: T1110 Brute Force）にあたる階層構造。
+- **Tactic / Technique 階層**: 1つの Tactic の下に複数の Technique が属し、Technique はさらに Sub-technique（例: T1059.001）に細分化される場合がある。
+- **`<mitre><id>`タグ**: Wazuh のルール定義（`local_rules.xml` など）内でルールに ATT&CK 技術IDを紐付けるためのタグ。1ルールに複数の `<id>` を持たせることも可能。
+- **Wazuh組込みマッピング**: Wazuh のデフォルトルールセットには主要なルールにあらかじめ `<mitre>` タグが付与済みのものが多く、`ruleset/rules/` 配下で確認できる。カスタムルール（`local_rules.xml`）にも同様に付与することで対応範囲を広げる。
+- **MITRE ATT&CKモジュール**: Wazuhダッシュボード上で、発生したアラートを Tactic / Technique 別に集計・可視化する画面。
+- **カバレッジ**: 「検知ルールが存在するか」を示す指標であり、「その攻撃を実際に防御できるか」を示すものではない点に注意（注意事項で詳述）。
+
+## シナリオ設定
+
+| rule_id | description | tactic | technique_id | coverage_note |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["rule_id"] }} | {{ r["description"] }} | {{ r["tactic"] }} | {{ r["technique_id"] }} | {{ r["coverage_note"] }} |
+{% endfor %}
+
+## 1. 既存ルールの構文を確認する
+
+`local_rules.xml` に手を加える前に、現状の構文とルールID採番の空き（100000番台はカスタムルール用の予約域）を確認します。
+
+```bash
+sudo test -f /var/ossec/etc/rules/local_rules.xml && echo "OK: local_rules.xml exists"
+sudo cp /var/ossec/etc/rules/local_rules.xml /var/ossec/etc/rules/local_rules.xml.bak.$(date +%Y%m%d)
+grep -o 'id="1000[0-9]*"' /var/ossec/etc/rules/local_rules.xml | sort -u
+```
+
+## 2. ルールに`<mitre><id>`タグを付与する
+
+シナリオ設定の各行を、ATT&CK 技術IDを紐付けたルール定義として `local_rules.xml` に追記します（実際に反映する前に、いったん別ファイルへ出力して差分を確認してください）。
+
+```bash
+cat >> /tmp/wazuh-mitre-rules.xml <<'EOF'
+<group name="local,mitre,">
+{% for r in csv_rows %}  <rule id="{{ r["rule_id"] }}" level="10">
+    <if_sid>5716</if_sid>
+    <description>{{ r["description"] }}</description>
+    <mitre>
+      <id>{{ r["technique_id"] }}</id>
+    </mitre>
+    <!-- tactic: {{ r["tactic"] }} -->
+    <group>mitre,</group>
+  </rule>
+{% endfor %}</group>
+EOF
+cat /tmp/wazuh-mitre-rules.xml
+```
+
+差分を確認したうえで `<group>...</group>` ブロックを `local_rules.xml` の末尾（`</ossec_config>` の手前ではなく既存 `<group>` の外側）に反映し、構文チェックしてから再起動します。
+
+```bash
+sudo /var/ossec/bin/wazuh-logtest -c /var/ossec/etc/rules/local_rules.xml || echo "構文エラー: 反映前に修正すること"
+sudo /var/ossec/bin/wazuh-control restart
+```
+
+## 3. ダッシュボードのMITRE ATT&CKモジュールで可視化する
+
+アラート発生後、ダッシュボードの `MITRE ATT&CK` モジュール（左メニュー > Threat Intelligence > MITRE ATT&CK）で戦術・技術別の集計が表示されることを確認します。CLIから同等の集計を確認する場合は、Wazuh Indexer（OpenSearch互換API）に対して集計クエリを投げます。
+
+```bash
+curl -k -u "$OS_ADMIN_USER:$OS_ADMIN_PASS" \
+  "https://localhost:9200/wazuh-alerts-*/_search" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "size": 0,
+    "aggs": {
+      "by_technique": {
+        "terms": { "field": "rule.mitre.id" }
+      }
+    }
+  }'
+```
+
+## 4. カバレッジの穴を洗い出す
+
+シナリオ設定の `coverage_note` 列で `-` 以外の値がある行は、既知の課題や未検知ギャップとして扱います。該当行を棚卸しリストとして抽出し、対応ルールの追加やチューニングの対象とします。
+
+```bash
+{% for r in csv_rows %}{% if r["coverage_note"] != "-" %}echo "要対応: {{ r["technique_id"] }} ({{ r["tactic"] }}) - {{ r["coverage_note"] }}"
+{% endif %}{% endfor %}```
+
+戦術（Tactic）ごとに、シナリオ設定に技術IDが1件も存在しない場合はカバレッジ0件とみなし、ダッシュボードの集計結果と突き合わせて追加ルールの要否を判断します。
+
+## 動作確認
+
+- アラート発生時、`rule.mitre.id` フィールドにシナリオ設定どおりの技術IDが付与されていること（ダッシュボードのアラート詳細、または Step 3 の集計クエリで確認）。
+- ダッシュボードの MITRE ATT&CK モジュールで、技術別の検知件数が Step 2 で追加したルールの発火回数と一致すること。
+- Step 4 で抽出した「未検知ギャップ」の技術IDが、集計結果で 0 件（またはルール未紐付け）として表示されること。
+
+## 注意事項
+
+- 上記コマンドの `$OS_ADMIN_USER` / `$OS_ADMIN_PASS` には、Wazuh Indexer（OpenSearch）の管理ユーザー認証情報を環境変数として設定すること。初期構築直後のデモ既定値（`admin`/`admin`相当）のまま運用してはならない。
+- 事前に `local_rules.xml` をバックアップし（Step 1）、`wazuh-logtest` での構文チェック（Step 2）を経てから `wazuh-control restart` を行うこと。構文エラーのまま再起動するとルールセット全体が読み込まれず検知が全面停止するリスクがある。
+- 既存ルール（組込みマッピングや他のカスタムルール）と `rule_id` が重複しないよう、Step 1 で採番状況を必ず確認する。
+- カバレッジは「検知ルールが存在するかどうか」を示す指標であり、「その攻撃を実際に防御・阻止できるか」を保証するものではない。カバレッジがあっても検知精度（誤検知・見逃し）は別途評価すること。
+- 技術ID（Technique ID）は ATT&CK のバージョンによって新設・非推奨・統合が発生する。マッピングを見直す際は、参照している ATT&CK バージョンと Wazuh組込みマッピングのバージョンの整合を確認すること。
+- カバレッジの穴（未検知の技術）の洗い出しは一度で終わらせず、ATT&CKの更新やインフラ変化に合わせて定期的な棚卸し運用として繰り返すこと。

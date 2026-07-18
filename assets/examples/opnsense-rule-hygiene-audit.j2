@@ -1,0 +1,116 @@
+# OPNsenseファイアウォールルールの定期棚卸し
+
+Firewall > Rulesの評価カウンタ(Evaluations/States)と`pfctl -vvsr`相当の統計から未ヒットルールを洗い出し、`rule_id / interface / description / hit_count / last_review / disposition(keep/disable/delete)`の棚卸し表で判定します。any-any許可や説明欄空欄のルールを重点レビュー対象とし、廃止候補はまず無効化(disable)して2週間観察してから削除する二段階の定期監査手順です。
+
+## 目的
+
+OPNsenseファイアウォールのルールを定期的に棚卸しし、ヒットカウンタとログから利用実態を確認した上で、any-any許可や説明欄空欄など過剰許可の疑いがあるルールを優先的にレビューできるようになることを目指します。あわせて、廃止候補は無効化してから一定期間観察し、影響がないことを確認してから削除する二段階の手順を、管理アクセスを失わない安全な順序で実施できるようになることを目指します。
+
+## 用語解説
+
+- **Evaluations/States**: `pfctl -vvsr`で表示される、そのルールが評価された回数(Evaluations)と現在保持しているステート数(States)。ヒットカウンタとして利用実態の確認に使う
+- **rule_id**: 棚卸し台帳でルールを一意に識別するための管理番号。OPNsense本体のUUID(`/api/firewall/filter/searchRule`で取得)と台帳側で対応付けて管理する
+- **any-any許可**: 送信元・宛先・ポートのいずれも限定しない、最も広い許可ルール。意図せず残存すると被害範囲が最大化するため重点レビュー対象とする
+- **説明欄空欄ルール**: `description`が未設定のルール。作成経緯や責任者が追えず、誤って残存している可能性が高いため重点レビュー対象とする
+- **disposition(keep/disable/delete)**: 棚卸しの結果として下す keep(維持)/ disable(無効化して観察)/ delete(削除確定)の判定
+- **二段階無効化**: 削除の前に一度`disable`(無効化)の状態で最低2週間運用し、業務影響が出ないことを確認してから`delete`(削除)に進める段階的な廃止手順
+- **anti-lockout rule**: OPNsenseが自動生成する、GUI/SSH管理アクセス用の暗黙許可ルール。棚卸し対象からは除外する
+- **CARP/pfsync**: OPNsenseの冗長化構成(HA)で使う仮想IP同期(CARP)・状態同期(pfsync)専用の通信。冗長化を維持するため棚卸し対象からは除外する
+
+## シナリオ設定
+
+今回の棚卸し対象は{{ csv_rows | length }}件です。台帳には`rule_id` / `interface` / `description` / `hit_count` / `last_review` / `disposition`を記録します。
+
+| rule_id | interface | description | hit_count | last_review | disposition |
+|---------|-----------|--------------|-----------|--------------|--------------|
+{% for r in csv_rows %}| {{ r["rule_id"] }} | {{ r["interface"] }} | {{ r["description"] }} | {{ r["hit_count"] }} | {{ r["last_review"] }} | {{ r["disposition"] }} |
+{% endfor %}
+
+表中の`description`が`-`の行は説明欄空欄(空欄扱いの明示的な記号)を表します。
+
+## 手順
+
+### 1. 棚卸し対象外(管理アクセス・CARP/pfsync)を仕分ける
+
+管理アクセス経路(OPNsense管理画面へのアクセスや`anti-lockout rule`)と、CARP/pfsyncによるHA冗長化通信は、無効化・削除の判断対象から除外します。台帳の`description`に該当語句が含まれる行を対象外として先に切り分けます。
+
+```bash
+{% for r in csv_rows %}{% if "管理" in r["description"] or "CARP" in r["description"] or "pfsync" in r["description"] %}echo "対象外(除外): {{ r["rule_id"] }} - {{ r["description"] }}"
+{% endif %}{% endfor %}```
+
+この後の手順2〜7は、ここで対象外と判定した行を除く、残りのルールのみに適用します。
+
+### 2. 無効化・削除の前に設定バックアップを取得する
+
+ルールを1件でも無効化する前に、必ず現在の`config.xml`を退避します。復元経路を確保しておくことで、誤って必要なルールを無効化した場合でも即座に切り戻せます。
+
+```bash
+mkdir -p /root/fw-audit-backup
+cp /conf/config.xml /root/fw-audit-backup/config_$(date +%Y%m%d_%H%M%S).xml
+```
+
+### 3. ヒットカウンタ(Evaluations/States)を取得し台帳と突き合わせる
+
+`pfctl -vvsr`で各ルールの評価回数・ステート数を取得し、台帳の`hit_count`と乖離がないか確認します。
+
+```bash
+pfctl -vvsr > /tmp/pfctl-rules.txt
+{% for r in csv_rows %}grep -A1 "{{ r["rule_id"] }}" /tmp/pfctl-rules.txt || echo "{{ r["rule_id"] }}: pfctlラベル未検出(台帳のhit_count={{ r["hit_count"] }}を暫定値として使用)"
+{% endfor %}```
+
+### 4. any-any許可・説明欄空欄ルールを重点レビュー対象として抽出する
+
+```bash
+{% for r in csv_rows %}{% if "any-any" in r["description"] %}echo "重点レビュー(any-any許可): {{ r["rule_id"] }} - {{ r["description"] }} (last_review={{ r["last_review"] }})"
+{% endif %}{% if r["description"] == "-" %}echo "重点レビュー(説明欄空欄): {{ r["rule_id"] }} (interface={{ r["interface"] }}, hit_count={{ r["hit_count"] }})"
+{% endif %}{% endfor %}```
+
+抽出されたルールは、hit_countが0であっても直ちに廃止と断定せず、次の手順5で影響確認を行ってからdispositionを確定します。
+
+### 5. 無効化前に代替アクセス経路を確保し、影響を確認する
+
+対象ルールが業務通信やSSH/管理アクセスに関わる可能性がある場合、無効化によって意図せず通信が途絶えないよう、無効化前に必ず次を確認します。
+
+1. 現在の管理セッション(SSH/WebGUI)を切断せずに維持したまま、別端末やタブから新規にSSH接続・WebGUIログインを試み、管理アクセス経路が手順1で除外した`anti-lockout rule`側で維持されていることを確認する
+2. 対象ルールが担う通信について、他の許可ルール(並行するより限定的な許可ルール)で同等の正当な通信が引き続き許可される見込みであることを、`Firewall > Rules`の一覧で確認する
+3. 新規セッション・並行ルールでの疎通が確認できるまで、対象ルールの無効化には進まない
+
+### 6. dispositionに沿って一段階目(disable)を実行する
+
+`disposition`が`disable`の行を、削除ではなくまず無効化します。UUIDは`/api/firewall/filter/searchRule`の応答から`rule_id`に対応する行を特定して取得してください。
+
+```bash
+{% for r in csv_rows %}{% if r["disposition"] == "disable" %}curl -k -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST \
+  https://fw.example.internal/api/firewall/filter/toggleRule/CHANGE_ME_UUID_{{ r["rule_id"] }}/0
+{% endif %}{% endfor %}curl -k -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST https://fw.example.internal/api/firewall/filter/apply
+```
+
+`CHANGE_ME_UUID_<rule_id>`は、手順内で取得した実際のUUIDに置き換えてください。無効化した日時を台帳の`last_review`に追記し、2週間後に手順7の削除判断を行う予定日として記録します。
+
+### 7. 2週間観察後、dispositionが確定した行を削除する
+
+無効化から2週間経過し、業務影響の報告がないことを確認できたルールのみ、`disposition`を`delete`に更新して削除します。
+
+```bash
+{% for r in csv_rows %}{% if r["disposition"] == "delete" %}curl -k -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST \
+  https://fw.example.internal/api/firewall/filter/delRule/CHANGE_ME_UUID_{{ r["rule_id"] }}
+{% endif %}{% endfor %}curl -k -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST https://fw.example.internal/api/firewall/filter/apply
+```
+
+## 動作確認
+
+1. 手順1で除外した管理アクセス・CARP/pfsync関連ルールが、手順6・7のいずれの一覧にも含まれていないこと
+2. 全{{ csv_rows | length }}件について`disposition`(keep/disable/delete)が確認できていること
+3. any-any許可・説明欄空欄ルールがすべて手順4の重点レビュー対象として抽出されていること
+4. 手順5の代替アクセス経路確認(新規セッション・並行ルールでの疎通)を完了してから、対象ルールの無効化に進んだこと
+5. `disable`済みルールについて、`pfctl -vvsr`で対象ルールが評価対象から外れ、かつ既存の正当な通信が引き続き許可されていること
+6. `delete`実行後、`/api/firewall/filter/searchRule`の結果に該当ルールが存在しないこと
+
+## 注意事項
+
+- 管理アクセス(`anti-lockout rule`を含むGUI/SSHアクセス経路)およびCARP/pfsyncによるHA冗長化通信は、本棚卸しの対象から必ず除外する。誤って無効化するとロックアウトやHAフェイルオーバー不能につながる。
+- ルールを1件でも無効化する前に、手順2の`config.xml`バックアップを必ず取得する。
+- 無効化はいきなり削除せず、まず`disable`にして最低2週間観察する二段階を徹底する。観察期間中に業務影響の報告があれば、直ちに`keep`へ差し戻す。
+- 無効化前に、手順5の代替アクセス経路(別セッションでの疎通・並行する限定的な許可ルールの存在)を必ず確認する。新しい経路・並行ルールでの疎通が確認できるまで、対象ルールを無効化しない。
+- hit_countが0であっても、月次バッチや季節性の通信である可能性があるため、`last_review`の期間だけで機械的に`delete`と判断しない。
+- API key/secretは平文でリポジトリやログに残さず、環境変数や秘密管理ツール経由で扱う。

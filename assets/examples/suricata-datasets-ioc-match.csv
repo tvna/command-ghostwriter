@@ -1,0 +1,6 @@
+ioc_value,ioc_type,source,added_at,expire_at
+evil-c2.example-bad.net,domain,internal-soc-feed,2026-07-01,2026-08-01
+totally-not-malware.example-bad.net,sni,internal-soc-feed,2026-07-01,2026-08-01
+malicious-cdn.example-bad.net,domain,otx-community-feed,2026-07-10,2026-07-25
+9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08,sha256,otx-community-feed,2026-07-10,2026-08-10
+phishing-portal.example-bad.net,domain,otx-community-feed,2026-07-15,2026-07-22

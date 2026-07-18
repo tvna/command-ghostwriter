@@ -1,0 +1,156 @@
+# KeycloakでのWebAuthn/パスキー導入 — {{ realm }}
+
+レルム **{{ realm }}** の認証フローにWebAuthn（フィッシング耐性のある公開鍵暗号方式の認証）を組み込み、パスキーによるパスワードレスログインを導入する手順です。ロックアウトを避けるため、必ずバックアップ認証手段の整備とテストユーザーでの確認を先に行ってから、既存フローを切り替えてください。
+
+## 目的
+
+WebAuthnポリシー（RPエンティティ名・署名アルゴリズム・アテステーション・ユーザー検証要件）を設定し、認証フローへWebAuthn Authenticatorを組み込んだうえで、required actionによる認証器登録とパスキーログインを、既存ユーザーをロックアウトしない順序で導入できるようになることを目指します。
+
+## 用語解説
+
+- **WebAuthn**: ブラウザ標準の公開鍵暗号方式による認証API。秘密鍵は認証器（セキュリティキーやOS内蔵の生体認証）から外に出ない
+- **フィッシング耐性(origin bind)**: WebAuthnの認証器は、鍵登録時のオリジン（`https://{{ rp_id }}` のようなドメイン）に署名を紐付けるため、偽サイトに認証情報を持ち込まれても認証が成立しない
+- **パスキー(passwordless)**: パスワード入力を経由せず、WebAuthn認証器単体で本人確認を完結させる方式。Keycloakでは「WebAuthn Passwordless Policy」と`webauthn-register-passwordless` required actionで実現する
+- **追加要素(2要素目)としてのWebAuthn**: パスワード認証を残したまま、2つ目の要素としてWebAuthn認証器を要求する方式。Keycloakでは「WebAuthn Policy」と`webauthn-register` required actionで実現する
+- **resident key(discoverable credential)**: 認証器側に鍵とユーザー情報を保持させる方式。ユーザー名入力なしでパスキーログインを開始できる（パスキー運用には`resident_key: true`が必須）
+- **rpId**: WebAuthnの信頼できるオリジンの基準となるホスト名。Keycloakのフロントエンドホスト名と一致していないと登録・認証が失敗する
+- **required action**: ユーザーの次回ログイン時に強制される追加設定（認証器登録など）
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| レルム | {{ realm }} |
+| Keycloakホスト | {{ kcadm_host }} |
+| rpEntityName | {{ rp_entity_name }} |
+| rpId(ホスト名) | {{ rp_id }} |
+| ユーザー検証要件 | {{ user_verification }} |
+| resident key必須化 | {{ "Yes" if resident_key else "No" }} |
+| パスワードレス(パスキー)運用 | {{ "有効" if passwordless else "無効(追加要素のみ)" }} |
+| アテステーション | {{ attestation_conveyance }} |
+| 対象認証フロー名 | {{ flow_name }} |
+| テストユーザー | {{ test_user }} |
+
+## 1. WebAuthnポリシーを設定する
+
+追加要素用の「WebAuthn Policy」を設定します。ここで登録した認証器は`webauthn-register`（2要素目としての登録）に使われます。
+
+```bash
+kcadm.sh config credentials --server {{ kcadm_host }} --realm master --user admin --password '<admin-password>'
+
+kcadm.sh update realms/{{ realm }} \
+  -s webAuthnPolicyRpEntityName="{{ rp_entity_name }}" \
+  -s 'webAuthnPolicySignatureAlgorithms=[{% for alg in signature_algorithms %}"{{ alg }}"{% if not loop.last %},{% endif %}{% endfor %}]' \
+  -s webAuthnPolicyAttestationConveyancePreference={{ attestation_conveyance }} \
+  -s webAuthnPolicyUserVerificationRequirement={{ user_verification }} \
+  -s webAuthnPolicyRequireResidentKey={{ "Yes" if resident_key else "No" }}
+```
+
+{% if passwordless %}
+パスキー（パスワードレス）運用のため、別建ての「WebAuthn Passwordless Policy」も同じ値で設定します。resident keyは`Yes`固定です（discoverable credentialでないとユーザー名入力なしのパスキーログインが成立しません）。
+
+```bash
+kcadm.sh update realms/{{ realm }} \
+  -s webAuthnPolicyPasswordlessRpEntityName="{{ rp_entity_name }}" \
+  -s 'webAuthnPolicyPasswordlessSignatureAlgorithms=[{% for alg in signature_algorithms %}"{{ alg }}"{% if not loop.last %},{% endif %}{% endfor %}]' \
+  -s webAuthnPolicyPasswordlessAttestationConveyancePreference={{ attestation_conveyance }} \
+  -s webAuthnPolicyPasswordlessUserVerificationRequirement={{ user_verification }} \
+  -s webAuthnPolicyPasswordlessRequireResidentKey=Yes
+```
+{% endif %}
+
+## 2. rpIdの整合を確認する
+
+Keycloakの「Frontend URL」（レルム設定）のホスト名が `{{ rp_id }}` と一致していることを確認します。不一致だとブラウザ側のオリジンとWebAuthnのrpIdが合わず、登録・認証が失敗します。
+
+```bash
+kcadm.sh get realms/{{ realm }} --fields frontendUrl,sslRequired
+```
+
+## 3. 認証フローを複製し、WebAuthn Authenticatorを追加する
+
+組み込みの`browser`フローは直接編集できないため、複製してから編集します。既存ユーザーのログインを止めないよう、この時点ではまだレルムの既定フローには設定しません。
+
+```bash
+kcadm.sh create -r {{ realm }} authentication/flows/browser/copy -s newName="{{ flow_name }}"
+
+kcadm.sh create -r {{ realm }} "authentication/flows/{{ flow_name }}/executions/execution" \
+  -b '{"provider":"webauthn-authenticator"}'
+
+kcadm.sh get -r {{ realm }} "authentication/flows/{{ flow_name }}/executions"
+```
+
+上記の一覧から、追加した`webauthn-authenticator`のexecution `id` を控え、要件を`REQUIRED`に設定します。
+
+```bash
+kcadm.sh update -r {{ realm }} authentication/executions \
+  -b '{"id":"<webauthn-authenticator-execution-id>","requirement":"REQUIRED"}'
+```
+
+## 4. required actionを有効化する
+
+追加要素登録用の`webauthn-register`を有効化します。
+
+```bash
+kcadm.sh update -r {{ realm }} "authentication/required-actions/webauthn-register" \
+  -s enabled=true -s defaultAction=false
+```
+
+{% if passwordless %}
+パスキー登録用の`webauthn-register-passwordless`も有効化します。
+
+```bash
+kcadm.sh update -r {{ realm }} "authentication/required-actions/webauthn-register-passwordless" \
+  -s enabled=true -s defaultAction=false
+```
+{% endif %}
+
+## 5. バックアップ手段を整備してからテストユーザーへ割り当てる
+
+WebAuthn認証器の紛失・故障に備え、次のバックアップ手段を先に整備します。これを飛ばして required action を必須にすると、認証器を失った瞬間にログイン不能になります。
+
+{% for b in backup_authenticators %}- {{ b.label }}（required action: `{{ b.required_action }}`）
+{% endfor %}
+
+バックアップ手段の整備を確認したうえで、まずはテストユーザー `{{ test_user }}` だけに required action を割り当てます（全ユーザーへの一括適用はStep 7の動作確認後に行います）。
+
+```bash
+TEST_USER_ID=$(kcadm.sh get -r {{ realm }} users -q username={{ test_user }} --fields id --format csv --noquotes | tail -n1)
+kcadm.sh update -r {{ realm }} "users/${TEST_USER_ID}" \
+  -s 'requiredActions=["webauthn-register"{% if passwordless %},"webauthn-register-passwordless"{% endif %}]'
+```
+
+## 6. 別ブラウザセッションでテストユーザーの登録〜認証を確認する
+
+**この確認が取れるまで、レルムの既定ブラウザフローを切り替えないでください。** 現行の`browser`フローを使ったセッションを別に保持したまま、テストユーザー専用のブラウザ（別プロファイルやシークレットウィンドウ）で複製フロー経由のログインを試します。
+
+```bash
+kcadm.sh get -r {{ realm }} realms/{{ realm }} --fields browserFlow   # 現状維持を確認（まだ変更しない）
+echo "ブラウザで https://{{ kcadm_host }}/realms/{{ realm }}/account/ に {{ test_user }} でログインし、"
+echo "WebAuthn認証器の登録プロンプトに従って認証器を登録してください。"
+```
+
+登録後、ログアウトしてパスキー（または追加要素）でのログインが成立することを確認します。
+
+## 7. 動作確認
+
+- Step 6でテストユーザー `{{ test_user }}` が認証器を登録でき、再ログイン時にWebAuthnプロンプトが表示されること
+{% if passwordless %}- パスワード入力なしにパスキー（`{{ rp_entity_name }}`のdiscoverable credential）だけでログインできること
+{% endif %}- WebAuthn/パスキー非対応のブラウザ・環境からアクセスした場合に、パスワード認証など既存の代替経路へフォールバックし、ログイン自体は継続できること
+- Step 5のバックアップ手段（{{ backup_authenticators[0].label }}）でも本人確認・再登録ができること
+
+## 8. 確認後、レルムの既定ブラウザフローへ反映する
+
+Step 6・7の確認が取れてから初めて、複製フロー `{{ flow_name }}` をレルムの既定ブラウザフローに設定し、他ユーザーへも順次 required action を展開します。
+
+```bash
+kcadm.sh update realms/{{ realm }} -s browserFlow="{{ flow_name }}"
+```
+
+## 注意事項
+
+- rpId（`{{ rp_id }}`）とKeycloakのFrontend URLのホスト名が一致していないと、WebAuthnの登録・認証が失敗する。ホスト名変更時は必ずWebAuthnポリシーとFrontend URLを同時に見直す。
+- 認証器紛失時は、Step 5で整備したバックアップ手段（{% for b in backup_authenticators %}{{ b.label }}{% if not loop.last %}、{% endif %}{% endfor %}）で本人確認したうえで、管理者が古い認証器の登録解除と新規登録を行う。バックアップ手段が未整備のままrequired actionを必須化すると、認証器紛失時にログイン不能となる。
+- ブラウザ・OSの組み合わせによって、resident key（discoverable credential）やユーザー検証(`{{ user_verification }}`)の対応状況が異なる。非対応環境向けに、Step 7で確認したパスワード認証等へのフォールバック経路を必ず残す。
+- Step 6の別セッション確認が完了するまで、Step 8のレルム既定ブラウザフロー切り替えを行わない。順序を誤ると、複製フローの設定ミスに気づかないまま全ユーザーのログインが影響を受ける。
+- 全ユーザーへのrequired action展開はテストユーザーでの確認後に段階的に行い、一度に全ユーザーへ強制しない。

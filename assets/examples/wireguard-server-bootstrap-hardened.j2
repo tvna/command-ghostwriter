@@ -1,0 +1,125 @@
+# WireGuard サーバの要塞化初期構築手順
+
+最小権限・鍵管理・ファイアウォール連携を含めて、WireGuard サーバ（{{ server.hostname }}）を要塞化された状態でゼロから構築します。作業は root 権限を持つ SSH セッションで実施してください。
+
+## 目的
+
+WireGuard サーバの初期構築を、鍵の安全な保管・最小権限のポート開放・IaC 前提の構成管理という 3 点を満たした形で行い、途中でロックアウト（管理経路の喪失）を起こさない手順を身につけることを目指します。
+
+## 用語解説
+
+- **WireGuard**: カーネル空間で動作する軽量な VPN 実装。UDP 1 ポートのみで待受け、鍵交換に Noise プロトコルを使う
+- **UDP シングルポート最小攻撃面**: WireGuard は listen_port の UDP のみを外部に公開すればよく、TCP ポートや複数ポートを開ける必要がないため、ファイアウォールでは listen_port 以外をすべて遮断するのが最小攻撃面の原則
+- **SaveConfig**: `wg-quick` が終了時に実行時の peer 変更を conf ファイルへ書き戻すオプション。`false` にすることで、conf ファイルの内容を Git 等の IaC 管理下に置いた「意図した構成」のみに保ち、実行時の一時的な変更で構成がドリフトするのを防ぐ
+- **ip_forward**: カーネルが受信したパケットを別インターフェースへ転送する機能。VPN 経由でトンネル内から外部ネットワークへ到達させるために必要
+- **ロックアウト防止順序**: トンネル外の管理経路（既存の SSH）を維持したままトンネルを構築し、疎通確認が取れてから初めて管理経路をトンネル内へ移す作業順序
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| ホスト名 | {{ server.hostname }} |
+| インターフェース名 | {{ server.interface }} |
+| トンネルアドレス | {{ server.tunnel_address }} |
+| ListenPort | {{ server.listen_port }}/udp |
+| 外部インターフェース | {{ server.external_iface }} |
+| ファイアウォールバックエンド | {{ server.firewall_backend }} |
+| 管理者許可ネットワーク | {{ admin_access.allowed_admin_net }} |
+| 既存 SSH ポート | {{ admin_access.ssh_port }} |
+| 秘密鍵パス | {{ key_paths.private_key_path }} |
+| 公開鍵パス | {{ key_paths.public_key_path }} |
+| conf パス | {{ key_paths.conf_path }} |
+
+## 1. 鍵ペアを生成し、権限を絞って保管する
+
+`wg genkey` で秘密鍵を生成し、公開鍵を導出します。秘密鍵ファイルは所有者のみ読み書き可能な 600 権限にします。
+
+```bash
+umask 077
+mkdir -p {{ key_paths.dir }}
+wg genkey | tee {{ key_paths.private_key_path }} | wg pubkey > {{ key_paths.public_key_path }}
+chmod 600 {{ key_paths.private_key_path }}
+chmod 644 {{ key_paths.public_key_path }}
+chown root:root {{ key_paths.private_key_path }} {{ key_paths.public_key_path }}
+```
+
+## 2. wg0.conf を作成する
+
+`SaveConfig = false` にして、conf ファイルの内容を唯一の構成源（IaC 管理）として扱います。実行時に peer を追加しても conf は自動で書き換わりません。
+
+```bash
+cat > {{ key_paths.conf_path }} <<'EOF'
+[Interface]
+Address = {{ server.tunnel_address }}
+ListenPort = {{ server.listen_port }}
+PrivateKey = $(cat {{ key_paths.private_key_path }})
+SaveConfig = false
+EOF
+chmod 600 {{ key_paths.conf_path }}
+```
+
+## 3. IP フォワーディングを有効化する
+
+トンネル内から外部ネットワークへパケットを転送できるよう、カーネルの ip_forward を恒久的に有効化します。
+
+```bash
+sed -i 's/^#net.ipv4.ip_forward=1/net.ipv4.ip_forward=1/' /etc/sysctl.conf
+sysctl -p
+```
+
+## 4. ListenPort のみをファイアウォールで許可する
+
+{% if server.firewall_backend == "nftables" %}
+`{{ server.listen_port }}/udp` のみを許可し、他は遮断します（nftables）。
+
+```bash
+nft add table inet filter
+nft add chain inet filter input { type filter hook input priority 0 \; policy drop \; }
+nft add rule inet filter input ct state established,related accept
+nft add rule inet filter input iif lo accept
+nft add rule inet filter input tcp dport {{ admin_access.ssh_port }} ip saddr {{ admin_access.allowed_admin_net }} accept
+nft add rule inet filter input udp dport {{ server.listen_port }} accept
+nft list ruleset > /etc/nftables.conf
+systemctl enable --now nftables
+```
+{% else %}
+`{{ server.listen_port }}/udp` のみを許可し、他は遮断します（iptables）。
+
+```bash
+iptables -P INPUT DROP
+iptables -A INPUT -i lo -j ACCEPT
+iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+iptables -A INPUT -p tcp --dport {{ admin_access.ssh_port }} -s {{ admin_access.allowed_admin_net }} -j ACCEPT
+iptables -A INPUT -p udp --dport {{ server.listen_port }} -j ACCEPT
+iptables-save > /etc/iptables/rules.v4
+```
+{% endif %}
+
+既存の SSH（{{ admin_access.ssh_port }}/tcp、送信元 {{ admin_access.allowed_admin_net }} のみ）はこの時点でも遮断しないでください。トンネルの疎通確認が取れるまで、管理経路をトンネル外に維持します。
+
+## 5. wg-quick を有効化・起動する
+
+```bash
+systemctl enable wg-quick@{{ server.interface }}
+systemctl start wg-quick@{{ server.interface }}
+```
+
+## 6. ロックアウト防止のための移行順序
+
+1. 上記手順でトンネルを起動した直後も、既存の SSH セッション（{{ admin_access.ssh_port }}/tcp 経由）は切断しない。
+2. 別端末から新規に SSH セッションを開き、`{{ admin_access.allowed_admin_net }}` からの接続と、トンネル経由（{{ server.tunnel_address }} 宛）の疎通を両方確認する。
+3. 両方の疎通が確認できてから、必要な場合に限り SSH の待受けをトンネル内アドレスのみに絞る変更を行う。疎通確認前に既存経路を遮断しない。
+
+## 動作確認
+
+1. `wg show` でインターフェース {{ server.interface }} が表示され、ListenPort が {{ server.listen_port }} であることを確認する。
+2. `systemctl status wg-quick@{{ server.interface }}` で `active (exited)` になっていることを確認する。
+3. 外部ネットワークから `nc -u -zv <サーバのグローバルIP> {{ server.listen_port }}` 等で ListenPort への到達性を確認する。
+4. 「6. ロックアウト防止のための移行順序」の手順 2 で、新規 SSH セッションとトンネル疎通の両方が確立できることを確認する。
+
+## 注意事項
+
+- {{ key_paths.private_key_path }} には平文の秘密鍵が保存される。600 権限を維持し、バックアップを取る場合も暗号化ボリュームなど同等以上の保護がされた場所に保管する。
+- {{ key_paths.conf_path }} にも `PrivateKey` が平文で記載される。conf ファイルを Git 等へコミットする場合は、秘密鍵行を除外するか、シークレット管理システム経由でデプロイ時に注入する運用にする。
+- `SaveConfig = false` を外すと、`wg-quick down` 時に実行時の peer 変更が conf に書き戻され、IaC で管理している構成と実機の状態がドリフトする。IaC 管理を維持する場合は `false` のままにする。
+- ファイアウォール変更やトンネル起動の作業中は、既存の SSH 経路（{{ admin_access.ssh_port }}/tcp、{{ admin_access.allowed_admin_net }}）を先に遮断しない。「6. ロックアウト防止のための移行順序」で疎通確認が取れるまで、新旧どちらの経路も生かしておく。

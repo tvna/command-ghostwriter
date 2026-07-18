@@ -1,0 +1,6 @@
+audit_profile: /etc/lynis/custom.prf
+skip_tests:
+  - FIRE-4512
+  - HTTP-6622
+report_path: /var/log/lynis-report.dat
+baseline_hardening_index: 68

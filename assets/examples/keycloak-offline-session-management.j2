@@ -1,0 +1,129 @@
+# Keycloakオフラインセッションの管理
+
+offline token（オフラインセッション）の有効期間・付与範囲・失効を kcadm.sh で管理し、長寿命トークンが持つリスクを制御する手順書です。
+
+## 目的
+
+`offlineSessionIdleTimeout` / `offlineSessionMaxLifespan` によるオフラインセッションの寿命制御と、`offline_access` スコープの付与制限、kcadm.sh によるアクティブなオフラインセッションの確認・失効を実施できるようになることを目指します。
+
+## 用語解説
+
+- **offline token（オフラインセッション）**: `offline_access` スコープ付きで発行されるリフレッシュトークン。通常のリフレッシュトークンと異なりブラウザSSOセッションの生存に依存せず、ユーザーが一度も再ログインしなくても長期間有効であり続ける
+- **offlineSessionIdleTimeout**: オフラインセッションが一定時間リフレッシュされない場合に失効するまでのアイドルタイムアウト（秒）
+- **offlineSessionMaxLifespan**: リフレッシュの有無に関わらずオフラインセッションが強制的に失効する絶対上限（秒）
+- **デバイス紐付けリスク**: offline tokenはモバイルアプリ等の端末に長期保存されるため、端末紛失・廃棄・盗難時にトークンだけが生き残り、正規ユーザー不在のまま長期間APIアクセスが継続し得るリスク
+- **offline_access scope**: クライアントに付与するとoffline tokenの発行を許可するクライアントスコープ。無制限に付与すると全クライアントが長寿命トークンを発行できてしまう
+- **notBefore（失効基準時刻）**: これより前に発行されたトークンを一括で無効化するレルム/クライアント単位の基準時刻
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| レルム | {{ realm.name }} |
+| offlineSessionIdleTimeout（秒） | {{ realm.offline_idle_seconds }} |
+| offlineSessionMaxLifespan（秒） | {{ realm.offline_max_lifespan }} |
+| 対象クライアント | {{ client.id }} |
+| offline_access scope を限定クライアントのみに付与 | {{ client.offline_scope_restricted }} |
+| 棚卸しレビュー間隔 | {{ review.review_interval }} |
+
+## 1. レルムのオフラインセッション寿命を設定する
+
+```bash
+/opt/keycloak/bin/kcadm.sh config credentials --server https://idp.example.com --realm master --user admin --password "$KC_ADMIN_PASSWORD"
+
+/opt/keycloak/bin/kcadm.sh update realms/{{ realm.name }} \
+  -s offlineSessionIdleTimeout={{ realm.offline_idle_seconds }} \
+  -s offlineSessionMaxLifespan={{ realm.offline_max_lifespan }} \
+  -s offlineSessionMaxLifespanEnabled=true
+```
+
+`offlineSessionMaxLifespanEnabled=true` を設定しないと `offlineSessionMaxLifespan` が無視され、アイドルタイムアウトさえ満たせばoffline tokenが無期限に更新され続けます。
+
+## 2. offline_access scopeの付与範囲を確認する
+
+```bash
+/opt/keycloak/bin/kcadm.sh get clients -r {{ realm.name }} --fields 'clientId,id' | grep -B1 '"clientId"'
+
+/opt/keycloak/bin/kcadm.sh get clients/{{ client.id }}/optional-client-scopes -r {{ realm.name }} --fields name
+```
+
+`offline_access` が全クライアントの optional/default scope に含まれていないか確認します。含まれる範囲が広いほど、長寿命トークンを発行できるクライアントが増え、攻撃対象領域が拡大します。
+
+## 3. 限定クライアントのみにoffline_access scopeを絞り込む
+
+まず対象外クライアントで `offline_access` を無効化する前に、許可対象クライアント（`{{ client.id }}`）が新しい設定のままoffline tokenを取得できることを並行して確認してから、他クライアントの権限を外します。
+
+```bash
+# 許可対象クライアント: offline_access を default scope として維持
+/opt/keycloak/bin/kcadm.sh update clients/{{ client.id }} -r {{ realm.name }} \
+  -s 'defaultClientScopes=["offline_access","profile","email"]'
+
+# 許可対象外クライアントの一覧から offline_access を除外(例: other-appの場合)
+/opt/keycloak/bin/kcadm.sh update clients/other-app -r {{ realm.name }} \
+  -s 'optionalClientScopes=[]'
+```
+
+## 4. 新しい制限下でoffline tokenを取得できることを確認する
+
+対象外クライアントの scope を外した直後に、許可対象クライアントで実際にoffline tokenが取得できることを確認してから完了とします。
+
+```bash
+curl -s -X POST https://idp.example.com/realms/{{ realm.name }}/protocol/openid-connect/token \
+  -d "client_id={{ client.id }}" \
+  -d "client_secret=$CLIENT_SECRET" \
+  -d "grant_type=password" \
+  -d "username=sato" \
+  -d "password=$USER_PASSWORD" \
+  -d "scope=openid offline_access" | grep -o '"refresh_token"'
+```
+
+`"refresh_token"` が返らない場合は `defaultClientScopes` の反映漏れです。Step 3 に戻って設定を確認してください。
+
+## 5. アクティブなオフラインセッションを確認する
+
+```bash
+{% for s in offline_sessions %}/opt/keycloak/bin/kcadm.sh get "clients/{{ client.id }}/offline-sessions" -r {{ realm.name }} --fields 'userSessionId,username,start' | grep -A2 '{{ s.user }}'
+{% endfor %}
+```
+
+シナリオ上のオフラインセッション一覧は次のとおりです。
+
+- {{ offline_sessions[0].user }}: セッションID `{{ offline_sessions[0].session_id }}`（開始日 {{ offline_sessions[0].started_at }}）
+- {{ offline_sessions[1].user }}: セッションID `{{ offline_sessions[1].session_id }}`（開始日 {{ offline_sessions[1].started_at }}）
+
+## 6. 不要デバイスのoffline tokenを個別に失効する
+
+棚卸しで不要と判定したデバイス（機種変更・退職等）のオフラインセッションのみをピンポイントで失効します。
+
+```bash
+{% for d in revoked_devices %}# {{ d.user }}: {{ d.reason }}
+/opt/keycloak/bin/kcadm.sh delete "clients/{{ client.id }}/offline-sessions/{{ d.session_id }}" -r {{ realm.name }}
+{% endfor %}
+```
+
+## 7. 漏洩時にレルム全体のoffline sessionを一括失効する
+
+offline tokenの漏洩が疑われる場合は、個別失効では対応が追いつきません。`notBefore` にこの瞬間の時刻を設定し、それより前に発行された全トークン（offline token含む）を一括で無効化します。
+
+```bash
+/opt/keycloak/bin/kcadm.sh update realms/{{ realm.name }} -s "notBefore=$(date +%s)"
+
+/opt/keycloak/bin/kcadm.sh get "clients/{{ client.id }}/push-revocation" -r {{ realm.name }} -X POST
+```
+
+## 動作確認
+
+- Step 1 反映後、`kcadm.sh get realms/{{ realm.name }} --fields offlineSessionIdleTimeout,offlineSessionMaxLifespan` の出力が設定値と一致すること
+- Step 4 で許可対象クライアント（`{{ client.id }}`）はoffline tokenを取得でき、対象外クライアントでは `scope=offline_access` を要求してもrefresh_tokenが返らないこと
+- アイドルタイムアウト（{{ realm.offline_idle_seconds }}秒）到達後、当該セッションが Step 5 の一覧から消えていること
+- 絶対上限（{{ realm.offline_max_lifespan }}秒）到達後、リフレッシュ操作を試みても `token_expired` 等のエラーで拒否されること
+- Step 6・7 実行後、対象セッションIDが Step 5 の一覧に再表示されないこと
+
+## 注意事項
+
+- offline tokenの棚卸しは `{{ review.review_interval }}` を目安に定期実施し、機種変更・退職・休眠アカウントに紐づく不要デバイスのセッションを個別に失効する。
+- `offline_access` scopeは全クライアントへ無制限に付与せず、業務上必要な限定クライアント（`{{ client.id }}`）のみのdefault/optional scopeに絞り込む。
+- scopeを絞り込む際は、対象外クライアントを無効化する前に許可対象クライアントで新しい設定のままoffline tokenを取得できることを Step 4 で必ず確認してから完了とする（認証経路を切る前に新経路が機能することを検証する）。
+- offline tokenの漏洩が疑われる場合は、個別失効を待たずStep 7の `notBefore` 更新でレルム全体のトークンを即時に一括失効し、その後正規クライアントの再認証を案内する。
+- `notBefore` の更新は当該レルムの全ユーザー・全クライアントのセッションに影響するため、緊急時以外の乱用は避け、実施したら関係者に周知する。
+- 本番レルムに適用する前に検証用レルムで同じ手順を試し、`offlineSessionMaxLifespanEnabled` の設定漏れがないことを確認する。

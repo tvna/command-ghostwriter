@@ -1,0 +1,24 @@
+title: LokiのS3互換オブジェクトストレージ移行
+hostname: loki-01
+loki_version: "2.9.4"
+config_path: /etc/loki/config.yaml
+old_storage_path: /var/lib/loki
+s3_endpoint: https://minio.internal.example.com:9000
+s3_region: us-east-1
+path_style: true
+schema_store: tsdb
+schema_from_date: "2026-08-01"
+log_job_label: varlogs
+buckets:
+  - name: loki-chunks-prod
+    purpose: チャンクデータ
+  - name: loki-ruler-prod
+    purpose: ルール保管
+credentials_methods:
+  - method: IAMロール(推奨)
+    detail: EC2/EKS等の実行基盤にIAMロールを付与し、access_key/secret_keyの平文記載を不要にする
+  - method: 環境変数
+    detail: systemdのEnvironment=でAWS_ACCESS_KEY_IDとAWS_SECRET_ACCESS_KEYを注入し、YAML本体には記載しない
+  - method: access_key直書き(非推奨)
+    detail: storage_config.aws.access_key_id/secret_access_keyへ平文記載。検証環境限定でのみ許容
+escalation: ログ基盤チーム (内線 1305、演習用連絡先)

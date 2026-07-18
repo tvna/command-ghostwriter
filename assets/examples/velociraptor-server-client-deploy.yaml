@@ -1,0 +1,16 @@
+server_url: "https://vr-server.example.internal:8000"
+frontend_bind: "0.0.0.0:8000"
+gui_bind: "127.0.0.1:8889"
+client_config_deployed: false
+ca_managed: false
+config_dir: "/opt/velociraptor"
+server_config_path: "/opt/velociraptor/server.config.yaml"
+client_config_path: "/opt/velociraptor/client.config.yaml"
+api_config_path: "/opt/velociraptor/api.config.yaml"
+datastore_dir: "/opt/velociraptor/datastore"
+admin_user: "vr-admin"
+client_hostname: "edr-client01.example.internal"
+client_config_dest: "/opt/velociraptor/client.config.yaml"
+binary_path: "/usr/local/bin/velociraptor"
+systemd_service_server: "velociraptor-server"
+systemd_service_client: "velociraptor-client"

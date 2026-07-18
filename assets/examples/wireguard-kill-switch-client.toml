@@ -1,0 +1,17 @@
+[wireguard]
+interface = "wg0"
+client_address = "10.66.0.2/32"
+private_key_file = "/etc/wireguard/wg0-private.key"
+server_public_key = "SERVER_PUBLIC_KEY_BASE64_PLACEHOLDER"
+endpoint = "vpn.example.jp:51820"
+persistent_keepalive = 25
+dns_server = "10.66.0.1"
+block_on_down = true
+
+[[allowed_lan]]
+name = "default_gateway"
+cidr = "192.168.1.1/32"
+
+[[allowed_lan]]
+name = "network_printer"
+cidr = "192.168.1.20/32"

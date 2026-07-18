@@ -1,0 +1,31 @@
+realm_name: corp
+source_flow: browser
+flow_name: browser-risk-stepup
+subflow_alias: Risk-Based Step-Up Conditional
+default_requirement: CONDITIONAL
+step_up_action: CONDITIONAL_OTP_FORM
+excluded_role: break-glass-admin
+recovery_group: account-recovery-operators
+test_user: qa-stepup-tester
+conditions:
+  - label: "高リスクロール保持"
+    provider_id: conditional-user-role
+    config_key: condUserRole
+    config_value: finance-approver
+    negate: "false"
+    requirement: REQUIRED
+    trigger_desc: "finance-approverロールを保持するユーザーは常に追加認証を課す"
+  - label: "許可IP範囲外からのアクセス"
+    provider_id: conditional-network-cidr
+    config_key: condNetworkCidr
+    config_value: 10.20.0.0/16
+    negate: "true"
+    requirement: REQUIRED
+    trigger_desc: "社内許可CIDR(10.20.0.0/16)の外側からのアクセス時に追加認証を課す"
+  - label: "OTP未登録ユーザー"
+    provider_id: conditional-user-configured
+    config_key: condUserConfigured
+    config_value: otp
+    negate: "true"
+    requirement: REQUIRED
+    trigger_desc: "OTPが未登録のユーザーはこの分岐でOTP登録(step-up)を要求する"

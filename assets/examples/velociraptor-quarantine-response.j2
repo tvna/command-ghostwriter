@@ -1,0 +1,113 @@
+# Velociraptorによるホスト隔離と封じ込め対応 — {{ target_host.hostname }}
+
+侵害が疑われるホスト `{{ target_host.hostname }}`（client_id: `{{ target_host.client_id }}`）を、Velociraptorのquarantineアーティファクト `{{ quarantine_artifact }}` でネットワーク隔離しつつ、サーバとの調査経路だけを残す初動対応手順です。
+
+## 目的
+
+EDR（Velociraptor）による「ソフト隔離」の仕組みを理解し、侵害ホストをネットワークから遮断しながらもサーバ経由の追加調査を継続できる状態を作り、安全に解除できるようになることを目指します。
+
+## 用語解説
+
+- **ソフト隔離と物理隔離の違い**: ソフト隔離はEDRエージェントがホスト上のファイアウォール／WFP（Windows Filtering Platform）にサーバ通信のみを許可するルールを適用し、他の全通信を遮断する方式で、調査経路を維持したまま対応できる。物理隔離はLANケーブル抜線やスイッチポート無効化など物理層で遮断する方式で、確実だがエージェント経由の追加収集ができなくなる。
+- **quarantineアーティファクト**: `Windows.Remediation.Quarantine`（Linux相当ホストでは同等の機能を持つカスタムアーティファクトで、nftables/iptablesによりVelociraptorサーバのフロントエンドIP・ポート以外への通信を遮断する）
+- **preserve_server_comm**: 隔離ルール適用後もVelociraptorサーバとの通信（フリート通信、追加コレクション）だけは許可し続ける設定
+- **flow（コレクション実行）**: Velociraptorがクライアントに対してアーティファクトを1回実行させる単位。`flows(client_id=...)` で状態を確認できる
+- **collect_client()**: VQLからサーバ経由で特定クライアントにアーティファクト収集を指示するプラグイン
+- **揮発性情報**: メモリ上のプロセス・ネットワーク接続・実行履歴など、再起動や電源断で失われる情報
+
+## シナリオ設定
+
+| 項目 | 値 |
+|---|---|
+| 対象ホスト名 | {{ target_host.hostname }} |
+| client_id | {{ target_host.client_id }} |
+| quarantineアーティファクト | {{ quarantine_artifact }} |
+| サーバ通信の維持 | {{ preserve_server_comm }} |
+| 隔離解除条件 | {{ unquarantine_condition }} |
+
+隔離中に収集するアーティファクト:
+
+{% for a in investigation_artifacts %}- {{ a }}
+{% endfor %}
+
+## 1. 揮発性情報を保全してから隔離を適用する
+
+**重要**: ネットワーク隔離を適用すると、攻撃者のC2セッションが切断されアーティファクト削除や証跡消去の挙動が誘発される場合があります。隔離前に、少なくともプロセス一覧とネットワーク接続の状態を1回収集し、揮発性情報を保全してから隔離に進みます。
+
+```bash
+velociraptor --config api_client.yaml query \
+  "SELECT collect_client(client_id='{{ target_host.client_id }}', artifact='Windows.Network.Netstat') AS flow_id FROM scope()"
+velociraptor --config api_client.yaml query \
+  "SELECT collect_client(client_id='{{ target_host.client_id }}', artifact='Windows.System.PsList') AS flow_id FROM scope()"
+```
+
+## 2. quarantineアーティファクトを適用する
+
+`{{ quarantine_artifact }}` を対象ホストに対して収集（実行）し、サーバ通信 (`preserve_server_comm: {{ preserve_server_comm }}`) 以外の全通信を遮断します。
+
+```bash
+velociraptor --config api_client.yaml query \
+  "SELECT collect_client(client_id='{{ target_host.client_id }}', artifact='{{ quarantine_artifact }}', args=dict(PreserveServerComm='{{ preserve_server_comm }}')) AS flow_id FROM scope()"
+```
+
+## 3. 隔離ルールの適用結果と、サーバ通信が維持されていることを確認する
+
+隔離ルールを本運用として扱う前に、必ずこのステップでサーバ通信（新しい許可経路）が生きていることを確認します。サーバ通信が確認できない場合は隔離ルールを直ちに解除し、原因を切り分けてから再適用してください（旧経路＝隔離前の全面遮断に頼るのではなく、新経路＝quarantineの許可ルールが機能していることの証跡を先に取る）。
+
+```bash
+velociraptor --config api_client.yaml query \
+  "SELECT * FROM flows(client_id='{{ target_host.client_id }}') WHERE artifact =~ 'Quarantine' ORDER BY create_time DESC LIMIT 1"
+velociraptor --config api_client.yaml query \
+  "SELECT client_id, last_seen_at FROM clients(search='{{ target_host.client_id }}')"
+```
+
+`last_seen_at` が現在時刻に近い値で更新され続けていれば、サーバ通信（フリート通信）は維持されています。外部への通信が実際に遮断されているかは、次の収集で確認します。
+
+```bash
+velociraptor --config api_client.yaml query \
+  "SELECT collect_client(client_id='{{ target_host.client_id }}', artifact='Windows.Network.Netstat') AS flow_id FROM scope()"
+```
+
+収集結果に、Velociraptorサーバのフロントエンド以外への確立済み接続（`ESTABLISHED`）が含まれていないことを確認してください。
+
+## 4. 隔離中に追加の調査アーティファクトを収集する
+
+隔離を維持したまま、以下のアーティファクトを収集し侵害範囲を調査します。
+
+```bash
+{% for a in investigation_artifacts %}velociraptor --config api_client.yaml query \
+  "SELECT collect_client(client_id='{{ target_host.client_id }}', artifact='{{ a }}') AS flow_id FROM scope()"
+{% endfor %}```
+
+各収集の完了は、それぞれのflow_idで進捗を確認します。
+
+```bash
+velociraptor --config api_client.yaml query \
+  "SELECT flow_id, state, artifacts_with_results FROM flows(client_id='{{ target_host.client_id }}') ORDER BY create_time DESC LIMIT {{ investigation_artifacts | length }}"
+```
+
+## 5. 解除条件を確認し、隔離を解除する
+
+解除条件（`{{ unquarantine_condition }}`）が満たされ、対応記録（誰が・いつ・どの根拠で承認したか）を残したうえで、`{{ quarantine_artifact }}` を解除引数付きで再実行します。
+
+```bash
+velociraptor --config api_client.yaml query \
+  "SELECT collect_client(client_id='{{ target_host.client_id }}', artifact='{{ quarantine_artifact }}', args=dict(RemovePolicy='Y')) AS flow_id FROM scope()"
+```
+
+## 動作確認
+
+1. Step 1の収集（隔離前の揮発性情報保全）が `state = FINISHED` で完了していること
+2. Step 2適用直後、Step 3のクライアント検索で `last_seen_at` が更新され続けており、サーバ通信が維持されていること
+3. Step 3のNetstat収集結果に、サーバのフロントエンド以外への `ESTABLISHED` 接続が存在しないこと（外部通信の遮断を確認）
+4. Step 4で指定した全アーティファクトの収集が `state = FINISHED` で完了し、結果セットが取得できること（隔離中でも調査経路が生きていることの確認）
+5. Step 5の解除実行後、対象ホストから外部への通信（例: 社内DNS・プロキシへの到達性）が復帰していること
+
+## 注意事項
+
+- **隔離漏れの確認**: quarantineルールがサーバ通信以外の経路（社内プロキシ、DNSフォワーダ、バックアップエージェントなど）を誤って許可していないか、Step 3のNetstat結果で必ず確認する。許可対象はVelociraptorサーバのフロントエンドIP・ポートに限定する。
+- **揮発性情報保全の順序**: 隔離適用（Step 2）はC2通信を切断し証跡消去を誘発しうるため、必ずStep 1（プロセス・ネットワーク接続の収集）を先に実施してから隔離に進む。順序を逆にしない。
+- **誤隔離の業務影響**: 対象ホストが業務システムやサービスを提供している場合、隔離により業務影響が発生する。適用前に資産の重要度と代替経路の有無を確認し、影響範囲の関係者へ事前通知する。
+- **隔離／解除の記録と承認**: 隔離の適用・解除は監査証跡として、対応者・日時・根拠（`{{ unquarantine_condition }}` の充足状況）・承認者を記録する。解除は口頭合意のみで行わず、書面またはチケットシステム上の承認を必須とする。
+- **サーバ通信維持の事前検証**: quarantineルールは「サーバ通信のみ許可」という新しい経路を作る操作であるため、本運用として全面遮断に依存する前に、必ずStep 3でサーバ通信（フリート通信）が生きていることを検証する。検証できない場合は直ちに解除し、原因切り分け後に再適用する。
+- `RemovePolicy` などのアーティファクト引数名は、実際の環境で導入している `{{ quarantine_artifact }}` の実装（サーバ管理者が独自にカスタマイズしている場合を含む）によって異なることがあるため、適用前にVelociraptor GUIのアーティファクト定義（Source）で実際の引数名を確認すること。

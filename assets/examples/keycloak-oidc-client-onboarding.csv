@@ -1,0 +1,4 @@
+client_id,protocol,access_type,redirect_uris,default_scopes,flow
+web-portal,openid-connect,confidential,https://portal.example.com/callback,openid profile email,standardFlow
+mobile-app,openid-connect,public,https://mobile.example.com/callback,openid profile,standardFlow+pkce
+batch-job,openid-connect,confidential,-,openid,serviceAccount

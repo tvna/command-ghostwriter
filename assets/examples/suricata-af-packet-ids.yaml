@@ -1,0 +1,7 @@
+monitor_interface: "eth1"
+cluster_id: 99
+home_net:
+  - "192.168.10.0/24"
+  - "192.168.20.0/24"
+ruleset_source: "/etc/suricata/rules/suricata.rules"
+mirror_vlan_tagged: false

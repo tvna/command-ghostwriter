@@ -1,0 +1,7 @@
+[scenario]
+identity = "svc-consumer-01"
+service = "erp-api"
+expected_dial_role = "#erp-clients"
+posture_required = true
+edge_router = "er-tokyo-01"
+controller = "ziti-ctrl01.corp.local:1280"

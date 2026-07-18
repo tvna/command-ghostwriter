@@ -1,0 +1,175 @@
+# OPNsenseによるDMZ向けポートフォワード構築
+
+WAN側から DMZ 内公開サーバ `{{ dmz_host }}` へのポートフォワードを、必要最小限の
+公開ポートだけで構成します。あわせて NAT リフレクションを有効化し、社内(LAN)側
+からも公開名で到達できることを確認します。GUI 操作と、確認用の CLI コマンドを
+併記します。
+
+## 目的
+
+Firewall > NAT > Port Forward で宛先 NAT ルールを作成し、Filter rule
+association を「Add associated filter rule」として対応する許可ルールを自動生成
+した上で、外部・内部の両方から疎通を検証できるようになることを目指します。
+
+## 用語解説
+
+- **Port Forward(宛先NAT/DNAT)**: WAN側の宛先IP:ポート宛のパケットを、内部ホストの
+  IP:ポートへ書き換えて転送するNAT
+- **Filter rule association**: NATルール作成時に、対応する許可(pass)ルールを
+  自動的にfilterへ追加するOPNsenseの機能。「Add associated filter rule」を選ぶと
+  NATルールと1対1に紐づいたfilterルールが生成される
+- **NATリフレクション(NAT Reflection)**: LAN側の端末が公開用のWAN IPやFQDNへ
+  アクセスした際に、外部からと同じNATルールを内部通信にも適用してDMZへ到達
+  させる仕組み。`purenat`はNAT自体を折り返す方式(Enable (Pure NAT))
+- **DMZ(非武装地帯)**: 外部公開サーバを専用のインターフェース/セグメントに隔離し、
+  侵害された場合でもLANへの直接到達を防ぐためのゾーン
+
+## シナリオ設定
+
+WAN実IP `{{ wan_ip }}`({{ wan_interface }}インターフェース)から、DMZセグメント
+(`{{ dmz_interface }}`)上のホスト `{{ dmz_host }}` へ、以下 {{ forward_ports | length }}
+件のポートのみを転送対象とします。
+
+| プロトコル | 外部ポート(WAN) | 内部ポート(DMZ) | 用途 |
+|---|---|---|---|
+{% for p in forward_ports %}| {{ p["proto"] }} | {{ p["ext_port"] }} | {{ p["int_port"] }} | {{ p["service"] }} |
+{% endfor %}
+
+NATリフレクションは `{{ nat_reflection }}` モードで有効化し、LAN(`{{ lan_network }}`)
+からも公開ポート経由でDMZへ到達できるようにします。なお、初期構築時に暫定で
+入れていた広範囲許可ルール(`{{ temp_rule_descr }}`)は、新ルールの動作確認が
+完了するまで無効化しません。
+
+## 手順
+
+### 1. 現状のDMZ関連ルールとリスニング状態を確認する
+
+作業前に、DMZホスト側で公開予定のサービスが実際に該当ポートで待ち受けている
+ことと、現行のFirewallルール一覧を確認します。
+
+```bash
+# DMZホスト側(SSHで接続して確認)
+ss -tlnp | grep -E ':(443|22)\b'
+```
+
+OPNsense側では GUI の *Firewall > Rules > {{ dmz_interface|upper }}* を開き、
+暫定ルール `{{ temp_rule_descr }}` がまだ有効になっていることを確認します。この
+ルールは新しい最小権限ルールへの切り替えが完了するまで残しておきます。
+
+### 2. 宛先NATルール(Port Forward)を作成する
+
+*Firewall > NAT > Port Forward* で **Add** を押し、以下の内容でルールを
+{{ forward_ports | length }}件作成します。
+
+{% for p in forward_ports %}#### 2-{{ loop.index }}. {{ p["service"] }}({{ p["proto"] }}/{{ p["ext_port"] }} -> {{ p["int_port"] }})
+
+- Interface: `{{ wan_interface|upper }}`
+- TCP/IP Version: IPv4
+- Protocol: `{{ p["proto"] }}`
+- Destination: `{{ wan_interface|upper }} address`({{ wan_ip }})
+- Destination port range: from `{{ p["ext_port"] }}` to `{{ p["ext_port"] }}`
+- Redirect target IP: `{{ dmz_host }}`
+- Redirect target port: `{{ p["int_port"] }}`
+- Description: `{{ p["service"] }}`
+- NAT reflection: `{{ nat_reflection }}`
+- Filter rule association: **Add associated filter rule**
+
+{% endfor %}
+「Filter rule association」を Add associated filter rule にすることで、各NAT
+ルールに1対1で紐づいた許可(pass)ルールが `Firewall > Rules > {{ wan_interface|upper }}`
+配下に自動生成されます。個別にpassルールを手動追加する必要はありません。
+
+保存後、画面上部の **Apply changes** を必ず押して反映します。
+
+### 3. NATリフレクションをシステム全体で許可する
+
+ルール単位の `NAT reflection` 設定を有効に機能させるには、リフレクション自体が
+システム設定で許可されている必要があります。*Firewall > Settings > Advanced*
+を開き、以下を設定します。
+
+- Reflection for port forwards: 有効化
+- Reflection for 1:1: 有効化(1:1 NATを併用する場合)
+- Automatic outbound NAT for Reflection: 有効化
+
+保存し、**Apply** で反映します。
+
+### 4. DMZからLANへの戻り通信を明示的に拒否するルールを追加する
+
+DMZサーバが侵害された場合に備え、DMZから `{{ lan_network }}` への通信は
+別ルールとして明示的に拒否します。*Firewall > Rules > {{ dmz_interface|upper }}*
+で、手順2で自動生成されたpassルールより **下**(評価順で後)に、以下のルールを
+追加します。
+
+- Action: Block(またはReject)
+- Interface: `{{ dmz_interface|upper }}`
+- Source: `{{ dmz_interface|upper }} net`
+- Destination: `{{ lan_network }}`
+- Description: `DENY-DMZ-TO-LAN`
+
+OPNsenseのルール評価は上から順に最初に一致したルールが適用されるため、この
+拒否ルールが手順2の許可ルールより後(下)に置かれていることを確認してください。
+
+### 5. 外部・内部から疎通を検証し、暫定ルールを無効化する
+
+新しいポートフォワードとリフレクションが正しく機能することを確認するまで、
+手順1で確認した暫定ルール `{{ temp_rule_descr }}` は有効なままにしておきます。
+
+```bash
+# 外部(WAN側)のクライアントから、L4レベルでの到達性を確認
+{% for p in forward_ports %}curl -v telnet://{{ wan_ip }}:{{ p["ext_port"] }}
+{% endfor %}
+```
+
+```bash
+# OPNsense本体で、NATの変換テーブルにルールが反映されていることを確認
+pfctl -s nat
+```
+
+`pfctl -s nat`の出力に、`{{ wan_ip }}`宛の各ポートから `{{ dmz_host }}` への
+`rdr`(redirect)エントリが表示されていることを確認します。
+
+```bash
+# LAN側の端末から、公開名/WAN IP経由でDMZへ到達できる(NATリフレクション)ことを確認
+{% for p in forward_ports %}curl -v telnet://{{ wan_ip }}:{{ p["ext_port"] }}
+{% endfor %}
+```
+
+外部・内部・`pfctl -s nat`のすべてで期待通りの結果が得られたら、はじめて
+*Firewall > Rules > {{ dmz_interface|upper }}* を開き、暫定ルール
+`{{ temp_rule_descr }}` を無効化(Disable)して **Apply changes** を押します。
+SSH管理用ポート(`{{ dmz_host }}:22`)の切り替えを行う場合は、既存の管理用
+セッションは接続したまま、別の端末やタブから新しい転送先ポート経由で新規
+SSHセッションを確立できることを確認してから、既存の接続経路や暫定ルールを
+無効化してください。
+
+## 動作確認
+
+- `curl -v telnet://{{ wan_ip }}:{{ forward_ports[0]["ext_port"] }}` が外部から
+  `Connected to`まで到達すること(以降のフォワードポートも同様)
+- `pfctl -s nat` に `{{ wan_ip }}` から `{{ dmz_host }}` への `rdr` エントリが
+  各ポート分表示されること
+- LAN内端末から `curl -v telnet://{{ wan_ip }}:{{ forward_ports[0]["ext_port"] }}` を
+  実行し、NATリフレクション経由で `{{ dmz_host }}` に到達できること
+- `Firewall > Rules > {{ dmz_interface|upper }}` に `DENY-DMZ-TO-LAN` ルールが
+  手順2の許可ルールより下に存在し、DMZから`{{ lan_network }}`宛の通信が実際に
+  ブロックされていること(DMZホスト上で該当宛先への疎通試験が失敗することを確認)
+- 新しいSSH管理用ポート(`{{ dmz_host }}:22`宛の転送)経由で新規セッションが
+  確立できることを、既存セッションを保持したまま確認できていること
+
+## 注意事項
+
+- 公開するポートは `forward_ports` に列挙した必要最小限の範囲に絞ること。
+  検証や利便性のためだけに広い範囲(例: 全ポートや`any`)を公開したままにしない。
+- SSHやその他の管理アクセスに関わるルールを切り替える際は、新しい経路(新ポートの
+  Port Forward + 許可ルール)が実際に機能することを、既存の接続やルールを維持した
+  ままの並行セッションで確認してから、暫定ルール `{{ temp_rule_descr }}` や旧経路を
+  無効化すること。先に旧経路を無効化すると、新経路に不備があった場合に
+  リモートから復旧できなくなるおそれがある。
+- DMZからLANへの戻り通信を許可したままにすると、DMZサーバが侵害された際に
+  LAN側へ直接侵入される経路になる。手順4の拒否ルールは省略せず、評価順が
+  許可ルールより後になっていることを必ず確認する。
+- NATリフレクションを有効にすると、内部から見た通信もOPNsense自体を経由する
+  ため、リフレクション対象の通信量が多い場合はOPNsenseへの負荷が増える点に
+  留意する。恒久的な社内アクセスには、split DNS等の代替手段も検討する。
+- 設定変更前に *System > Configuration > Backups* からconfig.xmlのバックアップを
+  取得し、意図しない通信断が発生した場合に切り戻せるようにしておく。

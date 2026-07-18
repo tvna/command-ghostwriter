@@ -1,0 +1,4 @@
+target_domain = "internal.example.jp"
+dnssec_bypass_test = true
+upstream_check = true
+cache_flush = true

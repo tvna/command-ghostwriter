@@ -1,0 +1,145 @@
+# Suricata eve.json出力の設計とSIEM連携
+
+Suricata の `{{ config_path }}` を編集し、eve.json の出力イベント種別・
+ローテーション・SIEM への転送を設計します。作業対象のログは
+`{{ eve_log_path }}` です。
+
+## 目的
+
+`outputs.eve-log` 配下の `types` を必要なイベント種別に絞り込み、
+`community-id` を有効化してSIEM側での相関分析を可能にしたうえで、
+ログローテーションと `{{ forwarder }}` によるSIEM転送までを一貫して
+構築できるようになることを目指します。
+
+## 用語解説
+
+- **eve.json**: Suricataが出力するJSON Lines形式のイベントログ。1行1イベント
+- **event_type**: eve.json内の各イベントの種別を示すフィールド（alert/dns/tls/http/flow/stats等）
+- **community-id**: フロー特定用のハッシュ値。SIEM・他ツールとのイベント突合に使う共通識別子
+- **suricatasc**: Suricataのユニックスソケット経由で稼働中プロセスへコマンドを送るツール
+- **reopen-log-files**: ログローテーション後にSuricataへログファイルの再オープンを指示するsuricatascコマンド
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 設定ファイル | `{{ config_path }}` |
+| eve.json出力先 | `{{ eve_log_path }}` |
+| 出力対象イベント種別 | {{ eve_types | join(", ") }} |
+| community-id | {{ community_id }} |
+| ローテーションサイズ | `{{ rotate_size }}` |
+| 転送方式 | `{{ forwarder }}` |
+| SIEM転送先 | `{{ siem_endpoint }}` |
+
+出力対象は {{ eve_types | length }} 種別に絞り込みます。flow/statsイベント
+は発生数が多くディスクを圧迫するため、本シナリオでは意図的に対象外として
+います。
+
+## 手順
+
+### 1. suricata.yamlのoutputs.eve-logを編集する
+
+`{{ config_path }}` の `outputs` セクションにある `eve-log` の設定を、
+出力対象イベント種別とcommunity-idの有効化を反映した内容に書き換えます。
+
+```yaml
+outputs:
+  - eve-log:
+      enabled: yes
+      filetype: regular
+      filename: {{ eve_log_path }}
+      community-id: {{ community_id }}
+      community-id-seed: 0
+      types:
+{% for t in eve_types %}        - {{ t }}
+{% endfor %}```
+
+### 2. 設定の構文チェックを行う
+
+```bash
+suricata -T -c {{ config_path }} -v
+```
+
+`Configuration provided was successfully loaded` の表示を確認してから
+次の手順に進みます。
+
+### 3. Suricataへ設定を反映する
+
+```bash
+systemctl reload suricata
+suricatasc -c "reload-rules"
+```
+
+### 4. logrotateでのローテーションを設定する
+
+```bash
+cat <<'EOF' > /etc/logrotate.d/suricata-eve
+{{ eve_log_path }} {
+    size {{ rotate_size }}
+    missingok
+    rotate 14
+    compress
+    delaycompress
+    notifempty
+    sharedscripts
+    postrotate
+        suricatasc -c "reopen-log-files" >/dev/null 2>&1 || true
+    endscript
+}
+EOF
+logrotate -f /etc/logrotate.d/suricata-eve
+```
+
+ローテーション後にログサイズが0に戻り、`suricatasc -c "reopen-log-files"`
+の実行によってSuricataが新しいファイルへ書き込みを継続していることを
+確認します。
+
+### 5. SIEMへの転送経路を設定する
+
+転送方式は `{{ forwarder }}` を使用します。promtailの場合は以下のように
+scrape対象を指定します。
+
+```yaml
+scrape_configs:
+  - job_name: suricata-eve
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: suricata-eve
+          __path__: {{ eve_log_path }}
+    pipeline_stages:
+      - json:
+          expressions:
+            event_type: event_type
+      - labels:
+          event_type:
+    clients:
+      - url: {{ siem_endpoint }}
+```
+
+```bash
+systemctl restart promtail
+```
+
+## 動作確認
+
+以下のコマンドで `alert` イベントが期待どおりの形式で出力され、SIEM側の
+取り込みキーに整形できることを確認します。
+
+```bash
+jq 'select(.event_type=="alert") | {timestamp,src_ip,alert.signature}' {{ eve_log_path }}
+```
+
+- 出力された各行に `timestamp` / `src_ip` / `alert.signature` が欠落なく
+  含まれていること
+- `community_id` フィールドが各イベントに付与されていること
+- `logrotate -f /etc/logrotate.d/suricata-eve` 実行後もSuricataがログ書き込みを継続していること（サイズが0から増加すること）
+- `{{ forwarder }}` のサービスステータスがactiveであり、SIEM (`{{ siem_endpoint }}`) 側で直近イベントを検索できること
+
+## 注意事項
+
+- `eve.json` には実通信のペイロード断片（http.http_request_body等）が含まれ得るため、保管先ディレクトリのパーミッションとアクセス制御（読み取り可能なユーザー・グループの限定、SIEM転送経路の暗号化）を必ず設定する。
+- flow/statsイベントは発生件数が非常に多くディスクを圧迫するため、本当に必要な場合を除き `types` から除外する。将来追加する際はディスク使用量の見積もりを先に行うこと。
+- SIEM転送設定（`{{ forwarder }}`）を切り替える際は、旧転送経路を止める前に新経路でイベントが実際に届くことを並行稼働で確認してから、旧経路を無効化する。
+- `logrotate -f` は手順確認のための即時実行であり、本番運用では定期実行（cron/systemd timer）に任せ、手動での強制ローテーションを乱用しない。

@@ -1,0 +1,115 @@
+# SuricataのHOME_NET・ポート変数設計
+
+自組織のアドレス設計に合わせて `suricata.yaml` の `vars.address-groups` と `vars.port-groups` を定義し直し、内部/外部の方向判定と検知精度を上げる手順です。
+
+## 目的
+
+HOME_NET・EXTERNAL_NETおよび各種アドレス変数、ポート変数を自組織のセグメント構成に合わせて正しく定義し、`suricata -T` による設定検証と模擬スキャンによる方向判定確認までを行えるようになることを目指します。
+
+## 用語解説
+
+- **HOME_NET**: 自組織の内部ネットワークとみなすIPアドレス群を定義する変数。多くのルールが「送信元/宛先がHOME_NET内かどうか」で内部・外部を判定する基準に使う
+- **EXTERNAL_NET**: 外部(信頼できない側)とみなすアドレス群。`"!$HOME_NET"` と定義するのが一般的で、これは「HOME_NETに含まれないすべてのアドレス」を意味する否定演算子`!`によるNOT集合の表現
+- **HOME_NET過小定義**: 実際には内部セグメントであるにもかかわらずHOME_NETに含めていないアドレス帯がある状態。この場合、内部セグメント間の通信が「HOME_NET→EXTERNAL_NET」や「EXTERNAL_NET→HOME_NET」と誤判定され、内部→内部の攻撃(横展開・内部スキャン等)を検知するはずのルールが発火しない、あるいは方向が逆転して意図と異なるルールが発火する検知漏れが生じる
+- **address-groups**: HOME_NET/EXTERNAL_NETに加え、HTTP_SERVERS・DNS_SERVERS・SMTP_SERVERSなど役割別サーバ群を定義する変数群。ルールの`$HTTP_SERVERS`のような参照先になる
+- **port-groups**: HTTP_PORTS・SHELLCODE_PORTSなど、プロトコル別に監視対象とするポート群を定義する変数群
+- **`suricata -T`**: 設定ファイルの構文・整合性をルールロードまで含めて検証する動作確認専用モード。実際のパケット処理は行わずプロセスを終了する
+
+## シナリオ設定
+
+自組織のアドレス設計は以下の通りです。
+
+| 変数 | 値 |
+|---|---|
+| HOME_NET | {{ home_net | join(", ") }} |
+| DNS_SERVERS | {{ dns_servers | join(", ") }} |
+| HTTP_SERVERS(DMZ) | {{ dmz_servers | join(", ") }} |
+| HTTP_PORTS | {{ http_ports | join(", ") }} |
+
+- HOME_NETは {{ home_net | length }} 個のRFC1918セグメントで構成します
+- DMZに公開しているHTTPサーバは {{ dmz_servers | length }} 台で、EXTERNAL_NET側から到達可能な位置に置きます
+- 内部DNSサーバは {{ dns_servers | length }} 台です
+
+## 手順
+
+### 1. 現在のaddress-groups/port-groups定義を確認する
+
+```bash
+sudo grep -A 20 "^vars:" /etc/suricata/suricata.yaml
+```
+
+既存の`HOME_NET`定義が自組織の全内部セグメントを網羅しているか、DMZやクラウド帯が漏れていないかをまず確認します。
+
+### 2. address-groupsを自組織設計に合わせて編集する
+
+`/etc/suricata/suricata.yaml` の `vars.address-groups` を以下のように編集します。
+
+```yaml
+vars:
+  address-groups:
+    HOME_NET: "[{{ home_net | join(",") }}]"
+    EXTERNAL_NET: "!$HOME_NET"
+    HTTP_SERVERS: "[{{ dmz_servers | join(",") }}]"
+    DNS_SERVERS: "[{{ dns_servers | join(",") }}]"
+    SMTP_SERVERS: "$HOME_NET"
+    SQL_SERVERS: "$HOME_NET"
+    TELNET_SERVERS: "$HOME_NET"
+    AIM_SERVERS: "$EXTERNAL_NET"
+```
+
+`EXTERNAL_NET: "!$HOME_NET"` は「HOME_NETに含まれない全アドレス」を表します。HOME_NETの定義に漏れがあると、本来は内部同士の通信であるにもかかわらずEXTERNAL_NET側と誤判定され、内部→内部の攻撃を検知すべきルールが発火しなくなります。
+
+### 3. port-groupsを編集する
+
+```yaml
+vars:
+  port-groups:
+    HTTP_PORTS: "[{{ http_ports | join(",") }}]"
+    SHELLCODE_PORTS: "!80"
+    ORACLE_PORTS: 1521
+    SSH_PORTS: 22
+```
+
+HTTP_PORTSには`{{ http_ports | join(", ") }}`のように自組織で実際に使うポートをすべて列挙し、リバースプロキシやAPIゲートウェイが使う追加ポートの漏れがないかを確認します。
+
+### 4. 設定ファイルの構文と整合性を`suricata -T`で検証する
+
+```bash
+sudo suricata -T -c /etc/suricata/suricata.yaml -v
+```
+
+`Configuration provided was successfully loaded` のような成功メッセージが出力され、エラーや`Rule parse error`が出ないことを確認します。エラーが出た場合は編集した`vars`セクションのインデントやYAML構文を見直します。
+
+### 5. 設定を反映してSuricataを再起動する
+
+```bash
+sudo systemctl restart suricata
+sudo systemctl status suricata --no-pager
+```
+
+### 6. 内部からの模擬スキャンで方向判定を確認する
+
+HOME_NET内の別ホストから、HOME_NET内のホストへ意図的にSYNスキャンを実行し、内部→内部の通信として検知されるかを確認します。
+
+```bash
+sudo nmap -sS -p {{ http_ports | join(",") }} {{ dmz_servers[0] }}
+```
+
+```bash
+sudo tail -f /var/log/suricata/fast.log | grep -i "SCAN"
+```
+
+`ET SCAN Suspicious inbound to *` ではなく、送信元・宛先が共にHOME_NET内アドレスとして記録されるログ(例: `ET SCAN Potential SSH Scan`が内部IP同士で発火)であれば、内部→内部の方向として正しく判定されています。もし送信元または宛先がEXTERNAL_NET側として記録される場合は、HOME_NETの定義漏れを疑い、手順2に戻ってセグメントを追加します。
+
+## 動作確認
+
+1. `sudo suricata -T -c /etc/suricata/suricata.yaml -v` が構文エラー・ルールパースエラーなく成功すること
+2. 手順6の模擬スキャンで、`fast.log`上の送信元・宛先双方がHOME_NET内アドレスとして記録され、内部→内部の攻撃として検知されること
+3. DMZサーバ(`{{ dmz_servers | join(", ") }}`)宛のHTTPアクセスが`HTTP_SERVERS`/`HTTP_PORTS`に紐づくルールで正しく評価されること
+
+## 注意事項
+
+- RFC1918全体(`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`)をまとめてHOME_NETにする場合、クラウドVPC内のプライベートアドレスやVPN経由で払い出される社外拠点・在宅端末のアドレス帯も同じRFC1918空間を使っていることが多く、意図せずEXTERNAL_NET側からの通信として扱われる、あるいは逆に信頼すべきでない経路をHOME_NET内と誤認する原因になる。クラウド/VPN帯は実際の信頼境界に応じて個別のCIDRとして明示的に含めるか除外するかを設計時に判断すること
+- `vars`セクションの変更はSuricataが評価するほぼ全ルールの内部/外部判定に影響するため、本番環境に適用する前に必ず手順4の`suricata -T`検証と、可能であればステージング環境での動作確認を行うこと
+- 変更を反映して`systemctl restart suricata`する際は、既存の検知が一時的に停止する空白時間が生じる。監視体制上問題がないメンテナンスウィンドウで実施すること
+- 変更後に想定外の大量アラートやアラート消失が発生した場合は、直前の`suricata.yaml`のバックアップ(`sudo cp /etc/suricata/suricata.yaml /etc/suricata/suricata.yaml.bak`を事前取得)に戻し、`suricata -T`で検証したうえで再度`systemctl restart suricata`すること

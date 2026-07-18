@@ -1,0 +1,182 @@
+# OPNsense二台構成CARP冗長化の構築
+
+`{{ primary_host }}`(プライマリ)と `{{ secondary_host }}`(セカンダリ)の2台のOPNsenseで、
+CARP仮想IP(VIP)とpfsyncによるステート同期、XMLRPCによる設定同期を構成し、
+フェイルオーバー動作を検証するまでの手順です。
+
+## 目的
+
+CARP・pfsync・XMLRPC設定同期がそれぞれ担う役割を理解し、2台のOPNsenseを
+実際に冗長構成として構築したうえで、意図的なフェイルオーバーを起こして
+VIPの移動とセッション維持まで検証できるようになることを目指します。
+
+## 用語解説
+
+- **CARP(Common Address Redundancy Protocol)**: 複数台のファイアウォールで1つの仮想IP(VIP)を共有し、
+  MASTER障害時にBACKUPが自動的にVIPを引き継ぐプロトコル
+- **VHID(Virtual Host ID)**: 同一セグメント上で複数のCARPグループを識別する番号。VIPごとに一意にする
+- **advskew**: CARPのアドバタイズ間隔に加える遅延値。値が小さいほど優先度が高くMASTERになりやすい
+- **pfsync**: ファイアウォールのステートテーブル(確立済みセッション情報)をペア間でリアルタイム同期する仕組み
+- **XMLRPC設定同期**: プライマリの設定変更をセカンダリへ自動的にプッシュする、OPNsenseのHA設定同期機能
+- **Persistent CARP Maintenance Mode**: 対象機のすべてのCARP VIPを強制的にBACKUP状態へ固定するモード。
+  解除するまで再起動後も維持され、計画的フェイルオーバーの検証に使う
+
+## シナリオ設定
+
+| 項目 | 値 |
+|---|---|
+| プライマリ機 | `{{ primary_host }}`(管理IP: `{{ primary_mgmt_ip }}`) |
+| セカンダリ機 | `{{ secondary_host }}`(管理IP: `{{ secondary_mgmt_ip }}`) |
+| pfsync専用インターフェース | `{{ sync_interface }}` |
+| pfsync peer IP(相手機のsync IP) | `{{ sync_peer_ip }}` |
+| XMLRPC同期ユーザー | `{{ xmlrpc_user }}` |
+
+CARP VIPは以下の {{ carp_vips | length }} 件を作成します。
+
+| interface | VIP | VHID | advskew(master) | advskew(backup) |
+|---|---|---|---|---|
+{% for v in carp_vips %}| {{ v.interface }} | {{ v.vip }} | {{ v.vhid }} | {{ v.advskew_master }} | {{ v.advskew_backup }} |
+{% endfor %}
+## 手順
+
+### 1. 各セグメントにCARP VIPを作成する(プライマリ機)
+
+`{{ primary_host }}` のGUIで Interfaces > Virtual IPs > + を開き、
+以下の内容でVIPを {{ carp_vips | length }} 件作成します(Mode: CARP)。
+
+{% for v in carp_vips %}- Interface: `{{ v.interface }}` / Address: `{{ v.vip }}` / VHID: `{{ v.vhid }}` / Advertising base: `1` / Advertising skew: `{{ v.advskew_master }}` / Password: `{{ carp_password }}`
+{% endfor %}
+config.xml上では各VIPは以下の形式で保持されます(参考)。
+
+```xml
+<vip>
+  <mode>carp</mode>
+  <interface>{{ carp_vips[0].interface }}</interface>
+  <subnet>{{ carp_vips[0].vip }}</subnet>
+  <subnet_bits>24</subnet_bits>
+  <vhid>{{ carp_vips[0].vhid }}</vhid>
+  <advskew>{{ carp_vips[0].advskew_master }}</advskew>
+  <advbase>1</advbase>
+  <password>{{ carp_password }}</password>
+</vip>
+```
+
+### 2. セカンダリ機にも同一VIPを作成する(advskewのみ変更)
+
+`{{ secondary_host }}` のGUIで同じ操作を行い、VHIDとパスワードは
+プライマリ機と完全に一致させたうえで、advskewのみBACKUP用の値にします。
+
+{% for v in carp_vips %}- Interface: `{{ v.interface }}` / Address: `{{ v.vip }}` / VHID: `{{ v.vhid }}` / Advertising skew: `{{ v.advskew_backup }}` / Password: `{{ carp_password }}`
+{% endfor %}
+
+VHIDとパスワードが1文字でも異なると、2台が同一グループとして認識されず
+CARPが正しく成立しないため、必ず突き合わせて確認します。
+
+### 3. pfsync(ステート同期)を設定する
+
+両機共通で System > High Availability > Settings を開き、以下を設定します。
+
+- Synchronize States: 有効化
+- Synchronize Interface: `{{ sync_interface }}`
+- pfsync Synchronize Peer IP: `{{ sync_peer_ip }}`(相手機の `{{ sync_interface }}` に設定したIP)
+
+```xml
+<hasync>
+  <pfsyncenabled>on</pfsyncenabled>
+  <pfsyncinterface>{{ sync_interface }}</pfsyncinterface>
+  <pfsyncpeerip>{{ sync_peer_ip }}</pfsyncpeerip>
+</hasync>
+```
+
+`{{ sync_interface }}` はプライマリ・セカンダリ間を直結する専用線(クロス接続、
+または他と共有しないVLAN)に接続し、他のセグメントと兼用しないようにします。
+
+### 4. XMLRPC設定同期を設定する(プライマリ機のみ)
+
+同じ System > High Availability > Settings 内で、以下を設定します(プライマリ機のみ)。
+
+- Synchronize Config to IP: `{{ secondary_mgmt_ip }}`
+- Username: `{{ xmlrpc_user }}`
+- Password: `{{ carp_password }}` とは別に、XMLRPC専用の管理者パスワードを設定
+- Synchronize: Virtual IPs / Firewall rules / NAT / Aliases にチェック
+
+セカンダリ機側では Synchronize Config to IP は空欄のままにし、
+プライマリからの一方向プッシュのみを許可する構成とします。
+
+### 5. CARP Statusを確認する
+
+両機でGUIの Interfaces > Virtual IPs > Status、またはCLI(コンソールのシェル、
+もしくはSSH)で以下を実行します。
+
+```bash
+ifconfig | grep -B 2 "carp:"
+```
+
+`{{ primary_host }}` 側の全VIPが `MASTER`、`{{ secondary_host }}` 側の全VIPが
+`BACKUP` と表示されることを確認します。あわせてpfsyncの同期先も確認します。
+
+```bash
+ifconfig {{ sync_interface }}
+```
+
+### 6. フェイルオーバーを検証する(Persistent CARP Maintenance Mode)
+
+新しい経路(セカンダリ機がMASTERとしてVIPを応答する状態)が実際に機能する
+ことを確認してから切り替えるため、事前に両機の管理IP(`{{ primary_mgmt_ip }}`
+と `{{ secondary_mgmt_ip }}`)へ直接アクセスできるセッションをそれぞれ
+別途確立しておきます(VIP経由の管理アクセスに依存しないこと)。
+
+VIP経由でクライアントから継続的な通信(SSHセッションの保持や `ping` の
+連続実行)を開始したうえで、`{{ primary_host }}` のGUIで Interfaces > Virtual IPs
+> Status から「Enter Persistent CARP Maintenance Mode」を実行します。
+
+```bash
+# クライアント側で事前に開始しておく確認用コマンド
+ping {{ carp_vips[0].vip }}
+```
+
+実行後、`{{ secondary_host }}` 側で以下を確認します。
+
+```bash
+ifconfig | grep -B 2 "carp:"
+```
+
+全VIPが `{{ secondary_host }}` 側で `MASTER` に切り替わり、継続していた
+`ping`/SSHセッションが切断されずに応答を継続していることを確認します。
+
+### 7. Persistent CARP Maintenance Modeを解除し元の状態へ戻す
+
+検証が完了したら、`{{ primary_host }}` のGUIで
+「Leave Persistent CARP Maintenance Mode」を実行し、CARP Statusで
+`{{ primary_host }}` 側が再び `MASTER` に戻ることを確認します。
+
+## 動作確認
+
+- 手順5の時点で `{{ primary_host }}` の全VIPが `MASTER`、`{{ secondary_host }}`
+  の全VIPが `BACKUP` と表示されていること
+- 手順6でPersistent CARP Maintenance Modeを実行した際、`{{ secondary_host }}`
+  側へVIPが正しく移動し、継続中のping/SSHセッションが切断されずに維持されること
+- 手順7でMaintenance Modeを解除した後、`{{ primary_host }}` 側が再び `MASTER`
+  に復帰すること
+- 両機の管理IP(`{{ primary_mgmt_ip }}` / `{{ secondary_mgmt_ip }}`)へVIP経由
+  ではなく直接アクセスできる経路が、検証の前後を通じて維持されていたこと
+
+## 注意事項
+
+- `{{ sync_interface }}` はpfsyncのステートテーブルとXMLRPC同期の認証情報
+  (`{{ xmlrpc_user }}` の資格情報)が流れる専用線であり、暗号化されていない
+  トラフィックが含まれる。WANや他のセグメントと共有せず、専用線または
+  他と隔離されたVLANとして構成し、外部に一切晒さないこと。
+- フェイルオーバー検証(手順6)は、VIP以外の経路で両機の管理画面に直接
+  アクセスできるセッションを確立した状態で行うこと。新しい経路(セカンダリ機
+  のMASTER昇格)が実際に機能することを確認する前に、プライマリ機への
+  唯一の管理経路をVIPだけに依存させてはならない。
+- CARP VIPのパスワード(`{{ carp_password }}`)とVHIDは両機で完全に一致させる
+  必要がある。1文字でも異なると別グループと認識され、両機が同時にMASTERを
+  主張して意図しないIPコンフリクトが発生する。
+- XMLRPC設定同期はプライマリからセカンダリへの一方向のみとし、双方向に
+  設定すると変更が競合して設定が上書きされ続ける状態になるため、
+  セカンダリ機側の「Synchronize Config to IP」は必ず空欄のままにする。
+- Persistent CARP Maintenance Modeは解除するまで再起動後も維持されるため、
+  検証後は必ず手順7で解除し、意図せず片系がBACKUP固定のままにならないよう
+  CARP Statusで最終状態を確認する。

@@ -1,0 +1,22 @@
+server_pubkey = "SRVpub7Jk2mQb9nWZxT4vC1dR8yL0aF6hU3sN5qEoXg="
+server_endpoint = "vpn.example.jp:51820"
+dns_server = "10.10.0.53"
+split_tunnel_networks = ["10.20.0.0/16", "10.30.0.0/16"]
+
+[[clients]]
+name = "tanaka-laptop"
+client_address = "10.10.0.11/32"
+pubkey = "CLIpub1AbZ8mKqR3xN6tF9wV2cY5hJ0dS7uL4oQeGz="
+tunnel_mode = "split"
+
+[[clients]]
+name = "sato-iphone"
+client_address = "10.10.0.12/32"
+pubkey = "CLIpub2Nc4rT9wA1xM6qF3vD8yH0jK5oS2uZ7bL9eR="
+tunnel_mode = "full"
+
+[[clients]]
+name = "suzuki-tablet"
+client_address = "10.10.0.13/32"
+pubkey = "CLIpub3Qw6eR2tY9uI4oP1aS8dF5gH0jK3lZ7xC6vB="
+tunnel_mode = "split"

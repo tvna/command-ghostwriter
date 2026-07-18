@@ -1,0 +1,120 @@
+# OpenZiti サービスとポリシー設計手順
+
+CSV で定義した {{ csv_rows | length }} 件のロールマッピングをもとに、OpenZiti
+の service / service-policy を作成し、ゼロトラスト前提（デフォルト全拒否）の
+最小権限アクセスを構成します。`ziti` CLI で controller にログイン済み
+（`ziti edge login`）であることを前提とします。
+
+## 目的
+
+サービス定義（host.v1 / intercept.v1 config）と service-policy（Dial / Bind）
+を役割属性（role attributes）で組み合わせ、意図した identity だけが意図した
+service にだけ到達できる最小権限のアクセス制御を構成できるようになることを
+目指します。
+
+## 用語解説
+
+- **service（サービス）**: OpenZiti 上でアクセス対象を表す論理オブジェクト。host.v1
+  config（提供側=bind の接続先情報）と intercept.v1 config（利用側=dial の
+  仮想アドレス）を組にして 1 つの service に紐付ける。
+- **host.v1 / intercept.v1**: config の型。host.v1 はエッジルータ/tunneler が
+  実サービスへ接続する際の宛先（address/port/protocol）、intercept.v1 は
+  クライアント側が dial する際の仮想アドレス（addresses/portRanges）を定義する。
+- **service-policy**: identity と service を役割属性で結び付ける許可ルール。
+  Dial（クライアントとして service を呼び出す権利）と Bind（サーバとして
+  service を待ち受ける権利）は別ポリシーとして分離する。ここを混同すると
+  クライアントが誤って bind 権限を持つ、といった過剰権限になる。
+- **role attributes（役割属性）**: identity/service に付与するタグ。指定方法は
+  2 通りある。`@<name>` は特定の 1 個体（identity 名や service 名そのもの）を
+  名指しする指定、`#<attribute>` はその属性タグを持つ集合全体を指す指定。
+  本手順の CSV では identity_roles 列に両方の書式が混在している。
+- **policy-advisor**: 特定 identity と特定 service の組み合わせについて、
+  Dial/Bind いずれかの経路が現在のポリシーで到達可能かどうかを判定する
+  診断コマンド。
+
+## シナリオ設定
+
+| service | config_type | intercept_address | identity_roles | service_roles | policy_type |
+|---------|-------------|--------------------|-----------------|----------------|-------------|
+{% for r in csv_rows %}| {{ r["service"] }} | {{ r["config_type"] }} | {{ r["intercept_address"] }} | {{ r["identity_roles"] }} | {{ r["service_roles"] }} | {{ r["policy_type"] }} |
+{% endfor %}
+
+## 1. host.v1 / intercept.v1 config を作成する
+
+CSV の `intercept_address` 列は `ホスト名:ポート` 形式のため、シェル側で
+分解してから JSON を組み立てます（1 service につき 1 回でよいので、Dial 側の
+行のみを使って重複作成を避けます）。
+
+```bash
+{% for r in csv_rows if r["policy_type"] == "Dial" %}INTERCEPT="{{ r['intercept_address'] }}"
+HOST="${INTERCEPT%%:*}"
+PORT="${INTERCEPT##*:}"
+ziti edge create config {{ r['service'] }}-intercept intercept.v1 "{\"protocols\":[\"tcp\"],\"addresses\":[\"${HOST}\"],\"portRanges\":[{\"low\":${PORT},\"high\":${PORT}}]}"
+ziti edge create config {{ r['service'] }}-host host.v1 "{\"protocol\":\"tcp\",\"address\":\"${HOST}\",\"port\":${PORT}}"
+{% endfor %}```
+
+## 2. service を作成し、role attributes を付与する
+
+`service_roles` 列の値（`#` 始まりの属性タグ）を、そのまま service の
+`--role-attributes` に渡します。
+
+```bash
+{% for r in csv_rows if r["policy_type"] == "Dial" %}ziti edge create service {{ r['service'] }} --configs {{ r['service'] }}-intercept,{{ r['service'] }}-host --role-attributes {{ r['service_roles'] }}
+{% endfor %}```
+
+## 3. service-policy を Dial / Bind に分離して作成する
+
+CSV の 1 行が 1 つの service-policy に対応します。Dial 行は「誰がこの
+service を呼び出せるか」、Bind 行は「誰がこの service の実体として待ち受け
+られるか」を表します。`identity_roles` 列は `@名前` 指定と `#属性` 指定が
+混在している点に注意してください（例: `@crm-web-frontend` は特定 1 identity
+のみ、`#backup-operators` はその属性を持つ全 identity）。
+
+```bash
+{% for r in csv_rows %}ziti edge create service-policy {{ r['service'] }}-{{ r['policy_type'] | lower }}-policy {{ r['policy_type'] }} --identity-roles "{{ r['identity_roles'] }}" --service-roles "{{ r['service_roles'] }}"
+{% endfor %}```
+
+## 動作確認
+
+1. 各 service について、Dial 側 identity から到達可否を確認します（許可対象の
+   identity 名と service 名を実際の値に置き換えてください）。
+
+   ```bash
+{% for r in csv_rows if r["policy_type"] == "Dial" %}   ziti edge policy-advisor identities <identity-matching-{{ r['identity_roles'] }}> {{ r['service'] }}
+{% endfor %}   ```
+
+   出力に `COMMON ROLES` として Dial ポリシーが表示され、`ROUTER OK` /
+   `IDENTITY OK` が両方 `Y`（到達可能）であることを確認します。
+
+2. Bind 側（サービスを提供する identity）についても同様に
+   `ziti edge policy-advisor identities <bind-identity> <service>` を実行し、
+   Bind ポリシーが `Y` になっていることを確認します。
+
+3. 意図せず許可してしまった組み合わせがないか、`ziti edge policy-advisor services <service>`
+   で service 側からも一覧確認します。
+
+4. 既存の広い許可（暫定の全体許可ポリシーなど）が残っている場合は、上記 1〜3
+   で新しい最小権限ポリシーが機能することを確認できてから、旧ポリシーを
+   `ziti edge delete service-policy <旧ポリシー名>` で削除します。新旧を
+   同時に無効化しないでください。
+
+## 注意事項
+
+- OpenZiti はデフォルト全拒否（default-deny）です。service-policy を作成
+  していない service は、identity 側の設定に関わらず一切到達できません。
+  「動かないので調査する」前に、まず対象の service-policy が存在するかを
+  確認してください。
+- role attributes（`@名前` / `#属性`）は綴りを 1 文字でも間違えると、
+  エラーにはならず単に一致する identity/service が 0 件になり、静かに不通
+  になります。投入前に `ziti edge list identities 'roleAttributes contains "<attribute>"'`
+  などで対象集合が想定通りかを必ず確認してください。
+- Dial と Bind は必ず別ポリシーとして分離すること。同一ポリシーに両方の
+  権限を持たせると、本来クライアントであるべき identity がサーバとして
+  待ち受け可能になってしまう。
+- 本手順はアクセス制御（ACL）ポリシーの変更に該当するため、新しい
+  service-policy が「動作確認」で到達可能であることを確認してから、既存の
+  暫定ポリシーや広すぎる許可を削除・無効化すること。新旧を同時に切り替えて
+  検証を省略しない。
+- 本番 controller に対して実行する前に、CSV の identity_roles / service_roles
+  が意図した集合と一致するか、必ずステージング環境またはテスト用 identity
+  で確認してから投入する。

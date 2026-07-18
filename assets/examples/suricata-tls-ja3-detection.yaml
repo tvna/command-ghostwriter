@@ -1,0 +1,8 @@
+ja3_enabled: true
+watch_ja3_hashes:
+  - e7d705a3286e19ea42f587b344ee6865
+  - 6734f37431670b3ab4292b8f60f29984
+watch_sni_patterns:
+  - badhost.example
+  - c2.badhost.example
+sid_base: 9100201

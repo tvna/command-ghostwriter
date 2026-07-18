@@ -1,0 +1,149 @@
+# Wazuhマネージャとエージェント登録の構築
+
+Wazuhマネージャの導入後、リモート接続設定・エージェント登録(自動/手動)・鍵配布・接続確認までを一巡し、HIDS基盤の土台を作ります。
+
+## 目的
+
+Wazuhマネージャで安全にエージェントを受け入れられるようリモート設定を行い、登録方式(agent-auth / manage_agents)を選定してエージェントを登録・接続させ、`agent_control` とログで正しく監視対象に組み込まれたことを確認できるようになることを目指します。
+
+## 用語解説
+
+- **wazuh-authd**: マネージャ上で稼働する自動登録デーモン(ポート1515)。エージェントからの登録要求を受け、鍵を自動発行する
+- **agent-auth**: エージェント側で実行するクライアントスクリプト。`wazuh-authd` に接続し、登録パスワードを使って自動的に鍵を取得・登録する方式
+- **manage_agents**: マネージャ側・エージェント側の双方で使う対話型CLI。マネージャ側で「エージェント追加→鍵抽出」、エージェント側で「鍵インポート」を手動で行う方式
+- **agent-auth と manage_agents の違い**: agent-authは登録パスワードさえ共有すればエージェント自身が鍵を取得できる自動登録方式で、大量展開向き。manage_agentsは鍵文字列を人手でコピー&ペーストする手動配布方式で、登録パスワードを使わずオペレータが個別に鍵を管理したい少数台向き
+- **agent_groups**: エージェントに共有設定(agent.conf)を配布するためのグループ分類
+- **agent_control**: マネージャ上でエージェントの接続状態(Active/Disconnected/Never connected)を確認するCLI
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| マネージャIP | `{{ manager_ip }}` |
+| 登録パスワード設定済み | {{ enrollment_password_set }} |
+| 登録方式 | `{{ registration_method }}` |
+| 対象エージェントホスト名 | `{{ agent_hostname }}` |
+| 所属グループ数 | {{ agent_groups | length }} |
+
+所属グループ:
+{% for g in agent_groups %}- `{{ g }}`
+{% endfor %}
+
+## 手順
+
+### 1. マネージャ側でリモート接続設定を行う
+
+`/var/ossec/etc/ossec.conf` の `<remote>` ブロックで、エージェントからの接続を受け付けるプロトコル・ポートを設定します。
+
+```bash
+sudo tee -a /var/ossec/etc/ossec.conf <<'EOF'
+<ossec_config>
+  <remote>
+    <connection>secure</connection>
+    <port>1514</port>
+    <protocol>tcp</protocol>
+    <queue_size>131072</queue_size>
+  </remote>
+</ossec_config>
+EOF
+
+sudo systemctl restart wazuh-manager
+```
+
+### 2. 登録パスワードを設定する(agent-auth方式を使う場合)
+
+自動登録(`wazuh-authd`)に登録パスワードを設定し、権限を絞って保管します。
+
+```bash
+sudo tee /var/ossec/etc/authd.pass <<'EOF'
+CHANGE_ME_TO_A_STRONG_RANDOM_PASSWORD
+EOF
+
+sudo chown root:wazuh /var/ossec/etc/authd.pass
+sudo chmod 640 /var/ossec/etc/authd.pass
+sudo systemctl restart wazuh-manager
+```
+
+登録パスワードは設定済みフラグが `{{ enrollment_password_set }}` であることを前提に、今回は `{{ registration_method }}` 方式でエージェント `{{ agent_hostname }}` を登録します。
+
+### 3-A. agent-authによる自動登録(registration_methodがagent-authの場合)
+
+エージェント側で以下を実行し、マネージャの `wazuh-authd` へ登録要求を送ります。
+
+```bash
+sudo /var/ossec/bin/agent-auth -m {{ manager_ip }} -A {{ agent_hostname }} -P
+```
+
+`-P` で登録パスワードの入力を求められるので、手順2で設定した値を入力します。成功すると `/var/ossec/etc/client.keys` にエージェント鍵が自動生成されます。
+
+### 3-B. manage_agentsによる手動登録(registration_methodがmanage_agentsの場合)
+
+マネージャ側でエージェントを追加し、鍵を抽出します。
+
+```bash
+sudo /var/ossec/bin/manage_agents
+# A) Add an agent
+#    Name: {{ agent_hostname }}
+#    IP: any (もしくは固定IPを指定)
+# E) Extract key for an agent
+#    -> 表示された鍵文字列を控える
+```
+
+エージェント側で鍵をインポートします。
+
+```bash
+sudo /var/ossec/bin/manage_agents
+# I) Import key for the local agent
+#    -> マネージャ側で抽出した鍵文字列を貼り付け
+```
+
+### 4. エージェントをグループに割り当てる
+
+```bash
+{% for g in agent_groups %}sudo /var/ossec/bin/agent_groups -a -i {{ agent_hostname }} -g {{ g }} -q
+{% endfor %}
+```
+
+### 5. エージェント側でマネージャのアドレスを設定する
+
+`/var/ossec/etc/ossec.conf` の `<client><server>` にマネージャのIPを設定します。
+
+```bash
+sudo tee -a /var/ossec/etc/ossec.conf <<'EOF'
+<ossec_config>
+  <client>
+    <server>
+      <address>{{ manager_ip }}</address>
+      <port>1514</port>
+      <protocol>tcp</protocol>
+    </server>
+  </client>
+</ossec_config>
+EOF
+
+sudo systemctl restart wazuh-agent
+```
+
+## 動作確認
+
+1. マネージャ側で `agent_control` を実行し、対象エージェントが `Active` と表示されることを確認します。
+
+```bash
+sudo /var/ossec/bin/agent_control -l | grep -A2 {{ agent_hostname }}
+```
+
+2. 接続ログでハンドシェイクが成功していることを確認します。
+
+```bash
+sudo tail -n 50 /var/ossec/logs/ossec.log | grep -i {{ agent_hostname }}
+```
+
+`Connected to the server` や鍵の検証成功に相当するログが出力され、`agent_control -l` の状態が `Active` であることの両方を確認できて初めて登録完了とみなします。
+
+## 注意事項
+
+- **登録パスワードの安全な受け渡し**: 発行(強固なランダム文字列を生成)→保管(`/var/ossec/etc/authd.pass` を `root:wazuh` の640権限で保管)→配布(メールやチャットの平文ではなく、既存のシークレット管理経路で共有)→ローテーション(定期的に、また漏えいが疑われた際は即座に再生成し `wazuh-manager` を再起動)の流れを徹底する。
+- **エージェント鍵の機微性**: `client.keys` に格納される鍵は認証情報そのものであり、ログや手順書に鍵文字列の実値を残さない。シェル履歴に平文で残さないよう `manage_agents` の対話入力後はhistoryを確認・削除する。
+- **時刻同期の必須性**: マネージャ・エージェント双方でNTP(chronydなど)による時刻同期を行うこと。イベント相関やアラートのタイムスタンプはこの同期に依存しており、数秒のズレでも相関ウィンドウがずれて誤検知・見逃しの原因になる。
+- **新しい登録経路の検証を先に行う**: 登録パスワードのローテーションや既存エージェントの鍵再発行を行う前に、必ず新しい鍵・パスワードで対象エージェントが `agent_control -l` で `Active` になり、`ossec.log` に接続ログが記録されることを確認する。旧鍵・旧パスワードを無効化・削除するのは、新経路での接続成功を確認した後にする。
+- ロールバックが必要な場合は、`manage_agents` の `R) Remove an agent` で問題のあるエージェント登録を削除し、鍵を再発行してから登録手順をやり直す。

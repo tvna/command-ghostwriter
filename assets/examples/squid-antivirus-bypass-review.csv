@@ -1,0 +1,7 @@
+bypass_type,target,reason,added_at,still_needed,disposition
+splice_ssl_bump,*.bank.example.com,証明書ピン留めアプリのため復号不可・正当なsplice除外,2025-01-10,true,keep
+splice_ssl_bump,*.legacy-vendor.example,移行作業中の暫定除外・理由不明のまま残存,2024-03-01,false,remove
+adaptation_exempt,10.0.5.0/24,ICAP検査対象外の管理系セグメント,2025-06-01,true,keep
+adaptation_exempt,*.update.microsoft.com,Windows Update検査除外・帯域負荷回避目的,2025-02-15,true,review
+always_direct,192.168.100.0/24,旧監視サーバの暫定プロキシバイパス・棚卸し漏れ,2024-11-20,false,remove
+always_direct,*.internal-corp.example,社内基幹システムの直接接続許可,2025-05-01,true,keep

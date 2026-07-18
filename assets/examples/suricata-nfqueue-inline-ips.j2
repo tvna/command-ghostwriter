@@ -1,0 +1,174 @@
+# SuricataによるNFQUEUEインラインIPSの構築
+
+nftablesの`queue`アクションでカーネルからパケットを`{{ nic_interface }}`
+経由でSuricataのNFQUEUEハンドラへ引き渡し、`suricata -q {{ queue_num }}`
+でインラインIPSとして動作させます。切替前に必ずIDSモード(検知のみ)で
+`{{ ids_soak_days }}`日間の誤検知潰しを済ませ、Suricataプロセス停止時の
+挙動(fail-open/fail-close)を事前に決めてから本番投入してください。
+
+## 目的
+
+nftablesのqueue連携でSuricataをカーネル内パケット処理経路に割り込ませ、
+`drop`ルールが一致した通信をリアルタイムに遮断できるインラインIPS構成
+を構築します。あわせて、Suricataプロセスが異常停止した際に通信を
+「素通しする(fail-open)」か「遮断する(fail-close)」かを設計判断として
+明記し、ロックアウト(意図しない全断)を防ぎます。
+
+## 用語解説
+
+- **NFQUEUE**: Linuxカーネルのnetfilterが持つターゲットの一つ。一致した
+  パケットをカーネル内で処理せず、指定したキュー番号を介してユーザ空間の
+  プロセス(ここではSuricata)へ引き渡す仕組み
+- **nfq: mode: accept**: `suricata.yaml`のNFQUEUE設定。Suricataがパケットを
+  検査した結果、明示的な`drop`シグネチャに一致しない限りaccept(通過)する
+  デフォルト動作を指す。個々のルールの`drop`アクションがこのacceptを上書きする
+- **bypass(fail-open)**: nftablesの`queue`アクションに付与できるオプション。
+  キュー番号に対応するユーザ空間プロセス(Suricata)が存在しない、または
+  応答できない状態のとき、パケットを破棄せずそのまま通過させる。Suricata
+  停止時に業務通信を止めないための設定だが、その間は検査・遮断が一切
+  効かなくなる点に注意する
+- **fail-close**: bypassを指定しない場合の挙動。対応するユーザ空間
+  プロセスが存在しないとパケットは破棄される。Suricata停止がそのまま
+  通信断になるため、可用性より遮断の確実性を優先する構成
+- **classtype**: Suricataルールの分類タグ。`policy-violation`は組織の
+  利用ポリシーに反する通信(今回のTELNET遮断など)を表す分類
+
+## シナリオ設定
+
+| 項目 | 値 |
+|------|-----|
+| 対象インターフェース | `{{ nic_interface }}` |
+| nftablesテーブル/チェーン | `{{ nft_table }}` / `{{ nft_chain }}` |
+| NFQUEUE番号(queue_num) | `{{ queue_num }}` |
+| 停止時の挙動(fail_open) | {% if fail_open %}bypass(fail-open: 素通し){% else %}bypassなし(fail-close: 遮断){% endif %} |
+| 保護対象ネットワーク(protected_net / HOME_NET) | `{{ protected_net }}` |
+| IDS観察期間(ids_soak_days) | `{{ ids_soak_days }}`日間 |
+| suricata.yamlパス | `{{ suricata_yaml_path }}` |
+| 検証用カスタムルールファイル | `{{ custom_rules_path }}` |
+
+追加する検証用drop_sids({{ drop_sids | length }}件):
+
+| # | SID |
+|---|-----|
+{% for sid in drop_sids %}| {{ loop.index }} | {{ sid }} |
+{% endfor %}
+
+## 1. IDSモード(検知のみ)でルールセットを事前検証する
+
+インライン化する前に、nftablesのqueue連携を組まずSuricataを通常の
+ミラーリング/pcapモードで最低`{{ ids_soak_days }}`日間走らせ、既存の
+ルールセットが業務通信を誤検知していないかを確認します。
+
+```bash
+suricata -c {{ suricata_yaml_path }} -i {{ nic_interface }} -D
+tail -f /var/log/suricata/eve.json | jq -r 'select(.event_type=="alert") | .alert.signature'
+```
+
+`{{ ids_soak_days }}`日間の観察で業務通信に対する誤検知シグネチャが
+残っていないことを確認してから、次の手順に進みます。
+
+## 2. suricata.yamlにNFQUEUE設定を追加する
+
+`{{ suricata_yaml_path }}`のNFQUEUEセクションを次のように設定します。
+
+```yaml
+nfq:
+  mode: accept
+  repeat-mark: 1
+  repeat-mask: 1
+```
+
+`mode: accept`は、個々のルールで明示的に`drop`と判定されない限り
+パケットを通過させる既定動作です。実際の遮断は手順3で追加するカスタム
+ルールの`drop`アクションが担います。
+
+## 3. 検証用dropルールを追加する
+
+`{{ custom_rules_path }}`に、TELNET(23/tcp)宛通信を遮断する検証用ルール
+を追加します。
+
+```
+{% for sid in drop_sids %}drop tcp any any -> $HOME_NET 23 (msg:"TELNET blocked"; sid:{{ sid }}; rev:1; classtype:policy-violation;)
+{% endfor %}```
+
+`suricata.yaml`の`default-rule-path`配下からこのファイルを読み込むよう
+`rule-files`に`{{ custom_rules_path }}`を追加し、`HOME_NET`が
+`{{ protected_net }}`を含んでいることを確認します。
+
+```bash
+grep -A3 '^HOME_NET' {{ suricata_yaml_path }}
+```
+
+## 4. nftablesでNFQUEUEへの転送ルールを投入する
+
+`{{ nic_interface }}`を通過するTCP通信をキュー番号`{{ queue_num }}`へ
+転送します。{% if fail_open %}Suricataプロセス停止時に業務通信を止めない
+方針のため`bypass`を付与します。{% else %}Suricataプロセス停止時は通信を
+確実に遮断する方針のため`bypass`は付与しません。{% endif %}
+
+```bash
+nft add table {{ nft_table }}
+nft add chain {{ nft_table }} {{ nft_chain }} '{ type filter hook forward priority 0 ; }'
+{% if fail_open %}nft add rule {{ nft_table }} {{ nft_chain }} ip protocol tcp queue num {{ queue_num }} bypass
+{% else %}nft add rule {{ nft_table }} {{ nft_chain }} ip protocol tcp queue num {{ queue_num }}
+{% endif %}```
+
+## 5. 別セッションを確保したうえでSuricataをインラインIPSとして起動する
+
+nftablesのqueueルールを投入した直後は、対応するSuricataプロセスが
+起動していないとパケットが滞留(fail-close時)または無検査で通過
+(fail-open時)します。ロックアウト防止のため、**管理アクセス用の別
+セッション(コンソールまたは別回線のSSH)を確保した状態で**Suricataを
+起動してください。
+
+```bash
+suricata -c {{ suricata_yaml_path }} -q {{ queue_num }} -D
+ps aux | grep '[s]uricata'
+```
+
+## 動作確認
+
+1. `{{ telnet_test_host }}`宛のTELNET(23/tcp)接続を試み、接続が確立
+   されず遮断されることを確認します。
+
+   ```bash
+   telnet {{ telnet_test_host }} 23
+   ```
+
+2. `fast.log`にドロップの記録が出力されていることを確認します。
+
+   ```bash
+   grep 'TELNET blocked' {{ fast_log_path }}
+   ```
+
+   `[Drop]`を含む行が記録され、`sid`が追加したSIDと一致していることを
+   確認します。
+
+3. 別セッションから、TELNET以外の既存業務通信(HTTP/HTTPS等)が引き続き
+   疎通することを確認し、インライン化による意図しない遮断が発生して
+   いないことを確認します。
+
+4. `nft list table {{ nft_table }}`で、投入したNFQUEUEルールが
+   `queue num {{ queue_num }}`{% if fail_open %} `bypass`{% endif %}を
+   含んだ状態で存在することを確認します。
+
+## 注意事項
+
+- **手順1のIDSモードでの事前観察を省略しない。** ルールセットの誤検知を
+  潰さずにインライン化すると、業務通信が想定外にdropされる。
+- **Suricataプロセス停止時の挙動(fail-open/fail-close)は、投入前に
+  必ず決定してnftablesルールの`bypass`有無に反映すること。** bypassなし
+  (fail-close)構成でSuricataが異常停止すると、対象インターフェースの
+  通信が全断するロックアウトになりうる。可用性を優先する場合は
+  `bypass`を付与するが、その間は検知・遮断が効かない点を運用者間で
+  共有しておく。
+- **手順5でnftablesルール投入後にSuricataを起動する際は、必ず別
+  セッション(コンソール等)を確保した状態で行う。** 現在の管理セッション
+  自体がNFQUEUE経路を通る場合、Suricata起動前後の疎通不良で操作不能に
+  陥る可能性がある。
+- 検証用ルール(SID {{ drop_sids | join(', ') }})はTELNETという明確に
+  不要なプロトコルを対象にしているが、本番投入時は誤って業務ポートを
+  巻き込まないよう`$HOME_NET`と宛先ポートの組み合わせを再確認すること。
+- 切り戻す場合は`nft delete table {{ nft_table }}`でNFQUEUEへの転送を
+  止めたうえで、Suricataプロセスを停止する。転送ルールを残したまま
+  Suricataだけを停止すると、fail-close設定時に通信断が先に発生する。

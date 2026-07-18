@@ -1,0 +1,181 @@
+# Keycloakユーザー自己登録とメール検証の設定
+
+realm でユーザー自己登録(self-registration)を有効化し、SMTP設定によるメール検証(verifyEmail)、
+利用規約同意、CAPTCHA相当の保護ステップを registration flow に追加することで、
+なりすまし・スパム登録のリスクを抑えながら self-service なアカウント作成を提供します。
+
+## 目的
+
+Keycloak の self-registration 機能とその防御的な設定(メール検証・利用規約・CAPTCHA)を理解し、
+未検証アカウントの権限を最小化した状態で安全に自己登録を有効化できるようになることを目指します。
+
+## 用語解説
+
+- **self-registration(自己登録)**: ログイン画面から誰でも新規アカウントを作成できる Keycloak の機能。
+  realm 属性 `registrationAllowed` で有効/無効を切り替える
+- **攻撃面としてのスパム登録**: self-registration を有効にすると、ボットによる大量のダミーアカウント作成、
+  他人のメールアドレスを騙った登録、フィッシング基盤としての悪用などのリスクが生じる
+- **verifyEmail**: 登録直後のアカウントを未検証状態にし、メール内リンクをクリックするまで
+  `VERIFY_EMAIL` required action を課すことで、メールアドレスの実在確認とボット登録の抑制を行う設定
+- **SMTP設定(smtpServer)**: realm から検証メールを送信するためのメールサーバー接続情報。
+  host/port/from に加えて認証情報(user/password)を含むため機微情報として扱う
+- **利用規約(Terms and Conditions)**: 登録フロー内で規約同意を必須ステップとして挟み、
+  未同意のまま利用開始できないようにする required action
+- **CAPTCHA相当の保護**: Keycloak の `registration-recaptcha-action` execution を registration flow に
+  追加し、機械的な大量登録(ボット)を検知・抑制する仕組み
+- **registration flow**: 自己登録画面で実行されるステップ(execution)の並びを定義する認証フローの一種
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| realm | {{ realm }} |
+| kcadm server | {{ kcadm.server }} |
+| kcadm admin realm | {{ kcadm.admin_realm }} |
+| kcadm admin user | {{ kcadm.admin_user }} |
+| コピー元registration flow | {{ registration_flow }} |
+| 自己登録有効化(registration_enabled) | {{ registration_enabled }} |
+| メール検証必須(verify_email) | {{ verify_email }} |
+| SMTP host | {{ smtp_config.host }} |
+| SMTP port | {{ smtp_config.port }} |
+| SMTP from | {{ smtp_config.from }} |
+| SMTP認証利用(auth) | {{ smtp_config.auth }} |
+| SMTP認証ユーザー | {{ smtp_config.user }} |
+| 利用規約同意必須(terms_required) | {{ terms_required }} |
+| CAPTCHA execution alias | {{ recaptcha_alias }} |
+| 未検証時のrequired action | {{ default_required_action_unverified }} |
+| 検証用テスト登録メールアドレス | {{ test_registrant_email }} |
+| 検証用テスト登録ユーザー名 | {{ test_registrant_username }} |
+| 未検証ユーザーグループ | {{ minimum_verified_users_group }} |
+
+## 1. kcadmにログインする
+
+```bash
+/opt/keycloak/bin/kcadm.sh config credentials \
+  --server {{ kcadm.server }} --realm {{ kcadm.admin_realm }} --user {{ kcadm.admin_user }}
+```
+
+## 2. 未検証ユーザーの権限を最小化するグループを準備する
+
+自己登録直後のアカウントに強い権限を与えないよう、先に未検証ユーザー専用グループを作成しておきます。
+このグループには realm-management ロールなど機微なロールを一切割り当てません。
+
+```bash
+/opt/keycloak/bin/kcadm.sh create groups -r {{ realm }} -s name={{ minimum_verified_users_group }}
+```
+
+## 3. SMTP設定を投入する
+
+検証メールを送信できるよう、realm に SMTP サーバー情報を設定します。
+`password` はここでは kcadm のコマンド履歴に残さないよう、対話入力または vault 参照で別途投入してください。
+
+```bash
+/opt/keycloak/bin/kcadm.sh update realms/{{ realm }} \
+  -s 'smtpServer.host={{ smtp_config.host }}' \
+  -s 'smtpServer.port={{ smtp_config.port }}' \
+  -s 'smtpServer.from={{ smtp_config.from }}' \
+  -s 'smtpServer.auth={{ smtp_config.auth }}' \
+  -s 'smtpServer.user={{ smtp_config.user }}' \
+  -s 'smtpServer.starttls=true'
+```
+
+## 4. registration flowを複製する
+
+既存の `{{ registration_flow }}` を直接編集せず、複製したフローを編集対象にします。
+問題が起きた場合は realm の registrationFlow を元に戻すだけでロールバックできます。
+
+```bash
+/opt/keycloak/bin/kcadm.sh create "authentication/flows/{{ registration_flow }}/copy" \
+  -r {{ realm }} -s newName=registration-hardened
+```
+
+## 5. CAPTCHA相当の保護executionを追加する
+
+複製したフローに reCAPTCHA execution を追加し、実行要件を REQUIRED にします。
+事前に Keycloak 管理コンソールの realm 設定で reCAPTCHA の site key / secret key を投入しておく必要があります。
+
+```bash
+/opt/keycloak/bin/kcadm.sh create authentication/executions -r {{ realm }} \
+  -b '{"provider":"registration-recaptcha-action","parentFlow":"registration-hardened"}'
+
+/opt/keycloak/bin/kcadm.sh get "authentication/flows/registration-hardened/executions" -r {{ realm }}
+```
+
+取得した `{{ recaptcha_alias }}` execution の `id` を使い、実行要件を更新します。
+
+```bash
+/opt/keycloak/bin/kcadm.sh update "authentication/flows/registration-hardened/executions" -r {{ realm }} \
+  -b '{"id":"<recaptcha_execution_id>","requirement":"REQUIRED"}'
+```
+
+## 6. 利用規約同意ステップを必須化する
+
+`{{ default_required_action_unverified }}` とは別に、`TERMS_AND_CONDITIONS` required action を
+realm レベルで有効化し、新規登録ユーザーに規約同意を強制します。
+
+```bash
+{% if terms_required %}
+/opt/keycloak/bin/kcadm.sh update authentication/required-actions/TERMS_AND_CONDITIONS -r {{ realm }} \
+  -s enabled=true -s defaultAction=true
+{% else %}
+/opt/keycloak/bin/kcadm.sh update authentication/required-actions/TERMS_AND_CONDITIONS -r {{ realm }} \
+  -s enabled=false -s defaultAction=false
+{% endif %}
+```
+
+## 7. self-registrationとメール検証を有効化する
+
+準備が整ったら、realm 全体で self-registration・メール検証・複製した registration flow への切り替えを
+まとめて反映します。
+
+```bash
+/opt/keycloak/bin/kcadm.sh update realms/{{ realm }} \
+  -s registrationAllowed={{ registration_enabled }} \
+  -s verifyEmail={{ verify_email }} \
+  -s registrationFlow=registration-hardened
+```
+
+## 8. テスト登録でメール検証フローを確認してから展開範囲を確定する
+
+いきなり本番ユーザー向けに広報せず、まずテスト用メールアドレス `{{ test_registrant_email }}` で
+実際に登録を行い、検証メール受信から有効化までの一連の流れを確認します。
+
+```bash
+/opt/keycloak/bin/kcadm.sh get users -r {{ realm }} -q username={{ test_registrant_username }}
+```
+
+上記コマンドで払い出された `id` を使い、未検証ユーザーが最小権限グループに入っていることを確認します。
+
+```bash
+/opt/keycloak/bin/kcadm.sh update users/<test_registrant_id> -r {{ realm }} \
+  -s 'groups=["/{{ minimum_verified_users_group }}"]'
+```
+
+## 動作確認
+
+- self-registration 画面から `{{ test_registrant_email }}` / `{{ test_registrant_username }}` で
+  アカウント作成ができ、CAPTCHA execution と利用規約同意ステップが表示されること
+- 登録直後のアカウントが `{{ default_required_action_unverified }}` を required action として持ち、
+  検証完了まで未検証状態(未検証ユーザーグループ `{{ minimum_verified_users_group }}` 所属)であること
+- `{{ smtp_config.from }}` から検証メールが実際に届き、メール内リンクをクリックすることで
+  `{{ default_required_action_unverified }}` required action が解除され、ログイン可能になること
+- realm の `registrationFlow` が `registration-hardened` になっており、
+  `authentication/flows/registration-hardened/executions` の CAPTCHA execution の requirement が
+  `REQUIRED` になっていること
+
+## 注意事項
+
+- self-registration の可否は要件次第で慎重に判断すること。特に内部システムやパートナー限定システムでは、
+  自己登録を有効化せず招待制・管理者作成のみに留めることを推奨する。
+- realm 全体へ `registrationAllowed`/`verifyEmail`/`registrationFlow` を反映する前に、必ずテスト登録
+  (Step 8)でメール受信から検証完了までを確認すること。検証前に有効化すると、メール未達やCAPTCHA設定ミスに
+  気づかないまま公開されるリスクがある。
+- SMTP認証情報(`smtp_config.user` とパスワード)は機微情報であり、kcadmのコマンド履歴やチケット・ログに
+  平文で残さないこと。パスワードは vault またはシークレットマネージャ経由で投入する。
+- 未検証アカウント(`{{ default_required_action_unverified }}` 未完了のユーザー)には、検証完了まで
+  `{{ minimum_verified_users_group }}` 以外のロール・グループを一切割り当てず、権限を最小化しておくこと。
+- CAPTCHA(`{{ recaptcha_alias }}`)はスパム登録の緩和策であり、単独では完全な防御にならない。
+  メール検証と組み合わせ、必要に応じてレート制限(WAF等)も併用すること。
+- ロールバックする場合は realm の `registrationAllowed` を `false` に戻すか、`registrationFlow` を
+  元の `{{ registration_flow }}` に戻すだけでよく、複製したフロー `registration-hardened` 自体は
+  削除せず残しておくと再適用が容易になる。

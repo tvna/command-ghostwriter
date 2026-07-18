@@ -1,0 +1,22 @@
+log_sources:
+  - path: /var/log/auth.log
+    label: SSH認証ログ
+  - path: /var/log/nginx/access.log
+    label: Nginxアクセスログ
+
+collections:
+  - crowdsecurity/sshd
+  - crowdsecurity/linux
+  - crowdsecurity/nginx
+
+bouncer_type: firewall-bouncer-nftables
+api_key_registered: false
+
+whitelist:
+  - address: 192.168.10.5
+    label: 管理端末A
+  - address: 192.168.10.6
+    label: 管理端末B
+
+test:
+  attacker_ip: 203.0.113.60

@@ -1,0 +1,5 @@
+rule_id,description,daily_count,verdict,tuning_action
+5715,sshd authentication success,15000,fp,level_down
+100010,cron job completed successfully,8000,fp,noalert
+31151,web attack sql injection attempt,450,fp,field_exclude
+5712,sshd authentication failure,600,tp,frequency

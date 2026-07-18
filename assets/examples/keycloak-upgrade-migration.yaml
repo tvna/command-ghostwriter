@@ -1,0 +1,5 @@
+current_version: "24.0.4"
+target_version: "25.0.6"
+db_backup: true
+cutover_window: "2026-07-20 02:00-04:00 JST (定例メンテナンス窓)"
+rollback_step: "kc-db-01 の pg_restore で keycloak_db を pre_upgrade_25_0_6.dump からリストアし、keycloak コンテナを current_version タグへ差し戻す"

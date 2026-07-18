@@ -1,0 +1,35 @@
+title: Loki + Promtailログ集約パイプライン構築
+loki_url: http://loki.internal:3100
+storage_type: filesystem
+retention_period: 720h
+scrape_jobs:
+  - job: system-journal
+    source_type: journal
+    path: "-"
+    labels:
+      - key: job
+        value: system-journal
+      - key: unit
+        value: nginx.service
+  - job: nginx-access
+    source_type: file
+    path: /var/log/nginx/access.log
+    labels:
+      - key: job
+        value: nginx-access
+      - key: env
+        value: production
+  - job: app-server
+    source_type: file
+    path: /var/log/app-server/*.log
+    labels:
+      - key: job
+        value: app-server
+      - key: level
+        value: info
+label_keys:
+  - job
+  - host
+  - env
+  - level
+  - unit

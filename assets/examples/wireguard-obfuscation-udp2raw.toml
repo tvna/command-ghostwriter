@@ -1,0 +1,22 @@
+[wireguard]
+interface = "wg0"
+server_address = "10.30.0.1/24"
+server_tunnel_ip = "10.30.0.1"
+server_listen_port = 51820
+client_tunnel_ip = "10.30.0.2/32"
+server_public_key = "PLACEHOLDER_SERVER_PUBKEY_REPLACE_ME="
+client_public_key = "PLACEHOLDER_CLIENT_PUBKEY_REPLACE_ME="
+
+[udp2raw]
+real_endpoint = "127.0.0.1:51820"
+real_endpoint_host = "127.0.0.1"
+real_endpoint_port = 51820
+udp2raw_mode = "faketcp"
+udp2raw_password = "CHANGE_ME_STRONG_PASSWORD_32CHARS_MIN"
+local_listen = "127.0.0.1:51821"
+server_raw_listen = "0.0.0.0:4096"
+server_public_raw_endpoint = "203.0.113.50:4096"
+
+[verification]
+handshake_timeout_sec = 30
+direct_udp_test_port = 51820

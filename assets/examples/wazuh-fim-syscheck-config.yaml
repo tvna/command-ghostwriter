@@ -1,0 +1,19 @@
+monitored_dirs:
+  - /etc
+  - /bin
+  - /sbin
+ignore_paths:
+  - /etc/mtab
+  - /etc/hosts.deny
+  - /etc/random-seed
+nodiff_paths:
+  - /etc/ssl/private
+realtime: true
+report_changes: true
+whodata: true
+frequency: 43200
+ossec_conf_path: /var/ossec/etc/ossec.conf
+wazuh_control_path: /var/ossec/bin/wazuh-control
+alert_log_path: /var/ossec/logs/alerts/alerts.log
+test_file: /etc/wazuh-fim-test.conf
+auditd_rules_path: /etc/audit/rules.d/audit.rules

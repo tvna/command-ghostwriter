@@ -1,0 +1,180 @@
+# OPA/GatekeeperによるKubernetes受付制御 — {{ cluster_name }}
+
+## 目的
+
+OPA Gatekeeperをadmission webhook（kube-apiserverからのリクエストをリソース作成・更新前に検査する受付制御機構）として導入し、ConstraintTemplateとConstraintでPodセキュリティ等の受付ポリシーを段階的に強制できるようになることを目指します。
+
+## 用語解説
+
+- **Gatekeeper**: OPAをKubernetesのValidating Admission Webhookとして動かすためのコントローラ
+- **admission webhook**: kube-apiserverがリソースの作成・更新を受け付ける前に外部サービスへ問い合わせる仕組み。Gatekeeperはここでポリシー違反リソースを拒否・警告する
+- **ConstraintTemplate**: Rego（OPAのポリシー言語）で書かれた`violation`ルールとパラメータのスキーマを定義するテンプレート
+- **Constraint**: ConstraintTemplateを具体的な対象（`match`）とパラメータ（`parameters`）に適用したインスタンス
+- **enforcementAction**: 違反時の挙動。`deny`は拒否、`dryrun`は拒否せず違反を記録のみ、`warn`は許可しつつ警告を返す
+- **fail-open / fail-closed**: Gatekeeperのwebhookが応答不能になった際に、リクエストを通す(fail-open)か拒否する(fail-closed)かの挙動
+
+## シナリオ設定
+
+対象クラスタ: {{ cluster_name }} / Gatekeeper稼働namespace: {{ gatekeeper_namespace }}
+
+除外namespace（Gatekeeper自身の管理系・kube-system等、ロックアウトを避けるため受付制御の対象から外す）:
+{% for ns in excluded_namespaces %}
+- {{ ns }}
+{% endfor %}
+
+初期enforcementAction: {{ enforcement_action }}
+
+| ConstraintTemplate | Rego package | 用途 |
+| --- | --- | --- |
+{% for t in constraint_templates %}
+| {{ t.kind }} | {{ t.name }} | Constraint適用対象を制限するポリシー本体 |
+{% endfor %}
+
+| Constraint | ConstraintTemplate | match対象種別 | parameters |
+| --- | --- | --- | --- |
+{% for c in constraints %}
+| {{ c.name }} | {{ c.kind }} | {% for k in c.match_kinds %}{{ k }} {% endfor %} | {{ c.parameters }} |
+{% endfor %}
+
+## 導入手順
+
+### 1. Gatekeeperをインストールする
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/open-policy-agent/gatekeeper/master/deploy/gatekeeper.yaml
+kubectl -n {{ gatekeeper_namespace }} rollout status deployment/gatekeeper-controller-manager
+kubectl -n {{ gatekeeper_namespace }} get pods
+```
+
+### 2. ConstraintTemplateを適用する
+
+各テンプレートについて、以下のようなマニフェストを作成して適用します（{{ constraint_templates[0].kind }} の例）。
+
+```yaml
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: {{ constraint_templates[0].name }}
+spec:
+  crd:
+    spec:
+      names:
+        kind: {{ constraint_templates[0].kind }}
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8sdenyprivileged
+
+        violation[{"msg": msg}] {
+          c := input.review.object.spec.containers[_]
+          c.securityContext.privileged == true
+          msg := sprintf("privileged container is not allowed: %v", [c.name])
+        }
+```
+
+同様に、必須ラベルを強制する`k8srequiredlabels`のRegoは以下の通りです。
+
+```rego
+package k8srequiredlabels
+
+violation[{"msg": msg}] {
+  required := input.parameters.labels
+  provided := input.review.object.metadata.labels
+  missing := required[_]
+  not provided[missing]
+  msg := sprintf("missing required label: %v", [missing])
+}
+```
+
+イメージレジストリを制限する`k8sallowedrepos`のRegoは以下の通りです。
+
+```rego
+package k8sallowedrepos
+
+violation[{"msg": msg}] {
+  c := input.review.object.spec.containers[_]
+  repo := input.parameters.repos[_]
+  not startswith(c.image, repo)
+  msg := sprintf("image registry not allowed: %v", [c.image])
+}
+```
+
+```bash
+{% for t in constraint_templates %}
+kubectl apply -f constrainttemplate-{{ t.name }}.yaml
+{% endfor %}
+kubectl get constrainttemplates
+```
+
+### 3. enforcementAction=dryrunでConstraintを適用し、既存リソースの違反を観察する（ロックアウト防止の第一段階）
+
+いきなり`deny`にすると、既存の準拠していないPodが即座に拒否され本番トラフィックに影響します。まず`dryrun`で違反を可視化します。
+
+```yaml
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: {{ constraints[0].kind }}
+metadata:
+  name: {{ constraints[0].name }}
+spec:
+  enforcementAction: {{ enforcement_action }}
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds:
+{% for k in constraints[0].match_kinds %}
+          - {{ k }}
+{% endfor %}
+    excludedNamespaces:
+{% for ns in excluded_namespaces %}
+      - {{ ns }}
+{% endfor %}
+```
+
+```bash
+{% for c in constraints %}
+kubectl apply -f constraint-{{ c.name }}.yaml
+{% endfor %}
+kubectl get constraints
+```
+
+### 4. dryrun中の違反を確認する
+
+```bash
+kubectl get {{ constraints[0].kind }} {{ constraints[0].name }} -o jsonpath='{.status.totalViolations}'
+kubectl get {{ constraints[0].kind }} {{ constraints[0].name }} -o jsonpath='{.status.violations}'
+```
+
+違反件数が0、または全て許容できる内容であることを確認してから次段階に進みます。既存の違反リソースが残っている場合は、denyへ昇格する前に是正（ラベル付与・イメージ差し替え・privileged解除）を完了させます。
+
+### 5. denyへ昇格する
+
+dryrunで観察した違反が解消されたことを確認したうえで、`enforcementAction`を`deny`に変更して再適用します。
+
+```bash
+kubectl patch {{ constraints[0].kind }} {{ constraints[0].name }} --type merge -p '{"spec":{"enforcementAction":"deny"}}'
+```
+
+## 動作確認
+
+1. 違反Podが拒否されることを確認する（`{{ violating_pod_manifest }}`はprivilegedコンテナを含む想定）
+   ```bash
+   kubectl apply -f {{ violating_pod_manifest }}
+   ```
+   `admission webhook "validation.gatekeeper.sh" denied the request` のようなエラーで拒否されればdeny昇格が機能しています。
+2. 準拠Podが許可されることを確認する
+   ```bash
+   kubectl apply -f {{ compliant_pod_manifest }}
+   kubectl get pod -l app=compliant-check
+   ```
+3. dryrun段階での監査結果を再確認する（昇格前に実施した記録として保存しておく）
+   ```bash
+   kubectl get {{ constraints[0].kind }} {{ constraints[0].name }} -o yaml > dryrun-audit-{{ cluster_name }}.yaml
+   ```
+
+## 注意事項
+
+- **denyへ昇格する前に、必ずdryrunで既存リソースの違反を観察し是正を完了させること。** 是正前にdenyへ切り替えると、既存の本番Podやデプロイが即座に拒否されロックアウトの原因になります。
+- excludedNamespacesには{{ gatekeeper_namespace }}および`kube-system`など、Gatekeeper自身やクラスタ基盤コンポーネントが動くnamespaceを必ず含めること。除外を忘れるとGatekeeper自身の再作成が拒否され復旧不能になり得ます。
+- Gatekeeperのwebhookが応答不能になった場合のfail-open/fail-closed設定（`failurePolicy`）を事前に確認し、fail-closedの場合はwebhook障害時にクラスタ全体のリソース作成が止まり得ることを運用者へ周知すること。
+- 新しいConstraintを追加する際は、既存の運用中Constraintとは別名で並行適用し、dryrunでの観察結果を確認してから既存のConstraintをdenyへ切り替える／削除する順序を守ること。
+- 段階適用（dryrun→是正→deny）の各ステップの実施記録を残し、ロールバックが必要な場合は該当Constraintの`enforcementAction`を`dryrun`へ戻すか`kubectl delete`で除去する。

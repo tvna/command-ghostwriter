@@ -1,0 +1,22 @@
+command_name: firewall-drop-repeat
+trigger_level: 10
+trigger_rules:
+  - 5710
+  - 5712
+  - 5760
+timeout_seconds: 600
+repeated_offenders: "600,1800,3600,86400"
+
+whitelist:
+  - address: 192.168.10.5
+    label: "監視サーバ(Wazuhマネージャ)"
+  - address: 192.168.10.20
+    label: "管理端末"
+
+agent:
+  name: "web01"
+  platform: "linux"
+
+test:
+  low_risk_rule_id: 5501
+  attacker_ip: 203.0.113.77

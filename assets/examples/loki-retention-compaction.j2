@@ -1,0 +1,117 @@
+# Lokiログ保持とcompaction運用 — {{ cluster_name }}
+
+クラスタ「{{ cluster_name }}」において、compactorによる保持期間(retention)の適用とインデックス圧縮(compaction)を安全に運用するための手順書です。
+
+## 目的
+
+`retention_enabled` と `compactor` の設定を正しく理解し、グローバルおよびテナント別の保持期間を意図通りに適用しながら、ストレージからの削除が非可逆であることを踏まえて安全に運用できるようになることを目指します。
+
+## 用語解説
+
+- **compactor**: Lokiのインデックスシャードを定期的に統合し、保持期間切れのチャンク・インデックスを削除するコンポーネント
+- **retention_period**: `limits_config` に設定するグローバルな保持期間。この期間を過ぎたログはcompactorの削除対象になる
+- **retention_enabled**: `compactor` 設定のフラグ。`false`(未設定)のままだと保持期間は一切適用されず、無期限保持になる
+- **delete_delay**: 削除対象と判定されてから実際にストレージから削除されるまでの猶予時間。誤設定に気づいて取り消すための猶予
+- **per_tenant_retention (overrides)**: テナントごとに異なる保持期間を設定する `overrides` ブロック。コンプライアンス要件が異なるテナントを個別に扱うために使う
+- **compaction_interval**: compactorがインデックス圧縮と保持適用のサイクルを回す間隔
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| クラスタ名 | {{ cluster_name }} |
+| compactor作業ディレクトリ | {{ compactor_working_directory }} |
+| ストレージバケット | {{ storage_bucket }} |
+| retention_enabled | {{ retention_enabled }} |
+| retention_period(グローバル) | {{ retention_period }} |
+| compaction_interval | {{ compaction_interval }} |
+| delete_delay | {{ delete_delay }} |
+| delete_request_cancel_period | {{ delete_request_cancel_period }} |
+
+テナント別retention(overrides):
+
+| テナント | retention_period |
+| --- | --- |
+{% for tenant, period in per_tenant_retention.items() %}
+| {{ tenant }} | {{ period }} |
+{% endfor %}
+
+## 手順
+
+### 1. compactorとlimits_configを設定する
+
+`loki-config.yaml` のcompactorブロックとlimits_configブロックを次のように設定します。
+
+```yaml
+compactor:
+  working_directory: {{ compactor_working_directory }}
+  compaction_interval: {{ compaction_interval }}
+  retention_enabled: {{ retention_enabled }}
+  retention_delete_delay: {{ delete_delay }}
+  retention_delete_worker_count: 150
+  delete_request_cancel_period: {{ delete_request_cancel_period }}
+
+limits_config:
+  retention_period: {{ retention_period }}
+```
+
+`retention_enabled` を設定し忘れると、`retention_period` を書いても保持期間は適用されず無期限保持のままになるため、値を明示的に確認します。
+
+### 2. テナント別retention(overrides)を設定する
+
+コンプライアンス要件が異なるテナントには `overrides` でテナント別の保持期間を上書きします。
+
+```yaml
+overrides:
+{% for tenant, period in per_tenant_retention.items() %}
+  {{ tenant }}:
+    retention_period: {{ period }}
+{% endfor %}
+```
+
+設定反映後、対象テナントのコンプライアンス保持要件(法定保存期間など)を担当部門と突き合わせ、`retention_period` がその要件を下回っていないことを確認します。
+
+### 3. 設定を段階的に反映する(新設定の検証を先行させる)
+
+`retention_enabled` や `retention_period` の変更はログの削除挙動に直結するため、既存の稼働系を止めずに新設定を検証してから本番反映します。
+
+```bash
+# 変更前の設定を検証用に複製し、別ポートのcompactorインスタンスで dry-run 相当の確認を行う
+cp loki-config.yaml loki-config.verify.yaml
+loki -config.file=loki-config.verify.yaml -verify-config
+```
+
+構文・スキーマ検証が通ったことを確認したうえで、本番の `loki-config.yaml` に反映しcompactorをローリング再起動します。
+
+### 4. compactorが単一稼働であることを確認する
+
+```bash
+kubectl get pods -l app=loki,component=compactor -o wide
+```
+
+compactorは複数レプリカが同時に保持適用・削除処理を行うと競合するため、常に1稼働であることを上記コマンドの出力(Running状態が1件のみ)で確認します。
+
+### 5. ストレージ使用量とcompactor動作ログを監視する
+
+```bash
+logcli query --limit=200 '{component="compactor"}' --since={{ compaction_interval }}
+aws s3 ls {{ storage_bucket }} --recursive --summarize | tail -n 5
+```
+
+`logcli` の出力でcompactorの圧縮・削除サイクルが `compaction_interval`({{ compaction_interval }})ごとに実行されていること、`aws s3 ls` の合計サイズが保持期間経過後に減少していることを確認します。
+
+## 動作確認
+
+- `retention_enabled` が {{ retention_enabled }} として反映され、`limits_config.retention_period`({{ retention_period }})を過ぎたログが削除対象になっていること
+- テナント別overridesが意図通りのテナント(上記表)に適用されていること
+- compactor動作ログに `compaction_interval`({{ compaction_interval }})ごとの圧縮・削除サイクルが記録されていること
+- `delete_delay`({{ delete_delay }})経過後にストレージ使用量(`aws s3 ls` の合計サイズ)が実際に減少していること
+- compactor Podが常に1稼働(単一稼働制約)であること
+
+## 注意事項
+
+- `retention_enabled` を設定し忘れると `retention_period` は無視され、無期限保持のまま気づかずストレージが肥大化し続けます。設定反映後は必ずシナリオ設定の値と一致しているかを確認してください。
+- 保持期間経過後の削除は非可逆です。誤って短い `retention_period` やテナントoverridesを設定すると、`delete_delay`({{ delete_delay }})の猶予時間を過ぎた分から復元できません。
+- 本手順の新しいcompactor設定は、手順3の検証(`-verify-config` によるdry-run相当の確認と段階的反映)で問題がないことを確認してから本番のcompactor設定を置き換えてください。旧設定を先に無効化しないでください。
+- テナント別retentionは、法務・コンプライアンス部門が定めた保存要件(最低保持期間)を下回らないよう突き合わせてから反映してください。
+- compactorは単一稼働が前提です。複数レプリカを同時稼働させるとインデックス圧縮・削除処理が競合し、データ不整合の原因になります。

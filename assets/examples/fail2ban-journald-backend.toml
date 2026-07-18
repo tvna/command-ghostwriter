@@ -1,0 +1,12 @@
+backend = "systemd"
+db_purge_age = "3d"
+
+[[jails]]
+name = "sshd"
+journalmatch = "_SYSTEMD_UNIT=sshd.service + _COMM=sshd"
+maxretry = 5
+
+[[jails]]
+name = "sudo-auth"
+journalmatch = "_SYSTEMD_UNIT=sudo.service + _COMM=sudo"
+maxretry = 3

@@ -1,0 +1,17 @@
+title: OPAポリシー変更の段階ロールアウト演習
+service_name: payments-api
+policy_name: payments-authz-v2
+prod_package: authz
+shadow_package: authz_v2
+opa_url: http://opa.internal:8181
+bundle_service_url: https://bundle-server.internal
+current_bundle_revision: "2026071601"
+previous_bundle_revision: "2026060501"
+rollout_stage: shadow
+shadow_decision_log: true
+impact_threshold: "shadow評価での拒否件数が、既存で許可されている正規トラフイックの1%を超えたら昇格を中止する"
+rollback_step: "bundle-serverのpayments-authzバンドルをprevious_bundle_revisionへ差し戻し、OPAのpolling.min_delay_secondsを待たずopa run上で強制リロードする"
+escalation: セキュリティ基盤チーム (内線 1305)
+verification_checks:
+  - "curl -s http://opa.internal:8181/v1/data/authz_v2/allow -d @sample_input.json"
+  - "curl -s http://opa.internal:8181/v1/status | jq -r .bundles.payments-authz.active_revision"

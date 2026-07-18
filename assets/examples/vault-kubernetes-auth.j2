@@ -1,0 +1,101 @@
+# VaultのKubernetes認証連携
+
+kubernetes auth methodを使い、Pod自身のService Accountトークンだけでシークレットにアクセスできるようにします。Vault CLIでのroot/管理者トークンでの実施を想定します。
+
+## 目的
+
+静的なVaultトークンをPodに配布する運用をやめ、Kubernetes上のPodが自分のService Account（SA）トークンでVaultに認証し、role境界の範囲でだけシークレットを取得できるようにします。
+
+## 用語解説
+
+- **kubernetes auth method**: Kubernetes上のSAトークンを使ってVaultにログインできるようにする認証方式
+- **TokenReview**: SAトークンの正当性をKubernetes API（`/apis/authentication.k8s.io/v1/tokenreviews`）に問い合わせて検証する仕組み。Vault側は`token_reviewer_jwt`の権限でこのAPIを呼び出す
+- **token_reviewer_jwt**: Vaultがtoken reviewを実行するために使う、Vault専用SAのJWT。TokenReview権限のみを持たせ、他の権限は与えない
+- **role**: `bound_service_account_names`・`bound_service_account_namespaces`・`token_policies`の組み合わせで、「どのnamespaceのどのSAが」「どのポリシーで」ログインできるかを定義する境界
+- **bound条件**: role側で許可したSA名・namespace以外からのログインを拒否する仕組み。越境アクセス（他namespaceのPodがroleを流用すること）を防ぐ
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| kubernetes_host | `{{ kubernetes_host }}` |
+| role名 | `{{ role_name }}` |
+| bound SA名 | {{ bound_sa_names | join(", ") }} |
+| bound namespace | {{ bound_namespaces | join(", ") }} |
+| token_policies | {{ token_policies | join(", ") }} |
+
+## 手順
+
+### 1. kubernetes auth methodを有効化する
+
+```bash
+vault auth enable kubernetes
+vault auth list
+```
+
+### 2. token_reviewer_jwt用のSAとRBACを用意する（最小権限）
+
+```bash
+kubectl -n vault create serviceaccount vault-auth-reviewer
+kubectl create clusterrolebinding vault-auth-reviewer-binding \
+  --clusterrole=system:auth-delegator \
+  --serviceaccount=vault:vault-auth-reviewer
+```
+
+`system:auth-delegator`はTokenReview/SubjectAccessReviewの実行のみを許可するクラスタロールで、それ以外のKubernetesリソースへの権限は含めません。
+
+### 3. kubernetes auth methodを設定する
+
+```bash
+VAULT_SA_JWT=$(kubectl -n vault get secret vault-auth-reviewer-token -o jsonpath='{.data.token}' | base64 -d)
+VAULT_CA_CERT=$(kubectl -n vault get secret vault-auth-reviewer-token -o jsonpath='{.data.ca\.crt}' | base64 -d)
+
+vault write auth/kubernetes/config \
+  kubernetes_host="{{ kubernetes_host }}" \
+  token_reviewer_jwt="${VAULT_SA_JWT}" \
+  kubernetes_ca_cert="${VAULT_CA_CERT}"
+```
+
+### 4. roleを作成する（bound条件でPod側を限定）
+
+```bash
+vault write auth/kubernetes/role/{{ role_name }} \
+  bound_service_account_names="{{ bound_sa_names | join(",") }}" \
+  bound_service_account_namespaces="{{ bound_namespaces | join(",") }}" \
+  token_policies="{{ token_policies | join(",") }}" \
+  ttl=1h
+```
+
+`bound_service_account_names`と`bound_service_account_namespaces`の両方に一致しないSAはログインを拒否されます。`ttl`を短く設定し、長期間有効なトークンを発行しないようにします。
+
+### 5. Pod側からログインする
+
+```bash
+JWT=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+
+vault write auth/kubernetes/login \
+  role={{ role_name }} \
+  jwt="${JWT}"
+```
+
+成功するとVaultトークンがクライアントトークンとして返却され、以降は通常のVault APIでシークレットを取得できます。
+
+```bash
+VAULT_TOKEN=$(vault write -field=client_token auth/kubernetes/login role={{ role_name }} jwt="${JWT}")
+VAULT_TOKEN="${VAULT_TOKEN}" vault kv get secret/{{ role_name }}
+```
+
+## 動作確認
+
+1. bound_sa_names/{{ bound_sa_names | join(", ") }}のいずれかに属するPodから`vault write auth/kubernetes/login`を実行し、ログインが成功してclient_tokenが発行されることを確認する
+2. 発行されたトークンで`token_policies`（{{ token_policies | join(", ") }}）が許可する範囲のシークレットにのみアクセスできることを確認する（許可外パスへのアクセスは403になること）
+3. bound_service_account_namespacesに含まれない別namespaceの同名SA、または別名の未登録SAから同じroleでログインを試み、Vaultが拒否する（permission denied）ことを確認する
+4. 本番のbound_sa_names/bound_namespacesを本適用する前に、検証用の別namespace・別roleで1〜3を一巡させ、既存の静的トークン配布を止める前にkubernetes auth経由の取得だけでアプリが正常動作することを確認する
+
+## 注意事項
+
+- `token_reviewer_jwt`に紐づくSAには`system:auth-delegator`（TokenReview/SubjectAccessReviewの実行）以外の権限を絶対に与えない。過剰な権限を持たせるとVault自体がKubernetes API侵害の踏み台になる。
+- `bound_service_account_names`と`bound_service_account_namespaces`は必ず両方を指定し、ワイルドカード（`*`）を安易に使わない。片方だけの緩い設定は他namespaceのPodによる越境アクセスを許してしまう。
+- `ttl`は業務上必要な最小値に留め、長時間有効なトークンをPodに保持させない。トークン更新はVault Agent injectorまたはVault CSI Provider（Secrets Store CSI Driver）に任せ、アプリコードにトークン管理ロジックを持たせない。
+- 既存の静的Vaultトークンやk8s Secretでシークレットを配布している場合は、動作確認の1〜4でkubernetes auth経由のログイン・取得・拒否が期待通りであることを確認してから、静的トークンの失効・配布停止を行う。新経路の検証前に旧経路を止めない。
+- roleやconfigの変更はVault監査ログ（audit device）で追跡できるようにしておき、想定外のbound条件変更やtoken_reviewer_jwtの差し替えに気付けるようにする。

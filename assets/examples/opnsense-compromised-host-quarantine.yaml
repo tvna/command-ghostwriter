@@ -1,0 +1,9 @@
+suspect_ip: 10.0.4.87
+suspect_mac: "AA:BB:CC:00:11:22"
+quarantine_alias: quarantine_hosts
+allowed_investigator_ips:
+  - 10.0.9.10
+  - 10.0.9.11
+allowed_ports:
+  - 22
+  - 8443

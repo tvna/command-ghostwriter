@@ -1,0 +1,130 @@
+# Wazuhファイル整合性監視(FIM)の構成 — {{ ossec_conf_path }}
+
+Wazuhのsyscheckモジュールを使い、`{{ ossec_conf_path }}` の設定でリアルタイムのファイル整合性監視(FIM)を構成します。who-data連携により、誰がどのファイルを変更したかまで記録します。
+
+## 目的
+
+syscheckのbaseline(初回スキャン)と差分検知の仕組みを理解し、重要ディレクトリの改ざんをリアルタイムに検知・who-dataで変更者まで特定できる構成を作成・検証できるようになることを目指します。
+
+## 用語解説
+
+- **FIM(File Integrity Monitoring)**: ファイル・ディレクトリのハッシュ値やメタデータを記録し、変化を検知する仕組み。Wazuhではsyscheckモジュールが担う
+- **baseline(初回スキャン)**: syscheck起動直後に対象ディレクトリ全体をスキャンし、ハッシュ値などの初期状態をデータベースに記録する処理。以降の差分検知の基準になる
+- **realtime**: inotify(Linux)を使い、ポーリングを待たずファイル変更を即座に検知するモード
+- **whodata**: Linuxではauditd(Audit監査サブシステム)と連携し、ファイルを変更したユーザー・プロセスを記録するモード。realtimeより詳細だが負荷が高い
+- **report_changes**: 変更前後の内容差分(diff)をWazuhサーバーに保存する機能。設定ファイルにパスワードなどの機微情報が含まれる場合は記録内容にも残るため注意が必要
+- **nodiff**: report_changes有効時でも、内容差分を保存せず「変更があった」事実のみ記録する除外リスト(秘密鍵などに使用)
+- **ignore**: 監視対象から完全に除外するパス(頻繁に変化する一時ファイルなど)
+- **frequency**: baseline再構築(定期フルスキャン)の間隔(秒)
+- **rule 550/554**: Wazuhのデフォルトルールセットで、550は「ファイル内容/属性が変更された」、554は「新規ファイルが追加された」ことを示すsyscheckアラート
+
+## シナリオ設定
+
+| 設定項目 | 値 |
+| --- | --- |
+| 監視対象ディレクトリ | {% for d in monitored_dirs %}`{{ d }}`{% if not loop.last %}, {% endif %}{% endfor %} |
+| realtime | {{ realtime }} |
+| report_changes | {{ report_changes }} |
+| whodata | {{ whodata }} |
+| 除外パス(ignore) | {% for i in ignore_paths %}`{{ i }}`{% if not loop.last %}, {% endif %}{% endfor %} |
+| 差分非保存パス(nodiff) | {% for n in nodiff_paths %}`{{ n }}`{% if not loop.last %}, {% endif %}{% endfor %} |
+| baseline再構築間隔(frequency) | {{ frequency }}秒 |
+| ossec.confパス | `{{ ossec_conf_path }}` |
+| wazuh-controlパス | `{{ wazuh_control_path }}` |
+| アラートログ | `{{ alert_log_path }}` |
+
+## 1. auditdを導入し、whodataの前提条件を満たす
+
+whodataはLinuxではauditd(Audit監査サブシステム)経由で動作者情報を取得します。事前にauditdが稼働していることを確認します。
+
+```bash
+sudo systemctl status auditd || sudo apt-get install -y auditd
+sudo systemctl enable --now auditd
+sudo systemctl is-active auditd
+cat {{ auditd_rules_path }}
+```
+
+## 2. ossec.confのsyscheckセクションを編集する
+
+`{{ ossec_conf_path }}` の `<syscheck>` ブロックを以下の内容に置き換えます。`restart_audit` を `yes` にすると、Wazuh側がauditルールを自動投入・再起動してくれます。
+
+```bash
+sudo cp {{ ossec_conf_path }} {{ ossec_conf_path }}.bak.$(date +%Y%m%d%H%M%S)
+sudo tee /tmp/syscheck-block.xml <<'EOF'
+  <syscheck>
+    <disabled>no</disabled>
+    <frequency>{{ frequency }}</frequency>
+    <scan_on_start>yes</scan_on_start>
+
+{% for d in monitored_dirs %}
+    <directories check_all="yes" realtime="{{ 'yes' if realtime else 'no' }}" report_changes="{{ 'yes' if report_changes else 'no' }}" whodata="{{ 'yes' if whodata else 'no' }}">{{ d }}</directories>
+{% endfor %}
+{% for i in ignore_paths %}
+    <ignore>{{ i }}</ignore>
+{% endfor %}
+{% for n in nodiff_paths %}
+    <nodiff>{{ n }}</nodiff>
+{% endfor %}
+
+    <whodata>
+      <restart_audit>yes</restart_audit>
+      <audit_key>wazuh_fim,wazuh_check</audit_key>
+    </whodata>
+
+    <synchronization>
+      <enabled>yes</enabled>
+    </synchronization>
+  </syscheck>
+EOF
+echo "生成した /tmp/syscheck-block.xml の内容を確認し、{{ ossec_conf_path }} の既存 <syscheck>...</syscheck> ブロックと手動で置き換える"
+```
+
+## 3. 設定を適用し、baseline(初回スキャン)を構築する
+
+```bash
+sudo {{ wazuh_control_path }} -t
+sudo {{ wazuh_control_path }} restart
+sudo {{ wazuh_control_path }} status
+```
+
+baseline構築中は `ossec.log` に `fim_scan` の開始・終了ログが出力されます。ディレクトリの規模によっては数分かかるため、完了を待ってから次のステップへ進みます。
+
+```bash
+sudo tail -f /var/ossec/logs/ossec.log | grep -i fim
+```
+
+## 4. 監視対象ファイルを変更し、syscheckアラートを確認する
+
+baseline構築完了後、監視対象配下の `{{ test_file }}` を作成・編集してアラートが上がることを確認します。
+
+```bash
+sudo touch {{ test_file }}
+echo "# fim-test $(date)" | sudo tee -a {{ test_file }}
+sleep 5
+sudo grep -E "rule.(550|554)" {{ alert_log_path }} | tail -n 5
+```
+
+## 5. who-dataで変更者情報を確認する
+
+同じアラートに `(uid|user|process)` フィールドとして変更者が記録されていることを確認します。
+
+```bash
+sudo grep -A 20 "{{ test_file }}" {{ alert_log_path }} | grep -E "srcuser|uname|process" | tail -n 10
+sudo ausearch -k wazuh_fim -ts recent | tail -n 20
+```
+
+## 動作確認
+
+- Step 3のbaseline構築ログ(`fim_scan` の start/end)が `ossec.log` に出力されていること
+- Step 4で `{{ test_file }}` をtouch/編集した後、`{{ alert_log_path }}` にrule 550(変更)またはrule 554(新規追加)のアラートが記録されること
+- Step 5で同アラートに変更を行ったユーザー・プロセス情報(who-data)が記録されていること
+- `{{ nodiff_paths[0] }}` 配下のファイルを変更した場合、アラートは出るが差分内容(diff)は記録されないこと
+
+## 注意事項
+
+- whodataはauditd経由でシステムコールを監視するため、realtimeのみの構成よりCPU/I/O負荷が高い。監視対象ディレクトリの規模とサーバー負荷を事前に見積もる。
+- `report_changes` は変更前後の差分をWazuhサーバー(あるいはインデクサ)に保存するため、設定ファイルに含まれるパスワードやAPIキーなどの機微情報がログとして残るリスクがある。機微情報を含みうるパスは `nodiff` に登録し、内容差分を保存しない。
+- `/etc` や `/bin` のような頻繁に変わらないディレクトリでも、パッケージ更新やログローテーションで意図しない変更が多発すると、アラートのノイズが増える。`ignore` で除外するか、変更頻度の高いサブパスを個別に切り出して監視範囲を調整する。
+- `<whodata><restart_audit>yes</restart_audit></whodata>` を有効にすると、Wazuh起動時にauditdへルールが追加され、auditdサービス自体が再起動されることがある。他の監査要件でauditdを利用している場合は、既存のaudit rulesとの競合がないか事前に `{{ auditd_rules_path }}` を確認する。
+- 監視対象ディレクトリや `check_all`/`whodata` の設定を変更した場合、既存のbaselineは古い設定を前提としているため、Step 3を再実行してbaselineを再構築する必要がある。再構築が完了するまでの間は、変更検知が一時的に不安定(誤検知・検知漏れ)になりうる点に留意する。
+- Step 2で `ossec.conf` を直接編集する前に必ずバックアップ(`.bak.タイムスタンプ`)を取得し、`{{ wazuh_control_path }} -t` の構文チェックを通してから `restart` する。構文エラーのまま再起動すると、syscheckを含む全モジュールが停止し監視が完全に途切れる。

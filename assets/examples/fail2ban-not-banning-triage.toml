@@ -1,0 +1,8 @@
+jail_name = "sshd"
+logpath = "/var/log/auth.log"
+failregex_matches = 8
+ban_action = "nftables"
+ignoreip_check = true
+backend = "auto"
+journal_unit = "sshd.service"
+test_attacker_ip = "203.0.113.77"

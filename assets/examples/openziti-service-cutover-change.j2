@@ -1,0 +1,113 @@
+# OpenZitiへの既存サービス移行変更 — {{ service_name }}
+
+従来経路({{ legacy_access }})で提供している `{{ service_name }}` を、OpenZitiのZTNAオーバーレイへ段階的に切り替えます。切替枠: {{ cutover_window }}。
+
+## 目的
+
+従来のVPN/直公開経路に依存していた `{{ service_name }}` へのアクセスを、OpenZitiのidentityベースのDial/Bindポリシーへ移行します。一部利用者(パイロット)での並行稼働と疎通確認を経てから旧経路を閉じることで、ロックアウトなく切替を完了できるようになることを目指します。
+
+## 用語解説
+
+- **intercept.v1 config**: クライアント(tunneler)がどのアドレス/ポートへのアクセスをZitiオーバーレイへ捕捉するかを定義する設定
+- **host.v1 config**: Ziti edge routerが実際の宛先(オンプレのサービス)へどう転送するかを定義する設定
+- **service**: intercept設定とhost設定を束ね、Dial/Bindポリシーの対象となる論理的なサービス単位
+- **Dialポリシー**: どのidentityがそのserviceへ接続(dial)を許可されるかを定義するポリシー
+- **Bindポリシー**: どのidentity(通常はhost側のedge router/tunneler)がそのserviceを待ち受け(bind)できるかを定義するポリシー
+- **パイロット利用者**: 本切替に先立ち、少数で新経路(Ziti)の疎通確認を行う対象者
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 対象サービス | {{ service_name }} |
+| 従来経路(閉塞対象) | {{ legacy_access }} |
+| パイロット対象identity | {% for pid in pilot_identities %}{{ pid }}{% if not loop.last %}, {% endif %}{% endfor %} |
+| 切替作業枠 | {{ cutover_window }} |
+
+## 手順
+
+### 1. host.v1 / intercept.v1 configとserviceを作成する
+
+```bash
+ziti edge create config {{ service_name }}-intercept intercept.v1 \
+  '{"protocols":["tcp"],"addresses":["{{ service_name }}.ziti"],"portRanges":[{"low":443,"high":443}]}'
+
+ziti edge create config {{ service_name }}-host host.v1 \
+  '{"protocol":"tcp","address":"10.0.1.20","port":8443}'
+
+ziti edge create service {{ service_name }} \
+  --configs {{ service_name }}-intercept,{{ service_name }}-host
+```
+
+### 2. Dial/Bindポリシーを作成する
+
+Bind対象のedge routerロールと、Dial対象のパイロットロールを分離しておきます。
+
+```bash
+ziti edge create service-policy {{ service_name }}-bind-policy Bind \
+  --service-roles "@{{ service_name }}" --identity-roles "#{{ service_name }}-hosts"
+
+ziti edge create service-policy {{ service_name }}-pilot-dial-policy Dial \
+  --service-roles "@{{ service_name }}" --identity-roles "#{{ service_name }}-pilot"
+```
+
+### 3. パイロット利用者のidentityを作成しトンネラーを配布する
+
+```bash
+{% for pid in pilot_identities %}
+ziti edge create identity user {{ pid }} -a {{ service_name }}-pilot -o {{ pid }}.jwt
+{% endfor %}
+```
+
+発行した `.jwt` ファイルを各パイロット利用者のZiti Desktop Edge / tunnelerへ配布し、エンロールを依頼します。エンロール完了は次のコマンドで確認します。
+
+```bash
+{% for pid in pilot_identities %}
+ziti edge list identities 'name="{{ pid }}"' -j | grep -i "isEnrolled"
+{% endfor %}
+```
+
+### 4. パイロットでZiti経路と旧経路を並行稼働させ疎通確認する
+
+旧経路({{ legacy_access }})はこの時点ではまだ閉じません。パイロット利用者のtunneler経由での疎通と、旧経路経由の疎通の両方が成立していることを確認します。
+
+```bash
+ziti edge list identities 'roleAttributes contains "{{ service_name }}-pilot"' -j
+curl -fsS https://{{ service_name }}.ziti/healthz
+```
+
+パイロット利用者からは業務操作(ログイン・主要画面の表示)が旧経路と同等に行えることも合わせて確認してもらいます。
+
+### 5. 全対象利用者へDialポリシーを拡大する
+
+パイロットでの疎通・業務確認が完了し、{{ cutover_window }} の作業枠に入ったら、Dialポリシーの対象ロールを全利用者ロールへ拡大します。
+
+```bash
+ziti edge update service-policy {{ service_name }}-pilot-dial-policy \
+  --identity-roles "#{{ service_name }}-all-users"
+```
+
+### 6. 全対象利用者のZiti疎通を確認してから旧経路を閉じる
+
+**ロックアウト防止のため、全対象利用者でZiti経路の疎通が確認できるまで、旧経路は閉じません。** 全利用者の疎通確認が完了したことをチェックリストで確認した後にのみ、次のステップへ進みます。
+
+```bash
+ziti edge list identities 'roleAttributes contains "{{ service_name }}-all-users"' -j | grep -i "isEnrolled"
+```
+
+全対象利用者の `isEnrolled: true` を確認し、代表者複数名からZiti経由での業務確認結果を得てから、旧経路({{ legacy_access }})を閉塞します。旧経路の閉塞作業自体は、ネットワーク機器/VPN側の変更手順(OPNsenseルール無効化・WireGuard ACL削除)に従って実施します。
+
+## 動作確認
+
+- Step 4: パイロット対象identityでZiti経由の疎通(`healthz`)と旧経路併用での業務操作が成立していること
+- Step 6: 全対象利用者identityが `isEnrolled: true` であり、Ziti経由での疎通・業務確認が完了していること
+- 旧経路閉塞後、`{{ service_name }}` への旧経路(直公開ポート/旧VPN ACL)経由のアクセスが遮断されていること
+- 旧経路閉塞後も、Ziti経由でのアクセスは継続して成立していること
+
+## 注意事項
+
+- **ロックアウト防止順序を厳守すること**: 旧経路({{ legacy_access }})を閉じるのは、全対象利用者でZiti経路の疎通確認が完了した後に限る。疎通未確認のまま旧経路を閉じると、エンロール未完了の利用者がアクセス不能になる。
+- 旧経路を閉じる前に、パイロット利用者へのtunneler配布とエンロール完了({{ pilot_identities|join(", ") }})を必ず確認しておくこと。
+- 旧経路を閉じる前のバックアウト手順: {{ rollback_step }}
+- 切替作業枠({{ cutover_window }})外での旧経路閉塞は行わない。作業枠内で問題が生じた場合は直ちにバックアウト手順を実施し、旧経路を復旧させる。
+- Dial/Bindポリシーの対象ロール拡大(Step 5)は、パイロットでの疎通・業務確認が完了したことを関係者間で合意してから実施する。

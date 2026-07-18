@@ -1,0 +1,136 @@
+# Squidアクセス拒否事象の切り分け調査
+
+「特定サイトへ行けない」という申告を、access.logの結果コードとhierarchy列を手掛かりに、ACL・認証・上位経路/名前解決の順で切り分けます。
+
+## 目的
+
+利用者から申告された「{{ target_url }}」への接続不能について、access.logの結果コード(TCP_DENIED / 407 / 502 / 503等)から原因カテゴリを特定し、必要に応じてdebug_optionsによる詳細ログ取得とsquidclientでの状態確認を経て、再現確認まで行えるようになることを目指します。
+
+## 用語解説
+
+- **access.log**: Squidが処理した各リクエストの結果を記録するログ。`結果コード/HTTPステータス` `所要時間` `送信元IP` `hierarchy(上位経路情報)` などが列として並ぶ
+- **TCP_DENIED**: `http_access` などのACL評価によってリクエストが拒否されたことを示す結果コード。多くの場合HTTPステータスは403
+- **407 Proxy Authentication Required**: プロキシ認証が要求されている、または提示された認証情報が無効であることを示すステータス
+- **hierarchy列**: そのリクエストが上位プロキシ(親キャッシュ)や直接接続のどちらで処理されたか、また `DIRECT` / `FIRSTUP_PARENT` / `TIMEOUT_DIRECT` などの経路選択結果を示す列
+- **502/503**: 上位サーバ(親プロキシまたは名前解決先のオリジンサーバ)への接続失敗やタイムアウトを示すステータス。名前解決失敗(DNS)もここに現れることがある
+- **debug_options**: `squid.conf` に設定する一時的な詳細ログ出力オプション。`ALL,1` は全セクションを軽度に、`28,9` はACLセクション(28番)を詳細に出力する。調査後は必ず元の値に戻す
+- **squidclient mgr:info**: Squidの管理ポート経由でキャッシュマネージャレポートを取得するコマンド。稼働中のSquidの内部統計(接続数、キャッシュヒット率、稼働時間等)を確認できる
+- **SSL Bump**: SquidがHTTPS通信を復号して内容を検査する機能。bump対象の通信はaccess.logにホスト名だけでなくフルパスまで記録されるが、bump対象外(トンネリングのみ)の通信は `CONNECT` メソッドとホスト:ポートしか記録されない
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 申告元クライアントIP | `{{ client_ip }}` |
+| 接続できないURL | `{{ target_url }}` |
+| access.logの結果コード | `{{ result_code }}` |
+| プロキシ認証(proxy_auth)有効 | `{{ proxy_auth }}` |
+
+## 手順
+
+### 1. access.logから該当リクエストを抽出する
+
+```bash
+sudo grep -F "{{ client_ip }}" /var/log/squid/access.log | grep -F "{{ target_url }}" | tail -20
+```
+
+→ 該当行の結果コード列に `{{ result_code }}` が含まれること、hierarchy列の値(`DIRECT` / `FIRSTUP_PARENT` / `TIMEOUT_DIRECT` 等)を併せて確認します。
+
+### 2. 結果コードで原因カテゴリを分岐する
+
+```bash
+awk '{print $4}' /var/log/squid/access.log | grep -F "{{ client_ip }}" -A0
+```
+
+→ 以下の分岐で切り分けを進めます。
+
+- `TCP_DENIED` を含む場合 → **ACL評価による拒否**。手順3へ。
+- `407` を含む場合 → **プロキシ認証の失敗**。手順4へ。
+- `502` または `503` を含む場合 → **上位経路または名前解決の失敗**。手順5へ。
+
+### 3. ACL評価による拒否(TCP_DENIED)を切り分ける
+
+```bash
+sudo squid -k parse
+sudo grep -n "^http_access\|^acl" /etc/squid/squid.conf
+```
+
+一時的にACL評価のみを詳細ログ化します。
+
+```bash
+sudo sed -i 's/^#debug_options.*/debug_options 28,9/' /etc/squid/squid.conf
+sudo squid -k reconfigure
+```
+
+```bash
+sleep 5
+sudo grep -A2 -B2 "{{ target_url }}" /var/log/squid/cache.log | tail -40
+```
+
+→ どのACL行で `DENIED` と判定されたかがcache.logに出力されるため、該当ACL(送信元、宛先カテゴリ、時間帯等)の定義を確認し、意図した制御か誤設定かを判断します。確認後は手順6でデバッグログを必ず無効化します。
+
+### 4. プロキシ認証の失敗(407)を切り分ける
+
+```bash
+sudo grep -n "^auth_param\|^acl.*proxy_auth" /etc/squid/squid.conf
+```
+
+```bash
+echo "proxy_auth 有効: {{ proxy_auth }}"
+```
+
+→ `proxy_auth` が有効な環境で407が返っている場合、クライアント側の資格情報(ID/パスワード)の失効・入力誤り、または認証ヘルパー(`basic_ncsa_auth` 等)側の異常が疑われます。認証ヘルパーの単体動作を確認します。
+
+```bash
+sudo squidclient mgr:info | grep -i "Number of clients\|Uptime"
+```
+
+→ Squid自体が正常稼働しているかを併せて確認し、認証ヘルパープロセスの再起動が必要かを判断します。
+
+### 5. 上位経路・名前解決の失敗(502/503)を切り分ける
+
+```bash
+sudo grep -F "{{ target_url }}" /var/log/squid/access.log | awk '{print $10}' | sort | uniq -c
+```
+
+→ hierarchy列が `TIMEOUT_DIRECT` や `FIRSTUP_PARENT/<親プロキシ名>` の場合、上位プロキシまたはオリジンサーバへの到達性を確認します。
+
+```bash
+dig +short "{{ target_url }}"
+sudo squidclient -h 127.0.0.1 mgr:info | grep -i "DNS"
+```
+
+→ 名前解決が失敗している場合は、Squidが参照するDNS(`/etc/resolv.conf` またはsquid.confの `dns_nameservers`)側の問題です。上位プロキシ側の問題であれば、親プロキシへの直接疎通(`curl` 等)を別途確認します。
+
+### 6. デバッグログを無効化し原状復帰する
+
+```bash
+sudo sed -i 's/^debug_options.*/#debug_options ALL,1/' /etc/squid/squid.conf
+sudo squid -k reconfigure
+sudo squidclient mgr:info | grep -i "Uptime"
+```
+
+→ `debug_options` をコメントアウトに戻し、reconfigure後にSquidが正常稼働していることを `squidclient mgr:info` で確認します。
+
+## 動作確認
+
+- 特定した原因区分(ACL / 認証 / 上位経路・名前解決)に対応する設定変更後、以下で再現確認を行います。
+
+```bash
+curl -x http://127.0.0.1:3128 -o /dev/null -s -w "%{http_code}\n" "{{ target_url }}"
+```
+
+→ ステータスコードが200番台(または想定される正常応答)になっていることを確認します。プロキシ認証が必要な場合は資格情報を付与して再実行します。
+
+```bash
+curl -x http://127.0.0.1:3128 -U "<test-user>:<password>" -o /dev/null -s -w "%{http_code}\n" "{{ target_url }}"
+```
+
+→ 併せて `tail -f /var/log/squid/access.log` で同一リクエストの結果コードが `TCP_MISS/200` 等の正常系に変わっていることを確認します。
+
+## 注意事項
+
+- `debug_options` による詳細ログ(特にACLセクション `28,9`)は出力量が多く、リクエストURLや送信元IPなどのPIIを含む可能性がある。調査目的の一時取得後は手順6で必ず無効化し、生成されたcache.logはアクセス権を絞った上で調査終了後に速やかに削除・アーカイブする。
+- SSL Bump対象のHTTPS通信は access.log にフルURLが記録されるが、bump対象外の通信は `CONNECT` とホスト:ポートのみが記録され、パス以下の情報は見えない。切り分け対象がbump対象かどうかで得られる情報量が異なる点を踏まえて調査範囲を判断する。
+- ACL変更や認証設定の変更を本番のhttp_accessに直接適用する前に、変更後のACLが意図通り許可/拒否するかを `squid -k parse` の構文チェックと、影響範囲の小さいテスト用ACL(または検証環境)での事前確認を行う。新しい設定が期待通り動作することを確認してから、既存の許可設定を外す・置き換える。
+- `squid -k reconfigure` は稼働中の接続を維持したまま設定を再読み込みするが、設定に構文エラーがあると失敗するため、必ず事前に `squid -k parse` で検証してから実行する。

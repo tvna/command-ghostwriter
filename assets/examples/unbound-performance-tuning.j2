@@ -1,0 +1,119 @@
+# Unboundリゾルバ性能チューニング
+
+高負荷時でも低遅延を維持できるよう、Unboundのスレッド数・スラブ数・キャッシュサイズ・prefetchを調整し、`unbound-control stats` で効果を検証します。
+
+## 目的
+
+スレッド数とスラブ数を整合させ、メッセージ/RRsetキャッシュサイズとprefetchを適切に設定することで、キャッシュヒット率を高め、負荷が上がっても応答時間が悪化しないUnboundリゾルバに調整できるようになることを目指します。
+
+## 用語解説
+
+- **num-threads**: Unboundが問い合わせ処理に使うワーカースレッド数。CPUコア数に応じて設定する
+- **スラブ(slabs)**: キャッシュ内部のロック競合を避けるための分割数。スレッド間の競合を減らすため2の冪で指定し、スレッド数と整合させる
+- **msg-cache-size / rrset-cache-size**: それぞれ問い合わせ結果全体、RRset(リソースレコード集合)を保持するキャッシュの容量
+- **キャッシュヒット率**: 全問い合わせのうちキャッシュから応答できた割合。`unbound-control stats` の `total.num.cachehits` と `total.num.cachemiss` から算出する
+- **prefetch**: キャッシュエントリのTTLが満了する直前に、クライアントの問い合わせを待たずUnbound自身が先回りして再解決する機能。有効にするとキャッシュミスによる遅延が減る一方、上位への問い合わせ回数が増える
+- **so-rcvbuf**: UDPソケットの受信バッファサイズ。カーネルの`net.core.rmem_max`を超える値は設定できない
+- **outgoing-range**: 上位サーバへの問い合わせに使う送信元ポート/クエリIDの範囲。広いほどキャッシュポイズニング耐性が上がる
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| num-threads | {{ num_threads }} |
+| msg-cache-slabs / rrset-cache-slabs | {{ slabs }} |
+| msg-cache-size | {{ msg_cache_size }} |
+| rrset-cache-size | {{ rrset_cache_size }} |
+| so-rcvbuf | {{ so_rcvbuf }} |
+| outgoing-range | {{ outgoing_range }} |
+| prefetch | {{ prefetch }} |
+
+## 手順
+
+### 1. 現在のスレッド数上限とキャッシュヒット率を確認する
+
+```bash
+nproc
+unbound-control stats_noreset | grep -E 'total.num.(queries|cachehits|cachemiss)'
+```
+
+### 2. so-rcvbufのカーネル上限を確認し、必要なら引き上げる
+
+```bash
+sysctl net.core.rmem_max
+# so-rcvbufで指定する値がカーネル上限を超える場合は、上限を先に引き上げる
+sysctl -w net.core.rmem_max=8388608
+echo 'net.core.rmem_max = 8388608' >> /etc/sysctl.conf
+```
+
+### 3. 変更前のunbound.confをバックアップする
+
+```bash
+cp /etc/unbound/unbound.conf.d/local.conf /etc/unbound/unbound.conf.d/local.conf.bak.$(date +%Y%m%d)
+```
+
+### 4. スレッド・スラブ・キャッシュ・prefetchを調整する
+
+```bash
+cat > /etc/unbound/unbound.conf.d/local.conf <<'EOF'
+server:
+    num-threads: {{ num_threads }}
+    msg-cache-slabs: {{ slabs }}
+    rrset-cache-slabs: {{ slabs }}
+    infra-cache-slabs: {{ slabs }}
+    key-cache-slabs: {{ slabs }}
+    msg-cache-size: {{ msg_cache_size }}
+    rrset-cache-size: {{ rrset_cache_size }}
+    so-rcvbuf: {{ so_rcvbuf }}
+    outgoing-range: {{ outgoing_range }}
+{% if prefetch %}    prefetch: yes
+{% else %}    prefetch: no
+{% endif %}EOF
+```
+
+### 5. 構文をドライラン検証してから反映する
+
+```bash
+# num-threadsの変更はリロードでは反映されず再起動が必要なため、
+# 先に構文検証だけを行い、問題なければ再起動して反映する
+unbound-checkconf
+systemctl restart unbound
+systemctl status unbound --no-pager
+```
+
+### 6. 変更前後でキャッシュヒット率と応答時間を比較する
+
+```bash
+# 同一問い合わせを2回実行し、2回目がキャッシュヒットで高速化することを確認する
+dig @127.0.0.1 example.com A
+dig @127.0.0.1 example.com A
+
+unbound-control stats_noreset | grep -E 'total.num.(queries|cachehits|cachemiss)'
+```
+
+### 7. 負荷をかけて安定性を確認する
+
+```bash
+# 短時間に大量の問い合わせを流し、応答時間とタイムアウトの有無を確認する
+for i in $(seq 1 200); do
+  dig @127.0.0.1 example.com A +time=1 +tries=1 +stats | grep 'Query time'
+done
+
+unbound-control stats_noreset | grep -E 'total.num.(queries|cachehits|cachemiss|recursivereplies)'
+```
+
+## 動作確認
+
+- `unbound-checkconf` がエラーなく通ること
+- `systemctl status unbound` が `active (running)` であること
+- 変更後の `unbound-control stats_noreset` でキャッシュヒット率(`total.num.cachehits` / (`total.num.cachehits` + `total.num.cachemiss`))が変更前より向上していること
+- 負荷試験中の `dig` の `Query time` が大きく劣化・変動せず安定していること
+- 負荷試験中にタイムアウトやSERVFAILが発生しないこと
+
+## 注意事項
+
+- スラブ数(`msg-cache-slabs`等)はスレッド数(`num-threads`)と合わせること。スラブ数がスレッド数より極端に少ないとロック競合が発生し、逆に多すぎるとメモリが無駄になる。
+- `msg-cache-size` / `rrset-cache-size` を大きくするとヒット率は上がるが、その分メモリを消費する。搭載メモリと他プロセスの使用量を踏まえて設定すること。
+- `prefetch: yes` はキャッシュミスを減らす代わりに上位サーバへの問い合わせ頻度が上がる。上位への負荷や帯域を踏まえた上で有効化すること。
+- `so-rcvbuf` はカーネルの `net.core.rmem_max` を超える値を設定できない。手順2で上限を引き上げずに大きな値を設定すると起動時にエラーとなる。
+- `num-threads` の変更はリロード(`unbound-control reload`)では反映されないため再起動が必要であり、既存のリゾルバ経路が一時的に切れる。本番環境では、手順3でバックアップした設定にすぐ戻せることを確認した上で、深夜帯などの低負荷時間帯に実施し、再起動直後は手順6・7で新しい設定が正しく機能することを確認してから利用を継続すること。異常があれば直ちにバックアップした`local.conf.bak.*`へ戻して再起動すること。

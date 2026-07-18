@@ -1,0 +1,161 @@
+# OPNsense ファームウェア更新のメンテナンス実施
+
+OPNsense を {{ current_version }} から {{ target_version }} へ更新します。
+事前バックアップ・変更告知・opnsense-update による更新・再起動後のバージョン
+確認・切り戻し判断までを、メンテナンス時間帯（{{ maintenance_window }}）内で
+完了させてください。
+
+## 目的
+
+OPNsense ファームウェアをメンテナンス窓内で安全に更新し、更新前の
+config.xml 退避と関係者への告知、更新後の動作確認、切り戻し基準を
+一連の変更手順として実施できるようになることを目指します。
+
+## 用語解説
+
+- **config.xml**: OPNsense の全設定を保持する設定ファイル（`/conf/config.xml`）
+- **opnsense-update**: CLI からファームウェア更新を実行するコマンド
+- **opnsense-version**: 現在インストールされているバージョンを表示するコマンド
+- **CARP**: OPNsense の冗長化構成で使われる仮想IP（VIP）の共有プロトコル
+- **段階適用（-ur）**: メジャーバージョンをまたぐ更新を1段階ずつ適用するオプション
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| メンテナンス時間帯 | {{ maintenance_window }} |
+| 更新前バージョン | {{ current_version }} |
+| 更新後バージョン | {{ target_version }} |
+| 切り戻し基準 | {{ rollback_criteria }} |
+
+告知先チャンネルは以下のとおりです。
+
+{% for ch in notify_channels %}
+- {{ ch }}
+{% endfor %}
+
+## 手順
+
+### 1. 変更告知を行う
+
+上記の告知先チャンネルへ、メンテナンス時間帯（{{ maintenance_window }}）と
+作業内容（{{ current_version }} から {{ target_version }} への更新）を
+事前に周知します。
+
+### 2. 更新前に config.xml をバックアップする
+
+```bash
+cp /conf/config.xml /conf/backup/config-before-update-$(date +%Y%m%d%H%M).xml
+```
+
+GUI からも System > Configuration > Backups でバックアップをダウンロードし、
+作業端末側にも退避しておきます。
+
+### 3. 現行バージョンとリリースノートを確認する
+
+```bash
+opnsense-version -v
+```
+
+表示が `{{ current_version }}` であることを確認したうえで、Web GUI の
+System > Firmware > Status を開き、`{{ target_version }}` までの各リリース
+ノートで破壊的変更・既知の不具合を確認します。
+
+### 4. アップデートの有無をチェックする
+
+```bash
+opnsense-update -c
+```
+
+`{{ target_version }}` への更新が検出されることを確認します。
+
+### 5. ファームウェアを更新する
+
+パッチバージョン更新（同一メジャーライン内）の場合は次のコマンドで
+自動更新します。
+
+```bash
+opnsense-update -y
+```
+
+メジャーバージョンをまたぐ更新の場合は、`{{ rollback_criteria }}` を
+判断基準としながら `-ur` オプションで段階的に適用します。
+
+```bash
+opnsense-update -ur 24.7
+```
+
+### 6. 再起動して反映を確認する
+
+```bash
+shutdown -r now
+```
+
+再起動後、SSH または コンソールで再接続し、バージョンを確認します。
+
+```bash
+opnsense-version -v
+```
+
+表示が `{{ target_version }}` になっていることを確認します。
+
+### 7. 動作確認チェックリストを実施する
+
+```bash
+ping -c 4 8.8.8.8
+ipsec status
+wg show
+suricata --build-info | head -n 1
+opnsense-cli firmware health
+```
+
+WAN疎通・VPNトンネルの再確立・IPSの稼働・CARPの状態が、更新前と同じで
+あることを次の観点で確認します。
+
+- WAN側から外部宛の疎通が取れること（上記 `ping` が成功すること）
+- IPsec/WireGuard 等のVPNトンネルが再確立していること（`ipsec status` /
+  `wg show` でトンネルが Up/Established になっていること）
+- IPS（Suricata）が稼働していること（プロセスが起動しシグネチャがロード
+  済みであること）
+- CARP構成の場合、Web GUI の Interfaces > Virtual IPs > Status で
+  MASTER/BACKUP の役割が更新前と同じ状態に復帰していること
+
+新しい経路（更新後の状態）が正常であることをここで確認できたら、旧構成
+（更新前のバックアップ）への依存を止めてよいと判断します。異常があれば
+手順8へ進みます。
+
+### 8. 問題があれば切り戻す
+
+`{{ rollback_criteria }}` に該当する場合は切り戻します。切り戻しは
+「設定復元 + 旧バージョン再インストール」となり、通常の更新より時間を
+要するため、告知時点でその所要時間も併記しておきます。
+
+```bash
+cp /conf/backup/config-before-update-YYYYMMDDHHMM.xml /conf/config.xml
+opnsense-update -ur 24.7
+```
+
+（ファイル名は手順2で退避した実際のタイムスタンプに置き換えます。）
+復元後は手順6・7を再実施し、`{{ current_version }}` 相当の状態に戻った
+ことを確認します。
+
+## 動作確認
+
+- `opnsense-version -v` の表示が `{{ target_version }}` であること
+- WAN疎通・VPNトンネル再確立・IPS稼働・CARP状態がすべて更新前と同じ状態で
+  復帰していること（手順7のチェックリスト参照）
+- `{{ rollback_criteria }}` に抵触していないこと
+
+## 注意事項
+
+- メジャーアップグレードは `opnsense-update -ur` を用いて段階的に適用し、
+  一度に複数メジャーバージョンを飛び越えて更新しない。
+- 切り戻しは「設定復元 + 旧バージョン再インストール」となり通常の更新
+  より所要時間が長くなるため、告知（手順1）にはその所要時間の見込みも
+  含めること。
+- 更新前の config.xml バックアップ（手順2）を取得せずに更新を開始しない。
+- 新しい経路（更新後のWAN疎通・VPN・IPS・CARP）が正常に稼働していることを
+  手順7で確認してから、旧設定への切り戻し判断（手順8）を終了とする。
+  確認が取れるまでは旧バージョンのイメージと退避済みconfig.xmlを削除しない。
+- CARP構成のペア機がある場合は、片系ずつ更新し、常に最低1台が正常な
+  MASTER状態を維持できるようにする。

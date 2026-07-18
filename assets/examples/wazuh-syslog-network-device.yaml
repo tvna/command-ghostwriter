@@ -1,0 +1,45 @@
+title: ネットワーク機器syslogのWazuhエージェントレス収集
+manager_ip: 192.0.2.10
+syslog_port: 514
+allowed_ips:
+  - address: 192.0.2.1
+    label: コアスイッチ (Catalyst 9300)
+  - address: 192.0.2.2
+    label: 境界ファイアウォール (FortiGate 100F)
+  - address: 192.0.2.3
+    label: L3スイッチ (YAMAHA RTX830)
+device_types:
+  - name: cisco_ios
+    vendor: Cisco IOS
+    srcip: 203.0.113.5
+    srcport: "0"
+    dstip: 192.0.2.10
+    dstport: "22"
+  - name: fortigate
+    vendor: FortiGate FortiOS
+    srcip: 203.0.113.5
+    dstip: 192.0.2.10
+    dstport: "22"
+    devname: FGT100F
+    devid: FG100F1234567890
+  - name: yamaha_rtx
+    vendor: YAMAHA RTX830
+    srcip: 203.0.113.5
+    srcport: "0"
+    dstip: 192.0.2.10
+    dstport: "22"
+target_rules:
+  - id: "100010"
+    level: 10
+    match: denied
+    description: 未許可ポートへの外部アクセス拒否ログを検知
+  - id: "100011"
+    level: 12
+    match: frequency
+    description: 短時間に拒否ログが多発しポートスキャンの疑いを検知
+  - id: "100012"
+    level: 7
+    match: configuration changed
+    description: ネットワーク機器の設定変更ログを検知
+test_source_ip: 192.0.2.1
+attacker_ip: 203.0.113.5

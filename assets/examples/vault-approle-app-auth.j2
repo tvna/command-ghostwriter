@@ -1,0 +1,95 @@
+# VaultのAppRole認証によるアプリ認証 — {{ role_name }}
+
+AppRole認証方式を有効化し、ロール `{{ role_name }}` を作成してアプリケーション（人間の対話的ログインを介さないマシン/サービス）に `role_id` と `secret_id` を配布し、シークレット取得を認可するまでの手順書です。
+
+## 目的
+
+AppRoleにおける `role_id`（公開的な識別子）と `secret_id`（機密情報）の役割の違いを理解し、両者を分離配布したうえでVaultトークンを取得し、ポリシーどおりにシークレットへアクセスできることを検証できるようになることを目指します。
+
+## 用語解説
+
+- **AppRole認証**: 人間ではなくアプリケーション/サービスがVaultに認証するための認証方式。ユーザー名/パスワードに相当する `role_id`/`secret_id` の組でトークンを取得する
+- **role_id**: ロールを一意に識別するID。ユーザー名に相当し、公開されても単体では認証できないため、アプリのソースコードやCI変数に含めても比較的安全とされる
+- **secret_id**: パスワードに相当する機密情報。単体でも `role_id` と組み合わせれば認証できてしまうため、平文でのSlack共有やログ出力は厳禁で、response wrappingや短いTTLで守る
+- **response wrapping**: Vaultがレスポンス（ここでは `secret_id`）を直接返さず、一度だけ開封できる使い捨てのラップトークンに包んで返す機能。配布経路の途中でsecret_idが漏れても、正規の受信者が先に開封していれば攻撃者は開封できない
+- **secret_id_num_uses**: 発行したsecret_idを使用できる回数の上限。1回に制限すればresponse wrappingの開封と合わせて使い捨てにできる
+- **token_policies**: ログイン成功後に発行されるVaultトークンへ付与されるポリシー名の配列。トークンでアクセスできるパス・操作範囲を決める
+- **cidr_bind（secret_id_bound_cidrs / token_bound_cidrs）**: ログイン試行元およびトークン利用元のIPアドレス範囲をCIDRで制限する設定。role_id/secret_idやトークンが漏洩しても、許可されたネットワーク以外からは使用できなくする
+
+## シナリオ設定
+
+| キー | 値 |
+| --- | --- |
+| role_name | {{ role_name }} |
+| token_policies | {{ token_policies | join(", ") }} |
+| secret_id_ttl | {{ secret_id_ttl }} |
+| token_ttl | {{ token_ttl }} |
+| cidr_bind | {{ cidr_bind | join(", ") }} |
+
+## 1. AppRole認証を有効化し、ポリシーとロールを作成する
+
+まず、ロールが参照する `token_policies` を事前にVaultへ登録済みであることを前提に、AppRole認証方式を有効化し、ロール `{{ role_name }}` を作成します。
+
+```bash
+vault auth enable approle
+
+vault write auth/approle/role/{{ role_name }} \
+  token_policies="{{ token_policies | join(",") }}" \
+  token_ttl={{ token_ttl }} \
+  token_max_ttl={{ token_ttl }} \
+  secret_id_ttl={{ secret_id_ttl }} \
+  secret_id_num_uses=1 \
+  secret_id_bound_cidrs="{{ cidr_bind | join(",") }}" \
+  token_bound_cidrs="{{ cidr_bind | join(",") }}"
+```
+
+## 2. role_idを取得する
+
+`role_id` は公開的な識別子のため、アプリのデプロイ設定などに直接組み込んで構いません。
+
+```bash
+vault read auth/approle/role/{{ role_name }}/role-id
+```
+
+## 3. secret_idをresponse wrappingで発行する
+
+`secret_id` は機密情報のため、平文で払い出さず、`-wrap-ttl` を付けて一度だけ開封できるラップトークンとして発行します（response wrapping）。この結果をログや履歴に残さないよう注意してください。
+
+```bash
+vault write -wrap-ttl=5m -f auth/approle/role/{{ role_name }}/secret-id
+```
+
+払い出されたラップトークンをアプリ側の初回起動時に一度だけ開封し、実体の `secret_id` を取り出します。
+
+```bash
+vault unwrap -field=secret_id "$WRAPPING_TOKEN"
+```
+
+## 4. AppRoleでログインし、トークンを取得する
+
+`role_id` と、開封して得た `secret_id` を使ってログインし、ポリシー `{{ token_policies | join(", ") }}` が付与されたVaultトークンを取得します。
+
+```bash
+vault write auth/approle/login \
+  role_id="$ROLE_ID" \
+  secret_id="$SECRET_ID"
+```
+
+取得したトークンは、環境変数やファイルへの一時保存は最小限にとどめ、`VAULT_TOKEN` としてプロセスの生存期間内でのみ保持してください。
+
+## 動作確認
+
+- 上記ログインが成功し、`token_policies`（{{ token_policies | join(", ") }}）が付与されたトークンが払い出されること
+- 取得したトークンで `vault kv get` 等、ポリシーで許可された範囲のシークレットにはアクセスでき、許可外のパスへは `permission denied` になること
+- `secret_id_num_uses=1` により、同じ `secret_id` で2回目のログインを試みると失敗すること
+- `secret_id_ttl`（{{ secret_id_ttl }}）経過後、未使用の `secret_id` でのログインが失敗すること
+- `token_ttl`（{{ token_ttl }}）経過後、発行済みトークンでのアクセスが失敗し、再ログインが必要になること
+- 許可された `cidr_bind`（{{ cidr_bind | join(", ") }}）以外のネットワークからログイン・トークン利用を試みると拒否されること
+
+## 注意事項
+
+- `secret_id` はパスワードに相当する機密情報であり、平文でのチャット共有・リポジトリコミット・アプリケーションログへの出力を行わない。発行コマンドの標準出力や監査ログに残さないよう、CI/CDのシークレットマスキング設定を必ず有効にする。
+- `secret_id` の配布はresponse wrapping（`-wrap-ttl`）を用い、短いTTL・`secret_id_num_uses=1`・`cidr_bind` によるネットワーク制限を組み合わせて、漏洩時の被害範囲を最小化する。
+- 既存の認証方式（静的トークンや共有クレデンシャルなど）からAppRoleへ切り替える場合は、既存経路を無効化する前に、必ずAppRoleでのログイン成功とポリシーどおりのアクセス可否を検証してから、旧方式を段階的に廃止する。
+- `secret_id` が漏洩した疑いがある場合は、`vault write auth/approle/role/{{ role_name }}/secret-id-accessor/destroy accessor=<accessor>` で当該secret_idのみを個別に失効させる。ロール全体の再作成は必要な場合のみ行う。
+- ロールの `token_policies` に想定より広い権限を付与すると、ログイン成功後のトークンがそのまま過大な権限を持ってしまうため、最小権限の原則でポリシーを設計・レビューする。

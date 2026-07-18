@@ -1,0 +1,5 @@
+agent_id = "042"
+manager_ip = "10.20.30.5"
+remote_port = 1514
+key_check = true
+ntp_check = true

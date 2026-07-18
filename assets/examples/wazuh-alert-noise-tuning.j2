@@ -1,0 +1,111 @@
+# Wazuhアラートノイズの調整と抑制
+
+多発しているアラートを rule.id 別に集計し、誤検知（fp）か真陽性（tp）かを判定した上で、`local_rules.xml` でのルール調整（level 引き下げ・相関条件の絞り込み・field 限定除外）を行い、`wazuh-logtest` で調整前後の挙動を比較検証します。
+
+## 目的
+
+Wazuh Manager が出す大量アラートのうち、恒常的なノイズ（誤検知・低リスク事象）を構造的に抑え、真に対処すべきアラートが埋もれない状態を作れるようになることを目指します。あわせて、ルール改変が実攻撃の見逃しにつながらないよう、安全な調整範囲を理解します。
+
+## 用語解説
+
+- **rule overwrite**: `local_rules.xml` で既存ルールと同じ `id` を指定し `overwrite="yes"` を付与すると、Wazuh のデコード/相関定義（デフォルトルールセット）側のルールを上書きできる仕組み。id を誤ると無関係なルールを壊すため慎重に扱う
+- **level**: ルールの深刻度（0〜16）。`ossec.conf` の `<alerts><log_alert_level>` が既定で 3 のため、level を 3 未満（0〜2）に下げると `alerts.log`/`alerts.json` には記録されるがアラートとしては扱われなくなる
+- **frequency / timeframe / if_matched_sid**: 同一 `if_sid` のイベントが `timeframe` 秒以内に `frequency` 回発生した場合のみ、`if_matched_sid` で指定した相関ルールを発火させる仕組み。単発ノイズを無視しつつ、連続発生時のみ検知したい場合に使う
+- **field 条件による限定除外**: `<field name="...">正規表現</field>` で、送信元IPやユーザー名など特定の値に一致するイベントだけをピンポイントで除外する仕組み。ルール全体を無効化せず、正規通信のみを除外できる
+- **noalert（`<options>no_log</options>`）**: level 引き下げとは異なり、level に関わらずアラート自体を生成させない指定。`alerts.log` にも一切残らないため、本当に不要と判断した場合のみ使う
+- **wazuh-logtest**: `/var/ossec/bin/wazuh-logtest` で生ログを流し込み、実際にどのルール（id・level）にマッチするかをその場で確認できる検証ツール
+
+## シナリオ設定
+
+| rule_id | description | daily_count | verdict | tuning_action |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["rule_id"] }} | {{ r["description"] }} | {{ r["daily_count"] }} | {{ r["verdict"] }} | {{ r["tuning_action"] }} |
+{% endfor %}
+
+## 1. 現状のアラート発生件数を rule.id 別に集計する
+
+```bash
+sudo cat /var/ossec/logs/alerts/alerts.json \
+  | jq -r '.rule.id' \
+  | sort | uniq -c | sort -rn
+```
+
+上記のシナリオ設定表は、この集計結果のうち上位に出てきた `rule_id` を一覧化したものです。`daily_count` が突出して多いものから対応します。
+
+## 2. 誤検知（fp）ルールの level を引き下げる
+
+`verdict` が `fp` かつ `tuning_action` が `level_down` の対象について、`/var/ossec/etc/rules/local_rules.xml` に overwrite ルールを追加します。
+
+```xml
+{% for r in csv_rows %}{% if r["tuning_action"] == "level_down" %}<rule id="{{ r["rule_id"] }}" level="2" overwrite="yes">
+  <if_sid>{{ r["rule_id"] }}</if_sid>
+  <description>{{ r["description"] }}（調整済み・非アラート化）</description>
+</rule>
+{% endif %}{% endfor %}```
+
+level を 2（既定の `log_alert_level` である 3 未満）に下げることで、ログには残るがアラートとしては扱われなくなります。
+
+## 3. 完全に不要なイベントを noalert（no_log）で抑止する
+
+日常的に大量発生し、記録自体も不要と判断した `tuning_action` が `noalert` の対象は、`no_log` オプションで抑止します。
+
+```xml
+{% for r in csv_rows %}{% if r["tuning_action"] == "noalert" %}<rule id="{{ r["rule_id"] }}" level="0" overwrite="yes">
+  <if_sid>{{ r["rule_id"] }}</if_sid>
+  <description>{{ r["description"] }}（記録・アラートとも抑止）</description>
+  <options>no_log</options>
+</rule>
+{% endif %}{% endfor %}```
+
+`no_log` は level 引き下げよりも強い抑止であり、`alerts.log` にすら残らないため、本当に無害と確認できたイベントにのみ適用してください。
+
+## 4. 正規通信のみを field 条件で限定除外する
+
+`tuning_action` が `field_exclude` の対象は、ルール全体を無効化するのではなく、既知の正規通信元（例: 脆弱性診断スキャナのIP）のみを `<field>` 条件で除外します。
+
+```xml
+{% for r in csv_rows %}{% if r["tuning_action"] == "field_exclude" %}<rule id="{{ r["rule_id"] }}0" level="0" overwrite="yes">
+  <if_sid>{{ r["rule_id"] }}</if_sid>
+  <field name="srcip">^10\.0\.20\.5$</field>
+  <description>{{ r["description"] }}（既知の診断スキャナ送信元を限定除外）</description>
+</rule>
+{% endif %}{% endfor %}```
+
+このルールは新規 id（元 id の末尾に 0 を付与）で定義し、`srcip` が既知スキャナと一致する場合のみ level 0 とすることで、それ以外の送信元からの同種攻撃は元の重要度のまま検知され続けます。
+
+## 5. 真陽性（tp）ルールは相関条件を絞って単発ノイズだけを減らす
+
+`verdict` が `tp` の対象（実際の攻撃の可能性がある）はルールを弱めるのではなく、`frequency` / `timeframe` / `if_matched_sid` で「短時間に連続発生した場合のみ」相関発火させ、単発の孤立イベントによるノイズを減らします。
+
+```xml
+{% for r in csv_rows %}{% if r["tuning_action"] == "frequency" %}<rule id="{{ r["rule_id"] }}9" level="10" frequency="6" timeframe="120" if_matched_sid="{{ r["rule_id"] }}">
+  <if_sid>{{ r["rule_id"] }}</if_sid>
+  <same_source_ip />
+  <description>{{ r["description"] }}が同一送信元から120秒以内に6回以上発生（ブルートフォースの疑い）</description>
+</rule>
+{% endif %}{% endfor %}```
+
+元の `rule_id` はそのまま残し、`if_matched_sid` で参照する新規相関ルールを追加するだけなので、単発の失敗イベント自体は従来どおり検知対象に残ります。
+
+## 6. 設定を反映し、wazuh-logtest で調整前後の挙動を比較する
+
+```bash
+sudo /var/ossec/bin/wazuh-control restart
+sudo /var/ossec/bin/wazuh-logtest
+```
+
+`wazuh-logtest` の対話プロンプトに、対象ルールに合致する生ログ（例: sshd の認証成功ログや cron 完了ログ）を1行ずつ貼り付け、出力される `rule.id` と `rule.level` を確認します。調整前は同じログでも `local_rules.xml` 反映前のバイナリ（起動前の設定）で試し、反映後との level・アラート有無の差分を記録してください。
+
+## 動作確認
+
+- Step 6 の `wazuh-logtest` で、`tuning_action` が `level_down`/`noalert`/`field_exclude` の対象ログを流した際、調整後は level が 3 未満（`noalert` 対象は `no_log` 出力）になっていること
+- Step 6 で `tuning_action` が `frequency` の対象ログを1回だけ流してもエスカレーション（`if_matched_sid` の新規ルール）が発火しないこと、6回連続で流した場合のみ発火すること
+- `sudo cat /var/ossec/logs/alerts/alerts.json | jq -r '.rule.id' | sort | uniq -c | sort -rn` を調整後に再実行し、対象 `rule_id` の1日あたりのアラート件数が調整前（シナリオ設定表の `daily_count`）より明確に減少していること
+- `field_exclude` で除外したもの以外の送信元からの同種イベントは、引き続き元の level でアラートされること（誤って全体を無効化していないこと）
+
+## 注意事項
+
+- `overwrite="yes"` は既存ルールの意図そのものを書き換えるため、ベンダー側のルールセット更新（アップデート）で意図が変わっていないか、最低でも四半期ごとに `local_rules.xml` の内容を見直すこと
+- 抑制対象を広げすぎると実攻撃を見逃すため、可能な限り「ルール全体の無効化」ではなく「Step 4 の `field` 限定除外」を優先し、送信元やユーザー名など具体的な条件で絞り込むこと
+- `no_log`（Step 3）はログにすら残らないため、監査要件や事後調査の必要があるイベントには使わず、まず level 引き下げ（Step 2）で様子を見ること
+- 本手順は認証成功ログ（sshd）を扱うため、`local_rules.xml` を反映して `wazuh-control restart` する前に、別セッションで既存の SSH 接続を維持したまま Step 6 の `wazuh-logtest` で調整結果を検証し、正規のログイン試行がアラート抑止範囲から意図せず外れていないことを確認してから本番反映すること

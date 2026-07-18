@@ -1,0 +1,89 @@
+# SquidアクセスルールとログのACL棚卸し
+
+squid.confのhttp_access順序(first match)とaccess.logの実績を突き合わせ、過剰許可・デッドルールを是正する定期監査手順です。
+
+## 目的
+
+http_accessはfirst match（最初に一致した行で確定）で評価されることを理解し、access.logのTCP_DENIED/TCP_ALLOWED集計から実際に効いているACLを特定した上で、未使用ACLや過剰なallow allを安全に是正できるようになることを目指します。
+
+## 用語解説
+
+- **first match**: http_accessは上から順に評価され、最初に一致した行のaction（allow/deny）で確定する。以降の行は評価されない
+- **rule_order**: squid.conf内でのhttp_access行の並び順。上位ほど優先度が高い
+- **TCP_DENIED / TCP_ALLOWED**: access.logに記録されるSquidの結果コード。拒否/許可の実績を集計する際の目印
+- **disposition(判定)**: 棚卸しの結果として下す keep（維持）/ review（要確認）/ remove（削除）の判定
+- **deny all**: http_accessの最終行に置く包括拒否ルール。これが無いとfirst matchの評価漏れが素通り許可になる
+
+## シナリオ設定
+
+今回棚卸し対象は {{ csv_rows | length }} 件のhttp_accessルールです。台帳には `rule_order` / `acl_name` / `action` / `hit_count` / `disposition` / `note` を記録します。
+
+## 手順
+
+### 1. 棚卸し対象ルールの並び順を確認する
+
+```bash
+echo "棚卸し対象ルール数: {{ csv_rows | length }}"
+{% for r in csv_rows %}echo "{{ r["rule_order"] }}: acl {{ r["acl_name"] }} {{ r["action"] }} (hit_count={{ r["hit_count"] }})"
+{% endfor %}```
+
+### 2. squid.confのhttp_access順序をエクスポートする
+
+```bash
+cp /etc/squid/squid.conf /etc/squid/squid.conf.bak.$(date +%Y%m%d)
+grep -n "^http_access" /etc/squid/squid.conf > /tmp/http_access_order.txt
+cat /tmp/http_access_order.txt
+```
+
+### 3. access.logからTCP_DENIED/TCP_ALLOWEDを集計し実効性を確認する
+
+```bash
+{% for r in csv_rows %}awk '$4 ~ /^TCP_(DENIED|ALLOWED)/' /var/log/squid/access.log | grep -c "{{ r["acl_name"] }}" || echo "{{ r["acl_name"] }}: ログから該当なし"
+{% endfor %}```
+
+### 4. 未使用ACL・過剰なallow allを検出する
+
+```bash
+{% for r in csv_rows %}{% if r["action"] == "allow" and r["hit_count"]|int < 100 %}echo "要検出: rule_order {{ r["rule_order"] }} ({{ r["acl_name"] }}) はヒット数 {{ r["hit_count"] }} の割に許可設定・過剰許可の疑い"
+{% endif %}{% endfor %}```
+
+### 5. dispositionに沿って段階的に是正する
+
+`remove` 判定のACLは、いきなり削除せず、まず該当のhttp_access行をコメントアウトして`squid -k parse`で構文検証だけを行う段階を挟みます。管理端末からのアクセス(localhostなど)が別セッションで引き続き通ることを確認してから、本番のreconfigureに進みます。
+
+```bash
+{% for r in csv_rows %}{% if r["disposition"] == "remove" %}echo "段階的是正対象(コメントアウトして検証): rule_order {{ r["rule_order"] }} acl {{ r["acl_name"] }} ({{ r["note"] }})"
+{% elif r["disposition"] == "review" %}echo "要確認: rule_order {{ r["rule_order"] }} acl {{ r["acl_name"] }} ({{ r["note"] }})"
+{% endif %}{% endfor %}```
+
+### 6. deny allの最終行配置とlocalhost許可の位置を確認する
+
+```bash
+tail -n 1 /tmp/http_access_order.txt
+echo "上記が deny all であることを確認してください（http_access deny all が最終行必須）"
+head -n 3 /tmp/http_access_order.txt
+echo "上記に localhost 管理許可が含まれ、過剰なallowより上位に置かれていることを確認してください"
+```
+
+### 7. 台帳を更新し、構文検証後にreconfigureする
+
+```bash
+{% for r in csv_rows %}echo "{{ r["rule_order"] }},{{ r["acl_name"] }},{{ r["action"] }},{{ r["hit_count"] }},{{ r["disposition"] }},{{ r["note"] }}" >> /tmp/squid-acl-audit-updated.csv
+{% endfor %}squid -k parse
+squid -k reconfigure
+```
+
+## 動作確認
+
+- `squid -k parse` がエラーなく終了していること（構文検証OK）
+- 全 {{ csv_rows | length }} 件のACLについて `disposition`（keep/review/remove）が確認できていること
+- http_accessの最終行が `deny all` であることを確認済みであること
+- localhost管理許可のrule_orderが、過剰なallow(allow_all_legacyなど)より上位にあることを確認済みであること
+- `squid -k reconfigure` 実行後、管理端末（localhost許可経路）からの疎通が別セッションで継続していること
+
+## 注意事項
+
+- first matchのため、許可ルールを既存ルールより上位に挿入すると、意図しない穴（想定外の許可）を生む可能性がある。挿入位置は既存のrule_orderとの前後関係を必ず確認する。
+- 変更前に必ず `squid.conf` をバックアップする（手順2でタイムスタンプ付きバックアップを取得済みであることを確認）。
+- `http_access deny all` が最終行に存在しない場合、評価漏れのリクエストが意図せず通過する。棚卸し後も必ず最終行を確認する。
+- `remove` 判定のACLをコメントアウトした直後は本番reconfigureをせず、管理端末など重要な許可経路が別セッションで引き続き機能することを確認してから反映する。

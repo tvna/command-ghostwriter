@@ -1,0 +1,8 @@
+prometheus_enabled: true
+client_online_threshold: 24
+watch_metrics:
+  - "velociraptor_client_comms_current_connections"
+  - "velociraptor_frontend_current_connections"
+  - "velociraptor_executor_worker_queue"
+  - "go_memstats_alloc_bytes"
+alert_channel: "#soc-velociraptor-alerts"

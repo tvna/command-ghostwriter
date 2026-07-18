@@ -1,0 +1,25 @@
+cache_dir_type = "aufs"
+cache_dir_size_mb = 8000
+cache_mem_mb = 512
+max_object_size_kb = 4096
+
+[[refresh_patterns]]
+pattern = "\\.(jpg|png|gif|css|js)$"
+min = 1440
+percent = 40
+max = 40320
+options = "reload-into-ims"
+
+[[refresh_patterns]]
+pattern = "\\.(deb|rpm|iso|tar\\.gz)$"
+min = 10080
+percent = 80
+max = 129600
+options = "override-expire"
+
+[[refresh_patterns]]
+pattern = "."
+min = 0
+percent = 20
+max = 4320
+options = "reload-into-ims"

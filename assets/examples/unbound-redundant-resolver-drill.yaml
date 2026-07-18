@@ -1,0 +1,7 @@
+primary_resolver: "10.0.20.1"
+secondary_resolver: "10.0.20.2"
+failover_method: "resolv.conf"
+target_downtime: "5分"
+test_domains:
+  - "example.com"
+  - "internal.example.local"

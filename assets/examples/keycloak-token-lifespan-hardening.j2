@@ -1,0 +1,125 @@
+# Keycloakトークン有効期間のハードニング — {{ realm.name }}
+
+変更ID **{{ lifespan.change_id }}** に基づき、realm **{{ realm.name }}** のアクセストークン/SSOセッションの有効期間を最小権限で見直す手順です。認証まわりの変更のため、必ずテストrealmで体感確認してから本番realmへ段階適用してください。
+
+## 目的
+
+短命アクセストークン・アイドルタイムアウト・SSOセッション最大時間・リフレッシュトークンの再利用検知という多層防御を理解し、`kcadm.sh` でrealm設定を安全に変更・検証・ロールバックできるようになることを目指します。
+
+## 用語解説
+
+- **accessTokenLifespan**: アクセストークン自体の有効秒数。短いほど漏洩時の悪用可能時間が減る
+- **ssoSessionIdleTimeout**: SSOセッションが無操作のまま放置されたときにタイムアウトするまでの秒数
+- **ssoSessionMaxLifespan**: 操作の有無に関わらずSSOセッションが強制終了されるまでの絶対上限秒数
+- **revokeRefreshToken**: trueにすると各リフレッシュトークンが一度使われるたびに新しいトークンへローテーションされ、同一トークンの再利用（盗用の兆候）を検知できる
+- **多層設計**: 短命アクセストークン＋リフレッシュローテーション＋アイドルタイムアウト＋絶対上限を組み合わせ、単一設定の緩みが即座に長時間の不正利用へ直結しないようにする考え方
+- **client別override**: realm全体のデフォルトとは別に、クライアント単位の`Advanced`タブでトークン有効期間を個別上書きできる仕組み
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 対象realm | {{ realm.name }} |
+| テストrealm | {{ kcadm.test_realm }} |
+| Keycloakサーバ | {{ kcadm.server_url }} |
+| 変更後 accessTokenLifespan(秒) | {{ lifespan.access_token_seconds }} |
+| 変更後 ssoSessionIdleTimeout(秒) | {{ lifespan.sso_idle_seconds }} |
+| 変更後 ssoSessionMaxLifespan(秒) | {{ lifespan.sso_max_seconds }} |
+| 変更後 revokeRefreshToken | {{ lifespan.revoke_refresh_token }} |
+| ロールバック用 accessTokenLifespan(秒) | {{ rollback.access_token_seconds }} |
+| ロールバック用 ssoSessionIdleTimeout(秒) | {{ rollback.sso_idle_seconds }} |
+| ロールバック用 ssoSessionMaxLifespan(秒) | {{ rollback.sso_max_seconds }} |
+
+## 1. kcadm.shで管理者認証する
+
+```bash
+kcadm.sh config credentials --server {{ kcadm.server_url }} --realm {{ kcadm.admin_realm }} --user {{ kcadm.admin_user }}
+```
+
+パスワードは対話プロンプトで入力してください（コマンド引数に平文で渡さない）。
+
+## 2. テストrealmへ先に反映する
+
+本番realmに触れる前に、同一設定をテストrealm **{{ kcadm.test_realm }}** へ反映し、挙動を体感確認します。
+
+```bash
+kcadm.sh update realms/{{ kcadm.test_realm }} \
+  -s accessTokenLifespan={{ lifespan.access_token_seconds }} \
+  -s ssoSessionIdleTimeout={{ lifespan.sso_idle_seconds }} \
+  -s ssoSessionMaxLifespan={{ lifespan.sso_max_seconds }} \
+  -s revokeRefreshToken={{ lifespan.revoke_refresh_token }} \
+  -s refreshTokenMaxReuse=0
+```
+
+## 3. テストrealmでトークンのexpを確認する
+
+```bash
+TOKEN_JSON=$(kcadm.sh get-token --server {{ kcadm.server_url }} --realm {{ kcadm.test_realm }} --user {{ test_user.username }} --client admin-cli)
+ACCESS_TOKEN=$(echo "$TOKEN_JSON" | jq -r '.access_token')
+echo "$ACCESS_TOKEN" | cut -d '.' -f2 | base64 -d 2>/dev/null | jq '.exp, .iat, (.exp - .iat)'
+```
+
+`exp - iat` が `{{ lifespan.access_token_seconds }}` 秒（付近）であることを確認します。
+
+## 4. テストrealmでアイドルタイムアウトによる再認証を確認する
+
+```bash
+sleep {{ lifespan.sso_idle_seconds }}
+kcadm.sh get realms/{{ kcadm.test_realm }}/sessions/user/{{ test_user.username }} 2>&1 | grep -i "not found\|error" && echo "アイドルタイムアウトOK: セッション失効済み"
+```
+
+放置後にアプリへ再アクセスすると、SSOセッションではなく再認証（ログイン画面）が要求されることを確認してください。
+
+## 5. リフレッシュトークンの再利用検知を確認する
+
+同一のリフレッシュトークンを2回使い、2回目が拒否されることを確認します。
+
+```bash
+REFRESH_TOKEN=$(echo "$TOKEN_JSON" | jq -r '.refresh_token')
+curl -s -X POST "{{ kcadm.server_url }}/realms/{{ kcadm.test_realm }}/protocol/openid-connect/token" \
+  -d "grant_type=refresh_token" -d "client_id=admin-cli" -d "refresh_token=$REFRESH_TOKEN" | jq '.access_token'
+curl -s -X POST "{{ kcadm.server_url }}/realms/{{ kcadm.test_realm }}/protocol/openid-connect/token" \
+  -d "grant_type=refresh_token" -d "client_id=admin-cli" -d "refresh_token=$REFRESH_TOKEN" | jq '.error'
+```
+
+1回目は成功し、同じトークンでの2回目は `invalid_grant`（再利用検知によるリボーク）となることを確認します。
+
+## 6. 本番realmへ段階適用する
+
+テストrealmでの確認が取れたら、本番realm **{{ realm.name }}** へ同じ設定を反映します。業務時間帯の再認証頻度への影響が大きいため、事前告知した上で低負荷時間帯に実施してください。
+
+```bash
+kcadm.sh update realms/{{ realm.name }} \
+  -s accessTokenLifespan={{ lifespan.access_token_seconds }} \
+  -s ssoSessionIdleTimeout={{ lifespan.sso_idle_seconds }} \
+  -s ssoSessionMaxLifespan={{ lifespan.sso_max_seconds }} \
+  -s revokeRefreshToken={{ lifespan.revoke_refresh_token }} \
+  -s refreshTokenMaxReuse=0
+```
+
+## 7. 問題発生時に元値へ戻す
+
+再認証の急増などの問題が確認された場合は、直ちに変更前の値へ戻します。
+
+```bash
+kcadm.sh update realms/{{ realm.name }} \
+  -s accessTokenLifespan={{ rollback.access_token_seconds }} \
+  -s ssoSessionIdleTimeout={{ rollback.sso_idle_seconds }} \
+  -s ssoSessionMaxLifespan={{ rollback.sso_max_seconds }} \
+  -s revokeRefreshToken={{ rollback.revoke_refresh_token }}
+```
+
+## 動作確認
+
+- Step 3: 発行されたアクセストークンの `exp - iat` が `{{ lifespan.access_token_seconds }}` 秒であること
+- Step 4: `{{ lifespan.sso_idle_seconds }}` 秒の放置後、SSOセッションが失効し再認証が要求されること
+- Step 5: リフレッシュトークンの2回目の使用が `invalid_grant` で拒否される（再利用検知）こと
+- Step 6実施後、`kcadm.sh get realms/{{ realm.name }} --fields accessTokenLifespan,ssoSessionIdleTimeout,ssoSessionMaxLifespan,revokeRefreshToken` の出力が変更値と一致すること
+
+## 注意事項
+
+- 認証まわりの変更のため、本番realmへ反映する前に必ずテストrealm **{{ kcadm.test_realm }}** で新しい有効期間の挙動（再認証頻度・タイムアウト）を体感確認し、問題がないことを確かめてから段階適用すること。旧設定を無効化・上書きする前に新しい経路が機能することを別セッション相当の確認（テストrealmでの検証）で確定させる。
+- 過短設定（`accessTokenLifespan`や`ssoSessionIdleTimeout`を極端に短くする）は業務中の再認証多発を招き、過長設定（`ssoSessionMaxLifespan`を長くしすぎる）は漏洩トークンの悪用可能時間を延ばすトレードオフがあるため、業務影響と脅威モデルの両面から値を決定する。
+- realm全体のデフォルトとは別に、クライアントごとの`Advanced`タブで`accessTokenLifespan`等を個別override可能。一部クライアントだけ短命化したい場合はrealm変更ではなくクライアント単位の設定を検討する。
+- 反映後に問題が確認された場合は、Step 7の手順で速やかに変更前の値へ戻す。
+- `revokeRefreshToken=true` にすると同一リフレッシュトークンの再利用がすべて失敗扱いになるため、ネットワーク不安定などによる意図しない多重リフレッシュがないかクライアント実装側も併せて確認する。

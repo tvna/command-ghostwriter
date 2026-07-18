@@ -1,0 +1,102 @@
+# SquidプロキシへのTLS保護リスナー構成
+
+クライアント〜Squidプロキシ間の通信をTLSで保護し、Basic認証の資格情報がネットワーク上を平文で流れないようにする手順書です。root権限(sudo)で実施してください。
+
+## 目的
+
+通常の`http_port`ではクライアント〜プロキシ間が平文通信のため、Basic認証のユーザー名・パスワードが平文で流れてしまう問題を解消します。`https_port`(TLSプロキシ)を追加構成し、証明書配布とクライアント設定変更まで一巡します。
+
+## 用語解説
+
+- **http_port(平文プロキシ)**: 通常の明示プロキシリスナー。クライアント〜プロキシ間はTLSで保護されないため、Basic認証のCredentialがBase64エンコードのみの状態でネットワークを流れる
+- **https_port(TLSプロキシ)**: `tls-cert=`/`tls-key=`を指定してSquid自身がTLS終端を行う明示プロキシリスナー。クライアント〜プロキシ間の通信全体(認証情報を含む)が暗号化される
+- **明示プロキシ(explicit proxy)**: クライアント側のブラウザ/OSにプロキシアドレスを明示設定して利用する方式。`https_port`のTLS終端はこの明示設定クライアントのみが対象で、透過(intercept)構成では利用できない制約がある
+- **intercept**: クライアントにプロキシ設定をさせず、ネットワーク経路上でトラフィックを強制的にプロキシへ振り向ける方式。`tls-cert=`と`intercept`オプションは同時使用できない
+- **auth_param basic**: SquidでBasic認証を行うための設定ディレクティブ。認証ヘルパープログラムとレルム名を指定する
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| TLSプロキシポート(https_port) | {{ https_port }} |
+| 既存の平文プロキシポート(http_port) | {{ old_http_port }} |
+| プロキシ証明書 | {{ proxy_cert_path }} |
+| プロキシ秘密鍵 | {{ proxy_key_path }} |
+| プロキシFQDN | {{ proxy_fqdn }} |
+| クライアント配布用CAバンドル | {{ ca_bundle_path }} |
+| Basic認証必須化 | {% if auth_required %}有効{% else %}無効{% endif %} |
+
+## 手順
+
+### 1. プロキシ証明書・秘密鍵を配置する
+
+```bash
+sudo install -o proxy -g proxy -m 0644 proxy-cert.pem {{ proxy_cert_path }}
+sudo install -o proxy -g proxy -m 0600 proxy-key.pem {{ proxy_key_path }}
+sudo install -o root -g root -m 0644 internal-ca.pem {{ ca_bundle_path }}
+```
+
+社内CAで発行した証明書のCommon Name/SANには`{{ proxy_fqdn }}`を含めてください。クライアント配布用に`{{ ca_bundle_path }}`も同時に準備します。
+
+### 2. squid.confにhttps_portを追加する
+
+```bash
+sudo tee -a /etc/squid/squid.conf <<'EOF'
+https_port {{ https_port }} tls-cert={{ proxy_cert_path }} tls-key={{ proxy_key_path }} cipher=HIGH:MEDIUM:!aNULL:!MD5
+EOF
+```
+
+既存の`http_port {{ old_http_port }}`はこの時点ではまだ削除しません。新旧リスナーを併存させ、移行完了後に平文リスナーを止めます。
+
+### 3. Basic認証を設定する
+
+```bash
+sudo htpasswd -B -c /etc/squid/passwords proxyuser
+sudo tee -a /etc/squid/squid.conf <<'EOF'
+auth_param basic program /usr/lib/squid/basic_ncsa_auth /etc/squid/passwords
+auth_param basic realm Proxy Authentication Required
+acl authenticated proxy_auth REQUIRED
+http_access allow authenticated
+http_access deny all
+EOF
+```
+
+{% if auth_required %}Basic認証を必須にするため、`http_access allow authenticated`より前に未認証を許可するACLが無いことを確認してください。{% endif %}
+
+### 4. 設定を検証してリロードする
+
+```bash
+sudo squid -k parse
+sudo squid -k reconfigure
+```
+
+構文エラーがある状態でreconfigureすると設定が反映されないため、`-k parse`で必ず事前検証します。
+
+### 5. TLSプロキシ経由の接続をテストする
+
+```bash
+curl --proxy https://{{ proxy_fqdn }}:{{ https_port }} --proxy-cacert {{ ca_bundle_path }} \
+  --proxy-user proxyuser:'<password>' https://example.com/ -o /dev/null -w '%{http_code}\n'
+```
+
+`200`が返れば、クライアント〜プロキシ間TLS越しにBasic認証付きで接続できています。旧`http_port {{ old_http_port }}`側も並行して疎通確認し、両リスナーが問題なく動作していることを確認してから次の切替作業に進みます。
+
+## 動作確認
+
+- `curl --proxy https://{{ proxy_fqdn }}:{{ https_port }} --proxy-cacert {{ ca_bundle_path }}`が`200`を返すこと
+- クライアントのプロキシ設定は明示プロキシ(ブラウザ/OSのプロキシ設定)であり、intercept(透過)構成ではないこと
+- パケットキャプチャで資格情報が暗号化されていることを確認する
+
+```bash
+sudo tcpdump -i any -w /tmp/proxy-check.pcap host {{ proxy_fqdn }} and port {{ https_port }}
+```
+
+取得後、`tshark -r /tmp/proxy-check.pcap -Y http`などでBasic認証ヘッダ(`Authorization: Basic ...`)の平文がキャプチャに現れないこと(TLSで秘匿されていること)を確認します。旧`http_port {{ old_http_port }}`向けの同種キャプチャでは、暗号化されていないBasic認証ヘッダがそのまま見えることと比較すると効果が分かりやすくなります。
+
+## 注意事項
+
+- クライアント〜プロキシ間TLSの`https_port`は、クライアント側で明示プロキシ設定(ブラウザ/OSのプロキシ設定)を行っている場合のみ有効です。透過型の`intercept`構成では`tls-cert=`を使うhttps_portは利用できません。対応できないクライアントが残っていないか事前に洗い出してください。
+- 移行期間中は`https_port {{ https_port }}`と旧`http_port {{ old_http_port }}`を併存させ、新しいTLSプロキシ経路で全対象クライアントの接続と認証が成功することを個別に確認してから、`http_port {{ old_http_port }}`の設定行を削除・無効化してください。先に平文リスナーを止めると、切替未完了のクライアントが接続不能になります。
+- `{{ ca_bundle_path }}`(社内CAのルート証明書)をすべてのクライアント端末に事前配布し、信頼ストアへ登録しておく必要があります。未配布のままでは証明書検証エラーで接続できません。
+- 証明書更新時は`{{ proxy_key_path }}`の権限(0600、所有者proxy)を必ず維持してください。権限が緩いと秘密鍵の漏えいリスクになります。
+- 万一TLSプロキシ側で問題が発生した場合に備え、旧`http_port {{ old_http_port }}`を即座に再有効化できるよう、切替前の`squid.conf`のバックアップを保管しておいてください。

@@ -1,0 +1,152 @@
+# osqueryクエリパックの管理と配布
+
+用途別に整備したosqueryクエリパックを、サーバ種別（役割）へ配布し、定期的に棚卸しする運用手順です。
+
+## 目的
+
+公式/コミュニティ提供のosqueryクエリパックと自組織カスタムパックを役割分担し、`osquery.conf` からの参照、サーバ種別ごとの割当、そして棚卸し（不要クエリ・重複パックの整理）までを一貫して運用できるようになることを目指します。
+
+## 用語解説
+
+- **クエリパック(query pack)**: 関連するosqueryクエリをひとつのJSONファイルにまとめたもの。`incident-response` や `vuln-management` のように用途別に構成する。
+- **公式/コミュニティパック**: osquery本体に同梱される `packs/` 配下の定義（`incident-response.conf`、`vuln-management.conf`、`osquery-monitoring.conf` 等）。原則として無改造で採用し、差分は自組織カスタムパック側に切り出す。
+- **自組織カスタムパック**: 公式パックでは賄えない要件（自社DB監査、レガシー機器監視等）を独自に定義したパック。公式パックと物理的に別ディレクトリ(`packs/custom/`)へ分離し、更新経路を分ける。
+- **discoveryクエリ**: パック内で「このホストで有効化すべきか」を判定する補助クエリ。結果が1行以上返るホストでのみパック内のクエリが実行される。サーバ種別ごとの割当はこの仕組みで実現する。
+- **interval_policy(実行間隔方針)**: `high`(高頻度・短間隔)、`standard`(標準間隔)、`low`(低頻度・長間隔)の3段階。高頻度クエリはホストの性能へ与える影響が大きいため最小限に留める。
+- **review_status(棚卸し状態)**: `approved`(運用中・承認済み)、`pending-review`(差分レビュー待ち)、`deprecated`(廃止予定・棚卸し対象)。
+
+## シナリオ設定
+
+配布・棚卸し対象のクエリパック一覧です。
+
+| pack_name | query_count | target_role | interval_policy | review_status |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["pack_name"] }} | {{ r["query_count"] }} | {{ r["target_role"] }} | {{ r["interval_policy"] }} | {{ r["review_status"] }} |
+{% endfor %}
+
+## 1. パックのJSON定義を確認する
+
+公式パックは無改造で `/etc/osquery/packs/` に、自組織カスタムパックは `/etc/osquery/packs/custom/` に分離して配置します。
+
+```bash
+ls -l /etc/osquery/packs/
+ls -l /etc/osquery/packs/custom/
+```
+
+各パックの定義例（`incident-response` の抜粋、公式 `packs/incident-response.conf` 相当）です。
+
+```json
+{
+  "queries": {
+    "listening_ports": {
+      "query": "SELECT pid, address, port, protocol FROM listening_ports;",
+      "interval": 60,
+      "description": "listening network ports",
+      "value": "incident response - unexpected listeners"
+    },
+    "shell_history": {
+      "query": "SELECT uid, command, history_file FROM shell_history;",
+      "interval": 300,
+      "description": "recently executed shell commands"
+    }
+  }
+}
+```
+
+自組織カスタムパック（`custom-db-audit` の例）は discovery クエリでサーバ種別を限定します。
+
+```json
+{
+  "discovery": [
+    "SELECT 1 FROM file WHERE path = '/etc/server-role/db-server';"
+  ],
+  "queries": {
+    "mysql_connections": {
+      "query": "SELECT pid, remote_address, remote_port FROM process_open_sockets WHERE remote_port = 3306;",
+      "interval": 86400,
+      "description": "db-server専用: 3306番ポートへの接続一覧"
+    }
+  }
+}
+```
+
+## 2. osquery.confでパックを参照する
+
+`/etc/osquery/osquery.conf` の `packs` セクションで、シナリオ設定の全パックを参照します。
+
+```json
+{
+  "options": {
+    "config_plugin": "filesystem",
+    "logger_plugin": "filesystem",
+    "schedule_splay_percent": 10,
+    "pack_delimiter": "_"
+  },
+  "packs": {
+{% for r in csv_rows %}    "{{ r["pack_name"] }}": "/etc/osquery/packs/{% if r["review_status"] != "deprecated" %}{{ r["pack_name"] }}.json{% else %}custom/{{ r["pack_name"] }}.json{% endif %}"{% if not loop.last %},{% endif %}
+
+{% endfor %}  }
+}
+```
+
+設定の文法チェックを行います。
+
+```bash
+sudo osqueryd --config_check --config_path=/etc/osquery/osquery.conf
+```
+
+## 3. サーバ種別へ割り当てる
+
+discoveryクエリの判定対象となる役割マーカーファイルを、サーバ種別ごとに配置します(configuration management側で管理する想定)。
+
+```bash
+{% for r in csv_rows %}{% if r["target_role"] != "all" %}sudo mkdir -p /etc/server-role
+sudo touch /etc/server-role/{{ r["target_role"] }}
+{% endif %}{% endfor %}```
+
+割当状況を役割別に整理します。
+
+```bash
+{% for r in csv_rows %}echo "{{ r["pack_name"] }} -> target_role={{ r["target_role"] }}, interval_policy={{ r["interval_policy"] }}"
+{% endfor %}```
+
+## 4. パックの棚卸しを行う
+
+`review_status` が `pending-review` または `deprecated` のパックを棚卸し対象として抽出します。
+
+```bash
+{% for r in csv_rows %}{% if r["review_status"] == "pending-review" %}echo "差分レビュー待ち: {{ r["pack_name"] }} ({{ r["query_count"] }} queries, target_role={{ r["target_role"] }})"
+{% endif %}{% if r["review_status"] == "deprecated" %}echo "廃止候補: {{ r["pack_name"] }} を無効化してよいか確認する"
+{% endif %}{% endfor %}```
+
+`deprecated` と判定したパックは、即時削除ではなく `osquery.conf` の `packs` エントリから外して再読込し、影響がないことを確認してから物理削除します。
+
+```bash
+{% for r in csv_rows %}{% if r["review_status"] == "deprecated" %}sudo osqueryctl config-check
+sudo systemctl reload osqueryd
+{% endif %}{% endfor %}```
+
+## 動作確認
+
+配布したパックが実際にスケジュール登録され、正しい間隔・役割で実行されていることを `osqueryi` で確認します。
+
+```bash
+sudo osqueryi --line "SELECT name, active, discovery_cache_hits FROM osquery_packs;"
+sudo osqueryi --line "SELECT name, interval, average_memory, last_executed FROM osquery_schedule ORDER BY interval;"
+```
+
+- `osquery_packs` の `active` が対象サーバの役割に応じて期待どおり(0/1)になっていること。
+- `osquery_schedule` の各クエリの `interval` が、シナリオ設定の `interval_policy`(high=短い間隔、standard=中間、low=長い間隔)と矛盾しないこと。
+- 高頻度(`interval_policy` が `high`)のパックについては、`average_memory` や `last_executed` の変化からホスト負荷への影響が許容範囲内であることを確認する。
+
+```bash
+{% for r in csv_rows %}{% if r["interval_policy"] == "high" %}sudo osqueryi --line "SELECT name, wall_time, average_memory FROM osquery_schedule WHERE name LIKE '%{{ r["pack_name"] }}%';"
+{% endif %}{% endfor %}```
+
+## 注意事項
+
+- 高頻度(`interval_policy=high`)のクエリはホストCPU・ディスクI/Oへの影響が大きいため、必要最小限に留め、`osquery_schedule` の `wall_time`/`average_memory` を定期的に確認して負荷を監視すること。
+- 棚卸しにより不要と判定した(`review_status=deprecated`)クエリ・パックは、`osquery.conf` から参照を外して再読込した後、一定期間の観測を経てから物理削除する(旧経路を残したまま新配布内容が正しく動くことを確認してから、旧パックを外す)。
+- パック更新(特に外部/コミュニティ提供パックの更新)を取り込む際は、untrusted pack queryの差分レビューを必須とする。SQLインジェクション的な意図しないテーブル参照や、想定外の高負荷クエリが混入していないかを更新前に確認する。
+- 収集したクエリ結果ログ(`/var/log/osquery/osqueryd.results.log` 等)は保管期間・アクセス権を定め、監査証跡として不要になった時点でローテーション・削除する運用ルールを別途定義する。
+- サーバ種別への割当はdiscoveryクエリと役割マーカーファイルに依存するため、マーカーファイルの配置ミスは意図しないパックの全ホスト適用または未適用につながる。配布後は必ず`動作確認`の手順で対象ホストごとの適用状況を確認すること。

@@ -1,0 +1,18 @@
+realm: "corp"
+kcadm_host: "https://idp.example.internal"
+rp_entity_name: "Corp Portal"
+rp_id: "portal.example.internal"
+user_verification: "required"
+resident_key: true
+passwordless: true
+attestation_conveyance: "none"
+signature_algorithms:
+  - "ES256"
+  - "RS256"
+flow_name: "browser-webauthn"
+test_user: "webauthn-tester"
+backup_authenticators:
+  - label: "TOTPアプリ(バックアップ)"
+    required_action: "CONFIGURE_TOTP"
+  - label: "予備の物理セキュリティキー"
+    required_action: "webauthn-register"

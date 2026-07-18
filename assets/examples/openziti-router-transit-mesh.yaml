@@ -1,0 +1,12 @@
+routers:
+  - name: er-tokyo01
+    link_listener: "tls:0.0.0.0:10080"
+    advertised: "er-tokyo01.ziti.example.jp:10080"
+  - name: er-osaka01
+    link_listener: "tls:0.0.0.0:10080"
+    advertised: "er-osaka01.ziti.example.jp:10080"
+  - name: er-nagoya01
+    link_listener: "tls:0.0.0.0:10080"
+    advertised: "er-nagoya01.ziti.example.jp:10080"
+link_dialer: "tls"
+transit_enabled: true

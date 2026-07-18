@@ -1,0 +1,10 @@
+exporter_enabled: true
+watch_metrics:
+  - "total.num.queries"
+  - "total.num.cachehit"
+  - "num.query.tcp"
+  - "total.num.recursivereplies"
+  - "answer.rcode.SERVFAIL"
+cache_hit_threshold: 70
+servfail_threshold: 2
+alert_channel: "#dns-alerts"

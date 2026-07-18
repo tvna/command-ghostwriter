@@ -1,0 +1,7 @@
+scope_name,scope_type,mapper_type,claim_name,token_target
+profile-min,default,user-attribute,department,access
+profile-min,default,user-attribute,employee_id,id
+groups-role,default,group-membership,groups,access
+audience-api,default,audience,aud,access
+reports-read,optional,hardcoded,scope_level,access
+reports-read,optional,user-attribute,report_region,access

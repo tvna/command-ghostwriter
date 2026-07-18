@@ -1,0 +1,103 @@
+# CrowdSec CTIブロックリストによる予防遮断
+
+CrowdSecのCTI(Cyber Threat Intelligence)ブロックリストを購読して既知の悪性IPを
+攻撃発生前に予防的に遮断しつつ、自組織のログ検知で見つけた個別IPも手動で遮断へ
+反映する運用手順です。対象決定(decision)は {{ csv_rows | length }} 件です。
+
+## 目的
+
+コミュニティ評判に基づくCTIブロックリストの購読と、自組織検知に基づく手動遮断
+(`cscli decisions add`)を併用し、bouncer経由で実際にトラフィックへ反映されるまでを
+確認できるようになることを目指します。
+
+## 用語解説
+
+- **cscli**: CrowdSecのCLI管理ツール。decision(遮断/警告等の判定)の追加・一覧・削除を行う
+- **decision**: 「このIP/レンジに対してこの期間このアクションを行う」というCrowdSecの判定単位
+- **CTIブロックリスト**: CrowdSecコミュニティが集約した既知悪性IPの評判データ。`cscli console enroll`でコンソール連携後、`cscli blocklist`で購読するブロックリストとして反映される
+- **bouncer**: LAPI(Local API)からdecisionを取得し、実際にiptables/nftables/WAF等へ反映するコンポーネント
+- **予防的遮断**: 自組織でまだ攻撃を観測していなくても、コミュニティ評判(CTI)により悪性と判定済みのIPを事前に遮断する運用方針。自組織検知による事後的な遮断と組み合わせて多層防御とする
+- **whitelist**: 自組織/正規IPを遮断対象から除外する設定。CTI購読・手動追加より優先して評価される
+
+## シナリオ設定
+
+CTI購読分および自組織検知分として、以下の decision 登録内容を投入します。
+
+| indicator | type | source | duration | reason | added_at |
+|-----------|------|--------|----------|--------|----------|
+{% for r in csv_rows %}| {{ r["indicator"] }} | {{ r["type"] }} | {{ r["source"] }} | {{ r["duration"] }} | {{ r["reason"] }} | {{ r["added_at"] }} |
+{% endfor %}
+
+## 1. CrowdSecコンソール連携とCTIブロックリスト購読を確認する
+
+CTIブロックリストの購読状況を確認します。未連携の場合は先にコンソールへ登録します。
+
+```bash
+sudo cscli console status
+sudo cscli console enroll <enroll-key>
+sudo cscli blocklist list
+```
+
+→ `cscli blocklist list` に購読中のCTIブロックリストが表示され、`source`列が`cti`の
+indicatorはこの購読を通じて自動的にdecisionへ反映されることを確認します。
+
+## 2. whitelistで自組織/正規IPの誤登録を防止する
+
+CTI購読・手動追加より前に、whitelist設定が有効であることを確認します。
+
+```bash
+sudo cscli whitelists list
+sudo cscli whitelists inspect ip <indicator>
+```
+
+→ 遮断対象として登録しようとしているIP/レンジがwhitelistに含まれていないことを
+事前に確認します。含まれている場合はwhitelistが優先されdecisionは無視されます。
+
+## 3. 自組織検知分をcscli decisions addで手動遮断する
+
+`source`列が`manual`の行を、検知内容(`reason`)に基づいて手動でdecisionへ追加します。
+
+```bash
+{% for r in csv_rows %}{% if r["source"] == "manual" %}{% if r["type"] == "range" %}sudo cscli decisions add --range "{{ r["indicator"] }}" --duration "{{ r["duration"] }}" --reason "{{ r["reason"] }}"
+{% else %}sudo cscli decisions add --ip "{{ r["indicator"] }}" --duration "{{ r["duration"] }}" --reason "{{ r["reason"] }}"
+{% endif %}{% endif %}{% endfor %}```
+
+→ `--duration`はGoのduration記法(`4h`, `24h`, `168h`等)で指定し、期限到来で
+自動的にdecisionが失効します。
+
+## 4. decision一覧とbouncerへの反映を確認する
+
+```bash
+sudo cscli decisions list
+sudo cscli bouncers list
+sudo cscli metrics
+```
+
+→ `cscli decisions list`に手順1(CTI購読分)・手順3(手動追加分)双方のindicatorが
+表示され、`origin`列でCTI経由(`crowdsec/lists`等)か手動(`cscli`)かを判別できます。
+
+## 動作確認
+
+- `sudo cscli decisions list` に本シナリオの全indicatorがdecisionとして登録されていること
+- 登録直後に該当IP/レンジからのアクセスがbouncer配下(iptables/nftables/WAF等)で
+  実際に遮断されること(例: `curl --connect-timeout 3 http://<web-server>` がタイムアウトすること)
+- `sudo cscli metrics` のbouncer項目で、登録したdecision数と一致する遮断件数が
+  カウントされていること
+- 期限(`duration`)到来後に `sudo cscli decisions list` から該当decisionが自動的に
+  消えており、遮断が自動解除されていること
+
+## 注意事項
+
+- decision追加前に必ずwhitelistを確認し、自組織/正規IPを誤って登録しないこと。
+  誤登録した場合は `sudo cscli decisions delete --ip <indicator>` で即時解除できるが、
+  業務影響が出る前にwhitelistでの予防が優先。
+- `duration`は攻撃の深刻度に応じて設計する。CTI購読分は短め(数時間〜1日)、
+  自組織で明確な攻撃兆候を確認した手動分は長め(1週間程度)など、根拠に基づき決める。
+- CTIブロックリスト購読(`cscli console enroll`)は自組織のシグナルをCrowdSecコミュニティへ
+  共有する仕組みを含む場合がある。共有されるデータの範囲をコンソール設定で確認し、
+  プライバシー・データ持ち出しポリシーに反しないことを確認してから有効化する。
+- 遮断のdecision追加・解除・失効の記録(`cscli decisions list`の出力)は証跡として
+  保存し、インシデント対応時に参照できるようにする。
+- 新規decisionの遮断有効性(手順4)を確認する前に、既存の許可ルールやwhitelistを
+  無効化・削除しないこと。想定外のIPまで遮断されていないかを確認してから、
+  恒久的な運用ルールへ反映する。

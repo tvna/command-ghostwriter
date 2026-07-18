@@ -1,0 +1,6 @@
+scenario,trigger_source,verdict,whitelist_target,action
+crowdsecurity/ssh-bf,203.0.113.10,fp,203.0.113.10,whitelist_ip
+crowdsecurity/http-probing,198.51.100.0/24,fp,198.51.100.0/24,whitelist_cidr
+crowdsecurity/http-crawl-non_statics,10.0.0.20,fp,10.0.0.20,whitelist_expr
+crowdsecurity/ssh-bf,192.0.2.55,tp,-,keep_ban
+crowdsecurity/http-probing,192.0.2.77,tp,-,keep_ban

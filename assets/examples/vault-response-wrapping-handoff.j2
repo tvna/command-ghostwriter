@@ -1,0 +1,120 @@
+# Vault response wrappingによる安全なシークレット受け渡し
+
+HashiCorp Vaultのresponse wrapping機能を使い、シークレットを平文のまま経路に流さず、単回・短TTLの「wrapping token」経由で受け渡す手順を整理します。
+
+## 目的
+
+response wrappingの仕組み(cubbyhole経由・単回開封・短TTL)を理解し、送信側でのwrapping token発行、受領側でのunwrap、そして開封済み検知(lookup)による漏洩発見までを一連の手順として実施できるようになることを目指します。
+
+## 用語解説
+
+- **response wrapping**: Vaultのレスポンス本体を直接返さず、一時的なラッパー(wrapping token)に包んで返す機能
+- **wrapping token**: ラップされたレスポンスを一度だけ取り出せる短命トークン。単回使用(single-use)であり、TTL経過後は自動失効する
+- **cubbyhole**: wrapping tokenに紐づく、そのトークン自身しかアクセスできない隔離ストレージ領域。実際のシークレットはここに一時保管される
+- **unwrap**: wrapping tokenを使ってcubbyholeから元のレスポンス(シークレット)を取り出す操作。成功すると同時にwrapping tokenは失効する
+- **sys/wrapping/lookup**: wrapping tokenのメタデータ(発行時刻・TTL・発行元パスなど)を、中身を取り出さずに確認するためのエンドポイント
+- **開封済み検知**: 正規の受領者がunwrapする前に誰かが先に開封していた場合、想定より早くトークンが無効になる、またはlookupが失敗するという形で漏洩の兆候を検知できる仕組み
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| wrapping TTL | {{ wrap_ttl_seconds }}秒 |
+| 対象シークレットパス | {{ secret_path }} |
+| 受領者 | {{ recipient }} |
+| 単回使用(single_use) | {{ single_use }} |
+
+## 1. 送信側でwrapping tokenを発行する
+
+シークレット保持者(送信側)が、対象パスの読み取り結果をラップして取得します。
+
+```bash
+export VAULT_ADDR="https://vault.internal:8200"
+vault login -method=userpass username=secret-owner
+
+vault kv get -wrap-ttl={{ wrap_ttl_seconds }}s {{ secret_path }}
+```
+
+出力にはシークレットの値ではなく、次のようなラップ済みレスポンスのメタデータのみが表示されます。
+
+```
+Key                              Value
+---                              -----
+wrapping_token:                  hvs.CAESIExamplePlaceholderToken...
+wrapping_accessor:                8b4b3b3a-70cf-4b6b-9d5d-example
+wrapping_token_ttl:               {{ wrap_ttl_seconds }}s
+wrapping_token_creation_time:     2026-07-17T10:00:00Z
+wrapping_token_creation_path:     {{ secret_path }}
+```
+
+secret_idなど別のVault認証情報自体を配布する場合も、同様に対象操作の前に `-wrap-ttl` を付けて実行します。
+
+```bash
+vault write -wrap-ttl={{ wrap_ttl_seconds }}s -f auth/approle/role/{{ recipient }}-role/secret-id
+```
+
+## 2. wrapping tokenを帯域外経路で受領者に伝達する
+
+発行された `wrapping_token` の値そのものを、Vaultの監査ログや同一チャネルに残さない帯域外経路(対面、暗号化された1対1のメッセージ等)で {{ recipient }} に伝えます。wrapping token自体は単回開封の性質を持ちますが、平文シークレットではないという理由でぞんざいに扱わないこと。
+
+## 3. 受領側でunwrapしてシークレットを取り出す
+
+```bash
+export VAULT_ADDR="https://vault.internal:8200"
+read -srp "受領したwrapping tokenを入力: " WRAP_TOKEN
+echo
+
+VAULT_TOKEN="$WRAP_TOKEN" vault unwrap
+```
+
+成功すると、Step 1で読み取った {{ secret_path }} の値がここで初めて平文として得られます。同時にこのwrapping tokenはcubbyholeごと失効し、以後は誰も同じトークンで再取得できません。
+
+## 4. 新しい認証情報を検証してから旧経路を無効化する
+
+このシナリオはVaultの認証情報(secret_id等)の受け渡しに関わるため、新しい経路が実際に機能することを確認するまでは、旧来の認証情報や既存セッションを無効化しません。
+
+```bash
+# 受領した新しいsecret_id / 資格情報で実際にログインできるか、旧資格情報とは別のセッションで検証する
+vault write auth/approle/login role_id="<role_id>" secret_id="<受領したsecret_id>"
+
+# 新しい認証情報でのログインに成功したことを確認できて初めて、旧secret_idを失効させる
+vault write -f auth/approle/role/{{ recipient }}-role/secret-id-accessor/destroy secret_id_accessor="<旧secret_idのaccessor>"
+```
+
+## 5. 二度目のunwrapが失敗することを確認する
+
+```bash
+VAULT_TOKEN="$WRAP_TOKEN" vault unwrap
+```
+
+```
+Error unwrapping: wrapping token is not valid or does not exist
+```
+
+single_useが{{ single_use }}であるこのトークンは、Step 3で一度取り出された時点でcubbyholeごと消費されているため、同じトークンでの再取得は必ず失敗します。
+
+## 6. 開封済み検知(lookup)で漏洩を発見する
+
+送信側は、想定した受領者からの受領報告より前に、次のコマンドでトークンの状態を確認できます。
+
+```bash
+vault write /sys/wrapping/lookup token="$WRAP_TOKEN"
+```
+
+正規の受領者がまだunwrapしていない段階でこのlookupが失敗する(トークンが無効という応答が返る)場合、想定していない第三者が先にunwrapした可能性を意味します。lookup自体はcubbyholeの中身には触れませんが、トークンの有効性を通じて「まだ誰にも開封されていないか」を検知するための手段です。
+
+## 動作確認
+
+1. Step 1で発行したwrapping tokenを使い、Step 3で {{ recipient }} が {{ secret_path }} の値取得に成功すること
+2. Step 5で同一のwrapping tokenによる二度目のunwrapが `wrapping token is not valid or does not exist` で失敗すること
+3. wrapping TTL({{ wrap_ttl_seconds }}秒)を経過してからunwrapを実行した場合も同様に失効エラーとなること(未使用のまま放置した場合の確認)
+4. Step 4で新しい認証情報によるログインが成功したことを確認してから、旧secret_idのaccessorをdestroyしていること
+
+## 注意事項
+
+- wrapping tokenそのものは平文シークレットではありませんが、それを盗まれると正規の受領者より先にunwrapされてしまうため、Step 2の伝達経路はVaultの監査ログや当該シークレットに関係する共有チャネルとは別に確保すること。
+- secret_idや他システムのトークンなど、Vault自体の認証情報を配布する運用にこそresponse wrappingを使うべきであり、平文のパスワードや証明書と同列に扱わないこと。
+- 認証情報の受け渡しを扱うシナリオのため、Step 4で新しい認証情報が実際に機能することを別セッションで確認するまでは、旧来の認証情報(secret_id・トークン等)を無効化・破棄しないこと。
+- Step 6のlookupが、正規の受領者による受領報告より早く「無効」を返した場合は、想定外の第三者による横取りの可能性があるためインシデントとして扱い、対象シークレット({{ secret_path }})の即時ローテーションと関係者への通知を行うこと。
+- single_useが{{ single_use }}の前提で書かれた手順であり、同一のwrapping tokenを複数の受領者に配布する運用は想定していない。複数人に配布する必要がある場合は、受領者ごとに個別にwrapping tokenを発行すること。
+- wrap_ttl_secondsは受領者が確実に受け取れる範囲でできるだけ短く設定し、長時間放置されたwrapping tokenが第三者に横取りされるリスクを抑えること。

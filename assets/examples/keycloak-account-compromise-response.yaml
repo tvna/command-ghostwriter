@@ -1,0 +1,17 @@
+title: Keycloak管理コンソール利用者のアカウント侵害対応
+keycloak_url: https://idp.example.internal
+realm: corp-employees
+admin_realm: master
+admin_client: admin-cli
+user_id: y.tanaka
+disable: true
+logout_all: true
+reset_credentials: true
+evidence_events:
+  - "LOGIN成功: 2026-07-16 03:12 JST, IP 198.51.100.77 (普段利用のない海外IPレンジ)"
+  - "CODE_TO_TOKEN成功: 同時刻に client=admin-console からトークン発行"
+  - "UPDATE_PROFILE: 直後にメールアドレスが本人未申告の値へ変更"
+service_accounts:
+  - "batch-sync-service (このユーザーがオーナー登録されているクライアント)"
+  - "reporting-connector (offline_access スコープを付与済み)"
+escalation: セキュリティインシデント対応チーム (内線 1199 / #sec-incident)

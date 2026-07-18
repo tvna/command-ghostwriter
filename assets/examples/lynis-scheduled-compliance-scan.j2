@@ -1,0 +1,126 @@
+# Lynis定期コンプライアンススキャン運用
+
+Lynis によるシステム監査を cron で定期実行し、レポートをアーカイブしつつ hardening index（強化指標）の推移と前回比での新規 warning を追跡する運用手順です。
+
+## 目的
+
+`lynis audit system --cronjob --quiet` を cron から非対話で実行し、レポートのアーカイブ、hardening index の時系列記録、前回スキャンとの差分による新規 warning 検出までを自動化された運用として定着させることを目指します。
+
+## 用語解説
+
+- **Lynis**: Linux/Unix向けのセキュリティ監査・コンプライアンスチェックツール。CIS等のベンチマークに沿ったチェックを行う
+- **`--cronjob`モード**: 対話プロンプトを一切出さずに実行するモード。`--quiet`と併用することで標準出力への進捗表示も抑制され、cron実行に適した非対話動作になる
+- **hardening index**: Lynisが算出する0〜100のスコアで、実施済みの強化策の割合を示す指標。`/var/log/lynis-report.dat`の`hardening_index=`行に記録される
+- **index時系列追跡**: hardening indexをスキャン実行のたびにCSV等へ追記し、時系列で推移を可視化・比較できるようにすること
+- **warning**: Lynisがreport.dat内に`warning[]=`として記録する、対応が推奨される検出項目
+- **監査証跡**: 監査・障害調査のためにレポートやindex履歴を改変されない形で保管しておく記録
+
+## シナリオ設定
+
+| 設定項目 | 値 |
+| --- | --- |
+| cronスケジュール | `{{ schedule }}` |
+| レポートアーカイブ先 | `{{ report_archive_dir }}` |
+| index履歴ファイル | `{{ index_history_file }}` |
+| 新規warning検知時にアラートするか | `{{ alert_on_new_warning }}` |
+
+## 1. Lynisの導入確認
+
+```bash
+lynis show version
+sudo lynis audit system --quiet --no-colors | tail -n 5
+```
+
+初回は対話モードで一度手動実行し、プラグインやプロファイル(`/etc/lynis/default.prf`)の警告が出ないことを確認しておきます。
+
+## 2. アーカイブ・index記録スクリプトを配置する
+
+cronから呼び出す集約スクリプトを作成します。
+
+```bash
+sudo mkdir -p {{ report_archive_dir }}
+sudo tee /usr/local/sbin/lynis-archive-report.sh > /dev/null <<'EOS'
+#!/bin/bash
+set -euo pipefail
+
+ARCHIVE_DIR="{{ report_archive_dir }}"
+HISTORY_FILE="{{ index_history_file }}"
+STAMP="$(date +%Y%m%dT%H%M%S)"
+CURRENT_REPORT="/var/log/lynis-report.dat"
+ARCHIVED_REPORT="${ARCHIVE_DIR}/lynis-report-${STAMP}.dat"
+
+cp "${CURRENT_REPORT}" "${ARCHIVED_REPORT}"
+
+INDEX="$(grep -m1 '^hardening_index=' "${ARCHIVED_REPORT}" | cut -d= -f2)"
+if [ ! -f "${HISTORY_FILE}" ]; then
+  echo "timestamp,hardening_index" | sudo tee "${HISTORY_FILE}" > /dev/null
+fi
+echo "${STAMP},${INDEX}" | sudo tee -a "${HISTORY_FILE}" > /dev/null
+
+PREVIOUS_REPORT="$(ls -1 "${ARCHIVE_DIR}"/lynis-report-*.dat | sort | tail -n 2 | head -n 1)"
+if [ -n "${PREVIOUS_REPORT}" ] && [ "${PREVIOUS_REPORT}" != "${ARCHIVED_REPORT}" ]; then
+  NEW_WARNINGS="$(comm -13 \
+    <(grep '^warning\[\]=' "${PREVIOUS_REPORT}" | sort) \
+    <(grep '^warning\[\]=' "${ARCHIVED_REPORT}" | sort))"
+  if [ -n "${NEW_WARNINGS}" ]; then
+    echo "NEW_WARNING_DETECTED"
+    echo "${NEW_WARNINGS}"
+  fi
+fi
+EOS
+sudo chmod 750 /usr/local/sbin/lynis-archive-report.sh
+```
+
+`comm -13` は「新しい方(現在のレポート)にのみ存在し、前回のレポートには存在しない行」を抽出し、新規に追加された`warning[]=`行、すなわち前回比での新規warningを検出します。
+
+## 3. cronジョブを登録する
+
+`--cronjob`モードは対話プロンプトを一切出さないためcron実行に適合し、`--quiet`との併用でレポート生成以外の標準出力を抑制します。
+
+```bash
+sudo tee /etc/cron.d/lynis-compliance-scan > /dev/null <<EOF
+{{ schedule }} root lynis audit system --cronjob --quiet >> /var/log/lynis-cron.log 2>&1 && /usr/local/sbin/lynis-archive-report.sh >> /var/log/lynis-cron.log 2>&1
+EOF
+sudo chmod 644 /etc/cron.d/lynis-compliance-scan
+```
+
+登録直後にcron設定の構文をrun-partsで検証します。
+
+```bash
+sudo run-parts --test /etc/cron.d 2>&1 | grep lynis-compliance-scan
+```
+
+## 4. 意図的な非準拠を導入し新規warning検知を演習する
+
+演習用に一時的な非準拠設定（世代管理していないファイルへの緩いパーミッション付与）を作り、次回スキャンで新規warningとして検出されることを確認します。
+
+```bash
+sudo install -m 0666 /dev/null /tmp/lynis-drill-loose-perm.conf
+sudo lynis audit system --cronjob --quiet
+sudo /usr/local/sbin/lynis-archive-report.sh
+```
+
+`NEW_WARNING_DETECTED`が出力されることを確認したら、演習用ファイルを削除して元の状態に戻します。
+
+```bash
+sudo rm -f /tmp/lynis-drill-loose-perm.conf
+```
+
+{% if alert_on_new_warning %}
+新規warning検知(`NEW_WARNING_DETECTED`)をトリガーに、`/var/log/lynis-cron.log`を監視するアラート連携(メール送信やログ監視エージェントの通知ルール等)へ接続し、検知結果が確実に人の目に届くようにします。
+{% endif %}
+
+## 動作確認
+
+- Step 3のcron登録後、翌日以降に `{{ index_history_file }}` へ1行ずつhardening indexが追記されていくこと
+- `{{ report_archive_dir }}` に日時付きのレポートファイルが蓄積されていくこと
+- Step 4の意図的な非準拠導入後、スクリプト実行で `NEW_WARNING_DETECTED` が出力され、該当する`warning[]=`行が表示されること
+- 演習用ファイル削除後、次回スキャンで当該warningが再出現しないこと
+
+## 注意事項
+
+- hardening indexの低下や新規warning検知時にアラート連携（メール・チャット通知等）へ確実につなげ、`{{ alert_on_new_warning }}`が`true`の場合は検知が放置されないようにする。
+- `{{ report_archive_dir }}`と`{{ index_history_file }}`は監査証跡として扱い、レポート閲覧・改変ができるユーザーをroot等の限定アカウントに絞るアクセス制御（適切なパーミッション設定）を行う。
+- Lynisのバージョンアップに伴いテスト項目や`warning[]=`のIDが変わることがあるため、バージョン更新後は一度手動実行して差分の性質（真の新規非準拠かテスト項目自体の変更か）を確認してから定期運用に戻す。
+- 複数ホストを運用する場合は、各ホストのレポート・index履歴をホスト名等で分離しつつ、集約先で横断的に比較できるよう命名規則を統一しておく。
+- Step 4の演習は検証用ファイルに対してのみ行い、本番の設定ファイルやサービス設定を対象にしない。

@@ -1,0 +1,5 @@
+api_endpoint: "https://wazuh-manager.internal:55000"
+api_user: "integration-svc"
+integration_name: "slack"
+trigger_level: 12
+hook_url_set: true

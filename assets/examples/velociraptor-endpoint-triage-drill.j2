@@ -1,0 +1,109 @@
+# Velociraptorエンドポイントトリアージ訓練
+
+インシデント発生時に使うtriageアーティファクトセットを、訓練ホストへ実際に実行し、所要時間・データ量・アーティファクト欠落有無・クライアントのオンライン率を定期的に測定する訓練手順です。実インシデント発生前に、収集手順とツール自体の動作が想定どおりであることを確認するのが目的です。
+
+## 目的
+
+実インシデント発生時にVelociraptorのトリアージ収集がそのまま使えることを、事前の訓練で保証できるようになることを目指します。収集の所要時間・データ量・アーティファクトの欠落有無・エージェントのオンライン率をCSVの台帳に基づいて測定し、目標値との乖離を是正します。
+
+## 用語解説
+
+- **アーティファクトセット**: Velociraptorで収集するフォレンジック情報の定義単位（例: `Windows.Triage.Full`）。複数のVQLクエリをまとめたもの
+- **クライアント(エージェント)**: 収集対象ホストにインストールされるVelociraptorのエージェントプロセス
+- **hunt**: 複数クライアントに対してアーティファクト収集を一括で発行する仕組み
+- **flow**: 1台のクライアントに対して発行された1回分の収集ジョブ
+- **online率**: 訓練対象ホスト群のうち、収集要求時にVelociraptorサーバーへ接続できていた（オフラインでなかった）ホストの割合
+- **VQL(Velociraptor Query Language)**: Velociraptorが収集・分析に使う独自のクエリ言語
+
+## シナリオ設定
+
+| metric | artifact_set | measured_value | target | tested_at |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["metric"] }} | {{ r["artifact_set"] }} | {{ r["measured_value"] }} | {{ r["target"] }} | {{ r["tested_at"] }} |
+{% endfor %}
+
+## 1. 訓練対象ホストと前提条件を確認する
+
+訓練は本番影響を避けるため、非本番または関係者の合意済みホストに対してのみ実施します。対象クライアントIDを確認します。
+
+```bash
+velociraptor --config /etc/velociraptor/client_config/api.config.yaml query \
+  "SELECT client_id, os_info.hostname AS hostname, last_seen_at FROM clients() WHERE labels =~ 'triage-drill'"
+```
+
+## 2. トリアージ収集を実行し所要時間を測定する
+
+対象アーティファクトセット `Windows.Triage.Full` を訓練ホストへ収集し、実測の所要時間を記録します。
+
+```bash
+START=$(date +%s)
+velociraptor --config /etc/velociraptor/client_config/api.config.yaml artifacts collect \
+  Windows.Triage.Full \
+  --client_id C.drill0001 \
+  --output /opt/vr-drill/triage_full_$(date +%Y%m%d%H%M%S).zip
+END=$(date +%s)
+echo "collection_duration_sec実測値: $((END - START)) 秒"
+```
+
+同様に、`Windows.EventLogs.Triage` も収集します。
+
+```bash
+START=$(date +%s)
+velociraptor --config /etc/velociraptor/client_config/api.config.yaml artifacts collect \
+  Windows.EventLogs.Triage \
+  --client_id C.drill0001 \
+  --output /opt/vr-drill/eventlogs_triage_$(date +%Y%m%d%H%M%S).zip
+END=$(date +%s)
+echo "collection_duration_sec実測値: $((END - START)) 秒"
+```
+
+## 3. 収集データ量とアーティファクト欠落を確認する
+
+収集結果のzipを展開せずに一覧化し、データ量と、想定していたアーティファクトが欠落していないかを確認します。
+
+```bash
+du -m /opt/vr-drill/triage_full_*.zip | tail -1
+unzip -l /opt/vr-drill/triage_full_*.zip | grep -E 'Windows\.(Sys|Network|Registry)' | wc -l
+```
+
+期待されるアーティファクト数（0件であってはならない）に対し、実際の抽出件数が0件であれば `artifact_missing_count` に欠落数を記録します。
+
+```bash
+echo "artifact_missing_count実測値: 期待アーティファクト数 - 実際の抽出件数 の差分をここに記録"
+```
+
+## 4. クライアントのオンライン率を測定する
+
+収集要求時点で、訓練対象ホスト群のうちオンラインだったクライアントの割合を算出します。
+
+```bash
+velociraptor --config /etc/velociraptor/client_config/api.config.yaml query \
+  "SELECT count(items=labels) AS total, count(items=labels WHERE last_seen_at > now() - 300) AS online FROM clients() WHERE labels =~ 'triage-drill'"
+```
+
+`online / total * 100` を `client_online_rate_pct` として記録します。
+
+## 5. 測定結果を目標値と突合し、是正する
+
+シナリオ設定の `target` 列と、今回の実測値を突合します。
+
+```bash
+{% for r in csv_rows %}echo "{{ r["metric"] }} ({{ r["artifact_set"] }}): target={{ r["target"] }}"
+{% endfor %}```
+
+`target` を超過、または `artifact_missing_count` が0でない場合は、収集セット（対象アーティファクトの追加・除外）またはVelociraptorサーバー/エージェントの構成を見直し、次回訓練で再測定します。
+
+## 動作確認
+
+- Step 2 のtriage収集コマンドがエラーなく完走し、出力zipが生成されていること
+- Step 3 で想定していたアーティファクト（`Windows.Sys`系・`Windows.Network`系・`Windows.Registry`系など）がzip内に含まれ、`artifact_missing_count` が0であること
+- Step 4 で算出したオンライン率が、シナリオ設定の `client_online_rate_pct` の `target` を満たしていること
+- 実測した `collection_duration_sec` と `collected_size_mb` が記録され、`target` と比較できる状態になっていること
+
+## 注意事項
+
+- 訓練は必ず非本番ホスト、または対象ホストの管理者・関係者の事前合意が取れたホストに対してのみ実施する。無断で本番ホストへ収集をかけない。
+- トリアージ収集はディスクI/O・CPU・ネットワーク帯域を消費するため、事前に業務影響（同時実行台数・時間帯）を評価してから実行する。
+- アーティファクトの欠落や所要時間の目標超過が判明した場合は、収集セットの過不足（不要なアーティファクトの除外、不足しているアーティファクトの追加）を是正し、次回訓練で改善を確認する。
+- 訓練を通じて対応チームがVelociraptorの操作手順（収集実行・結果確認・記録）に習熟することも目的の一つであるため、手順は実際に手を動かして実施する。
+- 訓練結果（実測値・是正内容・実施日）はシナリオ設定のCSV台帳を更新して証跡として保管し、事後の監査・訓練履歴の追跡に使えるようにする。

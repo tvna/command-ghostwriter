@@ -1,0 +1,134 @@
+# OPNsenseによるWANデフォルト拒否ポリシー構築
+
+WAN側インターフェースを暗黙拒否(implicit deny)前提とし、CSV で定義した
+{{ csv_rows | length }} 件の最小許可ルールのみを OPNsense に登録します。
+GUI での登録手順と、同内容を投入する API（curl）手順を併記し、最後に
+Live View ログで遮断・許可の状況を検証します。ロックアウトを防ぐため、
+新ルールの動作確認を終えるまでは既存の管理アクセス経路を変更しません。
+
+## 目的
+
+WAN側を暗黙拒否(implicit deny)とした上で、業務上必要な通信のみを最小許可
+ルールとして登録し、GUI・API のどちらからでも同じルールセットを再現できる
+ようになることを目指します。あわせて、ログを用いて許可・遮断双方の挙動を
+検証し、既存の管理アクセスを失わない安全な適用順序を身につけます。
+
+## 用語解説
+
+- **暗黙拒否 (implicit deny)**: ユーザーがルールを1件も一致させなかった通信を、最終的にすべて破棄するファイアウォールの既定動作
+- **quick評価 (先勝ちルール)**: OPNsense (pf ベース) は上から順にルールを評価し、最初に一致したルールを適用する。以降のルールは評価されない
+- **anti-lockout rule**: OPNsense が自動生成する、GUI/SSH管理アクセス用の暗黙許可ルール。`Firewall > Settings > Advanced` の `Disable anti-lockout rule` を有効にしない限り常に有効
+- **Live View**: `Firewall > Log Files > Live View` で確認できる、フィルタルールの許可/遮断結果をリアルタイム表示するログ画面
+- **API key/secret**: `System > Access > Users` で発行する OPNsense REST API 認証情報。`curl -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET"` の Basic 認証として使う
+
+## シナリオ設定
+
+今回 WAN に登録する最小許可ルールと明示的デフォルト拒否ルールは、次の
+{{ csv_rows | length }} 件です。`rule_no` の昇順がそのままルールの並び順
+（評価順）になります。
+
+| rule_no | interface | action | proto | src | src_port | dst | dst_port | description |
+|---------|-----------|--------|-------|-----|----------|-----|----------|--------------|
+{% for r in csv_rows %}| {{ r["rule_no"] }} | {{ r["interface"] }} | {{ r["action"] }} | {{ r["proto"] }} | {{ r["src"] }} | {{ r["src_port"] }} | {{ r["dst"] }} | {{ r["dst_port"] }} | {{ r["description"] }} |
+{% endfor %}
+
+表中の `*` は「すべて／指定なし」を表します（例: 送信元ポート任意）。
+
+## 手順
+
+### 1. 現状の管理アクセスとLive Viewの正常通信を確認する（変更前の基準を取る）
+
+新ルールを1件も投入する前に、まず現状を確認します。ここで得た基準と、
+手順5で取得するログを比較することで、ロックアウトの有無を判断します。
+
+- `Firewall > Settings > Advanced` を開き、`Disable anti-lockout rule` が
+  **チェックされていない**ことを確認します（今回の変更でもこの項目には
+  一切触れません）。
+- `Firewall > Log Files > Live View` を開き、現在許可されている正常通信
+  （保守アクセスや既存の公開サービス宛の通信）が表示されることを確認し、
+  スクリーンショットまたはメモとして記録します。
+
+### 2. 最小許可ルールをGUIで登録する
+
+`Firewall > Rules > WAN > Add` から、シナリオ設定の `action` が `pass`
+の行を上から順に登録します。各行につき、次のフィールドを表の値のまま
+入力します：Action / TCP/IP Version(`IPv4`固定) / Protocol(`proto`) /
+Source(`src`) / Source port range(`src_port`) / Destination(`dst`) /
+Destination port range(`dst_port`) / Description(`description`)。
+
+{% for r in csv_rows %}{% if r["action"] == "pass" %}- rule_no {{ r["rule_no"] }}: Action={{ r["action"] }} / {{ r["proto"] }} / {{ r["src"] }}:{{ r["src_port"] }} -> {{ r["dst"] }}:{{ r["dst_port"] }} ({{ r["description"] }})
+{% endif %}{% endfor %}
+入力後は `Save` のみを行い、この時点ではまだ `Apply Changes` を押しません。
+
+### 3. 同じルールをAPI(curl)で登録する
+
+GUI と同じ内容を、`/api/firewall/filter/addRule` へのPOSTでも登録できます。
+`$OPNSENSE_API_KEY` / `$OPNSENSE_API_SECRET` には、`System > Access > Users`
+で発行した API キー/シークレットをそれぞれ環境変数として設定してください。
+
+```bash
+{% for r in csv_rows %}curl -k -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" https://fw.example.internal/api/firewall/filter/addRule \
+  -H "Content-Type: application/json" \
+  -d '{"rule":{"interface":"{{ r["interface"] }}","action":"{{ r["action"] }}","direction":"in","ipprotocol":"inet","protocol":"{{ r["proto"] | upper }}","source_net":"{{ r["src"] }}","source_port":"{% if r["src_port"] != "*" %}{{ r["src_port"] }}{% endif %}","destination_net":"{{ r["dst"] }}","destination_port":"{% if r["dst_port"] != "*" %}{{ r["dst_port"] }}{% endif %}","description":"{{ r["description"] }}","log":"1"}}'
+{% endfor %}```
+
+### 4. 明示的デフォルト拒否ルールを最後尾に登録する
+
+action が `block` の行は、暗黙拒否と同じ効果を明示化してログに残すための
+ルールです。手順2・3で登録した `pass` ルールより**必ず後ろ**（評価順で
+最後）に置いてください。quick評価のため、先に `block` を置くと後続の
+`pass` ルールが評価されなくなります。
+
+GUIでは Log の項目にチェックを入れて保存します。APIでも同様に登録します。
+
+```bash
+{% for r in csv_rows %}{% if r["action"] == "block" %}curl -k -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" https://fw.example.internal/api/firewall/filter/addRule \
+  -H "Content-Type: application/json" \
+  -d '{"rule":{"interface":"{{ r["interface"] }}","action":"{{ r["action"] }}","direction":"in","ipprotocol":"inet","protocol":"{{ r["proto"] | upper }}","source_net":"{{ r["src"] }}","destination_net":"{{ r["dst"] }}","description":"{{ r["description"] }}","log":"1"}}'
+{% endif %}{% endfor %}```
+
+### 5. 変更を適用し、Live Viewで許可・遮断のログを検証する
+
+ここで初めて設定を反映します。GUIなら `Apply Changes`、APIなら
+`/api/firewall/filter/apply` を呼び出します。
+
+```bash
+curl -k -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST https://fw.example.internal/api/firewall/filter/apply
+```
+
+反映後、`Firewall > Log Files > Live View` を再度開き、次の順序で確認します。
+
+1. 手順1で記録した既存の正常通信が、引き続き許可（Pass）として表示される
+2. シナリオ設定の `pass` 行に対応する新しい通信が、各ルールの
+   description 付きで許可表示される
+3. 想定外の送信元・宛先向けの通信が、明示的デフォルト拒否ルール
+   （action が `block` の行）に一致して遮断（Block）表示される
+
+この3点をすべて確認できるまで、既存の一時的な広めの許可ルールや旧ルール
+を無効化・削除しないでください。新しい経路での疎通が確認できて初めて、
+旧ルールの整理に進みます。
+
+## 動作確認
+
+- `Disable anti-lockout rule` が変更前後で一貫してチェックされていないこと（anti-lockout rule が有効なまま）
+- Live View に、手順1で記録した既存の正常通信が変更後も引き続き Pass として表示されること
+- シナリオ設定の `pass` 行に対応する通信が、それぞれの description 付きで許可されること
+- シナリオ設定の `block` 行に対応する未許可の通信が、遮断としてログに記録されること
+- `Firewall > Rules > WAN` 上で `pass` ルールが `block` ルールより上位（評価順で先）に並んでいること
+
+## 注意事項
+
+- **anti-lockout rule を無効化しないこと。** `Disable anti-lockout rule` は
+  本手順のいずれの段階でも変更しません。誤って有効化すると、WAN側の
+  設定ミスと重なった場合に管理画面へアクセスできなくなるおそれがあります。
+- **新ルール適用前に既存の正常通信を確認すること。** 手順1のLive View
+  確認を飛ばして手順5の適用に進むと、ロックアウトの発生に気づく基準が
+  なくなります。必ず手順1→2→3→4→5の順序を守ってください。
+- quick評価のため、`pass` ルールと `block` ルールの並び順を誤ると
+  意図しない遮断・許可が発生します。並び順は `Firewall > Rules > WAN`
+  でドラッグ操作により随時修正できます。
+- 旧ルール・一時的な広い許可ルールの無効化は、手順5の3点確認が完了した
+  後にのみ行います。既存の管理アクセスやサービスが新ルールで維持される
+  ことを確認する前に、古い経路を削除しないでください。
+- API key/secret は平文でリポジトリやログに残さず、環境変数や秘密管理
+  ツール経由で扱ってください。

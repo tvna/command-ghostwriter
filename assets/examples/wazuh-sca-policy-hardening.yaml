@@ -1,0 +1,25 @@
+sca_enabled: true
+scan_interval: 12h
+policies:
+  - /var/ossec/ruleset/sca/cis_debian12.yml
+  - /var/ossec/ruleset/sca/cis_debian_linux.yml
+  - /var/ossec/etc/sca/sca_custom_ssh_hardening.yml
+custom_policy_checks:
+  - id: 1
+    title: "Ensure SSH root login is disabled"
+    condition: all
+    rules:
+      - expr: "f:/etc/ssh/sshd_config"
+        match: "r:^PermitRootLogin\\s+no$"
+  - id: 2
+    title: "Ensure UFW firewall is active"
+    condition: all
+    rules:
+      - expr: "c:ufw status"
+        match: "r:^Status:\\s+active$"
+  - id: 3
+    title: "Ensure no world-writable files exist under /etc"
+    condition: none
+    rules:
+      - expr: "c:find /etc -xdev -type f -perm -0002"
+        match: "r:^/etc"

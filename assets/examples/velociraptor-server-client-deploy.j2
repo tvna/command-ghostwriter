@@ -1,0 +1,120 @@
+# Velociraptorサーバとクライアント配備 — {{ server_url }}
+
+Velociraptor をEDR/フォレンジック基盤として構築します。サーバ設定（{{ server_config_path }}）とクライアント設定（{{ client_config_path }}）を生成し、frontend起動、クライアント配布・登録、GUIでの接続確認までを一巡します。
+
+## 目的
+
+`velociraptor config generate` によるサーバ/クライアント設定の生成から、frontendの起動、クライアントの配備・登録、GUIでのオンライン確認までを行い、EDR基盤としてのVelociraptorを一から構築・検証できるようになることを目指します。
+
+## 用語解説
+
+- **frontend**: クライアントからのTLS接続を受け付けるVelociraptorサーバのコンポーネント（既定 `{{ frontend_bind }}`）
+- **GUI**: 管理者がクライアント一覧・収集結果を確認するWeb管理画面（既定 `{{ gui_bind }}`、frontendとは別ポート/別バインドで待ち受ける）
+- **サーバ生成CA**: `velociraptor config generate` が自動生成する自己署名認証局。サーバ証明書とクライアント証明書の両方をこのCAが発行する
+- **クライアント相互TLS(mTLS)**: クライアントはサーバ証明書を、サーバはクライアント証明書を互いに検証してから通信を確立する方式。クライアント設定ファイル（`client.config.yaml`）に埋め込まれたCA証明書とクライアント鍵により成立する
+- **client_id**: サーバがクライアントの公開鍵から算出する一意な識別子。GUIのクライアント一覧やVQLクエリの結果に表示される
+- **VQL(Velociraptor Query Language)**: Velociraptor上でホスト情報やアーティファクトを収集するための問い合わせ言語。`info()` プラグインでホスト基本情報を取得できる
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| サーバURL | {{ server_url }} |
+| frontend待受 | {{ frontend_bind }} |
+| GUI待受 | {{ gui_bind }} |
+| サーバ設定パス | {{ server_config_path }} |
+| クライアント設定パス | {{ client_config_path }} |
+| API設定パス | {{ api_config_path }} |
+| データストア | {{ datastore_dir }} |
+| GUI管理者ユーザー | {{ admin_user }} |
+| 配備対象クライアント | {{ client_hostname }} |
+| クライアント設定配備済み | {{ client_config_deployed }} |
+| CA運用管理済み | {{ ca_managed }} |
+
+## 1. サーバ設定とクライアント設定を生成する
+
+`velociraptor config generate` は対話式です。デプロイ種別（Self Signed SSL）、frontendのホスト名とポート（`{{ frontend_bind }}`）、GUIのバインド（`{{ gui_bind }}`）、データストアのパス（`{{ datastore_dir }}`）、GUI管理者ユーザー名（`{{ admin_user }}`）を尋ねられるので、シナリオ設定表の値で回答します。このとき自己署名CAと、サーバ証明書・初期クライアント証明書一式が同時に生成されます。
+
+```bash
+sudo mkdir -p {{ config_dir }} {{ datastore_dir }}
+sudo {{ binary_path }} config generate -i > {{ server_config_path }}
+```
+
+生成された `{{ server_config_path }}` からクライアント配布用の設定を切り出します。
+
+```bash
+sudo {{ binary_path }} --config {{ server_config_path }} config client > {{ client_config_path }}
+```
+
+GUIとAPI経由でのクエリ用に、API設定も切り出しておきます（GUIの管理者ユーザーとは別に、CLIからサーバへ問い合わせるための証明書つき設定です）。
+
+```bash
+sudo {{ binary_path }} --config {{ server_config_path }} config api_client --name {{ admin_user }}-cli > {{ api_config_path }}
+```
+
+## 2. GUI管理者ユーザーを作成する
+
+```bash
+sudo {{ binary_path }} --config {{ server_config_path }} user add {{ admin_user }} --role administrator
+```
+
+パスワードの入力を求められるので、この場でのみ使用する初期パスワードを設定し、パスワードマネージャーに登録します。
+
+## 3. frontendを起動する
+
+frontendとGUIを1プロセスで提供します。まず前景で起動し、証明書やデータストアのパスにエラーが出ないことを確認してから、systemdユニット化します。
+
+```bash
+sudo {{ binary_path }} --config {{ server_config_path }} frontend -v
+```
+
+エラーが出ないことを確認したら Ctrl+C で停止し、systemdサービスとして登録します。
+
+```bash
+sudo {{ binary_path }} --config {{ server_config_path }} service install
+sudo systemctl enable --now {{ systemd_service_server }}
+sudo systemctl status {{ systemd_service_server }} --no-pager
+```
+
+GUI（`{{ gui_bind }}`）にブラウザでアクセスし、Step 2で作成した管理者ユーザーでログインできることを確認します。
+
+## 4. クライアント設定を配布し、クライアントを登録する
+
+Step 1で生成した `{{ client_config_path }}` には、サーバのCA証明書とクライアント鍵が含まれています。機微情報のため、配布は暗号化されたチャネル（`scp`等）に限定します。
+
+```bash
+scp {{ client_config_path }} deploy@{{ client_hostname }}:{{ client_config_dest }}
+```
+
+配備先ホストにVelociraptorバイナリを配置し、配布した設定でクライアントサービスを登録・起動します。
+
+```bash
+ssh deploy@{{ client_hostname }} "sudo {{ binary_path }} --config {{ client_config_dest }} service install"
+ssh deploy@{{ client_hostname }} "sudo systemctl enable --now {{ systemd_service_client }}"
+ssh deploy@{{ client_hostname }} "sudo systemctl status {{ systemd_service_client }} --no-pager"
+```
+
+クライアントは起動時にサーバ証明書を検証したうえでmTLSでfrontend（`{{ frontend_bind }}`）へ接続し、公開鍵から算出したclient_idで自身を登録します。
+
+## 動作確認
+
+1. GUIのクライアント一覧（Clients）で `{{ client_hostname }}` が **online** 表示になっていることを確認する。
+2. サーバ側からAPI設定を使ってVQLクエリを実行し、登録済みクライアントの情報を取得する。
+
+```bash
+{{ binary_path }} --config {{ api_config_path }} query "SELECT client_id, os_info.hostname AS hostname, last_seen_at FROM clients() WHERE os_info.hostname = '{{ client_hostname }}'"
+```
+
+3. クライアント側でも `info()` プラグインを直接実行し、ホスト情報がサーバ側の結果と一致することを確認する。
+
+```bash
+ssh deploy@{{ client_hostname }} "sudo {{ binary_path }} --config {{ client_config_dest }} query 'SELECT * FROM info()'"
+```
+
+## 注意事項
+
+- サーバ生成CAの秘密鍵とクライアント鍵（`{{ server_config_path }}` / `{{ client_config_path }}` 内に埋め込まれている）は最高度の機微情報です。バージョン管理に含めず、パーミッションを `600`、所有者をVelociraptorサービスの実行ユーザーに限定して保管してください（`{{ ca_managed }}` を true にする、すなわちCAの保管・ローテーション運用を正式に確立するまでは、このYAMLの値どおりCAは未管理として扱い、追加のクライアント配布を広げないこと）。
+- GUI管理者パスワードは初回ログイン後に必ず変更し、共有アカウントではなく管理者ごとに `user add` でアカウントを分離してください。
+- frontend（`{{ frontend_bind }}`、クライアント接続用）とGUI（`{{ gui_bind }}`、管理者アクセス用）は待受を分離し、GUIはVPNや踏み台経由などクライアント接続用のネットワークから隔離された経路からのみアクセス可能にしてください。frontendをインターネットに公開する場合も、GUIポートは決して公開しないこと。
+- クライアント設定（`{{ client_config_deployed }}` が true になるまでの配布作業）は、旧クライアント（過去バージョンや別サーバ向けの設定）を無効化・削除する前に、Step 4で新設定のクライアントが動作確認（動作確認セクションの1・2）で online になることを確認してから行ってください。新旧のクライアントを一時的に並行稼働させ、新設定側の接続が確認できてから旧設定を撤去する手順とします。
+- サーバとクライアントの時刻がずれているとmTLSの証明書検証（有効期限判定）やVQLクエリのタイムスタンプ比較が失敗することがあるため、両者でNTP（`chronyd`等）による時刻同期を事前に確認してください。

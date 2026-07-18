@@ -1,0 +1,6 @@
+metric,baseline,current,deviation,disposition
+new_external_dest_count,0,4,new,escalate
+new_service_count,2,2,+0%,normal
+total_bytes_gb,150,410,+173%,escalate
+top_talker_bytes_gb,8,52,+550%,escalate
+unique_active_host_count,120,128,+7%,review

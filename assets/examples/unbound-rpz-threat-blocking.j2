@@ -1,0 +1,109 @@
+# UnboundのRPZによる悪性ドメイン遮断
+
+Response Policy Zone(RPZ)を使い、CSVで管理する {{ csv_rows | length }} 件の悪性/監視対象ドメインをUnboundでNXDOMAIN応答やPASSTHRUに振り分け、脅威通信をDNSの応答段階で遮断する手順です。
+
+## 目的
+
+RPZフィードを「とりあえずブロックリストに追記する」場当たり対応ではなく、ゾーンファイルとして構成管理し、`unbound-control`によるホットリロードとdigによる検証をセットで運用できるようになることを目指します。
+
+## 用語解説
+
+- **RPZ (Response Policy Zone)**: DNSの問い合わせ結果を、通常の権威応答の前段でポリシーに基づいて書き換える仕組み。DNSファイアウォールとも呼ばれる
+- **QNAMEポリシー**: 問い合わせされたドメイン名（QNAME）そのものに対してポリシーを適用するRPZの基本的なトリガー種別
+- **NXDOMAIN action**: 該当ドメインを「存在しないドメイン」として応答する。ゾーンファイル上は `CNAME .` で表現する
+- **NODATA action**: ドメイン自体は存在するがレコードなしとして応答する。ゾーンファイル上は `CNAME *.` で表現する
+- **PASSTHRU action**: RPZによる書き換えを行わず、本来の権威応答をそのまま通過させる。誤遮断の例外やドメインの一時許可に使う
+- **DROP action**: 応答を返さずクエリ自体を破棄する。今回のシナリオでは使用しない
+- **rpz-log**: RPZによって書き換え/通過が発生したクエリをUnboundのログに記録する設定。感染ホストの特定に使う
+- **TLP (Traffic Light Protocol)**: 脅威インテリジェンス情報の共有範囲を示す区分（CLEAR/GREEN/AMBER/RED）
+
+## シナリオ設定
+
+CSVで管理する対象ドメインとRPZアクションの一覧です。
+
+| domain | rpz_action | source | tlp | added_at |
+|--------|------------|--------|-----|----------|
+{% for r in csv_rows %}| {{ r["domain"] }} | {{ r["rpz_action"] }} | {{ r["source"] }} | {{ r["tlp"] }} | {{ r["added_at"] }} |
+{% endfor %}
+
+## 1. unbound.confにRPZ stanzaを追加する
+
+`/etc/unbound/unbound.conf.d/rpz.conf` として、ローカルのRPZゾーンファイルを読み込むstanzaを追加します。まずは本番の`unbound`とは別プロセス・別ポートで動かす検証用インスタンス（後述）に投入し、挙動を確認してから本番設定へ反映します。
+
+```bash
+sudo tee /etc/unbound/unbound.conf.d/rpz.conf <<'EOF'
+rpz:
+	name: "threat-block.rpz"
+	zonefile: "/etc/unbound/rpz/threat-block.rpz"
+	rpz-action-override: cname
+	rpz-log: yes
+	rpz-log-name: "threat-block"
+EOF
+```
+
+## 2. RPZゾーンファイルを作成する
+
+CSVの各行のアクションに応じて、QNAMEポリシーをRPZゾーンファイルへ書き出します。`nxdomain`は`CNAME .`、`nodata`は`CNAME *.`、`passthru`は`CNAME rpz-passthru.`で表現します。
+
+```bash
+sudo tee /etc/unbound/rpz/threat-block.rpz <<'EOF'
+$TTL 60
+@ SOA localhost. admin.localhost. (1 3600 1800 604800 60)
+@ NS localhost.
+{% for r in csv_rows %}{% if r["rpz_action"] == "nxdomain" %}{{ r["domain"] }} CNAME .
+{% elif r["rpz_action"] == "nodata" %}{{ r["domain"] }} CNAME *.
+{% elif r["rpz_action"] == "passthru" %}{{ r["domain"] }} CNAME rpz-passthru.
+{% endif %}{% endfor %}EOF
+```
+
+SOAシリアル（上記の`1`）は、ゾーンファイルを更新するたびに必ずインクリメントします。インクリメントを忘れると`unbound-control`が変更を反映しないことがあります。
+
+## 3. 構文確認と検証用インスタンスへの反映
+
+まず検証用ポート（例: 15353番）で動かしている別プロセスのUnboundに反映し、本番の名前解決を止めずに動作を確認します。
+
+```bash
+sudo unbound-checkconf /etc/unbound/unbound.conf
+sudo unbound-control -c /etc/unbound/unbound-test.conf reload
+```
+
+## 4. 動作確認（検証用インスタンス経由）
+
+検証用インスタンス（ポート15353）に対してdigを行い、rpz_actionごとの応答を確認します。
+
+```bash
+{% for r in csv_rows %}{% if r["rpz_action"] == "nxdomain" %}dig @127.0.0.1 -p 15353 {{ r["domain"] }} A
+{% elif r["rpz_action"] == "nodata" %}dig @127.0.0.1 -p 15353 {{ r["domain"] }} A
+{% elif r["rpz_action"] == "passthru" %}dig @127.0.0.1 -p 15353 {{ r["domain"] }} A
+{% endif %}{% endfor %}```
+
+`nxdomain`対象は応答セクションが `status: NXDOMAIN` になること、`nodata`対象は`status: NOERROR`かつANSWERが0件になること、`passthru`対象は本来の権威応答（正引き結果）がそのまま返ることを確認します。
+
+```bash
+sudo tail -n 20 /var/log/unbound/unbound.log | grep threat-block
+```
+
+`rpz-log-name: "threat-block"`で指定した名前でログに書き換え内容（適用ドメインとaction種別）が記録されていることを確認します。
+
+## 5. 本番Unboundへの反映
+
+検証用インスタンスでの動作確認が取れたら、同じ`/etc/unbound/unbound.conf.d/rpz.conf`と`/etc/unbound/rpz/threat-block.rpz`を本番のUnboundへ反映します。
+
+```bash
+sudo unbound-checkconf
+sudo unbound-control reload
+```
+
+## 動作確認
+
+- 検証用インスタンス・本番インスタンスの双方で、`nxdomain`対象ドメインへのdigが`status: NXDOMAIN`を返すこと
+- `rpz-log`により、遮断・通過したクエリの記録がログへ残ること
+- `passthru`対象ドメインへのdigが、RPZによる書き換えを受けず正常な権威応答を返すこと
+
+## 注意事項
+
+- RPZは新しい名前解決経路を追加する変更のため、本番のUnboundへ直接投入せず、必ず手順3・4の検証用インスタンス（別ポート）で期待通りの応答になることを確認してから、手順5で本番へ反映すること。
+- CSVの`rpz_action`が`passthru`の行は、誤検知や誤遮断が判明したドメインの例外設定として使う。正規ドメインを誤って`nxdomain`のまま放置しないよう、例外が必要になった時点でCSVを更新しゾーンファイルを再生成すること。
+- 外部のRPZフィードや脅威インテリジェンス（`source`列）は無条件に信頼せず、取り込み前に鮮度（`added_at`）と提供元の信頼性を確認すること。古い、または出所不明なフィードをそのまま適用しない。
+- 誤遮断が発生した場合は、該当行を`passthru`へ変更してゾーンファイルを再生成し、`unbound-control reload`で即座に解除できるようにしておくこと。SOAシリアルのインクリメントを忘れないこと。
+- `rpz-log`に記録された遮断ログは、どのホストがどの悪性ドメインへ問い合わせたかを特定する一次情報になるため、定期的に確認し感染ホストの洗い出しに活用すること。

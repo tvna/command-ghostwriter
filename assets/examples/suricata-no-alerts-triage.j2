@@ -1,0 +1,107 @@
+# Suricataが検知しない事象の切り分け調査
+
+アラートが一切出ない、または特定の検知だけ出ない事象について、トラフィック到達からルール適用までを順に検証する調査手順です。
+
+## 目的
+
+Suricataでアラートが期待通り出力されない事象について、パケットがセンサーに到達しているか、Suricataが受信・処理しているか、対象ルールがロードされているかを切り分け、原因箇所(ミラー設定・Suricata本体・ルール設定)を特定できるようになることを目指します。
+
+## 用語解説
+
+- **ミラーセッションのVLANタグ剥がれ**: SPAN/ミラーポートで転送されたフレームのVLANタグが、スイッチ側の設定(トランク/アクセス、encapsulation replication有無)によって除去または付与され、Suricataの`vlan.id`条件やBPFフィルタと不整合を起こし、想定した通信が到達していないように見える現象
+- **片方向ミラー(one-way mirroring)**: SPANセッションが送信方向(Tx)または受信方向(Rx)の片方にしか設定されておらず、往復のうち片方のパケットしかセンサーに到達しないため、往復両方を要件とするルール(flow:established等)が発火しない現象
+- **チェックサムオフロード(checksum offload)によるチェックサム不正**: NICのオフロード機能(TSO/GRO/checksum offload)が有効なミラーポートでキャプチャすると、送信側で未計算のチェックサムがそのままキャプチャされ、Suricataがデフォルトの検証で不正パケットとして破棄する現象。`checksum-checks: {{ checksum_checks }}` への変更で回避できる
+- **iface-stat**: `suricatasc`のUnixソケット経由で、指定インターフェースの受信パケット数・drop数などのカウンタを取得するコマンド
+- **eve stats(detect.alert)**: `eve.json`に出力される`stats`イベントに含まれる、検知エンジンが発報したアラート累積数のフィールド
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 監視インターフェース | `{{ monitor_interface }}` |
+| 期待されるsid | `{{ expected_sid }}` |
+| 検知確認用コマンド | `{{ test_command }}` |
+| checksum-checks設定 | `{{ checksum_checks }}` |
+
+## 手順
+
+### 1. ミラートラフィックの到達を確認する
+
+```bash
+sudo tcpdump -i {{ monitor_interface }} -c 100
+```
+
+→ パケットが1件も表示されない場合、スイッチ側のSPAN/ミラー設定(送信元ポート指定、Tx/Rx方向、トランクのVLANタグ扱い)を先に疑います。ここで到達していなければ、以降のSuricata側の調査は無意味です。
+
+### 2. Suricataの受信カウンタを確認する
+
+```bash
+sudo suricatasc -c "iface-stat {{ monitor_interface }}"
+```
+
+→ `pkts`が増加しているのに`drop`も増加している場合、NIC側のチェックサムオフロードによる不正パケット破棄を疑います(手順5へ)。`pkts`が全く増えない場合はNICへの到達はあるがSuricataのキャプチャ設定(インターフェース名の誤り等)を疑います。
+
+### 3. 既知の検知確認用トラフィックで疎通と検知を確認する
+
+```bash
+{{ test_command }}
+```
+
+→ testmynids.orgへのアクセスはEICARテスト文字列に類似した既知パターンを含み、sid `{{ expected_sid }}` (GPL ATTACK_RESPONSE id check returned root)相当のルールが有効なら検知されるはずの基準トラフィックです。検知されない場合は手順4でルールロード状況を確認します。
+
+自作のテストパケットで特定ルールのみを狙って検証する場合は、scapyで最小限のパケットを組み立てて送出します。
+
+```python
+from scapy.all import IP, TCP, send
+
+pkt = IP(dst="198.51.100.10") / TCP(dport=80, flags="S")
+send(pkt, iface="{{ monitor_interface }}", count=3)
+```
+
+### 4. ルールのロード状況を確認する
+
+```bash
+sudo suricata -T -c /etc/suricata/suricata.yaml -v
+```
+
+→ `-T`はテストモードで、設定ファイルとルールファイルの構文検証のみ行い、パケットは処理しません。エラーなく終了し、ロードされたルール数がログに出力されることを確認します。
+
+```bash
+sudo suricatasc -c "iface-stat {{ monitor_interface }}"
+grep -c "^" /var/log/suricata/eve.json 2>/dev/null || true
+tail -n 1 /var/log/suricata/stats.log
+```
+
+→ `eve.json`の`stats`イベント内の`detect.alert`が起動時から増加しているか確認します。増加していれば検知自体は動作しており、対象sid `{{ expected_sid }}` がルールセットから除外(disable-sid, drop等の設定)されていないかを`suricata.yaml`の`rule-files`および除外リストで確認します。
+
+### 5. HOME_NETの方向性とチェックサム設定を確認する
+
+```bash
+grep -A 3 "^HOME_NET" /etc/suricata/suricata.yaml
+grep "checksum-checks" /etc/suricata/suricata.yaml
+```
+
+→ ルールの`msg`が特定方向(`->`のみ等)しか一致しないよう書かれている場合、`HOME_NET`の定義が実際の監視対象セグメントと逆転しているとマッチしません。また、`checksum-checks`が`yes`のままミラーポートでオフロード起因の不正チェックサムを受け取っていると、該当パケットは黙って破棄されます。切り分け用に一時的に以下へ変更します。
+
+```yaml
+checksum-checks: {{ checksum_checks }}
+```
+
+```bash
+sudo suricatasc -c reload-rules
+```
+
+## 動作確認
+
+- 手順1のtcpdumpでミラートラフィックが到達していること
+- 手順2の`iface-stat`で`pkts`が増加し、`drop`が想定以上に増えていないこと
+- 手順3の検知確認用トラフィックまたはscapyテストパケットで、sid `{{ expected_sid }}` を含む検知が`eve.json`に記録されること
+- 手順4で`suricata -T`がエラーなく完了し、`detect.alert`カウンタが増加していること
+- `checksum-checks: {{ checksum_checks }}` へ変更した状態で、それまで検知できなかったトラフィックが検知されるようになること(オフロード起因の切り分けが確定)
+
+## 注意事項
+
+- `checksum-checks: {{ checksum_checks }}` は切り分け目的の暫定設定であり、本番のインライン(IPS)構成でチェックサム検証を無効化したまま恒久化すると、実際に破損したパケットまで正常として処理してしまう。恒久化する前に、NIC側のオフロード設定(`ethtool -K {{ monitor_interface }} rx off tx off gro off tso off`等)を見直し、ミラーポート側で正しいチェックサムが再計算されるようにする対応を優先する。
+- 設定変更(`checksum-checks`の変更やルール除外解除)は必ず`suricatasc -c reload-rules`または`suricata -T`での構文検証を経てから反映する。設定ミスのまま本番リロードすると検知が全面的に停止する恐れがある。
+- ルール除外リスト(`disable-sid`等)を変更する際は、変更前の状態をバックアップし、変更後は必ず本手順の動作確認で検知が復旧したことを確認してから、対象sid以外のルールに影響がないかも合わせて確認する。
+- ミラーセッションの設定変更(VLANタグ処理、Tx/Rx方向の追加)はスイッチ側の既存の監視・キャプチャ用途に影響する可能性があるため、変更前に他の利用者がいないか確認し、変更後は新旧両方のミラー経路でパケット到達を並行確認してから旧設定を撤去する。

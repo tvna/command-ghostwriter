@@ -1,0 +1,108 @@
+# Keycloak条件付きアクセスフローの構築 — {{ flow_name }}
+
+realm **{{ realm_name }}** の認証フローに Conditional サブフローを組み込み、特定条件が成立したユーザーにのみ追加認証（step-up）を課す設定を行います。管理者ロール・回復用アカウントを除外設定してから、テストユーザーで各条件分岐を段階的に検証します。
+
+## 目的
+
+Conditional Sub-Flow（`Condition - User Role` / `Condition - User Configured` 等）を用いて、リスクベースで追加認証を要求する認証フローを、締め出し事故を起こさずに構築・検証できるようになることを目指します。
+
+## 用語解説
+
+- **Conditional Sub-Flow**: 通常のREQUIRED/ALTERNATIVEなサブフローと異なり、内部に条件判定(Condition)実行を1つ以上持ち、その条件が真の場合のみサブフロー全体が評価されるサブフロー種別
+- **REQUIRED**: サブフロー内の実行が必ず成功しないと認証全体が失敗する要求レベル
+- **CONDITIONAL**: サブフロー自体に付与する要求レベルで、「内部の条件判定によって有効/無効を切り替える」ことを示す
+- **Condition - User Role (`conditional-user-role`)**: ログイン中のユーザーが指定ロールを保持しているかを判定する条件実行
+- **Condition - User Configured (`conditional-user-configured`)**: 直後に続く認証方式（OTP等）がそのユーザーに対して設定済みかどうかを判定する条件実行
+- **negate**: 条件の真偽を反転させるオプション（例: 「範囲内」ではなく「範囲外」で真にする）
+- **ステップアップ認証**: 通常のパスワード認証を通過した後、リスクが高いと判定した場合にのみ追加で要求する認証（OTP等）
+- **bindingフロー**: realmの「Browser flow」等、実際にログインで使われるフローの割り当て設定
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| realm | {{ realm_name }} |
+| コピー元フロー | {{ source_flow }} |
+| 新規フロー名 | {{ flow_name }} |
+| Conditionalサブフロー名 | {{ subflow_alias }} |
+| サブフローの要求レベル | {{ default_requirement }} |
+| step-upアクション | {{ step_up_action }} |
+| 除外ロール（管理者） | {{ excluded_role }} |
+| 除外グループ（アカウント回復） | {{ recovery_group }} |
+| 検証用テストユーザー | {{ test_user }} |
+
+条件分岐一覧:
+
+| 条件 | provider_id | 設定キー | 設定値 | negate | 要求レベル |
+| --- | --- | --- | --- | --- | --- |
+{% for c in conditions %}| {{ c.label }} | {{ c.provider_id }} | {{ c.config_key }} | {{ c.config_value }} | {{ c.negate }} | {{ c.requirement }} |
+{% endfor %}
+
+## 1. 除外設定（管理者・回復手段）を先に整備する
+
+条件付きフローを本番bindingへ適用する前に、締め出し防止のため管理者ロールとアカウント回復用グループを除外しておきます。
+
+```bash
+kcadm.sh get roles -r {{ realm_name }} --fields name --format csv | grep -F "{{ excluded_role }}"
+kcadm.sh get group -r {{ realm_name }} --fields name --format csv | grep -F "{{ recovery_group }}"
+```
+
+`{{ excluded_role }}` ロール保持者と `{{ recovery_group }}` グループ所属者は、後述のConditional評価から意図的に除外し、旧フロー（`{{ source_flow }}`）またはパスワードのみのフォールバック手段でログインできる状態を維持してください。
+
+## 2. 既存フローを複製して作業用フローを作る
+
+本番で使われている `{{ source_flow }}` フローを直接編集せず、複製した `{{ flow_name }}` 上で作業します。
+
+```bash
+kcadm.sh create -x authentication/flows/{{ source_flow }}/copy \
+  -r {{ realm_name }} \
+  -s newName="{{ flow_name }}"
+```
+
+## 3. Conditionalサブフローを追加する
+
+```bash
+kcadm.sh create authentication/flows/{{ flow_name }}/executions/flow \
+  -r {{ realm_name }} \
+  -b '{"alias": "{{ subflow_alias }}", "type": "basic-flow", "provider": "registration-page-form", "description": "risk-based step-up conditional"}'
+```
+
+追加したサブフローの実行IDを確認し、要求レベルを `{{ default_requirement }}` に設定します。
+
+```bash
+kcadm.sh get authentication/flows/{{ flow_name }}/executions -r {{ realm_name }}
+# 出力中の "{{ subflow_alias }}" に対応する id を SUBFLOW_EXEC_ID とする
+kcadm.sh update authentication/executions -r {{ realm_name }} \
+  -b '{"id": "SUBFLOW_EXEC_ID", "requirement": "{{ default_requirement }}"}'
+```
+
+## 4. 条件判定の実行(Condition)をサブフロー内に積む
+
+`{{ subflow_alias }}` サブフローの中に、条件実行を1つずつ追加し、それぞれ `config_key`/`config_value` を設定します。
+
+```bash
+{% for c in conditions %}kcadm.sh create authentication/executions/execution -r {{ realm_name }} \
+  -b '{"flowAlias": "{{ subflow_alias }}", "provider": "{{ c.provider_id }}"}'
+# 出力の id を {{ c.provider_id }}_EXEC_ID として控える
+kcadm.sh create authentication/executions/{{ c.provider_id }}_EXEC_ID/config -r {{ realm_name }} \
+  -b '{"alias": "{{ c.provider_id }}-cfg", "config": {"{{ c.config_key }}": "{{ c.config_value }}", "negate": "{{ c.negate }}"}}'
+kcadm.sh update authentication/executions -r {{ realm_name }} \
+  -b '{"id": "{{ c.provider_id }}_EXEC_ID", "requirement": "{{ c.requirement }}"}'
+{% endfor %}
+```
+
+条件判定の直後には、step-up本体として `{{ step_up_action }}`（OTP登録/入力フォーム相当）の実行を `REQUIRED` で追加してください。この並びにより、条件が真のときだけOTPが要求されます。
+
+## 動作確認
+
+1. `{{ test_user }}` に一時的に `finance-approver` ロールを付与した状態でログインし、パスワード認証後に `{{ step_up_action }}` への遷移（追加認証要求）が発生することを確認する。
+2. ロールを外した状態、許可CIDR内、OTP登録済みの3条件をすべて満たさない状態でログインし、追加認証がスキップされ通常どおりログイン完了することを確認する。
+3. `kcadm.sh get authentication/flows/{{ flow_name }}/executions -r {{ realm_name }}` で各条件実行の `requirement` が意図通りであることを再確認する。
+
+## 注意事項
+
+- 本手順は `{{ flow_name }}` という別名フロー上で完結させ、realmの「Browser flow」bindingを切り替える前に、動作確認セクションの全ケースを完了させること。bindingを切り替えると全ユーザーのログイン経路に即座に影響するため、切替時は別セッションで管理者権限のログインを保持したまま実施し、異常があれば直ちに旧フロー（`{{ source_flow }}`）へbindingを戻せる状態にしておく。
+- `{{ excluded_role }}` ロールと `{{ recovery_group }}` グループは、Conditional評価の対象から明示的に除外し、万一の締め出し時に管理者がログインできる経路を必ず残すこと。
+- 条件の組み合わせが増えるほどフロー論理が複雑化し、意図しない分岐（どの条件にも合致せず認証が素通りする、または複数条件が重複して二重に追加認証が要求される）が発生しやすい。条件の網羅性（想定する全ユーザー区分がいずれかの分岐でカバーされているか）を表形式で棚卸ししてからbinding切替に進むこと。
+- `conditional-network-cidr` はKeycloak標準ビルトインの条件プロバイダではなく、CIDR範囲判定を行うカスタムSPI（同等機能の認証プロバイダ拡張）の導入を前提とする。標準機能のみで完結させたい場合は、リバースプロキシ/WAF側でのIPベースheader付与とスクリプト実行（非推奨機能）や外部IdP連携での代替を検討すること。
+- 本番bindingへ適用した後も、`{{ recovery_group }}` の少なくとも1アカウントで実際にログインできることを都度確認し、Conditional評価のロジック変更時は必ず本セクションの動作確認を再実施すること。

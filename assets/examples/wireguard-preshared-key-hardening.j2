@@ -1,0 +1,107 @@
+# WireGuard PresharedKey 併用ハードニング手順 — {{ global.side_a_host }} ⇔ {{ global.side_b_host }}
+
+対象インターフェース **{{ global.interface }}**（設定ファイル `{{ global.config_path }}`）の各ピアに PresharedKey (PSK) を追加し、Curve25519 の公開鍵交換に対称鍵ベースの追加防御層を重ねる変更を、メンテナンス窓 **{{ global.maintenance_window }}** で実施します。
+
+## 目的
+
+WireGuard は既定で Curve25519 による ECDH 鍵交換のみでセッション鍵を導出します。本シナリオでは、各ピアに PresharedKey を追加併用することで、将来の量子計算機によるトラフィック解析（Harvest Now, Decrypt Later）に対する耐性を高めるハードニングを、両端のロックアウトを起こさずに実施します。
+
+## 用語解説
+
+- **PresharedKey (PSK)**: WireGuard の `[Peer]` セクションに設定できる 256bit の対称鍵。ECDH で導出した鍵に XOR 的に混合され、鍵交換アルゴリズム（Curve25519）が将来破られても PSK を知らない攻撃者はセッション鍵を導出できない、という追加防御になる。
+- **wg genpsk**: PSK をランダム生成する `wg` コマンドのサブコマンド。生成された値は両端の該当ピアに全く同じ値を設定する必要がある。
+- **wg syncconf**: 実行中のインターフェース設定を、ファイルに書いた設定へダウンタイムなしで同期反映するコマンド（`wg-quick down/up` より安全）。
+- **ハンドシェイク (handshake)**: WireGuard が約2分ごとに行う鍵再ネゴシエーション。`wg show` の `latest handshake` が更新され続けていれば疎通は正常。
+- **ロックアウト**: 設定変更によって管理対象への接続経路そのものを失う事故。PSK は両端で値が一致しないと該当ピアの通信が即座に不通になるため、本手順では「無停止で片端ずつ即時反映し、疎通を確認してから次に進む」順序を徹底する。
+
+## シナリオ設定
+
+| ピア名 | 現在のPSK設定 | ローテーション周期 | AllowedIPs | Endpoint |
+| --- | --- | --- | --- | --- |
+{% for p in peers %}
+| {{ p.peer_name }} | {{ "設定済み" if p.psk_set else "未設定" }} | {{ p.rotation_schedule }} | {{ p.allowed_ips }} | {{ p.endpoint }} |
+{% endfor %}
+
+## 1. PSKの生成（ハブ側 {{ global.side_a_host }} で実施）
+
+ピアごとに個別の PSK を生成します。ファイルはハブ側にのみ一時的に置き、権限を `600` に絞ります。
+
+```bash
+{% for p in peers %}
+wg genpsk > {{ p.psk_file_a }}
+chmod 600 {{ p.psk_file_a }}
+{% endfor %}
+```
+
+生成した PSK ファイルは、この後の手順でオフバンド（帯域外）かつ暗号化された経路で拠点側へ安全に受け渡します。設定ファイルや Git にはコミットしません。
+
+## 2. ハブ側（{{ global.side_a_host }}）へ即時適用
+
+ハブ側の `{{ global.config_path }}` に、各ピアの `[Peer]` セクションへ `PresharedKey` 行を追記します。
+
+```ini
+{% for p in peers %}
+[Peer]
+# {{ p.peer_name }} （PresharedKey の値は次のコマンドの出力をそのまま貼り付ける: cat {{ p.psk_file_a }}）
+PresharedKey = <cat_output_of_{{ p.psk_file_a }}>
+AllowedIPs = {{ p.allowed_ips }}
+Endpoint = {{ p.endpoint }}
+{% endfor %}
+```
+
+ダウンタイムなしで反映します。
+
+```bash
+wg syncconf {{ global.interface }} <(wg-quick strip {{ global.interface }})
+```
+
+この時点ではまだ拠点側に PSK が入っていないため、該当ピアのハンドシェイクは一時的に途絶えます。この状態を長時間放置しないよう、直ちに手順3へ進みます。
+
+## 3. 拠点側（{{ global.side_b_host }}）へ間髪入れず適用
+
+事前にオフバンド経路（対面 USB 渡し、または別途確立済みの暗号化チャネル。手順1で生成したファイルをそのまま WireGuard トンネル越しに流用しない）で受け渡した PSK ファイルを、拠点側の `{{ global.config_path }}` に反映します。
+
+```bash
+{% for p in peers %}
+chmod 600 {{ p.psk_file_b }}
+{% endfor %}
+```
+
+```ini
+{% for p in peers %}
+[Peer]
+# {{ p.peer_name }} 側から見たハブ （PresharedKey の値は次のコマンドの出力をそのまま貼り付ける: cat {{ p.psk_file_b }}）
+PresharedKey = <cat_output_of_{{ p.psk_file_b }}>
+{% endfor %}
+```
+
+```bash
+wg syncconf {{ global.interface }} <(wg-quick strip {{ global.interface }})
+```
+
+## 動作確認
+
+1. 両端で `wg show {{ global.interface }} latest-handshakes` を実行し、対象ピアのタイムスタンプが直近（数分以内）に更新されていることを確認する。
+2. `wg show {{ global.interface }} transfer` で、反映直後から双方向にバイト数が増加していることを確認する（片方向のみ増加している場合は不通の疑い）。
+{% for p in peers %}
+3. `ping -c 3 {{ p.allowed_ips.split('/')[0] }}` で {{ p.peer_name }} への到達性を確認する。
+{% endfor %}
+4. 上記いずれかが失敗した場合、直ちに手順「切り戻し」を実施する。
+
+### 切り戻し（ハンドシェイク復帰が確認できない場合）
+
+両端の `{{ global.config_path }}` から追記した `PresharedKey` 行のみを削除し、`wg syncconf` で再同期して PSK 追加前の状態に戻します。
+
+```bash
+wg syncconf {{ global.interface }} <(wg-quick strip {{ global.interface }})
+```
+
+再同期後、手順「動作確認」の 1〜2 を再実施し、PSK 追加前の疎通状態まで復帰したことを確認してから原因調査に移る。
+
+## 注意事項
+
+- **両端同時反映が前提**: PSK は片端だけ設定した瞬間から反映完了までの間、該当ピアの通信が途絶える。手順2完了後は間を置かず手順3へ進み、メンテナンス窓 {{ global.maintenance_window }} 内で完結させること。
+- **新経路を確認してから旧経路を廃止する**: 本手順はダウンタイムを伴う切替のため、既存のトンネルを維持したまま「動作確認」で新しいハンドシェイクが確立したことを確認するまで、他の管理経路（コンソール、帯域外管理network等）を切断しないこと。
+- **PSKの受け渡しは必ずオフバンドかつ暗号化**: 生成した PSK ファイルを、これから守ろうとしている WireGuard トンネル自体で転送しない。USB 経由の手渡し、既存の別 VPN、age/GPG 等で暗号化した上でのファイル転送など、独立した安全な経路を用いる。
+- **一時ファイルの削除**: 反映確認後、`{{ global.config_path }}` 外に置いた PSK ファイル（`psk_file_a` / `psk_file_b` で指定したもの）は `shred -u` 等で確実に削除する。
+- **定期ローテーション**: シナリオ設定に記載のローテーション周期（例: 180日ごと）で本手順を再実施し、PSK を更新する。ローテーション時も本手順と同じ「両端同時反映→動作確認→未達なら切り戻し」の順序を厳守する。

@@ -1,0 +1,19 @@
+audit_rules:
+  - "-a always,exit -F arch=b64 -S execve -F euid=0 -F key=exec_audit"
+  - "-a always,exit -F arch=b32 -S execve -F euid=0 -F key=exec_audit"
+  - "-w /usr/bin/sudo -p x -k exec_audit"
+monitored_keys:
+  - exec_audit
+alert_commands:
+  - /usr/bin/passwd
+  - /usr/sbin/useradd
+  - /usr/bin/sudo
+alert_level: 10
+wazuh:
+  agent_conf_path: /var/ossec/etc/ossec.conf
+  local_rules_path: /var/ossec/etc/rules/local_rules.xml
+  rule_id_base: 100600
+  alerts_log: /var/ossec/logs/alerts/alerts.json
+auditd:
+  rules_file: /etc/audit/rules.d/exec_audit.rules
+  log_path: /var/log/audit/audit.log

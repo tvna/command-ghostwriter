@@ -1,0 +1,137 @@
+# Suricataアラートの日次トリアージ運用
+
+`eve.json` に記録された前日分のアラートをシグネチャ・送信元別に集計し、severity（重要度）と classtype（分類）から対応要否を「即応 / チューニング / 様子見」の3分類で判定する日次トリアージ手順です。
+
+## 目的
+
+Suricata の `eve.json` を毎日決まった時刻に集計し、大量に出るアラートを severity と classtype に基づいて機械的に優先度づけできるようになることを目指します。既知のノイズシグネチャを除外し、対応が必要なものだけを後続の手順（security-response 手順・threshold チューニング手順）へ引き継げる状態にします。
+
+## 用語解説
+
+- **eve.json**: Suricata がアラート・フロー・DNS等のイベントをJSON Lines形式で記録するログファイル
+- **signature_id (sid)**: シグネチャ（検知ルール）を一意に識別するID
+- **severity**: `alert.severity` に記録される重要度（数値が小さいほど深刻。1=高、2=中、3=低）
+- **classtype**: ルールが分類する攻撃・事象の種別（例: `trojan-activity`, `attempted-recon`）
+- **threshold.config**: 特定シグネチャの通知頻度を抑制・除外するための Suricata のしきい値設定ファイル
+- **ログローテーション**: `logrotate` 等により `eve.json` が `eve.json.1` のようにリネーム・圧縮される運用
+
+## シナリオ設定
+
+| 項目 | 値 |
+|---|---|
+| 集計対象ログ (log_path) | {{ log_path }} |
+| トリアージ実施時刻 (triage_time) | {{ triage_time }} |
+| 既知ノイズsid (known_noise_sids) | {{ known_noise_sids | join(", ") }} |
+| エスカレーション先 (escalation_contact) | {{ escalation_contact }} |
+
+### severityごとの対応SLA (severity_sla)
+
+| severity | 対応方針 |
+|---|---|
+{% for sev, action in severity_sla.items() %}| {{ sev }} | {{ action }} |
+{% endfor %}
+
+## 1. 前日分のログをローテーション込みで収集する
+
+`logrotate` で `eve.json` が日次ローテーションされる運用では、日付をまたいだ直後のアラートが `eve.json.1`（未圧縮）や `eve.json.2.gz`（圧縮済み）側に残っていることがあります。前日分の集計対象からこれらを漏らさないよう、両方を結合してから日付でフィルタします。
+
+```bash
+TARGET_DATE=$(date -d "yesterday" +%Y-%m-%d)
+WORKFILE="/tmp/eve-triage-${TARGET_DATE}.json"
+: > "${WORKFILE}"
+for f in {{ log_path }} {{ log_path }}.1 {{ log_path }}.2.gz; do
+  [ -e "$f" ] || continue
+  case "$f" in
+    *.gz) zcat "$f" >> "${WORKFILE}" ;;
+    *)    cat "$f"  >> "${WORKFILE}" ;;
+  esac
+done
+jq -c --arg d "${TARGET_DATE}" 'select(.timestamp | startswith($d))' "${WORKFILE}" > "/tmp/eve-triage-${TARGET_DATE}.filtered.json"
+```
+
+## 2. シグネチャ・送信元別に日次集計する
+
+```bash
+jq -r 'select(.event_type=="alert") | [.alert.signature_id,.alert.signature,.src_ip,.dest_ip] | @tsv' \
+  "/tmp/eve-triage-${TARGET_DATE}.filtered.json" | sort | uniq -c | sort -rn \
+  > "/tmp/eve-triage-${TARGET_DATE}.summary.txt"
+cat "/tmp/eve-triage-${TARGET_DATE}.summary.txt"
+```
+
+出力は「件数 sid シグネチャ名 送信元IP 宛先IP」の順で、件数が多い（`sort -rn`）行ほど上に表示されます。
+
+## 3. 既知ノイズsidを除外して再集計する
+
+{{ escalation_contact }} が過去に「対応不要」と判断済みのシグネチャ（known_noise_sids）を除外し、実際に判断が必要な行だけを残します。
+
+```bash
+NOISE_SIDS="{{ known_noise_sids | join(',') }}"
+jq -r --arg noise ",${NOISE_SIDS}," '
+  select(.event_type=="alert")
+  | select(($noise | contains("," + (.alert.signature_id|tostring) + ",")) | not)
+  | [.alert.signature_id,.alert.signature,.src_ip,.dest_ip] | @tsv
+' "/tmp/eve-triage-${TARGET_DATE}.filtered.json" | sort | uniq -c | sort -rn \
+  > "/tmp/eve-triage-${TARGET_DATE}.actionable.txt"
+cat "/tmp/eve-triage-${TARGET_DATE}.actionable.txt"
+```
+
+## 4. severity・classtypeで対応優先度を判定する
+
+除外後に残った行それぞれについて、該当する `sid` の severity と classtype を確認し、上記の severity_sla に従って3分類のいずれかを割り当てます。
+
+```bash
+jq -r --arg d "${TARGET_DATE}" '
+  select(.event_type=="alert" and (.timestamp | startswith($d)))
+  | [.alert.severity, .alert.classtype, .alert.signature_id, .alert.signature] | @tsv
+' "/tmp/eve-triage-${TARGET_DATE}.filtered.json" | sort -n | uniq -c
+```
+
+判定結果は以下のいずれかに分類します。
+
+- **即応**: severity 1 が1件でも観測された、または同一 classtype（例: `trojan-activity`）が短時間に多発している場合。Step 5 の security-response 手順へ引き継ぎます。
+- **チューニング**: severity 2 でノイズ判定されていないシグネチャが継続的に出続けている場合。Step 6 の threshold 手順へ引き継ぎます。
+- **様子見**: severity 3、または単発で再現性のないアラートの場合。次回トリアージまで静観し、記録のみ残します。
+
+## 5. 「即応」と判定した場合: security-response手順へ引き継ぐ
+
+```bash
+echo "$(date '+%F %T') [即応] sid=<対象sid> src=<送信元IP> dest=<宛先IP>" \
+  | tee -a /var/log/suricata-triage-escalation.log
+```
+
+上記ログとStep 4で確認した該当行を添えて {{ escalation_contact }} へ即時連絡し、社内の security-response（インシデント対応）手順を開始してください。本手順自体は判定までを対象とし、封じ込め・根絶作業は security-response 手順側で実施します。
+
+## 6. 「チューニング」と判定した場合: threshold手順へ引き継ぐ
+
+誤検知ではなく「検知はできているが通知頻度を抑えたい」ケースでは、`threshold.config` に抑制ルールを追加します。既存の検知パスを止める前に、新しい抑制ルールが意図通りに動くことを確認します。
+
+```bash
+sudo tee -a /etc/suricata/threshold.config <<'EOF'
+# チューニング対象: <対象sid> は同一送信元からの反復検知のみ抑制する
+threshold gen_id 1, sig_id <対象sid>, type limit, track by_src, count 1, seconds 3600
+EOF
+sudo suricata -T -c /etc/suricata/suricata.yaml -v
+```
+
+`-T` はテストモードでの構文検証です。構文エラーがないことを確認してから、実運用のSuricataプロセスに反映します。
+
+```bash
+sudo kill -USR2 "$(pidof suricata)"
+```
+
+`USR2` シグナルはルール・しきい値設定をプロセス再起動なしで再読込します。反映直後は、対象sidのアラートが `threshold` の設定どおりに間引かれているかをStep 2の集計コマンドで再確認し、抑制しすぎて必要なアラートまで消えていないことを確認してから運用を終了してください。
+
+## 動作確認
+
+- Step 1 で `/tmp/eve-triage-<日付>.filtered.json` が生成され、前日00:00〜23:59分のイベントのみが含まれていること（ローテーション後ファイル分の漏れがないこと）
+- Step 2 の集計結果（`summary.txt`）に少なくとも1件以上の行が出力されること（0件の場合はログ収集自体の失敗を疑う）
+- Step 3 で known_noise_sids に含まれるsidが `actionable.txt` に出現しないこと
+- Step 4 の判定結果（即応/チューニング/様子見）が記録され、即応・チューニングと判定した件については Step 5 または Step 6 への引き継ぎ記録が残っていること
+- Step 6 でthreshold反映後、`suricata -T` の構文検証が成功していること、および再読込後も対象外のsidのアラートが従来どおり検知されていること
+
+## 注意事項
+
+- 集計対象期間の抜けに注意してください。ログローテーションの直後（トリアージ実施時刻がローテーション時刻の直後の場合）は前日分のアラートが `{{ log_path }}.1` や `{{ log_path }}.2.gz` 側に残っていることがあるため、Step 1のようにローテーション済みファイルも含めて集計します。
+- `threshold.config` への抑制ルール追加は既存の検知パスを弱める変更です。反映後は必ずStep 2の再集計で対象外のシグネチャが従来どおり検知され続けていること（抑制が対象sidだけに閉じていること）を確認してから、抑制前の状態を前提にした対応を終了してください。問題があれば追加した行を削除し `kill -USR2` で戻せます。
+- known_noise_sids は定期的な見直しが必要です。一度ノイズと判定したシグネチャでも、送信元やタイミングが変わると実害を伴う場合があるため、除外リストへの追加・削除は{{ escalation_contact }}の合意を経て行ってください。
+- 即応・チューニングいずれの判定も誤ると対応漏れに直結するため、判定に迷う場合は必ず様子見ではなく即応側に倒してエスカレーションしてください。

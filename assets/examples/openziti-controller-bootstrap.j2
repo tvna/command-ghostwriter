@@ -1,0 +1,105 @@
+# OpenZitiコントローラの初期構築
+
+OpenZitiのコントローラをPKI初期化から起動、管理者ログインまで構築し、ZTNA(Zero Trust Network Access)オーバーレイの基盤を作ります。作業はコントローラ予定機のroot権限(sudo)またはzitiユーザーで実施してください。
+
+## 目的
+
+OpenZitiのPKI階層(ルートCA・中間CA・サーバ証明書)を作成し、コントローラ設定ファイルを生成して起動、`ziti edge login`で管理接続できる状態を作ることを目指します。
+
+## 用語解説
+
+- **ZTNA(Zero Trust Network Access)**: 「境界内は信頼できる」という前提を置かず、通信の都度アイデンティティを検証してアクセス可否を判断するネットワークアクセス方式
+- **デフォルト全拒否(default-deny)**: OpenZitiでは明示的なポリシー(edge router policy / service policy / edge router policy for services)が定義されない限り、いかなる通信も許可されない。ネットワーク到達性があってもポリシーがなければ通信不能のままとなる
+- **アイデンティティ中心**: IPアドレスやポートではなく、証明書で認証された「アイデンティティ(identity)」単位でアクセス制御を行う設計思想。エンドポイントが移動してもポリシーは追随する
+- **コントローラ(controller)**: アイデンティティ・サービス・ポリシーを管理し、edge routerとの信頼関係の起点となるOpenZitiの中枢コンポーネント
+- **PKIルート(pki_root)**: ルートCA・中間CA・各種証明書一式を保管するディレクトリ。コントローラとedge router間のmTLS信頼の起点になる
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| コントローラアドレス(ctrl_address) | {{ ctrl_address }} |
+| コントローラポート(ctrl_port) | {{ ctrl_port }} |
+| PKIルートディレクトリ(pki_root) | {{ pki_root }} |
+| 管理者ユーザー(admin_user) | {{ admin_user }} |
+| advertised address | {{ advertised_address }} |
+
+## 手順
+
+### 1. PKI(ルートCA・中間CA・サーバ証明書)を作成する
+
+```bash
+mkdir -p "{{ pki_root }}"
+
+ziti pki create ca \
+  --pki-root "{{ pki_root }}" \
+  --ca-file root \
+  --ca-name "OpenZiti Root CA"
+
+ziti pki create intermediate \
+  --pki-root "{{ pki_root }}" \
+  --ca-name root \
+  --intermediate-name intermediate \
+  --intermediate-file intermediate \
+  --max-path-len 1
+
+ziti pki create server \
+  --pki-root "{{ pki_root }}" \
+  --ca-name intermediate \
+  --server-file server \
+  --dns "{{ advertised_address }}" \
+  --ip "127.0.0.1"
+```
+
+ルートCAの秘密鍵は`{{ pki_root }}/root/keys/`配下に生成されます。この鍵はコントローラ・edge router全体の信頼を左右するため、後述の注意事項に従って厳重に保管してください。
+
+### 2. controller.yamlを生成する
+
+```bash
+export ZITI_CTRL_ADVERTISED_ADDRESS="{{ advertised_address }}"
+export ZITI_CTRL_ADVERTISED_PORT="{{ ctrl_port }}"
+export ZITI_PKI_CTRL_CA="{{ pki_root }}/root/certs/root.cert"
+export ZITI_PKI_CTRL_CERT="{{ pki_root }}/intermediate/certs/server.chain.pem"
+export ZITI_PKI_CTRL_KEY="{{ pki_root }}/intermediate/keys/server.key"
+
+mkdir -p /opt/ziti/etc
+
+ziti create config controller \
+  --output /opt/ziti/etc/controller.yaml
+```
+
+生成された`/opt/ziti/etc/controller.yaml`を開き、`ctrl.listener`のアドレスが`{{ ctrl_address }}:{{ ctrl_port }}`、`edge.api.advertise`が`{{ advertised_address }}:{{ ctrl_port }}`になっていることを確認します。ここで**advertised_addressを実際にedge routerやクライアントから到達可能なホスト名/IPと一致させる**ことが重要です(誤設定時の影響は注意事項参照)。
+
+### 3. コントローラを起動する
+
+```bash
+ziti controller run /opt/ziti/etc/controller.yaml
+```
+
+初回起動時は上記をフォアグラウンドで実行し、ログにエラーが出ないことを確認します。問題なければsystemdユニット等でバックグラウンド常駐化してください。
+
+### 4. 管理者としてログインする
+
+```bash
+ziti edge login "{{ ctrl_address }}:{{ ctrl_port }}" \
+  -u {{ admin_user }} \
+  --ca "{{ pki_root }}/root/certs/root.cert"
+```
+
+`-p`オプションでパスワードを渡すと履歴・プロセス一覧に平文で残るため、上記のように`-p`を省略してプロンプト入力で行ってください。コントローラ初期化時に払い出された初期パスワードを入力します。
+
+## 動作確認
+
+```bash
+ziti edge list identities
+ziti edge list services
+```
+
+両コマンドがエラーなく応答し(初期状態では`admin`アイデンティティのみ、servicesは空一覧)、認証済みセッションでコントローラAPIに到達できていることを確認します。応答がタイムアウトする場合は`advertised_address`の到達性を疑ってください。
+
+## 注意事項
+
+- `{{ pki_root }}/root/keys/`配下のルートCA秘密鍵は、コントローラとedge router全体の信頼の起点です。オフライン媒体やHSM等での厳重保管を行い、通常運用時にコントローラ本体には置かないことを推奨します。漏洩した場合はPKI階層全体の再構築が必要になります。
+- `advertised_address`を実際にクライアント/edge routerから到達できないホスト名やIPに誤設定すると、コントローラ自体は起動してもedge router・SDKクライアントからの登録(enrollment)や接続が確立できなくなります。変更する場合は、既存の接続経路を残したまま新しいadvertised_addressで`ziti edge list identities`が応答することを確認してから、旧経路の設定を撤去してください。
+- 初期パスワードは`ziti edge login`成功後、`ziti edge update authenticator`等で速やかに変更してください。初期パスワードのまま放置しない。
+- OpenZitiはデフォルト全拒否です。identity・serviceを登録しただけでは通信できず、edge router policyとservice policyを明示的に作成するまで、いかなるトラフィックも許可されません。次段のポリシー設計は本手順の範囲外です。

@@ -1,0 +1,6 @@
+schedule_name,days,time_range,target_rule,action
+business-hours,Mon-Fri,08:00-19:00,lan-to-wan-https,pass
+business-hours,Sat,09:00-13:00,lan-to-wan-https,pass
+after-hours,Mon-Fri,19:00-23:59,lan-to-wan-https-afterhours-deny,block
+after-hours,Sat,13:00-23:59,lan-to-wan-https-afterhours-deny,block
+after-hours,Sun,00:00-23:59,lan-to-wan-https-afterhours-deny,block

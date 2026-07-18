@@ -1,0 +1,7 @@
+alert_sid: "2027768"
+c2_dest: "203.0.113.50:8443"
+infected_hosts:
+  - "10.20.30.15"
+  - "10.20.30.42"
+evidence_dir: "/data/evidence/incident-20260718-c2beacon"
+escalation_contact: "secops-lead@example.com"

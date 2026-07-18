@@ -1,0 +1,125 @@
+# suricata-updateによるルールセット管理の導入
+
+`suricata-update`を使ってET Open等の公開ルールソースを取得・管理し、enable/disable/modifyの各設定で自組織向けにルールを調整するまでの標準フローを一巡します。root権限(sudo)で実施してください。
+
+## 目的
+
+`suricata-update`のソース管理コマンドと`enable.conf`/`disable.conf`/`modify.conf`/`drop.conf`の書式を理解し、`{{ rules_dir }}/suricata.rules`を安全に生成・反映できるようになることを目指します。
+
+## 用語解説
+
+- **ルールソース**: `suricata-update`が管理する外部ルール配布元。`et/open`(Emerging Threats Open)や`oisf/trafficid`などIDで指定する
+- **enable.conf**: 既定で無効なルールを有効化する条件を書くファイル。`re:`接頭辞で正規表現によるmsg一致を指定できる
+- **disable.conf**: 特定のsidを無効化するファイル。sidを1行1件で列挙する
+- **modify.conf**: 既存ルールの本文を正規表現置換で書き換えるファイル。`<sid> "<検索パターン>" "<置換後>"`の3項形式で書く
+- **drop.conf**: 指定sidのルールを強制的に`drop`アクションへ変換するファイル。IPSモードでの遮断に使う
+- **sid/rev/classtype**: ルールの識別子(signature id)・改版番号(revision)・分類(classtype)。sidはソース内で一意
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| ルールディレクトリ | `{{ rules_dir }}` |
+| Suricata設定ファイル | `{{ suricata_yaml }}` |
+| 登録するソース | {% for s in sources %}`{{ s }}`{% if not loop.last %}, {% endif %}{% endfor %} |
+| 有効化パターン(enable.conf) | {% for p in enable_patterns %}`{{ p }}`{% if not loop.last %}, {% endif %}{% endfor %} |
+| 無効化sid(disable.conf) | {% for sid in disable_sids %}`{{ sid }}`{% if not loop.last %}, {% endif %}{% endfor %} |
+| drop変換sid(drop.conf) | {% for sid in drop_sids %}`{{ sid }}`{% if not loop.last %}, {% endif %}{% endfor %} |
+
+## 手順
+
+### 1. 利用可能なルールソースを確認する
+
+```bash
+suricata-update list-sources
+```
+
+一覧に登録したいソースIDが含まれることを確認します。含まれない場合は`suricata-update update-sources`でインデックスを更新してください。
+
+### 2. ルールソースを登録する
+
+{% for s in sources %}
+```bash
+suricata-update enable-source {{ s }}
+```
+{% endfor %}
+
+登録状況は`suricata-update list-enabled-sources`で確認できます。
+
+### 3. enable.conf で無効ルールを有効化する
+
+`/etc/suricata/enable.conf`に、正規表現によるmsg一致条件を1行ずつ記載します。
+
+```
+{% for p in enable_patterns %}{{ p }}
+{% endfor %}```
+
+### 4. disable.conf で不要なsidを無効化する
+
+`/etc/suricata/disable.conf`にsidを1行1件で列挙します。
+
+```
+{% for sid in disable_sids %}{{ sid }}
+{% endfor %}```
+
+### 5. modify.conf で既存ルールをdropへ書き換える
+
+`/etc/suricata/modify.conf`に`<sid> "<検索パターン>" "<置換後>"`の3項形式で記載します。ここでは対象sidの`alert`アクションを`drop`に置き換えます。
+
+```
+{% for sid in drop_sids %}{{ sid }} "^alert" "drop"
+{% endfor %}```
+
+### 6. drop.conf でIPS強制ドロップ対象を指定する
+
+`/etc/suricata/drop.conf`にもsidを1行1件で列挙すると、該当ルールは無条件で`drop`アクションに変換されます。
+
+```
+{% for sid in drop_sids %}{{ sid }}
+{% endfor %}```
+
+### 7. suricata-update を実行しルールセットを生成する
+
+```bash
+suricata-update -c {{ suricata_yaml }} --output {{ rules_dir }}
+```
+
+正常終了すると`{{ rules_dir }}/suricata.rules`が生成・更新されます。
+
+### 8. 生成結果と件数を確認する
+
+```bash
+ls -l {{ rules_dir }}/suricata.rules
+grep -c '^alert\|^drop' {{ rules_dir }}/suricata.rules
+```
+
+## 動作確認
+
+1. 設定構文を検証する
+
+   ```bash
+   suricata -T -c {{ suricata_yaml }} -l /var/log/suricata
+   ```
+
+   `Configuration provided was successfully loaded. Exiting.`が出力されることを確認します。エラーが出た場合は次の反映手順に進まないでください。
+
+2. 稼働中プロセスへルールをホットリロードする
+
+   ```bash
+   suricatasc -c reload-rules
+   ```
+
+3. `eve.json`でロードされたルール数を確認する
+
+   ```bash
+   tail -n 200 /var/log/suricata/eve.json | jq 'select(.event_type=="stats") | .stats.detect.engines[0] | {id, rules_loaded, rules_failed}'
+   ```
+
+   `rules_failed`が0であり、`rules_loaded`が期待するルール数(概ね直前の`grep -c`件数)と一致することを確認します。
+
+## 注意事項
+
+- 手順6は`suricata -T`による構文検証を必ず通過してから実施すること。検証を経ずに`suricatasc reload-rules`を実行すると、不正なルールで検知エンジンが起動できず検知が無効化される恐れがある。
+- ルール自動更新を`cron`化する場合は、更新後に`suricata -T`を実行し、失敗したら生成物を反映せず旧`{{ rules_dir }}/suricata.rules`へ戻すガードをスクリプトに組み込むこと(例: 更新前にファイルを`.bak`へ退避し、検証失敗時は`.bak`を復元してからジョブを異常終了させる)。検証なしに新ルールを本番へ適用しない。
+- `modify.conf`や`drop.conf`でsidを`drop`化する変更は、まずステージング環境か`-T`検証および`suricatasc ruleset-reload-nonblocking`後のログ確認で誤検知による正規通信の遮断が発生しないことを確かめてから、本番の全センサーへ展開すること。
+- ET Open等の外部ルールソースは第三者配布物であり、自組織の環境や法令に照らして有効化前に内容を確認する。

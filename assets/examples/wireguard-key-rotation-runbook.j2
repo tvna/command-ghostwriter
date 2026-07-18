@@ -1,0 +1,97 @@
+# WireGuard鍵ローテーションの定期運用
+
+ピア鍵を無停止に近い形でローテーションする定期運用を、順序と検証つきで手順化します。
+
+## 目的
+
+WireGuardのピア鍵を定期的にローテーションする際に、新しい鍵の疎通を確認してから旧鍵を廃棄する安全な順序を理解し、ロックアウト（旧鍵削除後に新鍵が疎通せず接続不能になる事故）を防げるようになることを目指します。
+
+## 用語解説
+
+- **PublicKey / PrivateKey**: WireGuardの鍵ペア。`wg genkey` で秘密鍵を生成し、`wg pubkey` で対応する公開鍵を導出する
+- **[Peer]セクション**: サーバ・クライアントの `wg0.conf` 内で相手ピアのPublicKeyとAllowedIPsを定義するブロック
+- **AllowedIPs**: そのピア経由で許可する通信先CIDR。鍵更新時に取り違えると、意図しない経路にトラフィックが漏れたり通信不能になったりする
+- **latest handshake**: `wg show` で確認できる、そのピアと最後にハンドシェイクが成立した時刻。新鍵での疎通確認の根拠にする
+- **rotated_at / verified**: ローテーション台帳（CSV）の列。ローテーション実施日と、新鍵での疎通確認が完了したかどうかを記録する
+
+## シナリオ設定
+
+今回ローテーション対象は {{ csv_rows | length }} 件のピアです。台帳には `peer_name` / `old_pubkey` / `new_pubkey` / `rotated_at` / `verified` を記録します。
+
+| peer_name | old_pubkey | new_pubkey | rotated_at | verified |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["peer_name"] }} | {{ r["old_pubkey"] }} | {{ r["new_pubkey"] }} | {{ r["rotated_at"] }} | {{ r["verified"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 各ピアの新しい鍵ペアを生成する
+
+クライアント端末側で新しい秘密鍵・公開鍵を生成します（サーバへは公開鍵のみ渡します）。
+
+```bash
+{% for r in csv_rows %}umask 077
+wg genkey | tee /tmp/{{ r["peer_name"] }}-new.key | wg pubkey > /tmp/{{ r["peer_name"] }}-new.pub
+echo "{{ r["peer_name"] }} 新PublicKey(台帳記載値): {{ r["new_pubkey"] }}"
+{% endfor %}```
+
+### 2. サーバ側に新PublicKeyの[Peer]を追加する（旧Peerと並存させる）
+
+ここが最重要ポイントです。旧Peerブロックはまだ削除せず、新PublicKeyの`[Peer]`を追加のみ行います。
+
+```bash
+{% for r in csv_rows %}wg set wg0 peer {{ r["new_pubkey"] }} allowed-ips 10.10.0.0/24
+echo "{{ r["peer_name"] }}: 旧Peer({{ r["old_pubkey"] }})は維持したまま新Peerを追加しました"
+{% endfor %}wg-quick save wg0
+```
+
+### 3. クライアントconfのPrivateKeyを新鍵へ更新する
+
+クライアント側の `wg0.conf` の `[Interface]` セクションにある `PrivateKey` を、手順1で生成した新しい秘密鍵に置き換えます。
+
+```bash
+{% for r in csv_rows %}NEWKEY=$(cat /tmp/{{ r["peer_name"] }}-new.key)
+sed -i "s#^PrivateKey = .*#PrivateKey = ${NEWKEY}#" /etc/wireguard/{{ r["peer_name"] }}.conf
+wg-quick down {{ r["peer_name"] }}
+wg-quick up {{ r["peer_name"] }}
+{% endfor %}```
+
+### 4. wg showで新Peerのハンドシェイク確認を行う（旧Peer削除前に必須）
+
+新PublicKeyでのlatest handshakeが更新されるまで、次の手順5（旧Peer削除）へは進みません。
+
+```bash
+{% for r in csv_rows %}wg show wg0 latest-handshakes | grep {{ r["new_pubkey"] }}
+{% if r["verified"] == "true" %}echo "{{ r["peer_name"] }}: 新Peerのハンドシェイクを確認済み。旧Peer削除に進めます"
+{% else %}echo "{{ r["peer_name"] }}: 新Peerのハンドシェイク未確認。旧Peer({{ r["old_pubkey"] }})を削除してはいけません"
+{% endif %}{% endfor %}```
+
+### 5. 疎通確認済みのピアのみ旧Peerを削除する
+
+```bash
+{% for r in csv_rows %}{% if r["verified"] == "true" %}wg set wg0 peer {{ r["old_pubkey"] }} remove
+echo "{{ r["peer_name"] }}: 旧Peer({{ r["old_pubkey"] }})を削除しました"
+{% else %}echo "{{ r["peer_name"] }}: 未検証のため旧Peerは削除せず、次回運用まで維持します"
+{% endif %}{% endfor %}wg-quick save wg0
+```
+
+### 6. ローテーション台帳を更新する
+
+```bash
+{% for r in csv_rows %}echo "{{ r["peer_name"] }},{{ r["old_pubkey"] }},{{ r["new_pubkey"] }},{{ r["rotated_at"] }},{{ r["verified"] }}" >> /var/log/wireguard/rotation-ledger.csv
+{% endfor %}```
+
+## 動作確認
+
+- 全 {{ csv_rows | length }} 件のピアについて、`wg show wg0 latest-handshakes` で新PublicKeyのlatest handshakeが手順3のクライアント再接続以降の時刻に更新されていること
+- `verified` が `true` のピアのみ旧Peerが `wg show` の出力から消えていること
+- `verified` が `false` のピア（例: branch-osaka-gw）は旧Peerがまだ残っており、疎通未確認のまま削除されていないこと
+- ローテーション台帳（`/var/log/wireguard/rotation-ledger.csv`）に今回の全ピアの新旧鍵・実施日・検証結果が記録されていること
+
+## 注意事項
+
+- **ロックアウト防止順序を厳守する**: 新鍵でのハンドシェイク確認（手順4）が取れるまで、旧Peer（手順5）を絶対に削除しない。特にリモート拠点ルータ（branch-osaka-gwのような）は、ここを誤ると物理アクセスなしでは復旧できなくなる。
+- **AllowedIPsを鍵更新時に取り違えない**: 新Peer追加時のAllowedIPsは旧Peerと同一の値を設定すること。誤って別のCIDRを割り当てると、鍵のハンドシェイクは成立してもトラフィックが想定外の経路に流れたり、疎通できなくなったりする。
+- **旧鍵の廃棄**: 旧Peer削除後は、クライアント側に残る旧PrivateKeyファイル（`/tmp/*-new.key` の前世代ファイルや古い `wg0.conf` のバックアップ）を `shred -u` 等で確実に消去する。
+- **ローテーション台帳（CSV）での棚卸し**: `verified` が `false` のまま残ったピアは次回運用の最優先確認対象とし、台帳から取りこぼさない。
+- 本手順は運用担当者が定期的に（例: 四半期ごと）実施する想定であり、緊急時の鍵失効（漏えい対応）は別手順とする。

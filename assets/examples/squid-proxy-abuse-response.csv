@@ -1,0 +1,4 @@
+source_ip,request_count,pattern,action,root_cause,followup
+198.51.100.23,48210,CONNECT乱用による外部SMTPへの大量中継,ACLで送信元を遮断,http_accessでlocalnetの範囲が過大定義,遮断記録を証跡として保管
+203.0.113.77,15320,manager用URLへの外部からの連続アクセス,ACLで送信元を遮断,cachemgr_passwdの制限が緩くmanager URLが外部到達可能,再発防止のため定期的なaccess.log監査を追加
+192.0.2.140,9860,任意ポート宛CONNECTでのトンネル中継,ACLで送信元を遮断,SSL_portsにポート制限がなくCONNECTが全ポート許可,SSL_ports設定の是正をレビューに含める

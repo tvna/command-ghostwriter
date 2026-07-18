@@ -1,0 +1,4 @@
+test_dir: policy/tests
+coverage_threshold: 90
+fmt_check: true
+ci_required: true

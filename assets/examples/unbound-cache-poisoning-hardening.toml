@@ -1,0 +1,8 @@
+caps_for_id = true
+unwanted_reply_threshold = 10000000
+rrset_roundrobin = true
+
+[harden_options]
+harden_glue = true
+harden_referral_path = true
+harden_below_nxdomain = true

@@ -1,0 +1,163 @@
+# Wazuh期待アラートが出ない事象の調査 — {{ agent_name }}
+
+- **管理サーバ**: {{ manager_host }}
+- **収集対象ログ**: {{ log_source }}（形式: {{ log_format }}）
+- **期待するルールID**: {{ expected_rule_id }}（{{ expected_rule_description }}）
+
+## 目的
+
+「本来検知されるはずのイベントでアラートが上がらない」事象を、ログ収集・デコード・ルールマッチ・アラートレベルの4段階に切り分け、原因を特定できるようになることを目指します。
+
+## 用語解説
+
+- **localfile**: `ossec.conf` でWazuhエージェントに監視させるログファイルやコマンド出力を定義する設定ブロック
+- **decoder（デコーダ）**: 生ログをフィールド（`srcip`、`id`、`status`等）に分解するパーサー定義。マッチしないとログは未分解のまま扱われ、後続のルールが必要なフィールドを参照できない
+- **rule（ルール）**: デコード済みフィールドや`if_sid`（親ルールID）を条件に、ログをどのセキュリティイベントとして分類するかを定義する
+- **rule level（アラートレベル）**: ルールに設定される重要度。`ossec.conf`の`<alerts><log_alert_level>`（既定値3）未満のレベルはルールにマッチしてもアラートとして記録・通知されない
+- **wazuh-logtest**: 実ログを流し込み、どのデコーダ・ルールにマッチしどのレベルになるかをマネージャ上で対話的に確認できる最有力の切り分けツール
+- **analysisd**: マネージャ側でログの受信・デコード・ルール評価を行うデーモン。処理統計は状態ファイルから確認できる
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| エージェント | {{ agent_name }} |
+| ログソース | {{ log_source }} |
+| ログ形式 | {{ log_format }} |
+| 期待ルールID | {{ expected_rule_id }} |
+| 期待ルールの内容 | {{ expected_rule_description }} |
+| 想定デコーダ | {{ decoder_name }} |
+| 現状のデコード成否 | {{ decoded }} |
+| 現状のルールレベル | {{ rule_level }} |
+| サンプルログ | `{{ sample_log | safe }}` |
+
+{{ agent_name }} で {{ expected_rule_description }}（ルールID {{ expected_rule_id }}）が発報するはずのイベントが、Wazuhダッシュボード上に表示されません。ログ収集からアラート発報までの経路を順に切り分けます。
+
+## 手順
+
+### 1. ログがlocalfileとして収集されているか確認する
+
+まずエージェント側の`ossec.conf`に対象ログの`localfile`定義があるかを確認します。
+
+```bash
+sudo grep -A2 "{{ log_source }}" /var/ossec/etc/ossec.conf
+```
+
+定義がなければ、以下のブロックを追加して`localfile`を登録します。
+
+```xml
+<localfile>
+  <log_format>{{ log_format }}</log_format>
+  <location>{{ log_source }}</location>
+</localfile>
+```
+
+追加後はエージェントを再起動して反映します。
+
+```bash
+sudo systemctl restart wazuh-agent
+```
+
+### 2. マネージャ側でログが受信されているか確認する
+
+```bash
+sudo tail -f /var/ossec/logs/archives/archives.log | grep "{{ agent_name }}"
+```
+
+`archives.log`（`logall`有効時）にログが到達していない場合、localfile未登録か収集経路の問題です。手順1に戻ります。
+
+### 3. wazuh-logtestでデコード可否を確認する
+
+`wazuh-logtest`はマネージャ上でルール・デコーダを対話的に検証できる最有力の切り分けツールです。サンプルログを流し込みます。
+
+```bash
+sudo /var/ossec/bin/wazuh-logtest
+```
+
+対話プロンプトにサンプルログを1行貼り付けます。
+
+```
+{{ sample_log | safe }}
+```
+
+出力の`**Phase 2: Completed decoding.**`セクションを確認します。
+
+```
+**Phase 2: Completed decoding.**
+	name: '{{ decoder_name }}'
+	srcip: '192.0.2.10'
+	id: '403'
+```
+
+このセクションが空、または`decoder`名が表示されない場合はデコード失敗です。デコーダが未定義かログ書式が想定と異なり、フィールドが1件も抽出されていない状態を意味します。`/var/ossec/etc/decoders/local_decoder.xml`にデコーダを追加します。
+
+```xml
+<decoder name="{{ decoder_name }}">
+  <program_name>nginx</program_name>
+</decoder>
+<decoder name="{{ decoder_name }}">
+  <parent>{{ decoder_name }}</parent>
+  <regex>^(\S+) \S+ \S+ \S+ "\S+ (\S+) \S+" (\d+) \d+$</regex>
+  <order>srcip, url, id</order>
+</decoder>
+```
+
+### 4. ルールがマッチしているか、対象ルールIDと突き合わせる
+
+`wazuh-logtest`出力の`**Phase 3: Completed filtering (rules).**`セクションを確認します。
+
+```
+**Phase 3: Completed filtering (rules).**
+	id: '{{ expected_rule_id }}'
+	level: '{{ rule_level }}'
+	description: '{{ expected_rule_description }}'
+```
+
+`id`が期待ルールID（{{ expected_rule_id }}）と一致しない、または表示されない場合、ルールの`if_sid`条件（親デコーダ名の不一致）やルール順序（より広い条件の別ルールが先にマッチしローカルルールに到達しない）が原因です。`/var/ossec/etc/rules/local_rules.xml`のルール定義とルールファイルの読み込み順を確認します。
+
+```bash
+sudo grep -n "rule_id\|include" /var/ossec/etc/ossec.conf
+```
+
+### 5. ルールレベルがアラート閾値以上か確認する
+
+```bash
+sudo grep -A2 "log_alert_level" /var/ossec/etc/ossec.conf
+```
+
+`log_alert_level`（既定値3）に対し、対象ルールの現状レベルは{{ rule_level }}です。レベルが閾値未満だとルールにマッチしてもアラートとして記録・通知されません。`local_rules.xml`で当該ルールの`level`属性を引き上げます。
+
+```xml
+<rule id="{{ expected_rule_id }}" level="7">
+  <if_sid>31100</if_sid>
+  <status>403</status>
+  <description>{{ expected_rule_description }}</description>
+</rule>
+```
+
+### 6. analysisdの処理統計を確認する
+
+デコード・ルール評価自体は正常でも、受信超過でイベントが破棄されていないかを状態ファイルで確認します。
+
+```bash
+sudo cat /var/ossec/var/run/wazuh-analysisd.state
+```
+
+`events_processed`に対し`events_dropped`が継続的に増えている場合は、収集量増加後にanalysisdの処理が追い付いていない負荷起因の可能性があります。
+
+## 動作確認
+
+1. `sudo /var/ossec/bin/wazuh-logtest` にサンプルログ `{{ sample_log | safe }}` を投入し、`**Phase 2: Completed decoding.**` に `{{ decoder_name }}` が表示されること
+2. 同じ出力の `**Phase 3: Completed filtering (rules).**` で `id: '{{ expected_rule_id }}'` と `level` が閾値（`log_alert_level`）以上の値で表示されること
+3. `/var/ossec/logs/alerts/alerts.json` に該当イベントが実際に記録されること
+
+```bash
+sudo grep "\"rule\":{\"id\":\"{{ expected_rule_id }}\"" /var/ossec/logs/alerts/alerts.json | tail -1
+```
+
+## 注意事項
+
+- 原因は「ログ未到達（localfile未登録・収集経路の問題）」「デコーダ不一致（フィールド未抽出）」「ルールレベルが閾値未満」「ルール順序（より汎用的なルールが先にマッチ）」の4系統に大別されます。手順1〜5の順で切り分け、複数該当することもある前提で進めてください。
+- `local_rules.xml`や`local_decoder.xml`を変更した場合は、必ず`wazuh-logtest`で新しい定義が期待通りマッチすることを検証してから、`sudo systemctl restart wazuh-manager`で本番反映してください。既存の検知が壊れていないかも同じ対話セッションで確認し、旧ルールを無効化する前に新ルールが動作することを確認します。
+- `localfile`定義を追加してログ収集対象を増やすと、マネージャ側の受信・デコード負荷が増加します。手順6の`wazuh-analysisd.state`で`events_dropped`が増えていないか監視し、必要に応じて`analysisd`のワーカー数やキューサイズをチューニングしてください。
+- ルールレベルを引き上げる変更は既存の通知・SOAR連携のしきい値にも影響します。変更前に{{ escalation }}へ影響範囲を確認してください。

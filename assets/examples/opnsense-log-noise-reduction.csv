@@ -1,0 +1,7 @@
+noise_pattern,src_net,dst_port,decision,rationale
+NetBIOS Name Service broadcast,192.168.10.0/24,137,no-log-rule,内部LANの定常ブロードキャストで異常検知に寄与しないため
+SSDP (UPnP discovery) broadcast,192.168.10.0/24,1900,no-log-rule,家電・IoT機器の定期探索でセキュリティ上意味を持たないため
+既定拒否によるインターネットスキャン(WAN),0.0.0.0/0,23,no-log-rule,WAN側への定常的な自動スキャンで対応不要な既知ノイズのため
+RDPスキャン(WAN),0.0.0.0/0,3389,no-log-rule,WAN側への定常的な自動スキャンで対応不要な既知ノイズのため
+SSHブルートフォース試行(WAN→DMZ踏み台),0.0.0.0/0,22,keep,認証系への攻撃兆候でセキュリティ監視対象のため抑制しない
+DMZ向け不明ポートアクセス,0.0.0.0/0,8443,keep,DMZ区画への通信は監視対象のため抑制しない

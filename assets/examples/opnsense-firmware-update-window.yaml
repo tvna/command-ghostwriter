@@ -1,0 +1,8 @@
+maintenance_window: "2026-07-25 01:00-03:00 JST"
+current_version: "OPNsense 24.7.6"
+target_version: "OPNsense 24.7.10"
+notify_channels:
+  - "#network-maintenance (Slack)"
+  - "運用チームMLへの事前告知メール"
+  - "社内ステータスページの掲載"
+rollback_criteria: "WAN疎通・VPNトンネル・IPS・CARP状態のいずれかが更新後15分以内に復帰しない場合は切り戻す"

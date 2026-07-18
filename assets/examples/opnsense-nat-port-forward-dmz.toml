@@ -1,0 +1,19 @@
+wan_interface = "wan"
+wan_ip = "203.0.113.10"
+dmz_interface = "opt1"
+dmz_host = "10.0.100.20"
+lan_network = "10.0.10.0/24"
+nat_reflection = "purenat"
+temp_rule_descr = "TEMP-ALLOW-ALL-WAN-TO-DMZ-INIT"
+
+[[forward_ports]]
+proto = "tcp"
+ext_port = 443
+int_port = 443
+service = "https-app"
+
+[[forward_ports]]
+proto = "tcp"
+ext_port = 2222
+int_port = 22
+service = "ssh-admin"

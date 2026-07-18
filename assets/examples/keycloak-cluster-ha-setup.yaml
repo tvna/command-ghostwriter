@@ -1,0 +1,16 @@
+nodes:
+  - name: kc-node1
+    ip: 10.0.1.11
+  - name: kc-node2
+    ip: 10.0.1.12
+  - name: kc-node3
+    ip: 10.0.1.13
+cache_stack: jdbc-ping
+discovery_protocol: JDBC_PING
+shared_db:
+  host: pg-primary.internal
+  port: 5432
+  name: keycloak
+  user: keycloak_svc
+hostname: sso.example.com
+lb_endpoint: https://sso.example.com/

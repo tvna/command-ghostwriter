@@ -1,0 +1,12 @@
+[global]
+interface_name = "wg0"
+client_address = "10.20.0.2/32"
+endpoint = "vpn.example.internal:51820"
+internal_dns = "10.20.0.53"
+search_domains = ["corp.internal", "dev.corp.internal"]
+force_all_dns = false
+
+[global.split_dns]
+allowed_suffix = "corp.internal"
+external_probe_host = "www.example.com"
+internal_probe_host = "portal.corp.internal"

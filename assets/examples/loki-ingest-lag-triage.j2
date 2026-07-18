@@ -1,0 +1,124 @@
+# Lokiログ取り込み遅延・欠落の調査
+
+ログが検索に出てこない、あるいは表示までに遅延がある事象について、promtail・レート制限・ストレージの順に原因を切り分ける調査手順です。
+
+## 目的
+
+「Grafana上でログが検索に出ない/遅延する」という申告に対して、取り込みパイプラインを送信元(promtail)から順に切り分け、どの段で詰まっているかを特定し、遅延・欠落を解消できるようになることを目指します。
+
+## 用語解説
+
+- **取り込みパイプライン**: `promtail`(収集・送信) → `distributor`(受信・レート制限・シャーディング) → `ingester`(メモリ上でのチャンク保持・フラッシュ) → `storage`(オブジェクトストレージへの永続化)の順でログが流れる。どの段が詰まっているかで対処が異なる
+- **positionsファイル**: promtailが各ログファイルのどこまで読み取り済みかを記録するファイル(`{{ promtail_positions_file }}`)。破損・リセットすると再送(重複)や読み飛ばし(欠落)が起こる
+- **per_stream_rate_limit**: distributorが1ストリーム(ラベルの組み合わせ単位)あたりに許容する書き込み速度の上限。超過すると`429`とともに`loki_discarded_samples_total{reason="rate_limited"}`が増加し、超過分のログは欠落する
+- **ingesterのフラッシュ**: ingesterはログをメモリ上のチャンクに溜め、一定サイズ/時間でストレージにフラッシュする。ここが詰まると検索反映までの遅延として現れる
+- **timestampのずれ**: promtail稼働ホストの時刻がLokiサーバとずれていると、`entry too far behind`等でエントリが拒否されたり、検索時刻範囲の外に記録されて「検索に出ない」ように見えたりする
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 対象ストリーム | `{job="{{ job_label }}", environment="{{ environment_label }}"}` |
+| テナントID | `{{ tenant_id }}` |
+| promtail positionsファイル | `{{ promtail_positions_file }}` |
+| promtailメトリクスURL | `{{ promtail_metrics_url }}` |
+| Lokiメトリクス URL | `{{ loki_metrics_url }}` |
+| Loki問い合わせURL | `{{ loki_query_url }}` |
+| limits_config設定ファイル | `{{ limits_config_path }}` |
+| 現在のper_stream_rate_limit | `{{ per_stream_rate_limit_mb }}` MB/s (burst `{{ per_stream_rate_limit_burst_mb }}` MB) |
+| ストレージバックエンド | `{{ storage_backend }}` (`{{ storage_bucket }}`) |
+| 観測された時刻ずれ | `{{ timestamp_skew }}` |
+
+## 手順
+
+### 1. promtail側を確認する(送信・欠落の有無)
+
+```bash
+curl -s {{ promtail_metrics_url }} | grep -E "promtail_sent_bytes_total|promtail_dropped_bytes_total|promtail_read_bytes_total"
+sudo systemctl status promtail --no-pager
+cat {{ promtail_positions_file }}
+```
+
+{% if promtail_metrics_check %}
+→ `promtail_dropped_bytes_total`が増加している場合、promtail自体が送信できずログを破棄しています。`promtail`のログ(`journalctl -u promtail`)でLokiへの接続エラー(タイムアウト、TLS証明書エラー等)がないか確認してください。
+{% else %}
+→ 今回は`promtail_dropped_bytes_total`の増加は見られず、`promtail_sent_bytes_total`は継続して増加しています。promtail側での送信・欠落は原因ではないと判断し、次段(distributor/レート制限)の確認に進みます。
+{% endif %}
+
+### 2. distributorのレート制限(429)を確認する
+
+```bash
+curl -s {{ loki_metrics_url }} | grep -E "loki_discarded_samples_total|loki_request_duration_seconds_count.*429"
+sudo journalctl -u loki --since "1 hour ago" | grep -i "429\|rate_limited\|per-stream"
+```
+
+{% if rate_limit_429 %}
+→ `loki_discarded_samples_total{reason="rate_limited", tenant="{{ tenant_id }}"}`が増加しており、`{job="{{ job_label }}", environment="{{ environment_label }}"}`のストリームで`429 Too Many Requests`が発生していることを確認しました。現在の`per_stream_rate_limit`は`{{ per_stream_rate_limit_mb }}`MB/s(burst `{{ per_stream_rate_limit_burst_mb }}`MB)で、対象ストリームの実測書き込み速度がこれを上回っています。この時点で原因は特定できたため、手順4(是正)に進みます。
+{% else %}
+→ `rate_limited`による破棄は見られませんでした。distributor側の制限は原因ではないため、次段(ingester)の確認に進みます。
+{% endif %}
+
+### 3. ingesterのフラッシュ状況を確認する
+
+```bash
+curl -s {{ loki_metrics_url }} | grep -E "loki_ingester_chunks_flushed_total|loki_ingester_chunks_stored_total|loki_ingester_memory_chunks"
+sudo journalctl -u loki --since "1 hour ago" | grep -iE "ingester|flush|failed to write to|{{ storage_backend }}"
+```
+
+{% if ingester_check %}
+→ `loki_ingester_memory_chunks`が増加を続け`loki_ingester_chunks_flushed_total`が伸びていない場合、ingesterがチャンクをフラッシュできず滞留しています。`{{ storage_backend }}`(`{{ storage_bucket }}`)への書き込みエラーがログに出ていないか確認し、ストレージ側の認証情報・疎通・容量を点検してください。
+{% else %}
+→ 前段(手順2)で`{job="{{ job_label }}", environment="{{ environment_label }}"}`のレート制限超過を原因として特定できたため、本手順ではingesterのフラッシュ状況に異常が無いことの確認のみ行い、深追いは行いません。フラッシュ関連メトリクスに異常があれば別途この手順を主経路として調査してください。
+{% endif %}
+
+### 4. レート制限を是正する
+
+```bash
+sudo cp {{ limits_config_path }} {{ limits_config_path }}.bak.$(date +%Y%m%d%H%M)
+sudo vi {{ limits_config_path }}
+```
+
+`limits_config`セクションの値を、現在の実測書き込み速度に見合う水準へ引き上げます。
+
+```yaml
+limits_config:
+  per_stream_rate_limit: {{ per_stream_rate_limit_mb }}MB
+  per_stream_rate_limit_burst: {{ per_stream_rate_limit_burst_mb }}MB
+```
+
+```bash
+sudo systemctl reload loki || sudo systemctl restart loki
+```
+
+### 5. timestampのずれを確認・是正する
+
+```bash
+timedatectl status
+curl -s {{ loki_metrics_url }} | grep -E "loki_ingester_oldest_unflushed_chunk_timestamp_seconds"
+```
+
+→ promtail稼働ホストとLokiサーバの時刻を突き合わせ、`{{ timestamp_skew }}`のずれが確認された場合はNTP同期(`sudo systemctl restart chronyd`または`sudo systemctl restart systemd-timesyncd`)を行い、ずれが解消するまで`timedatectl status`で追跡します。
+
+## 動作確認
+
+1. `curl -s {{ loki_metrics_url }} | grep loki_discarded_samples_total`で`reason="rate_limited"`のカウンタが増加を止めていること
+2. 再現確認として、対象アプリからログを再送出し、下記クエリで数分以内に検索結果へ反映されることを確認する
+
+```bash
+curl -sG {{ loki_query_url }} \
+  --data-urlencode 'query={job="{{ job_label }}", environment="{{ environment_label }}"}' \
+  --data-urlencode 'start='$(date -d '5 minutes ago' +%s%N) \
+  --data-urlencode 'end='$(date +%s%N) \
+  -H "X-Scope-OrgID: {{ tenant_id }}"
+```
+
+3. `timedatectl status`で promtail稼働ホストとLokiサーバの時刻差が解消していること(`{{ timestamp_skew }}`のずれが無くなっていること)
+4. `loki_ingester_memory_chunks`と`loki_ingester_chunks_flushed_total`が定常的に増減しており、滞留(memory_chunksのみが増え続ける状態)が無いこと
+
+## 注意事項
+
+- `per_stream_rate_limit`の引き上げはメモリ・ディスクI/Oの負荷増加を伴う。引き上げ幅は実測値に対して余裕を持たせつつ、際限なく緩めず、根本原因(高頻度書き込み元アプリのバッチ化・サンプリング)の是正も合わせて追跡すること。
+- `{{ promtail_positions_file }}`を削除・リセットするとpromtailはファイルの現在位置(末尾)または先頭から再読込を行うため、削除前に必ず現在の実装(`--path.prefix`や`limits`設定)を控え、リセット後は同一時間帯のログが重複記録されていないか、あるいは欠落していないかを`{{ loki_query_url }}`への問い合わせで確認すること。
+- `timestamp_skew`(`{{ timestamp_skew }}`)が大きいまま運用を続けると、書き込み時にエントリが拒否される、または検索時刻範囲の外側に記録され「ログが出ない」ように見える事象が再発するため、NTP同期の恒久的な監視を追加すること。
+- 高cardinality(ラベルの組み合わせが多すぎる)なストリーム設計はingesterのメモリ使用量を急増させ、フラッシュ遅延・OOMの原因になる。ラベルにリクエストIDやユーザーIDのような高カーディナリティな値を含めていないか、本調査と合わせて確認すること。
+- `limits_config`の変更やNTP同期先の切替は、まず1台(または1テナント)で適用して`{{ loki_query_url }}`への問い合わせで検索反映が正常化することを確認してから、他のホスト・テナントへ展開すること。旧設定への切り戻し手順(`{{ limits_config_path }}.bak.*`からの復元)も事前に用意しておくこと。

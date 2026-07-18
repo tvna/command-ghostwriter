@@ -1,0 +1,132 @@
+# Vault Transitによる暗号化サービス構成 — {{ app_name }}
+
+HashiCorp Vaultの transit secrets engine を使い、`{{ app_name }}` がマスター鍵そのものを保持せずに暗号化・復号を行える構成（Encryption as a Service, EaaS）を手順化します。
+
+## 目的
+
+アプリケーションに暗号鍵を配布せず、Vaultへ平文を渡して暗号文を受け取る（またはその逆）運用方式を理解し、鍵ローテーションとキーバージョン管理を安全に運用できるようになることを目指します。
+
+## 用語解説
+
+- **EaaS（Encryption as a Service）**: アプリが鍵そのものを保持せず、暗号化/復号の処理だけをVaultなど中央サービスに委譲する方式
+- **transit secrets engine**: Vaultが提供する、鍵の保管とデータ保存を分離した暗号処理専用のsecrets engine
+- **キーバージョン**: `vault write -f transit/keys/<key>/rotate` を実行するたびに追加される鍵の世代。暗号文には使用したバージョン番号が埋め込まれる
+- **min_decryption_version**: このバージョンより古い鍵バージョンでの復号を拒否する設定値。古い鍵の使用を強制的に終了させる
+- **rewrap**: 平文を経由せず、暗号文を古い鍵バージョンから最新の鍵バージョンへ暗号文のまま再暗号化する操作
+- **convergent encryption**: 同じ平文から常に同じ暗号文を生成する方式。検索性は上がるが、暗号文から平文の重複が推測されうるリスクを伴う
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| Vaultアドレス | `{{ vault_addr }}` |
+| transitマウントパス | `{{ transit_mount }}` |
+| 対象アプリ | `{{ app_name }}` |
+| 鍵名 | `{{ key_name }}` |
+| 鍵タイプ | `{{ key_type }}` |
+| ローテーション周期 | `{{ rotation_period }}` |
+| min_decryption_version | `{{ min_decryption_version }}` |
+| convergent | `{{ convergent }}` |
+
+## 1. transit secrets engineの有効化と鍵の作成
+
+```bash
+export VAULT_ADDR="{{ vault_addr }}"
+
+vault secrets enable -path={{ transit_mount }} transit
+
+vault write -f {{ transit_mount }}/keys/{{ key_name }} \
+  type={{ key_type }} \
+{% if convergent %}
+  convergent_encryption=true \
+  derived=true
+{% else %}
+  convergent_encryption=false
+{% endif %}
+
+vault read {{ transit_mount }}/keys/{{ key_name }}
+```
+
+## 2. アプリ用ポリシーの割り当て（暗号鍵そのものは渡さない）
+
+`{{ app_name }}` には `{{ transit_mount }}/encrypt/{{ key_name }}` と `{{ transit_mount }}/decrypt/{{ key_name }}` への書き込み権限のみを与え、`{{ transit_mount }}/keys/{{ key_name }}` の読み取りやエクスポートは許可しません。
+
+```bash
+vault policy write {{ app_name }}-transit - <<'EOF'
+path "{{ transit_mount }}/encrypt/{{ key_name }}" {
+  capabilities = ["update"]
+}
+path "{{ transit_mount }}/decrypt/{{ key_name }}" {
+  capabilities = ["update"]
+}
+path "{{ transit_mount }}/rewrap/{{ key_name }}" {
+  capabilities = ["update"]
+}
+EOF
+```
+
+## 3. 暗号化と復号の往復
+
+平文は必ずbase64化してから渡し、生の平文をログへ残しません。
+
+```bash
+PLAINTEXT_B64=$(printf '%s' "{{ plaintext_sample }}" | base64)
+
+CIPHERTEXT=$(vault write -field=ciphertext {{ transit_mount }}/encrypt/{{ key_name }} \
+  plaintext="${PLAINTEXT_B64}")
+echo "ciphertext: ${CIPHERTEXT}"
+
+DECRYPTED_B64=$(vault write -field=plaintext {{ transit_mount }}/decrypt/{{ key_name }} \
+  ciphertext="${CIPHERTEXT}")
+echo "${DECRYPTED_B64}" | base64 --decode
+```
+
+## 4. 鍵ローテーション
+
+```bash
+vault write -f {{ transit_mount }}/keys/{{ key_name }}/rotate
+
+vault read {{ transit_mount }}/keys/{{ key_name }}
+```
+
+ローテーション後も、`min_decryption_version` を引き上げるまでは旧バージョンの鍵で暗号化された既存の暗号文をそのまま復号できることを確認します。
+
+```bash
+vault write -field=plaintext {{ transit_mount }}/decrypt/{{ key_name }} \
+  ciphertext="${CIPHERTEXT}"
+```
+
+## 5. rewrapで暗号文を最新鍵バージョンへ更新する
+
+平文を経由せず、既存の暗号文だけを最新の鍵バージョンで再暗号化します。
+
+```bash
+REWRAPPED=$(vault write -field=ciphertext {{ transit_mount }}/rewrap/{{ key_name }} \
+  ciphertext="${CIPHERTEXT}")
+echo "rewrapped: ${REWRAPPED}"
+```
+
+## 6. min_decryption_versionによる旧鍵バージョンの無効化
+
+すべての暗号文がrewrap済みであることを確認したうえで、旧バージョンでの復号を拒否する設定に引き上げます。
+
+```bash
+vault write {{ transit_mount }}/keys/{{ key_name }}/config \
+  min_decryption_version={{ min_decryption_version }} \
+  deletion_allowed=false
+```
+
+## 動作確認
+
+1. Step 3の暗号化→復号の往復で、`{{ plaintext_sample }}` が過不足なく復元されること
+2. Step 4のローテーション後も、旧バージョンで暗号化された `${CIPHERTEXT}` がStep 4の復号コマンドで引き続き復号できること（min_decryption_version引き上げ前）
+3. Step 5のrewrap後、`${REWRAPPED}` がStep 3と同じ復号コマンドで復元できること
+4. Step 6でmin_decryption_versionを引き上げた後は、`${CIPHERTEXT}`（rewrap前の旧バージョン暗号文）の復号がVaultからエラーで拒否されること
+
+## 注意事項
+
+- transitは暗号処理を提供するだけで、データそのものをVault内に保管する機能ではない。暗号文の保存先はアプリ側のデータストアであり、Vaultは平文・暗号文いずれも永続化しない。
+- 平文は必ずbase64でエンコードしてVaultへ渡し、生の平文（{{ plaintext_sample }} のような値）をログやシェル履歴に残さない。
+- `min_decryption_version` を引き上げると、それより古い鍵バージョンで暗号化されたデータは復号できなくなる。Step 6の前に、対象データがすべてStep 5のrewrapで最新バージョンへ移行済みであることを確認してから引き上げる。
+- 鍵ローテーション周期は `{{ rotation_period }}` を目安とし、ローテーション直後は新旧バージョンが並存する期間を設けたうえで、rewrapが完了してからmin_decryption_versionを引き上げる。
+- アプリ（`{{ app_name }}`）には鍵の読み取り・エクスポート権限を与えず、encrypt/decrypt/rewrapのAPIのみを許可することで、鍵自体がアプリ側に渡らない構成を維持する。

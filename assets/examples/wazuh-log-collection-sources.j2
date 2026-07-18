@@ -1,0 +1,117 @@
+# Wazuhログ収集ソースの設計と追加
+
+`ossec.conf` の `<localfile>` ブロックで、OS・監査・アプリケーションのログを新たに収集対象へ追加する手順です。
+
+## 目的
+
+台帳(CSV)に基づき、エージェント(または監視対象サーバ)の `ossec.conf` に `<localfile>` を追加し、
+Wazuhマネージャまでログが到達してアラート・デコード対象になることを確認できるようにします。
+
+## 用語解説
+
+- **localfile**: `ossec.conf` 内で1つの収集対象(ファイル・コマンド)を定義するブロック。`log_format` によって扱いが変わる
+- **log_format: syslog**: 行単位のテキストログとして扱い、既存のsyslog系デコーダ(`sshd`等)でパースする
+- **log_format: json**: 1行1JSONのログをそのままJSONとしてパースする。アプリ側が構造化ログを出力している場合に使う
+- **log_format: audit**: Linux監査サブシステム(auditd)のログ行を専用パーサで解釈し、`auditd`デコーダ/ルールへ連携する
+- **log_format: command / full_command**: 指定したコマンドをエージェントが定期実行し、標準出力をログとして収集する。`frequency`(秒)で実行間隔を制御する
+- **target_decoder**: そのソースを解釈するために使うWazuhデコーダ名(台帳上の想定値。実際のマッチはデコーダ側のパターン次第)
+- **wazuh-logtest**: マネージャ上でルール・デコーダのマッチングをオフラインで検証できるCLIツール
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 件のログ収集ソースを追加します。
+
+| log_source | log_format | path_or_command | target_decoder | note |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["log_source"] }} | {{ r["log_format"] }} | {{ r["path_or_command"] }} | {{ r["target_decoder"] }} | {{ r["note"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 現在の収集設定を確認する
+
+変更前に既存の `<localfile>` 定義との重複がないか確認します。
+
+```bash
+sudo grep -A3 "<localfile>" /var/ossec/etc/ossec.conf
+sudo /var/ossec/bin/wazuh-control status
+```
+
+### 2. localfileブロックを追加する
+
+`log_format` ごとに構成が異なるため、CSVの行に応じてタグを分けます。`syslog`/`json`/`audit` は
+`<location>` にファイルパスを指定し、`command`/`full_command` は `<command>` と `<frequency>` を指定します。
+
+```bash
+sudo cp /var/ossec/etc/ossec.conf /var/ossec/etc/ossec.conf.bak.$(date +%Y%m%d%H%M%S)
+sudo tee -a /var/ossec/etc/ossec.conf.d/localfile-additions.conf <<'EOF'
+{% for r in csv_rows %}<localfile>
+  <log_format>{{ r["log_format"] }}</log_format>
+{% if r["log_format"] == "full_command" %}  <command>{{ r["path_or_command"] }}</command>
+  <frequency>300</frequency>
+{% elif r["log_format"] == "command" %}  <command>{{ r["path_or_command"] }}</command>
+  <frequency>60</frequency>
+{% else %}  <location>{{ r["path_or_command"] }}</location>
+{% endif %}</localfile>
+{% endfor %}EOF
+```
+
+`command`/`full_command` はエージェントが任意コマンドを定期実行して収集する設計になるため、
+実行ユーザーの権限と出力内容を必ず事前に確認してください(詳細は注意事項)。
+
+### 3. 設定を反映する
+
+構文検証してからサービスを再起動します。
+
+```bash
+sudo /var/ossec/bin/wazuh-control configcheck
+sudo systemctl restart wazuh-agent
+sudo /var/ossec/bin/wazuh-control status
+```
+
+### 4. wazuh-logtestでデコード・ルールマッチを事前検証する
+
+サービス再起動前後どちらでも、実際のログ行をサンプルとして流し込み、デコーダ・ルールに
+到達するかをオフラインで確認できます。
+
+```bash
+{% for r in csv_rows %}{% if r["log_format"] != "command" and r["log_format"] != "full_command" %}sudo /var/ossec/bin/wazuh-logtest <<'EOF'
+$(tail -n1 {{ r["path_or_command"] }})
+EOF
+{% endif %}{% endfor %}```
+
+### 5. 各ソースを実際に発火させてイベント到達を確認する
+
+`syslog`/`json`/`audit` は対象への操作でログを発生させ、`command`/`full_command` は
+次回実行タイミングまで待つか手動で1回実行して確認します。
+
+```bash
+{% for r in csv_rows %}{% if r["log_format"] == "full_command" or r["log_format"] == "command" %}{{ r["path_or_command"] }}
+{% else %}sudo tail -n5 {{ r["path_or_command"] }}
+{% endif %}{% endfor %}```
+
+## 動作確認
+
+- 手順4の `wazuh-logtest` で、各 `syslog`/`json`/`audit` ソースが期待する `target_decoder` に到達していること
+- マネージャ側で `sudo /var/ossec/bin/wazuh-control status` の全プロセスが `running` であること
+- `sudo tail -n 50 /var/ossec/logs/alerts/alerts.log` に、追加したソースに対応するアラート(または少なくともイベント)が出力されること
+- `command`/`full_command` ソースについては、`frequency` で設定した間隔どおりに実行された形跡が `ossec.log` にあること
+
+```bash
+sudo tail -n 20 /var/ossec/logs/ossec.log
+sudo tail -n 50 /var/ossec/logs/alerts/alerts.log
+```
+
+## 注意事項
+
+- `command`/`full_command` の `log_format` はエージェントが任意のコマンドをroot権限相当で定期実行する経路になるため、
+  コマンド自体の妥当性・実行権限・出力に機微情報(パスワード、鍵、個人情報等)が含まれないかを追加前に必ず確認する。
+  出力にPIIが含まれる場合はコマンド側でマスキングしてから収集対象にすること。
+- 収集したログ自体にPIIや認証情報が含まれる可能性があるため、マネージャ側の保管期間・アクセス権限(`/var/ossec/logs`のパーミッション)を
+  既存の保全ポリシーに合わせて設定する。
+- 収集対象を無計画に増やすと、イベント量の増大でマネージャの解析負荷・ディスク使用量が増大する。追加は目的(note列)が
+  明確なソースに限定し、追加後は `sudo /var/ossec/bin/wazuh-control status` とマネージャのCPU/メモリ使用率を監視する。
+- 既存の収集経路(旧`localfile`定義や他の監視手段)を無効化・削除する場合は、手順4・5で新しい経路のイベント到達を
+  確認できるまで旧経路を残し、並行稼働させたうえで撤去すること。
+- `ossec.conf` は事前にバックアップを取得しており、`configcheck` が失敗した場合は
+  `sudo cp /var/ossec/etc/ossec.conf.bak.<timestamp> /var/ossec/etc/ossec.conf` で即座にロールバックできる。

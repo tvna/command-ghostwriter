@@ -1,0 +1,21 @@
+app_name = "billing-api"
+job_label = "billing-api-logs"
+log_path = "/var/log/billing-api/app.log"
+promtail_config_path = "/etc/promtail/config.yml"
+loki_query_url = "http://localhost:3100/loki/api/v1/query_range"
+tenant_id = "billing-api-logs"
+multiline_firstline = '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}'
+max_wait_time = "3s"
+timestamp_source = "timestamp"
+timestamp_format = "2006-01-02T15:04:05.000Z07:00"
+wrong_timestamp_format = "2006-01-02T15:04:05Z07:00"
+observed_skew = "9時間"
+
+test_log_sample = '''
+2026-07-15T09:12:31.482+09:00 ERROR OrderService: failed to charge card
+java.lang.NullPointerException: null
+    at com.example.billing.OrderService.charge(OrderService.java:88)
+    at com.example.billing.OrderController.pay(OrderController.java:41)
+    at java.base/java.lang.Thread.run(Thread.java:840)
+2026-07-15T09:12:35.101+09:00 INFO OrderService: retry succeeded
+'''

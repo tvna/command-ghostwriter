@@ -1,0 +1,134 @@
+# Wazuh SCAによる構成コンプライアンス評価
+
+Security Configuration Assessment(SCA)モジュールで、エージェント配下ホストのCISベンチマーク適合状況を評価し、カスタムポリシーで自組織固有の基準を追加する手順です。
+
+## 目的
+
+Wazuhの組込みSCAポリシー(CISベンチマーク)を有効化し、加えて自組織のセキュリティ基準をカスタムポリシーとして定義することで、構成のコンプライアンス状態を継続的にスコアリングできるようにします。SCAはあくまで「評価」であり、検出した不適合の是正は別作業であることを前提に手順を進めます。
+
+## 用語解説
+
+- **SCA(Security Configuration Assessment)**: Wazuhエージェントがホスト上でポリシーのチェック項目を評価し、pass/fail/not applicableを判定するモジュール
+- **ポリシー(policy)**: `checks:` のリストを持つYAMLファイル。CIS Benchmarkなど既存の基準に対応した組込みポリシーと、自組織で定義するカスタムポリシーがある
+- **チェック(check)**: ポリシー内の評価単位。`id` / `title` / `condition` / `rules` を持ち、`condition` は `all`(全rule成立でpass)・`any`(いずれか成立でpass)・`none`(いずれも不成立でpass)を指定する
+- **ruleプレフィックス**: `f:`(ファイル内容の正規表現一致)、`c:`(コマンド出力の正規表現一致)、`d:`(ディレクトリ存在)、`p:`(プロセス存在)などがあり、`->` の右側に判定条件(`r:正規表現` など)を書く
+- **SCAスコア**: ポリシーごとの `pass / (pass + fail)` の割合。ダッシュボードの「Security configuration assessment」モジュールで確認できる
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| SCAモジュール有効化 | {{ sca_enabled }} |
+| スキャン間隔 | {{ scan_interval }} |
+| 適用ポリシー数 | {{ policies | length }} |
+| カスタムチェック数 | {{ custom_policy_checks | length }} |
+
+適用するポリシー:
+{% for p in policies %}
+- `{{ p }}`
+{% endfor %}
+
+## 手順
+
+### 1. ossec.confでSCAモジュールと適用ポリシーを設定する
+
+エージェント(またはマネージャ配下の `shared` 設定)の `ossec.conf` に `<sca>` ブロックを追加します。
+
+```xml
+<ossec_config>
+  <sca>
+    <enabled>{% if sca_enabled %}yes{% else %}no{% endif %}</enabled>
+    <scan_on_start>yes</scan_on_start>
+    <interval>{{ scan_interval }}</interval>
+{% for p in policies %}
+    <policies>
+      <policy>{{ p }}</policy>
+    </policies>
+{% endfor %}
+  </sca>
+</ossec_config>
+```
+
+設定反映後、エージェント(またはマネージャ)を再起動します。
+
+```bash
+sudo systemctl restart wazuh-agent
+```
+
+### 2. 組込みCISポリシーを有効化する
+
+組込みポリシーは `/var/ossec/ruleset/sca/` に配置されています。対象OSに合致するファイルが存在することを確認します。
+
+```bash
+ls -l /var/ossec/ruleset/sca/ | grep cis_
+```
+
+該当ファイルが無い場合は、Wazuhのルールセットアップデート(`wazuh-manager` のアップデート、または公式ルールセットの再取得)でCISポリシーを追加してから、上記の`<policies>`に記載します。
+
+### 3. カスタムSCAポリシーを作成する
+
+自組織固有の基準(SSH設定・ファイアウォール状態・危険なパーミッションの有無など)をカスタムポリシーとして定義します。マネージャ側で共有フォルダに配置し、エージェントへ配布します。
+
+```bash
+sudo tee /var/ossec/etc/shared/default/sca_custom_ssh_hardening.yml <<'EOF'
+policy:
+  id: "custom_ssh_hardening"
+  file: "sca_custom_ssh_hardening.yml"
+  name: "自組織カスタムSCAポリシー"
+  description: "SSH/ファイアウォール/ファイルパーミッションの独自基準"
+
+checks:
+{% for c in custom_policy_checks %}
+  - id: {{ c.id }}
+    title: "{{ c.title }}"
+    condition: {{ c.condition }}
+    rules:
+{% for r in c.rules %}
+      - "{{ r.expr }} -> {{ r.match }}"
+{% endfor %}
+{% endfor %}
+EOF
+```
+
+配布後、マネージャ側でエージェントグループの再同期を行います。
+
+```bash
+sudo /var/ossec/bin/agent_groups -a -g default
+```
+
+### 4. 意図的な非準拠設定でfail検出を確認する
+
+チェックが実際に機能していることを確認するため、一時的にルールに反する設定を作り、fail判定されることを確認します。たとえばチェックID {{ custom_policy_checks[0].id }}(「{{ custom_policy_checks[0].title }}」)を検証する場合、対象ホストで意図的にSSHのrootログインを許可してみます。
+
+```bash
+sudo cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
+sudo sed -i 's/^PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+sudo systemctl reload sshd
+```
+
+SCAスキャンを手動実行し、結果を待ちます。
+
+```bash
+sudo /var/ossec/bin/wazuh-control restart
+```
+
+確認が終わったら、必ず元の設定へ戻します。
+
+```bash
+sudo cp /etc/ssh/sshd_config.bak /etc/ssh/sshd_config
+sudo systemctl reload sshd
+```
+
+## 動作確認
+
+- Wazuhダッシュボードの「Security configuration assessment」モジュールで、対象ホストのポリシーごとのスコア(pass/fail件数)が表示されること
+- カスタムポリシー(ID: custom_ssh_hardening)の個別チェック結果として、{{ custom_policy_checks | length }}件のチェックがpass/failいずれかで一覧表示されること
+- 手順4で意図的にSSHのrootログインを許可した際、チェックID {{ custom_policy_checks[0].id }} が一時的にfailへ遷移し、設定を元に戻した後の次回スキャンでpassへ復帰すること
+- 個別チェックの詳細画面で、該当ルール(`{{ custom_policy_checks[0].rules[0].expr }} -> {{ custom_policy_checks[0].rules[0].match }}`)が判定根拠として表示されること
+
+## 注意事項
+
+- SCAは構成の**評価**であり、fail検出後の是正(実際の設定変更)は本手順の範囲外の別作業です。SCAの結果を自動で反映・修復する仕組みではありません。
+- カスタムポリシーの `c:` (コマンド)チェックは、Wazuhエージェントの実行権限でホスト上にてそのまま実行されます。任意のシェル入力を反映するような可変コマンドを `rules` に含めないこと。チェック内容は必ずレビューしてからマネージャに配布してください。
+- 組込みCISポリシー(`cis_*.yml`)にはベンチマークのバージョンが対応付けられています。OSやCISベンチマークの版が上がった際は、対応するポリシーファイルへの更新有無を都度確認し、古いバージョンのまま放置しないこと。
+- 手順4でSSH設定を意図的に緩めて検証する際は、rootログインを許可する前に別セッション(または別の認証手段)で接続確認を取り、検証中に対象ホストへ再接続できなくなるロックアウトを避けること。検証後は速やかに元の設定へ戻し、`systemctl reload sshd` で反映を確認する。

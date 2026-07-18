@@ -1,0 +1,90 @@
+# Lynisカーネル・sysctlハードニング監査
+
+Lynisのaudit system実行で得られたカーネル/ネットワーキングカテゴリのsuggestionに基づき、`{{ lynis.sysctl_conf_file }}` にsysctlハードニング設定を段階的に適用し、hardening indexの改善を確認する変更手順です。
+
+## 目的
+
+Lynisのsuggestion ID（KRNL/NETW系）が指摘するsysctlパラメータの意味を理解し、`/etc/sysctl.d/` へのドロップイン投入によって安全に永続化・検証・切り戻しできるようになることを目指します。
+
+## 用語解説
+
+- **Lynis audit system**: システムのセキュリティ設定を走査し、hardening indexとsuggestion（改善提案）を出力するコマンド
+- **hardening index**: Lynisが算出する0〜100のスコアで、適用済みの強化策の割合を示す
+- **sysctl**: カーネルパラメータを実行時に読み書きするコマンド、および `/proc/sys/` 配下の設定
+- **/etc/sysctl.d/**: 起動時に読み込まれるsysctl設定のドロップインディレクトリ（永続化先）
+- **kernel.randomize_va_space**: ASLR（アドレス空間配置のランダム化）の強度を制御するパラメータ
+- **rp_filter (Reverse Path Filtering)**: 送信元IPが応答経路と矛盾するパケットを破棄する仕組み。非対称経路構成では正規パケットを誤って破棄する可能性がある
+- **tcp_syncookies**: SYN flood攻撃への耐性を高めるためTCP接続確立をcookieで検証する仕組み
+- **accept_source_route**: 送信元ルーティング指定パケットの受理可否を制御するパラメータ
+
+## シナリオ設定
+
+| suggestion_id | key | 現在値 | 推奨値 | 影響メモ |
+| --- | --- | --- | --- | --- |
+{% for s in sysctl_settings %}| {{ s.suggestion_id }} | `{{ s.key }}` | {{ s.current_value }} | {{ s.recommended_value }} | {{ s.impact_note }} |
+{% endfor %}
+
+- Lynis hardening index（適用前）: {{ lynis.audit_index_before }}
+- 目標hardening index（適用後）: {{ lynis.audit_index_after_target }} 以上
+- 永続化先: `{{ lynis.sysctl_conf_file }}`
+- 切り戻し用バックアップ: `{{ lynis.rollback_file }}`
+
+## 1. Lynis audit systemでsuggestionを確認する
+
+```bash
+sudo lynis audit system --quick
+sudo grep -E "KRNL-|NETW-" /var/log/lynis-report.dat
+```
+
+出力中の `hardening_index=` の値が {{ lynis.audit_index_before }} 前後であることを確認し、上記シナリオ設定の各 `suggestion_id` が実際にレポートへ現れていることを確認します。
+
+## 2. 現在値をバックアップしてから、別セッションを確保する
+
+`net.ipv4.conf.*.rp_filter` はネットワーク経路に影響するため、変更前に必ず**もう一つ別のSSHセッションを開いたまま**にしておきます。万一rp_filter変更で現在のセッションの通信が破棄されても、別セッションから復旧作業ができるようにするためです。
+
+```bash
+{% for s in sysctl_settings %}sudo sysctl -n {{ s.key }} | sudo tee -a {{ lynis.rollback_file }}.values
+{% endfor %}```
+
+上記コマンドは各パラメータの現在値を `{{ lynis.rollback_file }}.values` に記録し、切り戻し時の参照値とします。
+
+## 3. ランタイムへ1項目ずつ段階適用し、都度疎通確認する
+
+一括反映はせず、1項目ずつ `sysctl -w` でランタイムに適用し、別セッションからの疎通（SSH再接続やping等）を確認してから次へ進みます。
+
+```bash
+{% for s in sysctl_settings %}sudo sysctl -w {{ s.key }}={{ s.recommended_value }}
+# 別セッションから疎通確認: ssh再接続、ping等が成功することを確認してから次へ進む
+{% endfor %}```
+
+途中で疎通が失敗した場合は、直前の項目のみ `sudo sysctl -w <key>=<バックアップ値>` で即座に戻し、原因（経路構成やマルチホーム構成の有無）を切り分けてから再度進めます。
+
+## 4. 疎通確認が取れた設定を永続化ファイルへ書き出す
+
+```bash
+{% for s in sysctl_settings %}echo "{{ s.key }} = {{ s.recommended_value }}" | sudo tee -a {{ lynis.sysctl_conf_file }}
+{% endfor %}```
+
+## 5. 永続化ファイルを反映し、値を検証する
+
+```bash
+{{ lynis.verify_command }}
+{% for s in sysctl_settings %}sysctl {{ s.key }}
+{% endfor %}```
+
+## 動作確認
+
+- Step 5 の `{{ lynis.verify_command }}` がエラーなく完了すること
+- 各 `sysctl <key>` の表示値が、シナリオ設定の推奨値と一致すること
+- 別セッションからのSSH接続・通信が変更後も継続して成功すること
+- 再度 `sudo lynis audit system --quick` を実行し、hardening indexが {{ lynis.audit_index_after_target }} 以上に改善していること
+- 適用済みsuggestion（KRNL-5820, NETW-3200等）がLynisの指摘一覧から消えていること
+
+## 注意事項
+
+- rp_filterやaccept_source_routeなどネットワーク経路に影響する項目は、別セッションでの疎通確認が取れるまで永続化ファイルへ書き出さない。旧経路（変更前の値）を無効化する前に、必ず新しい経路で通信が継続することを検証してから進める。
+- 非対称経路（マルチホーム、ポリシールーティング、一部VPN構成）のホストでは `rp_filter=1`（Strict）により正規パケットが破棄される場合がある。該当構成では `rp_filter=2`（Loose）への調整を検討する。
+- 一括適用ではなく1項目ずつ段階適用し、都度検証する。複数項目を同時に変更すると、問題発生時にどの項目が原因か切り分けられなくなる。
+- 変更前の値は `{{ lynis.rollback_file }}.values` に記録し、切り戻し時は `sudo sysctl -w <key>=<記録した値>` でランタイムを戻し、`{{ lynis.sysctl_conf_file }}` から該当行を削除するか `{{ lynis.rollback_file }}` として退避したうえで `sysctl --system` を再実行する。
+- `kernel.randomize_va_space` の変更は、アドレス固定を前提にした一部のデバッグツールやレガシーアプリケーションの動作に影響する可能性があるため、本番適用前にステージング環境で動作確認する。
+- 変更内容（適用日時、適用者、対象key、旧値・新値、Lynis suggestion_id）を変更記録として残し、後日の監査・切り戻し判断に利用できるようにする。

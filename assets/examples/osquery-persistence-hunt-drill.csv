@@ -1,0 +1,8 @@
+hunt_id,osquery_table,query,baseline_note,tested_at
+H01,crontab,SELECT * FROM crontab;,root/各ユーザーのcrontabはbaseline_crontab.csvに記載の8件のみが正常。それ以外の行やcommand変更は要調査。,2026-04-01
+H02,systemd_units,"SELECT name, status, source FROM systemd_units;",status=enabledのユニットはbaseline_units.txtの42件と一致すること。source配下に/tmpや/home等の非標準パスがあれば異常。,2026-04-01
+H03,startup_items,"SELECT name, path, source, status FROM startup_items;",cron/systemd以外の起動項目(rc.local等)はbaseline_startup.txtの3件のみ正常。新規ファイルの追加は異常。,2026-04-01
+H04,authorized_keys,"SELECT username, key, key_file FROM authorized_keys;",鍵のfingerprintはbaseline_keys.txtの一覧と一致すること。台帳外の公開鍵や退職者アカウントの鍵は異常。,2026-04-01
+H05,kernel_modules,"SELECT name, size, status FROM kernel_modules;",ロード済みモジュールはbaseline_modules.txtの一覧と一致すること。lsmod非表示の隠しモジュールは重大異常。,2026-04-01
+H06,etc_hosts,"SELECT address, hostnames FROM etc_hosts;",/etc/hostsはbaseline_hosts.txtの内容(localhost定義のみ)と一致すること。外部ドメインへの静的割り当て追加はDNSハイジャックの疑い。,2026-04-01
+H07,dns_resolvers,"SELECT id, address, type FROM dns_resolvers;",設定済みDNSリゾルバはbaseline_resolvers.txtの社内DNS2台のみが正常。未知の外部アドレスの追加は異常。,2026-04-01

@@ -1,0 +1,138 @@
+# OPAポリシー統制の定期棚卸し訓練
+
+全OPA(Open Policy Agent)の稼働ポリシー・data・例外(exemption)・decision logの拒否/許可傾向を定期的に棚卸しし、逸脱や陳腐化を洗い出す訓練手順です。
+
+## 目的
+
+稼働中のポリシー(bundleバージョン)・data・例外設定・decision logの傾向を台帳と突合し、陳腐化した例外や過剰許可、未使用ポリシー、default deny設定からの逸脱を洗い出せるようになることを目指します。
+
+## 用語解説
+
+- **bundle**: OPAが読み込むRegoポリシーとdataをまとめて配布する単位。`revision`(版数)で世代管理する
+- **exemption(例外)**: 本来のポリシー判定を上書きして特定の対象(namespace/repoなど)を許可する例外設定
+- **decision log**: OPAが下したallow/denyの判定結果を記録したログ。傾向分析に用いる
+- **default deny**: 明示的に許可(allow)されない限り拒否(deny)する設計原則。ゼロトラストの基本方針
+- **disposition(処置)**: 棚卸しの結果として決定した対応方針(是正・維持・廃止候補など)
+
+## シナリオ設定
+
+今回の棚卸し対象は {{ csv_rows | length }} 件のポリシーです。台帳の各行から `policy` / `bundle_version` / `exemptions` / `decision_trend` / `disposition` / `reviewed_at` を確認します。
+
+| policy | bundle_version | exemptions | decision_trend | disposition |
+| --- | --- | --- | --- | --- |
+{% for r in csv_rows %}| {{ r["policy"] }} | {{ r["bundle_version"] }} | {{ r["exemptions"] }} | {{ r["decision_trend"] }} | {{ r["disposition"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 稼働中ポリシー一覧をOPAから取得する
+
+REST APIで実際にロードされているポリシー(モジュール)一覧を取得し、台帳の件数と突合します。
+
+```bash
+curl -s http://localhost:8181/v1/policies | jq -r '.result[].id'
+echo "台帳側の対象件数: {{ csv_rows | length }}"
+```
+
+### 2. bundleバージョン(revision)を台帳と突合する
+
+配布中のbundleアーカイブを `opa inspect` でマニフェスト検査し、`revision` が台帳の `bundle_version` と一致するか確認します。
+
+```bash
+{% for r in csv_rows %}echo "--- {{ r["policy"] }} ---"
+opa inspect "bundles/{{ r["policy"] }}.tar.gz" | jq -r '.manifest.revision'
+echo "台帳側の記録: {{ r["bundle_version"] }}"
+{% endfor %}```
+
+### 3. dataの整合性をpolicyバージョンと合わせて確認する
+
+policyとdataが異なる版数の組み合わせで動いていないか、稼働中バンドルに同梱されたdataのハッシュを確認します。
+
+```bash
+{% for r in csv_rows %}opa inspect "bundles/{{ r["policy"] }}.tar.gz" -a | jq -r '.manifest.roots, .manifest.metadata'
+{% endfor %}```
+
+### 4. 例外(exemption)の妥当性をレビューする
+
+`exemptions` が `-` のポリシーは例外なしなのでスキップし、値があるものだけ期限・対象の妥当性を確認します。
+
+```bash
+{% for r in csv_rows %}{% if r["exemptions"] != "-" %}echo "{{ r["policy"] }}: 例外あり -> {{ r["exemptions"] }} (対象の存続と期限を確認)"
+{% endif %}{% endfor %}```
+
+### 5. decision logからallow/deny傾向を集計する
+
+decision logのconsole出力(journalctl経由)からallow/deny件数を突合し、台帳の `decision_trend` と一致するか確認します。
+
+```bash
+{% for r in csv_rows %}journalctl -u opa --since "7 days ago" --no-pager -o cat \
+  | jq -r 'select(.decision_id != null and (.path == "{{ r["policy"] | replace(".", "/") }}")) | .result' \
+  | sort | uniq -c
+echo "台帳側の記録: {{ r["policy"] }} -> {{ r["decision_trend"] }}"
+{% endfor %}```
+
+### 6. default deny設定からの逸脱を確認する
+
+`default_deny_baseline` のような基盤ポリシーが、入力が空でも必ず拒否側に倒れる(default deny)ことを実際に評価して確認します。
+
+```bash
+echo '{"input": {}}' > /tmp/opa-empty-input.json
+opa eval --format pretty \
+  -d bundles/kubernetes.admission.default-deny-baseline.tar.gz \
+  -i /tmp/opa-empty-input.json \
+  'data.kubernetes.admission.default_deny_baseline.allow'
+```
+
+想定される出力は `false` です。`true` が返る場合はdefault denyが崩れているため、直ちにエスカレーションします。
+
+### 7. 是正対象について、例外削除前に新パス(例外なし)の動作を並行検証する
+
+台帳の `disposition` が「是正」となった例外について、いきなり本番の例外を削除せず、まずステージング環境のOPAで例外を外したポリシーを並行評価し、想定通りdenyされる対象・意図せずdenyされる対象がないかを確認します。
+
+```bash
+{% for r in csv_rows %}{% if r["disposition"] == "例外失効のため是正" %}opa eval --format pretty \
+  -d bundles/{{ r["policy"] }}.tar.gz \
+  -i staging-inputs/{{ r["policy"] }}.json \
+  'data.{{ r["policy"] | replace(".", ".") }}.deny' \
+  --explain full
+echo "上記のステージング結果を確認できたら、本番の例外設定から {{ r["exemptions"] }} を削除する"
+{% endif %}{% endfor %}```
+
+### 8. 未使用・過剰許可ポリシーの処置を決定する
+
+decision logが一定期間ゼロ、または許可/拒否比率が極端なポリシーについて、`disposition` 欄の判断(廃止候補・要因調査)を確定します。
+
+```bash
+{% for r in csv_rows %}echo "{{ r["policy"] }}: {{ r["decision_trend"] }} -> 処置: {{ r["disposition"] }}"
+{% endfor %}```
+
+### 9. 棚卸し記録を証跡として保管する
+
+棚卸し結果とレビュー日をハッシュ付きで保存し、後日の監査に備えます。
+
+```bash
+cat <<'EOF' > /tmp/opa-policy-review-$(date '+%Y%m%d').md
+# OPAポリシー統制 棚卸し記録
+対象ポリシー件数: {{ csv_rows | length }}
+{% for r in csv_rows %}- {{ r["policy"] }} (bundle {{ r["bundle_version"] }}) reviewed_at={{ r["reviewed_at"] }} disposition={{ r["disposition"] }}
+{% endfor %}
+EOF
+sha256sum /tmp/opa-policy-review-$(date '+%Y%m%d').md >> /var/log/opa-policy-review-evidence.log
+```
+
+## 動作確認
+
+1. 全 {{ csv_rows | length }} 件のポリシーについて、`/v1/policies` の稼働ポリシー一覧・`opa inspect` のbundle revision・decision logの集計値が取得できていること
+2. 取得した値をすべて台帳(`bundle_version` / `decision_trend`)と突合し、一致または差分の原因が説明できていること
+3. `exemptions` が `-` でない行について、対象の存続確認と期限の妥当性レビューが完了していること
+4. `default_deny_baseline` の評価結果が `false` (deny側)であり、default deny設定からの逸脱がないこと
+5. 「例外失効のため是正」の対象について、ステージングでの並行検証結果を確認済みであること
+6. 棚卸し記録ファイルが作成され、sha256sumによる証跡がログに追記されていること
+
+## 注意事項
+
+- 惰性で残った例外(exemption)は、対象システムが廃止・移行済みであることを個別に確認してから削除する。確認できない例外は残置せず、いったん「要調査」として棚卸し記録に残す。
+- 例外の削除は本番のOPAで直接行わず、必ずステージング環境で例外なしのポリシーを並行評価し、意図しないdenyが発生しないことを確認してから本番に適用する。
+- `default_deny_baseline` の評価で `true` (allow)が返った場合は、default deny原則が崩れている重大な逸脱のため、棚卸しを中断し即座にエスカレーションする。
+- policyとdataのバージョン(revision)がbundle内で一致していることを確認する。異なる版数の組み合わせは意図しない判定結果につながる。
+- 棚卸し記録はレビュー担当者・日時・処置内容が追跡できる形で保管し、上書きせず追記(またはハッシュ付き保存)によって改ざん検知できるようにする。

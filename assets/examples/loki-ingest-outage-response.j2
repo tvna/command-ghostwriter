@@ -1,0 +1,114 @@
+# Lokiログ取り込み停止時の対応
+
+Loki(Grafana Loki + Promtail)への取り込みが停止し、セキュリティ監視の可視性を失った際に、原因特定と暫定保全を行うための初動対応手順です。
+
+## 目的
+
+Loki取り込み停止を検知した際に、Promtail側でログを失わずにバッファさせつつ原因を切り分け、暫定的なローカル保全を行った上で、復旧後にログの連続性を確認できるようになることを目指します。
+
+## 用語解説
+
+- **Loki**: ログをラベルベースでインデックスするGrafana製ログ集約システム
+- **Promtail**: ログを収集しLokiへ送信するエージェント。送信失敗時はpositionsファイルと内部バッファで読み取り位置を保持する
+- **positionsファイル**: Promtailがどのログファイルのどの位置まで読み取り済みかを記録するファイル。再送のために保全が重要
+- **ingester**: Lokiでログを受信しチャンクとしてストレージへ書き込むコンポーネント
+- **リング(hash ring)**: Loki内部でingester間の担当範囲を分散させる仕組み。障害でリングが不整合になると取り込みが止まる
+- **レートリミット**: Loki側で設定された取り込み上限(per-stream/per-tenant)を超えると`429`で拒否される状態
+- **セキュリティ監視の盲点**: ログ集約が停止している間は、不正アクセスや異常操作の検知ができなくなるリスクを指す。停止時間そのものが調査対象になる
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 影響範囲 | {{ outage_scope }} |
+| Promtailローカルバッファ有効 | {{ promtail_buffer }} |
+| ローカル退避先パス | `{{ local_fallback_path }}` |
+| 想定される根本原因 | {{ root_cause }} |
+| 復旧手順の要点 | {{ recovery_step }} |
+
+## 手順
+
+### 1. 取り込み停止を確認し、Promtail側のバッファ状況を確認する
+
+Lokiのクエリが直近ログを返さないことを確認し、Promtailが送信をリトライしているか、positionsファイルが更新され続けているかを確認します。
+
+```bash
+logcli query '{job="varlogs"}' --since=15m --limit=10
+curl -s http://promtail:9080/metrics | grep promtail_read_bytes_total
+cat /var/log/promtail/positions.yaml
+```
+
+{% if promtail_buffer %}
+Promtailのローカルバッファが有効なため、送信先が復旧するまでログはディスク上のWAL/バッファに保持され続けます。バッファ上限に達するとログが欠落し始めるため、早急に原因切り分けへ進みます。
+{% endif %}
+
+```bash
+journalctl -u promtail --since "-15 min" | grep -iE "error|retry|429|timeout"
+```
+
+### 2. 原因を切り分ける(ストレージ/リング/レート制限)
+
+```bash
+# ストレージ書き込みエラーの確認
+curl -s http://loki:3100/metrics | grep -E 'loki_ingester_wal_(disk_full|writes_failed)_total'
+
+# リング(hash ring)の状態確認
+curl -s http://loki:3100/ring | grep -iE "unhealthy|left"
+
+# レートリミットによる429の確認
+curl -s http://loki:3100/metrics | grep 'loki_discarded_samples_total'
+```
+
+原因が {{ root_cause }} と特定できた場合、その根拠(メトリクス名・ログ行)を対応記録に残します。
+
+### 3. 暫定的なローカルログ保全を行う(rsyslog退避)
+
+Loki復旧までの間、対象ホストのログを失わないよう、rsyslogでローカルディスクへ退避します。
+
+```bash
+mkdir -p {{ local_fallback_path }}
+cat <<EOF | sudo tee /etc/rsyslog.d/90-loki-fallback.conf
+*.* {{ local_fallback_path }}/fallback.log
+EOF
+sudo systemctl restart rsyslog
+echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') Loki取り込み停止のためローカル退避を開始: {{ local_fallback_path }}" | sudo tee -a {{ local_fallback_path }}/incident.log
+```
+
+### 4. 復旧作業を実施する
+
+{{ recovery_step }}
+
+```bash
+sudo systemctl restart loki-ingester
+sleep 10
+curl -s http://loki:3100/ready
+```
+
+新しい取り込み経路(再起動後のingester)が実際にログを受け付けているかを、旧経路(rsyslogローカル退避)を止める前に別セッションで確認します。
+
+```bash
+# 別セッションで新規ログの取り込みを検証してから、退避設定を無効化する
+logcli query '{job="varlogs"}' --since=2m --limit=5
+```
+
+確認できたら、暫定退避設定を無効化します。
+
+```bash
+sudo rm /etc/rsyslog.d/90-loki-fallback.conf
+sudo systemctl restart rsyslog
+```
+
+## 動作確認
+
+- 手順2の根拠(メトリクス・ログ)により原因が特定できていること
+- 手順3により`{{ local_fallback_path }}`へのローカル保全が確立していること
+- 手順4で新しい取り込み経路が実際にログを受け付けたことを別セッションで確認してから旧経路(ローカル退避)を停止したこと
+- 復旧後、`logcli query`で取り込み再開直後から現在までのログが連続して取得できること(欠落期間があれば`incident.log`に記録されていること)
+
+## 注意事項
+
+- Loki取り込み停止中は、不正アクセスやマルウェア挙動の検知ができなくなる「セキュリティ監視の盲点」が生じる。停止期間を記録し、事後にその期間のログを他系統(rsyslogローカル退避・端末側ログ等)から補完調査すること。
+- ローカル退避先`{{ local_fallback_path }}`には認証情報や個人情報を含む機微なログが集まるため、アクセス権限を対応者のみに限定し、復旧後は保管期限を決めて削除すること。
+- 復旧作業(手順4)は、新しい取り込み経路が実際に機能していることを別セッションで確認してから、ローカル退避などの旧経路を無効化すること。確認前に旧経路を止めるとログが欠落する。
+- 欠落した期間(Promtailバッファ上限超過やrsyslog退避のみだった期間)は必ず記録し、事後のセキュリティレビューで見逃しがないか確認すること。
+- 復旧優先度は、まずログの取り込み再開(可視性の回復)を最優先とし、根本原因の恒久対策(容量拡張やレート設定見直し)は復旧後の別タスクとして扱う。

@@ -1,0 +1,135 @@
+# WireGuard検閲回避のためのトランスポート難読化
+
+UDPが遮断・DPI検査される環境から正当な業務接続性を確保するため、udp2rawでWireGuardのUDPパケットを`{{ udp2raw.udp2raw_mode }}`モードに包み、一見TCP/ICMPに見えるトランスポートに載せて疎通させます。サーバ・クライアント双方の管理者権限(sudo)で実施してください。
+
+## 目的
+
+DPI(Deep Packet Inspection)やUDP全遮断がある環境下でも、WireGuardのハンドシェイクとデータ転送が成立するよう、udp2rawを追加のトランスポート層として構成し、`wg show`でハンドシェイク確立を確認できるようになることを目指します。
+
+## 用語解説
+
+- **udp2raw**: UDPペイロードをTCPライクな`faketcp`、`udp`偽装、`icmp`のいずれかの見た目に変換してトンネリングするツール。ペイロード自体は暗号化されず難読化のみを行うため、`--cipher-mode`と`-k`(共有パスワード)による認証・簡易暗号化と組み合わせる
+- **faketcpモード**: TCPの3ウェイハンドシェイクに酷似したパケット列を生成し、ステートフルファイアウォールやDPIによるUDP遮断を回避する。ICMPモードより検知されにくいが、経路上でTCP接続として扱われるためカーネルのTCPスタックとは独立したユーザ空間実装を使う
+- **icmpモード**: ICMP Echoパケットに偽装する。UDP/TCPが完全に遮断されpingのみ通る環境向けだが、ICMPペイロード監視があると検知されやすい
+- **DPI(Deep Packet Inspection)**: パケットのヘッダだけでなくペイロード内容まで検査し、プロトコルを識別・遮断する仕組み。WireGuardの特徴的なハンドシェイクパターンはDPIの検知対象になりやすい
+- **トレードオフ**: 難読化層を追加するとカプセル化・偽装処理のオーバーヘッドで遅延とCPU負荷が増え、構成要素(WireGuard + udp2raw)が二重になることで障害点と運用の複雑さが増す。あくまで正当な業務通信の到達性を確保する目的でのみ用い、恒常的な迂回策としない
+
+## シナリオ設定
+
+| 設定項目 | 値 |
+|---|---|
+| WireGuardインターフェース | {{ wireguard.interface }} |
+| サーバ側WireGuard待受(real_endpoint) | {{ udp2raw.real_endpoint }} |
+| udp2rawモード | {{ udp2raw.udp2raw_mode }} |
+| udp2rawサーバの公開Raw待受 | {{ udp2raw.server_raw_listen }} |
+| udp2rawサーバの公開到達先(クライアントから見た宛先) | {{ udp2raw.server_public_raw_endpoint }} |
+| クライアント側ローカル待受(local_listen) | {{ udp2raw.local_listen }} |
+| WireGuardトンネルアドレス(サーバ) | {{ wireguard.server_address }} |
+| WireGuardトンネルアドレス(クライアント) | {{ wireguard.client_tunnel_ip }} |
+
+## 1. サーバ側でWireGuardをローカルのみで待受させる
+
+udp2rawがフロントに立つため、WireGuard自体は外部に直接公開せずループバックまたは内部アドレスで待受させます。
+
+```bash
+sudo apt install -y wireguard
+wg genkey | tee server_private.key | wg pubkey > server_public.key
+chmod 600 server_private.key
+
+sudo tee /etc/wireguard/{{ wireguard.interface }}.conf <<'EOF'
+[Interface]
+Address = {{ wireguard.server_address }}
+PrivateKey = $(cat server_private.key)
+ListenPort = {{ udp2raw.real_endpoint_port }}
+
+[Peer]
+PublicKey = {{ wireguard.client_public_key }}
+AllowedIPs = {{ wireguard.client_tunnel_ip }}
+EOF
+sudo chmod 600 /etc/wireguard/{{ wireguard.interface }}.conf
+sudo systemctl enable --now wg-quick@{{ wireguard.interface }}
+```
+
+## 2. サーバ側でudp2rawサーバを起動する
+
+WireGuardの`{{ udp2raw.real_endpoint }}`宛てUDPを、公開側の`{{ udp2raw.server_raw_listen }}`で`{{ udp2raw.udp2raw_mode }}`偽装して受け付けます。
+
+```bash
+sudo apt install -y build-essential git
+git clone --depth 1 https://github.com/wangyu-/udp2raw.git
+cd udp2raw && sudo ./build.sh
+
+sudo ./udp2raw -s \
+  -l {{ udp2raw.server_raw_listen }} \
+  -r {{ udp2raw.real_endpoint }} \
+  -k "{{ udp2raw.udp2raw_password }}" \
+  --raw-mode {{ udp2raw.udp2raw_mode }} \
+  -a
+```
+
+`-a`はデーモン化オプションです。恒常運用する場合はsystemdユニット化してください。
+
+## 3. クライアント側でudp2rawクライアントを起動する
+
+クライアントは公開到達先`{{ udp2raw.server_public_raw_endpoint }}`へ`{{ udp2raw.udp2raw_mode }}`で接続し、ローカルの`{{ udp2raw.local_listen }}`にUDPを橋渡しします。
+
+```bash
+sudo ./udp2raw -c \
+  -l {{ udp2raw.local_listen }} \
+  -r {{ udp2raw.server_public_raw_endpoint }} \
+  -k "{{ udp2raw.udp2raw_password }}" \
+  --raw-mode {{ udp2raw.udp2raw_mode }} \
+  -a
+```
+
+## 4. クライアント側WireGuard設定のEndpointをudp2rawローカル待受へ向ける
+
+WireGuardクライアントのEndpointを、udp2rawが提供する`{{ udp2raw.local_listen }}`に向けます。これにより、実際のパケットは udp2rawクライアント → (難読化トンネル) → udp2rawサーバ → WireGuardサーバ、という経路を通ります。
+
+```bash
+sudo tee /etc/wireguard/{{ wireguard.interface }}.conf <<'EOF'
+[Interface]
+Address = {{ wireguard.client_tunnel_ip }}
+PrivateKey = $(cat client_private.key)
+
+[Peer]
+PublicKey = {{ wireguard.server_public_key }}
+Endpoint = {{ udp2raw.local_listen }}
+AllowedIPs = {{ wireguard.server_address }}
+PersistentKeepalive = 25
+EOF
+sudo chmod 600 /etc/wireguard/{{ wireguard.interface }}.conf
+sudo systemctl enable --now wg-quick@{{ wireguard.interface }}
+```
+
+## 5. 直接UDPでの疎通確認(旧経路)を先に取る
+
+udp2raw経由へ切り替える前に、直接UDP(ポート{{ verification.direct_udp_test_port }})が現在到達可能かどうかを記録しておきます。DPI/UDP遮断環境では失敗して当然ですが、許可されたテスト環境や移行前の検証では、旧経路(直接UDP)が生きている間に一度成功させ、切り戻し可能な状態を確認してから次のステップに進んでください。
+
+```bash
+nc -zvu -w 3 {{ udp2raw.real_endpoint_host }} {{ verification.direct_udp_test_port }}
+```
+
+## 6. udp2raw経由の疎通とハンドシェイクを確認する
+
+新経路(udp2raw経由)でハンドシェイクが成立することを確認したうえで、旧経路(直接UDPのファイアウォール許可等)を無効化します。
+
+```bash
+sleep {{ verification.handshake_timeout_sec }}
+sudo wg show {{ wireguard.interface }} latest-handshakes
+ping -c 3 {{ wireguard.server_tunnel_ip }}
+```
+
+## 動作確認
+
+- クライアント・サーバ双方でudp2rawプロセスが起動しており、`-a`指定時はデーモンとして残っていること
+- `sudo wg show {{ wireguard.interface }} latest-handshakes`で直近{{ verification.handshake_timeout_sec }}秒以内のハンドシェイク時刻が表示されること
+- 直接UDPが遮断されている環境下でも、udp2raw経由(`{{ udp2raw.server_public_raw_endpoint }}`宛て`{{ udp2raw.udp2raw_mode }}`)ではWireGuardトンネル内アドレスへのpingが成功すること
+- サーバの`{{ udp2raw.server_raw_listen }}`とクライアントの`{{ udp2raw.local_listen }}`以外に、WireGuardのリアルポートが外部から直接到達不能であること
+
+## 注意事項
+
+- この難読化構成は、DPIやUDP遮断がある環境下でも正当な業務接続性を確保する目的にのみ用いること。検閲回避を名目にした無許可のトンネリングは、接続先組織や現地法規のポリシーに反する場合があるため、事前に利用許可を確認する。
+- `udp2raw_password`はudp2rawの`-k`に渡される共有シークレットであり、WireGuard自体の鍵とは別に安全に管理する。両者を混同・使い回ししない。
+- 新しいudp2raw経由の経路でハンドシェイクと疎通が確立したことを確認するまで、直接UDP用のファイアウォールルールや旧Endpoint設定を無効化・削除しない。切り替え前に手順5で旧経路の生存を確認し、切り戻し可能な状態を保ったまま手順6へ進むこと。
+- faketcp/icmpによるカプセル化はCPU負荷・遅延を増加させ、WireGuard単体運用より帯域効率が下がる。恒常的な迂回策としてではなく、UDP遮断環境における一時的・限定的な代替経路として運用し、直接UDPが利用可能になり次第、通常構成へ戻すことを検討する。

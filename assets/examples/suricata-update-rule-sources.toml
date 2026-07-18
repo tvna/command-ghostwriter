@@ -1,0 +1,6 @@
+sources = ["et/open", "oisf/trafficid"]
+enable_patterns = ["re:emerging-scan", "re:emerging-malware"]
+disable_sids = ["2013028", "2013504"]
+drop_sids = ["2027101"]
+rules_dir = "/var/lib/suricata/rules"
+suricata_yaml = "/etc/suricata/suricata.yaml"

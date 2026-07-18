@@ -1,0 +1,9 @@
+audit_enabled: true
+process_events: true
+socket_events: true
+audit_backlog_limit: 8192
+osqueryd_flags_path: /etc/osquery/osquery.flags
+osquery_conf_path: /etc/osquery/osquery.conf
+osqueryd_service: osqueryd
+auditd_service: auditd
+schedule_interval: 10

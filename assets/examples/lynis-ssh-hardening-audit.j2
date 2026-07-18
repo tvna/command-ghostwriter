@@ -1,0 +1,137 @@
+# LynisによるSSH設定ハードニング監査 — {{ server.host }}
+
+対象サーバ **{{ server.host }}** に対して Lynis の SSH 監査（SSH-7408 系テスト）を実行し、`sshd_config` の弱点を洗い出したうえで安全に是正する手順です。ロックアウトを防ぐため、鍵認証の確立とパスワード認証の無効化は必ず順序を守り、別セッションでの確認を挟みます。
+
+## 目的
+
+Lynis の SSH カテゴリ監査結果を読み解き、`PermitRootLogin` / `PasswordAuthentication` / `Protocol` / `MaxAuthTries` / `AllowUsers` など sshd_config の弱点項目を特定・是正できるようになることを目指します。また、設定変更によって自分自身がリモート締め出し（ロックアウト）される事故を防ぐ安全な変更手順を身につけます。
+
+## 用語解説
+
+- **Lynis**: Linux/Unix 向けのオープンソースセキュリティ監査ツール。システム構成をスキャンし、強化提案(hardening index)を提示する
+- **SSH-7408**: Lynis の SSH デーモン設定を検査するテストID。sshd_config の各項目を推奨値と比較する
+- **PermitRootLogin**: root ユーザーでの直接SSHログインを許可するかの設定。`no` にすることでroot直接ログインを禁止し、一般ユーザー経由+sudoに限定する
+- **PasswordAuthentication**: パスワードによるログインを許可するかの設定。鍵認証確立後に `no` にすることで総当たり攻撃を無効化する
+- **Protocol**: 使用するSSHプロトコルバージョン。`2` を明示することで脆弱なSSH1相当の挙動を排除する
+- **MaxAuthTries**: 1接続あたりの認証試行回数の上限。小さくすることでパスワード推測攻撃の効率を下げる
+- **AllowUsers**: ログインを許可するユーザーを明示的に限定するディレクティブ。未設定だと全ローカルアカウントがSSH到達可能になる
+- **hardening index**: Lynis が算出するシステム強化度のスコア。SSH是正により改善する代表的な指標
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 対象ホスト | {{ server.host }} |
+| 管理ユーザー | {{ server.admin_user }} |
+| ドロップイン設定ファイル | {{ paths.sshd_dropin }} |
+| Lynis レポートファイル | {{ paths.lynis_report }} |
+
+### Lynis が検出したSSH弱点
+
+| Test ID | 項目 | 現在値 | リスク |
+| --- | --- | --- | --- |
+{% for f in ssh_findings %}| {{ f.test_id }} | {{ f.item }} | {{ f.current_value }} | {{ f.risk }} |
+{% endfor %}
+
+### 是正後の目標値
+
+| 項目 | 目標値 |
+| --- | --- |
+{% for key, value in target_settings.items() %}| {{ key }} | {{ value }} |
+{% endfor %}
+
+## 1. Lynis でSSH監査を実行し弱点を洗い出す
+
+```bash
+ssh {{ server.admin_user }}@{{ server.host }} "sudo lynis audit system --tests-category ssh --report-file {{ paths.lynis_report }}"
+```
+
+実行後、レポート内の `SSH-7408` セクションを確認します。
+
+```bash
+ssh {{ server.admin_user }}@{{ server.host }} "sudo grep -A2 'SSH-7408' {{ paths.lynis_report }}"
+```
+
+上記シナリオ設定の表にある弱点（PermitRootLogin, Protocol, X11Forwarding, MaxAuthTries, AllowUsers など）が warning/suggestion として出力されていることを確認してください。
+
+## 2. 鍵認証が確立済みであることを先に確認する（ロックアウト防止の前提）
+
+**PasswordAuthentication を無効化する前に、鍵認証で確実にログインできることを別セッションで確認します。** この確認が取れるまで次のステップには進まないでください。
+
+```bash
+ssh -o PreferredAuthentications=publickey {{ server.admin_user }}@{{ server.host }} hostname
+```
+
+鍵認証でのログインに失敗する場合は、`ssh-copy-id` での公開鍵配置と `~/.ssh/authorized_keys` の権限(600)を先に是正してください。
+
+## 3. ドロップイン設定ファイルを作成し是正値を書き込む
+
+既存の `sshd_config` を直接編集せず、優先度の高いドロップインファイルとして追加します。
+
+```bash
+ssh {{ server.admin_user }}@{{ server.host }} "sudo tee {{ paths.sshd_dropin }} > /dev/null" <<'EOF'
+{% for key, value in target_settings.items() %}{{ key }} {{ value }}
+{% endfor %}EOF
+```
+
+## 4. 構文チェックを行う
+
+反映前に必ず `sshd -t` で構文エラーがないことを確認します。
+
+```bash
+ssh {{ server.admin_user }}@{{ server.host }} "sudo sshd -t"
+```
+
+エラーが出力された場合は reload せず、ドロップインファイルの内容を見直してください。
+
+## 5. 別セッションで新設定でのログイン成功を確認してから反映する
+
+{% if verify_second_session %}
+**現在のセッションを切断せずに保持したまま**、新しい別セッションを開いて以下の手順で反映と検証を行います。
+
+```bash
+ssh {{ server.admin_user }}@{{ server.host }} "sudo systemctl reload sshd"
+```
+
+reload 直後、**既存の（今開いている）セッションはそのまま維持し**、新規に別セッションを開いてログイン確認を行います。
+
+```bash
+ssh -o PreferredAuthentications=publickey {{ server.admin_user }}@{{ server.host }} "whoami"
+```
+
+新規セッションでのログインに成功した場合のみ、最初のセッションを閉じてください。失敗した場合は最初のセッションから即座にロールバックします。
+{% endif %}
+
+## 6. ロールバック手順
+
+新設定でのログインに失敗した場合、締め出される前に最初のセッションから復旧します。
+
+```bash
+sudo cp {{ rollback.backup_path }} {{ paths.sshd_dropin }}
+sudo systemctl reload sshd
+```
+
+事前にバックアップを取得しておく場合のコマンドは以下の通りです。
+
+```bash
+ssh {{ server.admin_user }}@{{ server.host }} "sudo cp {{ paths.sshd_dropin }} {{ rollback.backup_path }}"
+```
+
+## 動作確認
+
+- 別セッションで `ssh -o PreferredAuthentications=publickey {{ server.admin_user }}@{{ server.host }}` によるログインが成功すること
+- パスワードのみでの接続（`PreferredAuthentications=password`）が拒否されること
+- `sudo sshd -t` がエラーなく通ること
+- Lynis を再実行し、`SSH-7408` に関する warning/suggestion 件数が是正前より減少していること
+
+```bash
+ssh {{ server.admin_user }}@{{ server.host }} "sudo lynis audit system --tests-category ssh --report-file {{ paths.lynis_report }}"
+```
+
+## 注意事項
+
+- **ロックアウト防止の順序を厳守すること**: (1) 鍵認証が別セッションで動作することを確認 → (2) `PasswordAuthentication no` を含む設定を反映 → (3) reload後、既存セッションを維持したまま別セッションで新設定でのログイン成功を確認 → (4) 成功を確認できた場合のみ既存セッションを閉じる。この順序を逆にすると自分自身を締め出すリスクがある。
+- 設定変更前に必ず `sudo sshd -t` で構文を確認する。構文エラーのまま reload すると sshd が起動失敗し、SSH経由での復旧が不可能になる場合がある。
+- 変更内容（変更日時・変更者・変更前後の値）は変更記録として残し、{{ rollback.backup_path }} のようなバックアップを都度取得しておく。
+- `AllowUsers` を設定する際は、対象ユーザー（{{ server.admin_user }} を含む）を漏れなく列挙すること。列挙漏れがあるとそのユーザーは即座にログイン不可になる。
+- コンソール（IPMI/シリアルコンソール等）へのアクセス手段を確保していない環境では、特に慎重に別セッション確認を行うこと。SSH以外の復旧経路がない場合、誤った反映は復旧不能な締め出しにつながる。

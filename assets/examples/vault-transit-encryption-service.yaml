@@ -1,0 +1,9 @@
+vault_addr: "https://vault.internal:8200"
+transit_mount: transit
+app_name: orders-api
+key_name: orders-api-key
+key_type: aes256-gcm96
+rotation_period: 720h
+min_decryption_version: 1
+convergent: false
+plaintext_sample: order-12345-payload

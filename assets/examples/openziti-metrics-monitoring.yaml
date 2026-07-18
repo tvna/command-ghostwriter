@@ -1,0 +1,26 @@
+controller_host: ziti-ctrl01.internal.example.jp
+events_output_dir: /opt/ziti/events
+event_subscriptions:
+  - circuit
+  - edge.sessions
+  - fabric.usage
+  - metrics
+metrics_endpoint: http://127.0.0.1:9186/metrics
+scrape_interval: 15s
+prometheus_scrape_job: openziti_controller
+alert_rules:
+  - name: RoutersOffline
+    expr: ziti_routers_online < 2
+    for: 2m
+    severity: critical
+    description: オンラインルータ数が閾値を下回っています
+  - name: DialFailureSpike
+    expr: rate(ziti_dial_failures_total[5m]) > 5
+    for: 5m
+    severity: warning
+    description: 失敗ダイヤルが急増しています(ポリシー誤設定または攻撃の兆候の可能性)
+  - name: NoActiveCircuits
+    expr: ziti_active_circuits == 0
+    for: 10m
+    severity: warning
+    description: アクティブなサーキットが検出されません

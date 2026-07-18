@@ -1,0 +1,125 @@
+# Loki rulerによるログベースアラート構築 — {{ hostname }}
+
+## 目的
+
+Grafana Loki の ruler コンポーネントと LogQL のメトリッククエリを使い、ログ条件に基づくアラート（例: 認証失敗の急増）を評価・発火させ、Alertmanager へ通知する仕組みを構築できるようになることを目指します。
+
+## 用語解説
+
+- **ruler**: Loki に組み込まれたコンポーネントで、定期的に LogQL クエリを評価し、条件を満たした場合に Alertmanager へアラートを送信する
+- **LogQL**: Loki のログクエリ言語。ラベルセレクタとフィルタ式（`|= \`文字列\`` 等）でログ行を絞り込む
+- **メトリッククエリ (count_over_time / rate)**: LogQL のログクエリをメトリクスに変換する関数。`count_over_time(...[5m])` は期間内の一致行数、`rate(...[5m])` は単位時間あたりの発生率を返し、比較演算子と組み合わせて閾値判定に使う
+- **rule group**: 同じ評価間隔でまとめて評価されるアラートルールの集合
+- **for (継続時間)**: 条件を満たしてから実際にアラートを発火させるまで待つ継続時間。単発のノイズで誤発火しないための抑制機構
+- **Alertmanager**: Prometheus/Loki 系のアラート通知を集約し、重複排除・グルーピング・通知先振り分けを行うコンポーネント
+- **ruler storage**: ルール定義ファイル（rule group の YAML）を保管する場所。ローカルディスクのほか object storage も選択できる
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 対象ホスト | {{ hostname }} |
+| Loki API エンドポイント | {{ loki_host }} |
+| ruler storage ディレクトリ | {{ ruler_storage_path }} |
+| Alertmanager URL | {{ alertmanager_url }} |
+| 評価間隔 (evaluation_interval) | {{ eval_interval }} |
+| 通知先 | {{ notify_channel }} |
+
+作成するアラートルール一覧:
+
+| ルール名 | 継続時間(for) | 重大度 |
+| --- | --- | --- |
+{% for g in rule_groups %}
+| {{ g.name }} | {{ g.for }} | {{ g.severity }} |
+{% endfor %}
+
+## 手順
+
+### 1. loki-config.yaml に ruler セクションを追加する
+
+```yaml
+ruler:
+  storage:
+    type: local
+    local:
+      directory: {{ ruler_storage_path }}
+  rule_path: /tmp/loki-rules-wal
+  alertmanager_url: {{ alertmanager_url }}
+  ring:
+    kvstore:
+      store: inmemory
+  enable_api: true
+  evaluation_interval: {{ eval_interval }}
+```
+
+### 2. ruler storage ディレクトリを作成し、rule group ファイルを配置する
+
+```bash
+sudo mkdir -p {{ ruler_storage_path }}/fake
+```
+
+`{{ ruler_storage_path }}/fake/security-alerts.yaml` を以下の内容で作成します（`fake` は namespace/tenant 名で、シングルテナント構成でも必須のディレクトリです）。
+{% for g in rule_groups %}
+```yaml
+groups:
+  - name: {{ g.name }}
+    rules:
+      - alert: {{ g.name }}
+        expr: |
+          {{ g.query }} > {{ g.threshold }}
+        for: {{ g.for }}
+        labels:
+          severity: {{ g.severity }}
+        annotations:
+          summary: {{ g.summary }}
+```
+{% endfor %}
+
+### 3. 設定ファイルの構文チェックとサービス再起動を行う
+
+```bash
+loki -config.file=/etc/loki/loki-config.yaml -verify-config
+sudo systemctl restart loki
+```
+
+### 4. ruler API でルールが読み込まれていることを確認する
+
+```bash
+curl -s http://{{ loki_host }}/loki/api/v1/rules/fake/security-alerts | head -n 30
+```
+
+### 5. Alertmanager との疎通を確認する
+
+```bash
+curl -s {{ alertmanager_url }}/-/healthy
+curl -s http://{{ loki_host }}/ruler/ring | grep -i healthy
+```
+
+疎通が確認できるまでは、既存の通知経路（監視ツールの現行アラート等）を無効化しないでください。
+
+## 動作確認
+
+### 6. ルール評価とアラート発火を確認する
+
+対象ログにテスト用の一致行を継続的に送出し（例: `logger -t auth "failed password test"` を `for` の継続時間より長く繰り返す）、以下でアラートが `pending` を経て `firing` に遷移することを確認します。
+
+```bash
+curl -s http://{{ loki_host }}/loki/api/v1/rules/fake/security-alerts
+curl -s http://{{ loki_host }}/prometheus/api/v1/alerts | grep -i firing
+```
+
+### 7. Alertmanager への通知到達を確認する
+
+```bash
+curl -s {{ alertmanager_url }}/api/v2/alerts | grep -i "{{ notify_channel }}"
+```
+
+{{ notify_channel }} 宛に実際に通知が届いていることを目視でも確認します。テスト後は送出したテストログ・テストアラートである旨を通知先に一言添えて誤解を防ぎます。
+
+## 注意事項
+
+- 閾値としきい値超過の継続時間（`for`）は、通常時のログ量を数日分観察してから決定してください。閾値を低く・`for` を短く設定しすぎると、単発のノイズで誤発火（アラート疲れ）を招きます。
+- `for` はアラート抑制の主要な手段です。`pending` 状態のまま `for` を待たずに通知したい緊急度の高い条件だけ、`for` を短めに個別設定してください。
+- ruler storage（{{ ruler_storage_path }}）はルール定義そのものの保管場所です。バックアップ対象に含め、変更前後で `diff` を取れるようバージョン管理下に置くことを推奨します。
+- アラートの `summary` やログ抜粋には認証失敗時のユーザー名・IPアドレス等の機微な情報が含まれ得ます。通知先（{{ notify_channel }}）が社内の適切なチャンネル・権限範囲であることを事前に確認し、外部に転送されない設定になっているか確認してください。
+- Alertmanager 連携（通知経路）を新規追加する際は、手順4・手順7で疎通と通知到達を確認できるまで、既存の監視・通知経路を無効化・削除しないでください。

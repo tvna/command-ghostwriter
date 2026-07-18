@@ -1,0 +1,122 @@
+# 切り分け手順書: WireGuard トンネル不通の切り分け調査
+
+対象インターフェース **{{ scenario.interface }}** （リッスンポート UDP {{ scenario.listen_port }}、対向 Endpoint `{{ scenario.peer_endpoint }}`）で「ハンドシェイクが成立しない」「疎通しない」事象を、鍵 → Endpoint → AllowedIPs → ファイアウォール → ルーティングの順に切り分けます。
+
+## 目的
+
+WireGuard トンネルが不通になった際に、原因を「そもそもハンドシェイクが成立しない」系統と「ハンドシェイクは成立するが疎通しない」系統に分岐させ、鍵・Endpoint・AllowedIPs・FW/NAT・ルーティング/MTU の各段階を順番に確認できるようになることを目指します。
+
+## 用語解説
+
+- **latest handshake**: `wg show` で確認できる、直近にハンドシェイクが成立した時刻。これが空、または大きく古い場合はハンドシェイクそのものが成立していない
+- **PublicKey**: WireGuard の鍵ペアのうち公開鍵。自分の PublicKey は相手側の `PublicKey =` として、相手の PublicKey は自分側の `PublicKey =` として設定されている必要がある
+- **AllowedIPs**: そのピア経由で許可する送信先レンジ（ルーティング）であると同時に、受信パケットの送信元フィルタとしても働く。左右（自分側の設定と相手側の設定）で対称に整合している必要がある
+- **PersistentKeepalive**: NAT/FW 配下のピアが、NAT セッションを維持するために定期的にダミーパケットを送る設定。省略するとNAT配下側からのハンドシェイクが後で届かなくなることがある
+- **切り分けの分岐**: 「ハンドシェイクが全く成立しない」場合は鍵の取り違え・Endpoint 誤り・UDP ポートの到達性（FW/NAT）を疑う。「ハンドシェイクは成立するが疎通しない（ping 等が通らない）」場合は AllowedIPs の左右不整合・ルーティング設定・NAT・MTU を疑う
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| インターフェース | `{{ scenario.interface }}` |
+| リッスンポート (UDP) | `{{ scenario.listen_port }}` |
+| 対向 Endpoint | `{{ scenario.peer_endpoint }}` |
+| 期待する AllowedIPs（対向ピア側） | `{{ scenario.expected_allowed_ips }}` |
+| 自ホストの AllowedIPs | `{{ scenario.local_allowed_ips }}` |
+| 自ホストの PublicKey | `{{ scenario.local_public_key }}` |
+| 対向ピアの PublicKey | `{{ scenario.peer_public_key }}` |
+
+## 1. ハンドシェイクの有無を確認する
+
+まず `wg show` で latest handshake が記録されているかを確認します。ここが空欄なら「ハンドシェイク不成立」系統（手順 2〜4）へ、時刻が入っていれば「疎通しない」系統（手順 5〜6）へ進みます。
+
+```bash
+sudo wg show {{ scenario.interface }} latest-handshakes
+sudo wg show {{ scenario.interface }} dump
+```
+
+## 2. UDP ListenPort の FW/NAT 到達性を確認する（ハンドシェイク不成立系統）
+
+対向からの UDP パケットが listen port に届いているかを、自ホスト側でパケットキャプチャして確認します。
+
+```bash
+sudo tcpdump -i any udp port {{ scenario.listen_port }} -nn
+```
+
+到達していない場合は、自ホストのファイアウォールで UDP {{ scenario.listen_port }} が許可されているか、対向側/経路上の NAT・FW で当該ポートが遮断されていないかを確認します。
+
+```bash
+sudo firewall-cmd --list-ports
+sudo firewall-cmd --query-port={{ scenario.listen_port }}/udp
+```
+
+## 3. 両端の PublicKey の取り違えを確認する（ハンドシェイク不成立系統）
+
+自分側の設定に書かれている「相手の PublicKey」と、相手が実際に名乗る PublicKey が一致しているかを突き合わせます。
+
+```bash
+# 自ホストの PublicKey（相手側の [Peer] PublicKey に設定されているべき値）
+sudo wg show {{ scenario.interface }} public-key
+
+# 自ホストの設定上、相手として登録している PublicKey
+sudo wg show {{ scenario.interface }} peers
+```
+
+期待値と突き合わせます。
+
+- 自ホストの PublicKey が `{{ scenario.local_public_key }}` と一致すること（対向側の設定ファイルにこの値が登録されているはず）
+- 自ホストが認識している対向ピアの PublicKey が `{{ scenario.peer_public_key }}` と一致すること
+
+## 4. Endpoint の設定を確認する（ハンドシェイク不成立系統）
+
+対向の Endpoint（IP:ポート）が想定通りか、DNS 名を使っている場合は名前解決が正しいかを確認します。
+
+```bash
+sudo wg show {{ scenario.interface }} endpoints
+getent hosts $(echo "{{ scenario.peer_endpoint }}" | cut -d: -f1)
+```
+
+`endpoints` の出力が `{{ scenario.peer_endpoint }}` と異なる、あるいは空の場合は wg-quick の設定ファイル（`/etc/wireguard/{{ scenario.interface }}.conf`）の `[Peer]` セクションの `Endpoint =` を見直します。
+
+## 5. AllowedIPs の左右整合を確認する（疎通しない系統）
+
+ハンドシェイクは成立しているが ping 等が通らない場合、まず AllowedIPs の左右不整合を疑います。
+
+```bash
+sudo wg show {{ scenario.interface }} allowed-ips
+```
+
+自ホスト側の設定で相手ピアの AllowedIPs として登録している値が `{{ scenario.expected_allowed_ips }}` と一致していること、また対向側の設定でも自ホストの AllowedIPs が `{{ scenario.local_allowed_ips }}` として正しく登録されていることを、対向管理者と突き合わせます。左右で範囲がずれていると、片方向だけ疎通する・全く疎通しないといった非対称な症状になります。
+
+## 6. ip_forward・ルーティング・MTU を確認する（疎通しない系統）
+
+AllowedIPs が正しくても疎通しない場合は、転送設定・経路・MTU 起因のブラックホールを疑います。
+
+```bash
+# ルータ/ゲートウェイとして転送する場合、有効化されているか
+sysctl net.ipv4.ip_forward
+
+# トンネル経由の経路が意図通りか
+ip route get $(echo "{{ scenario.expected_allowed_ips }}" | cut -d/ -f1)
+
+# MTU起因のフラグメント問題切り分け（DFビットを立てて疎通確認）
+ping -M do -s 1400 -c 4 $(echo "{{ scenario.expected_allowed_ips }}" | cut -d/ -f1)
+```
+
+`ping -M do` が特定サイズ以上で失敗する場合は、`wg-quick` インターフェースの MTU（既定 1420 前後）を経路上のオーバーヘッドに合わせて調整します。
+
+## 動作確認
+
+1. `sudo wg show {{ scenario.interface }} latest-handshakes` に直近の時刻が表示されること
+2. `sudo tcpdump -i any udp port {{ scenario.listen_port }} -nn` で対向からの UDP パケットが観測されること
+3. `sudo wg show {{ scenario.interface }} public-key` および `peers` の出力が、シナリオ設定表の PublicKey と一致すること
+4. `sudo wg show {{ scenario.interface }} endpoints` が `{{ scenario.peer_endpoint }}` と一致すること
+5. `sudo wg show {{ scenario.interface }} allowed-ips` の左右設定がシナリオ設定表の値と整合していること
+6. `ping -M do -s 1400 -c 4 <対向レンジ内アドレス>` が成功すること
+
+## 注意事項
+
+- NAT/FW 配下にいるピア（自ホストからは到達できるが、相手からは自発的に到達できない側）は `PersistentKeepalive = 25` 程度を設定しないと、NAT セッションが切れてしばらくすると疎通しなくなる。恒常的に不通/断続的に不通を繰り返す場合はこの設定漏れを疑う。
+- WireGuard のハンドシェイクは内部的にタイムスタンプ（TAI64N）を用いた再送/リプレイ防止の仕組みを持つが、通常運用でクライアント間の時刻に多少のずれがあっても疎通不能の直接原因にはならない。ハンドシェイクが成立しない場合は、まず本手順の鍵・Endpoint・FW を優先して疑い、時刻同期を犯人と決めつけない。
+- 本手順は既存のトンネル設定を変更せず状態を確認するだけの調査手順である。切り分けの結果、鍵や AllowedIPs、FW ルールの変更が必要と判断した場合は、既存の疎通経路（現在のセッション・別経路の SSH など）を維持したまま新しい設定を並行して検証し、新しい経路での疎通を確認できてから旧設定・旧ルールを無効化・削除すること。
+- `tcpdump` や `wg show` の出力には鍵情報や通信先アドレスが含まれる場合があるため、ログや報告書に転記する際は必要最小限にとどめ、秘密鍵そのもの（`wg show <if> private-key` 相当の情報）は絶対に取得・共有しないこと。

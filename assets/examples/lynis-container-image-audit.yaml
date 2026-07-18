@@ -1,0 +1,13 @@
+target: container
+container_name: lynis-audit-web
+base_image: nginx:1.27
+skip_tests:
+  - BOOT-5122
+  - KRNL-5677
+  - KRNL-5820
+  - STRG-1846
+profile_path: /etc/lynis/container.prf
+report_path: /var/log/lynis-report-container.dat
+log_path: /var/log/lynis-container.log
+ci_integration: true
+ci_hardening_index_min: 70

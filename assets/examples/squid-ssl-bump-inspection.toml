@@ -1,0 +1,13 @@
+[global]
+hostname = "proxy01.internal.example.jp"
+bump_port = 3129
+bump_enabled = true
+ca_cert_path = "/etc/squid/ssl_cert/myCA.pem"
+ca_key_path = "/etc/squid/ssl_cert/myCA.key"
+ca_days = 3650
+db_dir = "/var/lib/ssl_db"
+splice_domains = [
+  "*.bank.example.jp",
+  "*.pay.example.jp",
+  "*.healthcare.example.jp",
+]

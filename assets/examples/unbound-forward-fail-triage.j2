@@ -1,0 +1,118 @@
+# Unbound名前解決失敗の切り分け調査
+
+SERVFAILや解決遅延が発生した際に、DNSSEC検証・上流サーバ到達性・Unboundの内部統計・access-control・キャッシュの順に原因を切り分ける調査手順です。
+
+## 目的
+
+「{{ target_domain }} が解決できない、または遅い」という申告に対し、Unboundのどの層で問題が起きているか（DNSSEC検証失敗／上流サーバ障害／access-control拒否／キャッシュ不整合）を、コマンドの実行結果に基づいて一つずつ切り分けられるようになることを目指します。
+
+## 用語解説
+
+- **SERVFAIL**: リゾルバが問い合わせに応答できなかったことを示すDNSの応答コード。原因は複数あり得るため単独では確定情報にならない
+- **+dnssec**: digでDNSSEC関連レコード(RRSIG等)を要求するオプション
+- **+cd (Checking Disabled)**: digでリゾルバ側のDNSSEC検証を無効化して問い合わせるオプション。**+cdを付けてSERVFAILが解消する場合、原因はDNSSEC検証失敗であると切り分けられる**（検証対象データ自体は取得できているため）
+- **unbound-control stats_noreset**: Unboundの内部統計をカウンタをリセットせずに取得するコマンド。`num.answer.rcode.SERVFAIL` や `num.query.tcpout`、`unwanted.queries` などから傾向を追える
+- **access-control**: 問い合わせを許可するクライアント範囲を制限するUnboundの設定項目。拒否時はREFUSEDが返り、SERVFAILとは区別される
+- **val-log-level**: DNSSEC検証(validator)モジュールのログ出力レベル。2に設定すると検証失敗の詳細理由がログに出力される
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 調査対象ドメイン | {{ target_domain }} |
+| DNSSEC検証バイパス試験を実施するか | {{ dnssec_bypass_test }} |
+| 上流サーバ到達性を確認するか | {{ upstream_check }} |
+| 原因確定後にキャッシュをフラッシュするか | {{ cache_flush }} |
+
+## 手順
+
+### 1. 現象を再現し応答コードを確認する
+
+```bash
+dig {{ target_domain }} A
+# ANSWERセクションではなくHEADERのstatusを確認する（例: status: SERVFAIL）
+```
+
+{% if dnssec_bypass_test %}
+### 2. DNSSEC検証バイパスで切り分ける(+cd)
+
+```bash
+# +cd を付けずに問い合わせ、DNSSEC込みの検証結果を確認する
+dig +dnssec {{ target_domain }} A
+
+# +cd を付けて検証を無効化した状態で再度問い合わせる
+dig +cd {{ target_domain }} A
+```
+
+- `+cd` なしでSERVFAIL、`+cd` ありで正常応答が返る場合は、DNSSEC検証失敗が原因である
+- 両方ともSERVFAILの場合は、DNSSEC以外（上流障害・access-control拒否等）を疑い、次の手順に進む
+{% endif %}
+{% if upstream_check %}
+### {% if dnssec_bypass_test %}3{% else %}2{% endif %}. 上流サーバへの到達性を確認する
+
+```bash
+# unbound.confのforward-zoneに設定した上流サーバへ直接問い合わせる
+dig @<upstream_ip> {{ target_domain }} A +time=2 +tries=1
+
+# Unbound自身から上流への疎通も確認する
+unbound-control forward
+```
+
+- 上流サーバへの直接問い合わせがタイムアウトまたは無応答の場合、上流サーバ側の障害または経路上の遮断が原因である
+- 上流サーバからは正常応答が得られるがUnbound経由では失敗する場合、Unbound側（検証・ACL・キャッシュ）の問題に絞り込める
+{% endif %}
+### {% if dnssec_bypass_test and upstream_check %}4{% elif dnssec_bypass_test or upstream_check %}3{% else %}2{% endif %}. Unboundの内部統計で傾向を確認する
+
+```bash
+unbound-control stats_noreset | grep -E 'num.answer.rcode.SERVFAIL|num.query.tcpout|unwanted.queries|num.answer.rcode.REFUSED'
+```
+
+- `num.answer.rcode.SERVFAIL` が継続的に増加していれば、恒常的な検証失敗または上流障害を示唆する
+- `num.query.tcpout` が多い場合はUDPでの応答不能によるTCPフォールバックが多発しており、上流の不安定さを示唆する
+- `unwanted.queries` や `num.answer.rcode.REFUSED` が増加している場合はaccess-control拒否が疑われるため、次の手順で確認する
+
+### {% if dnssec_bypass_test and upstream_check %}5{% elif dnssec_bypass_test or upstream_check %}4{% else %}3{% endif %}. access-control拒否を確認する
+
+```bash
+# クライアント側での結果
+dig {{ target_domain }} A
+# HEADERのstatusがREFUSEDであればaccess-control拒否
+
+# Unbound側での設定確認
+unbound-control -v get_option access-control
+```
+
+- REFUSEDが返る場合はSERVFAILとは別原因であり、`access-control` に問い合わせ元クライアントのアドレス範囲が許可されていないことが原因である
+- 設定を修正した場合は `unbound-checkconf` で構文検証してから `unbound-control reload` を行う
+
+{% if cache_flush %}
+### {% if dnssec_bypass_test and upstream_check %}6{% elif dnssec_bypass_test or upstream_check %}5{% else %}4{% endif %}. キャッシュ不整合を疑い、フラッシュして再検証する
+
+```bash
+# 対象ドメインのキャッシュのみをフラッシュする（全体フラッシュより影響範囲が小さい）
+unbound-control flush {{ target_domain }}
+
+# フラッシュ直後に再問い合わせし、新しい結果が得られることを確認する
+dig {{ target_domain }} A
+```
+
+- フラッシュ後に正常応答へ変化した場合、上流の変更が反映される前の古いレコードまたは過去に発生したSERVFAILの結果がキャッシュされていたことが原因である
+- フラッシュ後も同じ結果であれば、キャッシュは原因ではなく、上位の手順（DNSSEC・上流・access-control）に立ち戻って再確認する
+{% endif %}
+
+## 動作確認
+
+- 手順1のdig結果でSERVFAILの発生を再現できていること
+{% if dnssec_bypass_test %}- 手順2の `+cd` あり/なしの比較結果から、DNSSEC検証failureか否かを判定できていること
+{% endif %}{% if upstream_check %}- 上流サーバへの直接問い合わせ結果から、上流側の障害有無を判定できていること
+{% endif %}- `unbound-control stats_noreset` の該当カウンタを取得し、増加傾向を確認できていること
+- access-control拒否(REFUSED)とSERVFAILを取り違えずに識別できていること
+{% if cache_flush %}- キャッシュフラッシュ後の再問い合わせ結果で、キャッシュ起因か否かを判定できていること
+{% endif %}
+
+## 注意事項
+
+- SERVFAILの原因はDNSSEC検証失敗・上流サーバ障害・access-control拒否・キャッシュ不整合など複数あり得るため、`+cd` での切り分けを最初に行わずに設定変更（DNSSEC検証の無効化やaccess-controlの緩和）に踏み切らないこと。原因を誤って断定すると本来必要な保護（検証やアクセス制御）を不必要に無効化してしまう。
+- DNSSEC検証を一時的に無効化する設定変更（`val-permissive-mode` 等）を本番のunbound.confに対して行う場合は、変更を反映する前に `unbound-checkconf` で構文検証し、可能であれば別セッション（他クライアントからの問い合わせ、または検証用の一時ポート）で新しい設定が期待通り動作することを確認してから、既存の検証設定を無効化・削除すること。確認前に旧設定を消すと、検証が必要な経路まで無防備になる恐れがある。
+- 詳細な検証失敗理由を追う場合は `unbound-control set_option val-log-level: 2` で検証ログを有効化し、`journalctl -u unbound` でログを確認する。調査終了後は元のログレベルに戻すこと（ログ肥大化を防ぐため）。
+- `unbound-control flush` は対象ドメインのみを指定し、全体フラッシュ(`flush_zone` や引数なし操作)は避けること。全体フラッシュは他の正常なキャッシュも失効させ、上流への問い合わせが急増して負荷やレート制限を招く可能性がある。

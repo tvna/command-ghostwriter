@@ -1,0 +1,9 @@
+field,as_label,cardinality,rationale,note
+job,true,low,ジョブ種別ごとに数十件程度に収まりストリーム数を抑えられる,promtailのscrape_configsで固定値として付与
+host,true,low,対象ホスト台数分にしか増えずクエリのインデックス絞り込みに有効,ノード追加時のみ緩やかに増加
+env,true,low,prod/stg/dev等の環境名は値の種類が固定される,静的ラベルとしてscrape_configsに設定
+level,true,low,info/warn/error/fatal等の少数のenum値に限定される,pipeline_stagesのregexで抽出しlabelsステージで昇格
+request_id,false,high,リクエストごとに一意の値が発生しストリーム数が際限なく増える,regexで抽出後はlabelsステージに含めずログ本文に残す
+user_id,false,high,アクティブユーザー数分の値が発生しチャンク肥大化を招く,JSON本文のフィールドとして保持しLogQLの行フィルタ/ラベルフィルタで検索
+trace_id,false,high,分散トレーシングIDは実質無限の値を取りストリーム数爆発の主因になる,ログ本文に保持しLogQLの|=やパーサ後のラベルフィルタで検索
+pod_ip,false,high,Pod再作成のたびに新しいIPが払い出され既存の悪いラベル運用の典型例,誤って昇格していた場合はlabeldropステージで是正する

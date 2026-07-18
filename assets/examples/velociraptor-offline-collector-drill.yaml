@@ -1,0 +1,16 @@
+case_id: "DRILL-VR-2026-07"
+drill_date: "2026-07-17"
+isolated_host: "forensic-lab-01"
+collector_artifacts:
+  - Generic.Client.Info
+  - Windows.KapeFiles.Targets
+  - Windows.EventLogs.EvtxHunter
+encryption: true
+collector_password_vault_path: "/secure/vault/velociraptor-collector-passwords/2026-07-17.txt"
+output_format: "Zip"
+transfer_medium: "検証済みUSBメモリ（write-protect有効）"
+import_method: "GUIドラッグアンドドロップアップロード"
+notebook_name: "Offline Collector Drill 2026-07-17"
+participants:
+  - alice
+  - bob

@@ -1,0 +1,6 @@
+pack_name,query_count,target_role,interval_policy,review_status
+incident-response,18,all,high,approved
+vuln-management,12,web-server,standard,approved
+osquery-monitoring,9,all,standard,approved
+custom-db-audit,6,db-server,low,pending-review
+custom-legacy-net,4,network-appliance,low,deprecated

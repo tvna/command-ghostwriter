@@ -1,0 +1,118 @@
+# Wazuh検知能力の定期検証訓練
+
+安全なテスト行為で主要な検知ルールが正しく発報するかを、四半期ごとに台帳（CSV）で管理しながら検証する訓練手順です。
+
+## 目的
+
+Wazuhの検知パイプライン（ログ収集 → デコード → ルール照合 → level判定 → アラート表示）は、設定変更やエージェント障害によって静かに劣化することがあります。本訓練では、認証失敗・FIM（ファイル整合性監視）・sudo実行・既知テストIoCという主要カテゴリのテスト行為を安全に発生させ、期待するルールIDとlevelで発報するかを台帳に記録し、不検知が起きた場合は原因調査の導線に沿って切り分けられるようになることを目指します。
+
+## 用語解説
+
+- **FIM(File Integrity Monitoring)**: `syscheck`機能により監視対象ディレクトリ・ファイルの追加/変更/削除を検知する仕組み
+- **wazuh-logtest**: ログ1行を投入し、どのデコーダ・ルールに一致するかをオフラインで確認できる検証ツール（実際のログパイプラインには影響しない）
+- **rule level**: ルールごとに設定される重要度(0〜16)。`ossec.conf`側のアラートレベルしきい値未満だとダッシュボードに表示されないことがある
+- **TEST-NET-2(198.51.100.99)**: RFC 5737で文書化・試験専用に予約されたIPアドレス帯。実在の攻撃者IPを使わず安全にIoC検知テストができる
+- **台帳(この手順のCSV)**: `test_id, category, action, expected_rule_id, expected_level, last_result, tested_at` の列を持つ、訓練の実施記録簿
+
+## シナリオ設定
+
+| test_id | category | action | expected_rule_id | expected_level | last_result | tested_at |
+|---|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["test_id"] }} | {{ r["category"] }} | {{ r["action"] }} | {{ r["expected_rule_id"] }} | {{ r["expected_level"] }} | {{ r["last_result"] }} | {{ r["tested_at"] }} |
+{% endfor %}
+
+## 1. 訓練前の事前通知
+
+テスト行為は監視対象ホストに実インシデントとして記録されるため、必ずSOC/対応チームへ事前通知してから開始します。誤ってインシデント対応が起動しないよう、実施予定の`test_id`一覧と実施時間帯を共有してください。
+
+```bash
+{% for r in csv_rows %}echo "訓練通知: {{ r["test_id"] }} ({{ r["category"] }}) を実施予定 - expected_rule_id={{ r["expected_rule_id"] }}"
+{% endfor %}```
+
+## 2. 認証失敗の模擬テスト(TC-01, TC-02)
+
+自組織が管理するテスト用ホストに対してのみ実施します。対象外ホストへは実施しないでください。
+
+```bash
+# TC-01: SSH認証失敗を6回連続で発生させる(rule 5710想定)
+for i in $(seq 1 6); do
+  ssh -o StrictHostKeyChecking=no -o PreferredAuthentications=password -o PubkeyAuthentication=no drill-test-user@127.0.0.1 exit
+done
+
+# TC-02: しきい値超過によるブルートフォース判定を確認する(rule 5720想定)
+for i in $(seq 1 20); do
+  ssh -o StrictHostKeyChecking=no -o PreferredAuthentications=password -o PubkeyAuthentication=no drill-test-user@127.0.0.1 exit
+done
+```
+
+## 3. FIM(ファイル整合性監視)の模擬テスト(TC-03, TC-04)
+
+事前に`ossec.conf`の`<syscheck>`セクションで監視対象ディレクトリ(例: `/etc/wazuh-drill`)が設定済みであることを確認してから実施します。
+
+```bash
+# TC-03: 監視対象ディレクトリへのファイル作成(rule 554想定)
+sudo mkdir -p /etc/wazuh-drill
+sudo touch /etc/wazuh-drill/drill-test-file.txt
+
+# TC-04: 監視対象ファイルの内容変更(rule 550想定)
+echo "drill-$(date +%s)" | sudo tee -a /etc/wazuh-drill/drill-test-file.txt
+
+# 訓練後の後片付け(次回訓練に影響しないよう削除)
+sudo rm -f /etc/wazuh-drill/drill-test-file.txt
+```
+
+## 4. sudo実行監視の模擬テスト(TC-05)
+
+```bash
+# TC-05: 一般ユーザーがsudoでroot権限コマンドを実行(rule 5402想定)
+sudo whoami
+```
+
+## 5. 既知テストIoCログ投入テスト(TC-06)
+
+実際のログパイプラインに影響を与えない`wazuh-logtest`でオフライン検証します。事前に以下のカスタムルールが`/var/ossec/etc/rules/local_rules.xml`に登録済みであることを前提とします。
+
+```xml
+<group name="threat_intel,">
+  <rule id="100050" level="10">
+    <if_group>web|attack</if_group>
+    <match>198.51.100.99</match>
+    <description>既知テストIoC(TEST-NET-2 198.51.100.99)との通信を検知(訓練用)</description>
+    <mitre>
+      <id>T1071</id>
+    </mitre>
+  </rule>
+</group>
+```
+
+```bash
+# TC-06: 既知テストIoC(198.51.100.99)を含むアクセスログをlogtestに投入
+echo '198.51.100.99 - - [18/Jul/2026:09:00:00 +0900] "GET /admin HTTP/1.1" 403 512' | /var/ossec/bin/wazuh-logtest
+```
+
+## 6. 動作確認(発報有無の記録)
+
+各テストについて、期待するルールID・levelでの発報を以下の方法で確認し、結果を台帳に転記します。
+
+- TC-01〜TC-05: Wazuhダッシュボードの「Security events」で、直近数分以内に該当ルールIDのアラートが出ていることを確認する
+- TC-06: `wazuh-logtest`の出力に表示される`rule.id`・`rule.level`が期待値と一致することを確認する
+
+```bash
+{% for r in csv_rows %}echo "{{ r["test_id"] }}: expected_rule_id={{ r["expected_rule_id"] }} expected_level={{ r["expected_level"] }} -> ダッシュボード/logtestの実測値と突合"
+{% endfor %}```
+
+不検知だった場合は、以下の順で原因調査を行います。
+
+1. **収集**: 対象ホストの`wazuh-agentd`が稼働し、マネージャと通信できているか(`/var/ossec/bin/agent_control -i <agent_id>`)
+2. **デコード**: 該当ログが期待するデコーダに一致しているか(`wazuh-logtest`で同一ログを再投入)
+3. **ルール**: `local_rules.xml`/`rules_config.xml`に期待するルールIDが存在し、構文エラーがないか(`/var/ossec/bin/wazuh-logtest -t`相当のルールテスト)
+4. **level**: `ossec.conf`のアラート通知しきい値(`<log_alert_level>`等)が期待levelより高く設定され、記録はされているが通知されていないだけでないか
+
+## 注意事項
+
+- テストは自組織が管理するホスト(検証用ステージング等)でのみ実施し、管理外・本番顧客環境では実施しない。
+- 訓練開始前に必ずSOC/対応チームへ実施予定の`test_id`と時間帯を通知し、誤ってインシデント対応やエスカレーションが起動しないようにする。
+- TC-05のsudo実行監視はrsyslog/auditdからのログ収集経路を変更するものではないため新旧経路の並行稼働確認は不要だが、TC-01/TC-02のSSH認証失敗テストで対象ホストのSSH到達性そのものを変更する設定(fail2ban等の遮断ルール変更)を合わせて行う場合は、必ず別セッションを維持した状態で新しい認証経路が機能することを確認してから旧経路を無効化・削除すること。
+- FIM検証で作成したテストファイル(TC-03/TC-04)は訓練終了後に必ず削除し、次回訓練の判定に影響を残さない。
+- 台帳(このCSV)の`last_result`/`tested_at`列に実施結果を記録し、監査証跡として保管する。不検知が発生した回はその原因調査結果も合わせて記録すること。
+

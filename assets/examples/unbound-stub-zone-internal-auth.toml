@@ -1,0 +1,10 @@
+resolver_host = "127.0.0.1"
+stub_first = false
+internal_test_host = "app01.internal.example"
+external_domain = "example.com"
+dnssec_validation = true
+internal_zone_signed = false
+
+[[stub_zones]]
+name = "internal.example."
+addr = ["10.0.30.5", "10.0.30.6"]

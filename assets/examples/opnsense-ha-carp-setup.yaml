@@ -1,0 +1,24 @@
+primary_host: fw-pri-01
+secondary_host: fw-sec-01
+primary_mgmt_ip: 192.168.1.1
+secondary_mgmt_ip: 192.168.1.2
+carp_password: "Carp-VIP-P@ssw0rd-2026"
+sync_interface: igb3
+sync_peer_ip: 198.51.100.2
+xmlrpc_user: root
+carp_vips:
+  - interface: wan
+    vip: 203.0.113.1
+    vhid: 1
+    advskew_master: 0
+    advskew_backup: 100
+  - interface: lan
+    vip: 192.168.10.1
+    vhid: 2
+    advskew_master: 0
+    advskew_backup: 100
+  - interface: dmz
+    vip: 192.168.20.1
+    vhid: 3
+    advskew_master: 0
+    advskew_backup: 100

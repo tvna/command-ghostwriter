@@ -1,0 +1,134 @@
+# Squid上位経路障害時の切り分け調査 — {{ symptom }}
+
+squidclientの内部指標・access.logの応答コード・名前解決・上位プロキシ疎通を順に確認し、名前解決/上位プロキシ/回線のどこで障害が起きているかを切り分けます。
+
+## 目的
+
+**{{ symptom }}** という事象に対し、Squid自身の状態、access.logの502/503/504とhierarchy列、DNS、上位プロキシ(cache_peer)への疎通を順番に確認し、原因箇所を名前解決・上位プロキシ・回線のいずれかに絞り込めるようになることを目指します。
+
+## 用語解説
+
+- **cache_peer**: Squidが上位中継先として使う親プロキシ(parent)を定義する設定。squid.confで宛先ホスト・ポートを指定する
+- **never_direct**: cache_peer経由を強制し、Squidから宛先への直接接続を禁止する設定。全てのcache_peerが不通になると外部通信が全滅する
+- **hierarchy列**: access.logの9番目のフィールド。`HIER_DIRECT`や`HIER_TIMEOUT/<parent>`のように、要求がどの経路(直接/どの親)で処理されたかを示す
+- **502 Bad Gateway**: 上位プロキシから不正な応答を受け取った状態
+- **503 Service Unavailable**: 上位プロキシに到達できない、または全滅している状態
+- **504 Gateway Timeout**: 上位プロキシへは到達しているが応答が返ってこない(応答遅延)状態
+- **dns_v4_first**: squid.confでIPv4での名前解決を優先させるディレクティブ。DNS起因の切り分け時に確認する
+
+## シナリオ設定
+
+{{ affected_scope }} から「{{ symptom }}」と報告されています。上位プロキシは `{{ parent_host }}` で、DNSサーバは以下を使用しています。
+
+| 項目 | 値 |
+| --- | --- |
+| 症状 | {{ symptom }} |
+| 影響範囲 | {{ affected_scope }} |
+| 上位プロキシ (parent) | {{ parent_host }} |
+{% for ns in dns_servers %}| DNSサーバ({{ loop.index }}) | {{ ns }} |
+{% endfor %}
+
+## 手順
+
+### 1. Squid自身の状態をsquidclientで確認する
+
+Squidプロセスが生きているか、直近の要求傾向に異常がないかを確認します。
+
+```bash
+squidclient -p 3128 mgr:info
+squidclient -p 3128 mgr:5min
+```
+
+→ `mgr:info` でプロセスが応答しない場合はSquid自体の障害です。`mgr:5min` でエラー率やタイムアウト数が急増していれば、以降の切り分けに進みます。
+
+### 2. access.logで502/503/504とhierarchy列を確認する
+
+Squidホスト上でaccess.logの応答コード分布と、どの経路(hierarchy列)で処理されたかを確認します。
+
+```bash
+tail -n 2000 /var/log/squid/access.log | awk '{print $4}' | cut -d/ -f2 | sort | uniq -c | sort -rn
+tail -n 2000 /var/log/squid/access.log | grep -E ' (TCP_MISS|TCP_TUNNEL)/(502|503|504) '
+```
+
+→ 504が多い場合は{{ parent_host }}への応答遅延、503が多い場合は{{ parent_host }}全滅、hierarchy列に`HIER_TIMEOUT`や`HIER_NONE`が並ぶ場合も上位経路の異常を示します。DNS関連のエラー(`DNS_FAIL`など)が出ていれば手順3に進みます。
+
+### 3. Squidホストから直接、名前解決を確認する(dig)
+
+Squidが使用しているDNSサーバに対し、Squidホスト自身から直接名前解決を試みます。
+
+```bash
+{% for ns in dns_servers %}dig @{{ ns }} www.example.com +time=2 +tries=1
+{% endfor %}
+```
+
+→ 一部または全部のDNSサーバで応答がない、あるいはSERVFAIL/タイムアウトになる場合はDNS起因です。squid.confの`dns_v4_first on`設定がIPv6優先環境で誤動作を招いていないかも合わせて確認します。
+
+```bash
+grep -i '^dns_v4_first' /etc/squid/squid.conf
+```
+
+全DNSサーバが正常に応答する場合は手順4に進みます。
+
+### 4. 上位プロキシへの疎通をcurlで直接確認する
+
+Squidを経由せず、Squidホストから{{ parent_host }}へ直接TCP接続とHTTP応答を確認します。
+
+```bash
+curl -x http://{{ parent_host }} -I https://www.example.com/ -m 5 -sv
+```
+
+→ 接続自体がタイムアウトする場合は{{ parent_host }}全滅(503系)、接続はできるが応答に時間がかかる場合は504系の応答遅延です。両方とも問題なければ回線(SquidホストからISP網まで)を疑います。
+
+### 5. 判定基準に基づき原因を切り分ける
+
+手順1〜4の結果を次の基準で判定します。
+
+- 504が多発し、手順4のcurlで接続はできるが応答が遅い → **上位プロキシ({{ parent_host }})の応答遅延**
+- 503が多発し、手順4のcurlで接続自体がタイムアウト → **上位プロキシ({{ parent_host }})の全滅**
+- 手順3のdigが失敗する → **名前解決の障害**(DNSサーバまたはdns_v4_first設定)
+- 手順3・4がいずれも正常 → **回線(Squidホストより先のISP網)を疑う**
+
+### 6. 一時的にdirect接続を許可して復旧させる場合
+
+cache_peerが全滅していて`never_direct`により外部通信が完全に止まっている場合、緊急避難として一時的に直接接続を許可できます。適用前に必ず変更内容を記録し、有効化後は限定した宛先で新経路が実際に機能することを確認してから範囲を広げます。
+
+```bash
+# 変更前に現在の設定を記録する
+cp /etc/squid/squid.conf /etc/squid/squid.conf.bak.$(date +%Y%m%d%H%M%S)
+grep -nE 'never_direct|cache_peer' /etc/squid/squid.conf
+```
+
+squid.confに検証用の限定ACLを追加し、まずはそのACLだけdirect接続を許可します(never_directの全体設定はまだ変更しません)。
+
+```
+acl direct_test src 10.10.1.100/32
+always_direct allow direct_test
+```
+
+```bash
+squid -k parse
+squid -k reconfigure
+```
+
+新経路が機能することを検証端末(10.10.1.100)から確認します。
+
+```bash
+curl --resolve www.example.com:443:203.0.113.10 -I https://www.example.com/ -m 5 -x http://10.10.1.1:3128
+```
+
+→ 検証端末経由で200番台の応答が返ることを確認できた場合のみ、`direct_test`の対象ACLを段階的に広げます。上位プロキシ復旧後は`always_direct allow direct_test`と`acl direct_test`を削除し、`squid -k reconfigure`で元のnever_direct構成に戻します。
+
+## 動作確認
+
+- `squidclient -p 3128 mgr:info` が正常応答し、`mgr:5min`のエラー率がベースライン相当に戻っていること
+- access.logの502/503/504の発生率が平常時の水準まで下がっていること
+- 手順3のdigが{{ dns_servers | join(", ") }}のいずれからも正常に応答すること
+- 手順4のcurlで{{ parent_host }}経由のHTTP応答が200番台で返ること
+- 一時的にdirect接続を許可した場合は、上位プロキシ復旧後に該当ACL・always_direct設定を削除し、`squid -k reconfigure`でnever_direct構成に復旧していること
+
+## 注意事項
+
+- `never_direct`でcache_peerを強制している構成では、上位プロキシ({{ parent_host }})が全滅すると外部通信が完全に停止する。一時的にdirect接続を許可する際は、必ず限定したACL(検証端末など)で新経路が機能することを確認してから対象を広げること。
+- direct接続を許可する変更は暫定復旧のための例外であり、適用日時・対象ACL・理由を変更記録に残し、上位プロキシ復旧後は速やかに元のnever_direct構成へ戻すこと。
+- `dns_v4_first`などDNS関連の設定変更はSquid全体の名前解決挙動に影響するため、変更前に現在の設定をバックアップし、影響範囲の小さい時間帯に適用すること。
+- squid.confの変更は必ず`squid -k parse`で文法検証してから`squid -k reconfigure`を実行し、設定ミスによる全断を避けること。

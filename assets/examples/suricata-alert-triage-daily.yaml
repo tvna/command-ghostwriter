@@ -1,0 +1,11 @@
+log_path: /var/log/suricata/eve.json
+triage_time: "09:00"
+severity_sla:
+  1: "即応(30分以内に一次対応、security-response手順へ)"
+  2: "当日中にチューニング要否を判断(threshold手順へ)"
+  3: "様子見(週次でまとめてレビュー)"
+known_noise_sids:
+  - 2013504
+  - 2100498
+  - 2024898
+escalation_contact: "セキュリティ運用チーム (Slack #secops-alert / 内線 5150)"

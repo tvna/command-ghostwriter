@@ -1,0 +1,4 @@
+sid,action,proto,dst_port,msg,classtype,content_summary,rev
+9100001,alert,tcp,22,LOCAL SSH banner grab,attempted-recon,SSH- を接続開始直後に検出,1
+9100002,alert,tcp,3389,LOCAL RDP brute force attempt,attempted-admin,短時間の連続接続を検出,2
+9100003,alert,tcp,445,LOCAL SMB unauthorized share access,attempted-recon,SMB negotiate protocol要求を検出,1

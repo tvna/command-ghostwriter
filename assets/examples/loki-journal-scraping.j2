@@ -1,0 +1,129 @@
+# Promtail journaldスクレイピング構成
+
+promtailのjournalスクレイプでsystemdログを収集し、unit別にラベル付けしてLokiへ送る手順です。journaldから直接読み取るため、rsyslog等の中継を経由せず低遅延にログを取り込めます。
+
+## 目的
+
+promtailの`journal`ブロックによるsystemdジャーナルの直接スクレイプを構成し、`relabel_configs`でunit・ホスト・優先度をラベル化したうえで、LogQLで絞り込み検索できる状態にすることを目指します。
+
+## 用語解説
+
+- **journalスクレイプ**: promtailがsystemd-journaldのバイナリログ（`/var/log/journal`）を直接読み取り、ファイルtailingを介さずログエントリを取得する方式
+- **`__journal__systemd_unit`**: journalエントリの`_SYSTEMD_UNIT`フィールドをpromtailが内部的に保持するメタラベル名
+- **`__journal__hostname`**: journalエントリの`_HOSTNAME`フィールドに対応するメタラベル名
+- **relabel_configs**: メタラベル（`__`始まりで内部専用）を、Lokiに送信される実ラベル（例: `unit`）へ変換・採用するルール群
+- **positionsファイル**: promtailがどこまで読み進めたかを記録し、再起動時の重複送信・欠損を防ぐための状態ファイル
+- **高カーディナリティ**: ラベル値の組み合わせパターンが非常に多くなること。Lokiのインデックス肥大化とクエリ性能劣化を招く
+
+## シナリオ設定
+
+journal読み取りパスは`{{ journal_path }}`、起動時に遡って取り込む最大期間は`{{ max_age }}`です。unitラベル付与は`{{ unit_labels }}`に設定し、以下のrelabelルールを適用します。
+
+| メタラベル | 変換先ラベル |
+| --- | --- |
+{% for rule in relabel_rules %}| `{{ rule.source }}` | `{{ rule.target }}` |
+{% endfor %}
+
+## 手順
+
+### 1. journaldの永続化を確認する
+
+promtailがjournalを継続的に読み取れるよう、journaldのログが揮発（メモリのみ）ではなくディスクに永続化されていることを先に確認します。
+
+```bash
+grep -E '^Storage=' /etc/systemd/journald.conf || echo "Storage未設定（デフォルトはauto）"
+sudo mkdir -p /var/log/journal
+sudo systemctl restart systemd-journald
+journalctl --disk-usage
+```
+
+`Storage=persistent`（または`auto`でディスクマウント済み）でない場合は、次の手順で明示的に設定します。
+
+```bash
+sudo sed -i 's/^#Storage=.*/Storage=persistent/' /etc/systemd/journald.conf
+sudo systemctl restart systemd-journald
+```
+
+### 2. promtailのjournal scrape_configを作成する
+
+`{{ journal_path }}`を読み取り対象とし、起動時は`{{ max_age }}`分のログのみ遡って取り込むよう設定します。
+
+```yaml
+# /etc/promtail/config.yml
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /var/lib/promtail/positions.yaml
+
+clients:
+  - url: http://loki.internal:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: journal
+    journal:
+      json: false
+      max_age: {{ max_age }}
+      path: {{ journal_path }}
+      labels:
+        job: systemd-journal
+    relabel_configs:
+{% for rule in relabel_rules %}      - source_labels: ["{{ rule.source }}"]
+        target_label: "{{ rule.target }}"
+{% endfor %}      - source_labels: ["__journal_priority_keyword"]
+        target_label: "level"
+```
+
+unit別ラベル付けを有効化する設定値は`unit_labels: {{ unit_labels }}`です。有効な場合、上記relabel_configsの`__journal__systemd_unit` → `unit`のルールを必ず含めてください。無効化する場合でも`__journal_priority_keyword` → `level`のルールは残し、優先度によるフィルタは維持します。
+
+### 3. positionsファイルの権限とpromtailサービスを確認する
+
+```bash
+sudo mkdir -p /var/lib/promtail
+sudo chown promtail:promtail /var/lib/promtail
+sudo systemctl restart promtail
+sudo systemctl status promtail --no-pager
+```
+
+### 4. 設定を検証用に反映する
+
+まず既存の転送経路（rsyslog等）は止めず、promtailを並行稼働させて新経路の到達を確認してから切り替えます。
+
+```bash
+promtail -config.file=/etc/promtail/config.yml -dry-run -log.level=debug 2>&1 | head -n 50
+sudo systemctl reload promtail || sudo systemctl restart promtail
+```
+
+## 動作確認
+
+1. テスト用ユニットにログを出力させ、journalctlで採取されていることを確認します。
+
+```bash
+logger -t promtail-test "journal-scrape-verify $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+journalctl -t promtail-test -n 5 --no-pager
+```
+
+2. LogQLでunitラベルによる絞り込みができることをLoki API経由で確認します。
+
+```bash
+curl -sG http://loki.internal:3100/loki/api/v1/query_range \
+  --data-urlencode 'query={job="systemd-journal", unit="promtail-test.service"}' \
+  --data-urlencode 'limit=5' | head -c 500
+```
+
+3. 優先度ラベル（level）でも絞り込めることを確認します。
+
+```bash
+curl -sG http://loki.internal:3100/loki/api/v1/query_range \
+  --data-urlencode 'query={job="systemd-journal", level="info"} |= "promtail-test"' \
+  --data-urlencode 'limit=5' | head -c 500
+```
+
+## 注意事項
+
+- journaldが`Storage=persistent`（またはディスク永続構成）でない場合、promtail再起動やホスト再起動でscrape対象のログが失われる。手順1で必ず永続化設定を確認・是正すること。
+- `max_age: {{ max_age }}`は起動時に遡って取り込む範囲を決める値であり、長すぎると起動直後に大量のログを一括送信してLoki側の取り込み負荷が急増する。環境のjournalサイズに応じて調整する。
+- `_SYSTEMD_UNIT`や`_HOSTNAME`以外のメタデータ（例: `_PID`や`_CMDLINE`など値が無数に変化するフィールド）を安易にラベル化しない。高カーディナリティラベルはLokiのインデックスを肥大化させクエリ性能を著しく低下させるため、ラベルは`unit`・`host`・`level`など値の種類が限られるものに限定する。
+- `positions.yaml`を保存するディレクトリ（`/var/lib/promtail`）の書き込み権限がpromtailユーザーにない場合、再起動のたびに全ログを再送信してしまう。権限とファイルの存在を事前に確認する。
+- 既存のログ転送経路（rsyslog転送など）がすでに稼働している場合は、promtailによる新経路が実際にLokiへ到達していることを動作確認で確認してから、旧経路の停止・撤去を行う。並行稼働なしにいきなり旧経路を止めない。

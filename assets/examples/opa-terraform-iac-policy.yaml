@@ -1,0 +1,7 @@
+policy_dir: "policy/terraform"
+plan_json: "plan.json"
+deny_rules:
+  - "publicアクセス禁止(S3バケット/セキュリティグループの0.0.0.0/0公開を拒否)"
+  - "暗号化必須(EBS/S3/RDSの保存時暗号化が無効な場合に拒否)"
+  - "タグ必須(Owner/Environmentタグが欠落しているリソースを拒否)"
+ci_gate: true

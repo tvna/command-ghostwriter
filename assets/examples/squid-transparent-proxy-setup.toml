@@ -1,0 +1,16 @@
+[squid]
+intercept_port = 3129
+cache_dir = "/var/spool/squid"
+https_handling = "splice"
+
+[gateway]
+lan_interface = "eth1"
+wan_interface = "eth0"
+redirect_source_net = "192.168.10.0/24"
+squid_host_ip = "192.168.10.1"
+pilot_client_ip = "192.168.10.50"
+
+[verification]
+access_log_path = "/var/log/squid/access.log"
+nft_table = "inet filter"
+nft_chain = "prerouting"

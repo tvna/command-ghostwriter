@@ -1,0 +1,159 @@
+# WireGuard サイト間 VPN 構築手順 — {{ site_a.name }} ⇔ {{ site_b.name }}
+
+**{{ site_a.name }}**（{{ site_a.local_subnet }}）と **{{ site_b.name }}**（{{ site_b.local_subnet }}）のサブネット同士を、WireGuard によるサイト間 VPN で接続します。両拠点のルータ（またはゲートウェイ）で `wg0` インターフェースを構成し、双方向の経路を確立します。
+
+## 目的
+
+このシナリオでは、2 拠点間に WireGuard トンネルを構築し、互いのサブネットへ双方向に到達できることを、実際の疎通確認（ping / traceroute / `wg show`）で検証できるようになることを目指します。
+
+## 用語解説
+
+- **wg0**: WireGuard 用の仮想ネットワークインターフェース名（本手順では両拠点とも `wg0` を使用）
+- **AllowedIPs**: そのピア経由でルーティングしてよい（＝受信・送信を許可する）宛先サブネットを指定する設定。左右（両拠点）で非対称な設定をすると、一方向だけ疎通し逆方向が不通になる典型的な設定ミスになる
+- **PersistentKeepalive**: NAT 環境などでセッションが切れないよう、一定間隔でキープアライブパケットを送信する設定（秒単位）
+- **ip_forward**: Linux カーネルの IP パケット転送機能。ルータとして動作させるには両拠点で有効化が必須
+- **MTU / MSS clamp**: WireGuard はヘッダ分のオーバーヘッドがあるため、通常のイーサネット MTU（1500）よりトンネルの MTU を小さく（目安 1420）する必要がある。TCP の場合は MSS を経路上でクランプしないと、大きいパケットがトンネル内で断片化・ドロップされることがある
+- **NAT 除外**: 拠点間トンネルを通るトラフィックを、インターネット向け NAT（マスカレード）の対象から除外する設定。除外を忘れると、対向拠点からの戻りパケットの送信元アドレスが変換され、通信が成立しない
+
+## シナリオ設定
+
+| 項目 | {{ site_a.name }} | {{ site_b.name }} |
+| --- | --- | --- |
+| 自拠点サブネット | {{ site_a.local_subnet }} | {{ site_b.local_subnet }} |
+| 対向拠点サブネット | {{ site_a.remote_subnet }} | {{ site_b.remote_subnet }} |
+| 自拠点エンドポイント | {{ site_a.local_endpoint }} | {{ site_b.local_endpoint }} |
+| 対向拠点エンドポイント | {{ site_a.remote_endpoint }} | {{ site_b.remote_endpoint }} |
+| トンネル MTU | {{ site_a.mtu }} | {{ site_b.mtu }} |
+| 疎通確認用ホスト | {{ verify.site_a_test_host }} | {{ verify.site_b_test_host }} |
+
+## 1. 事前確認（アドレス設計）
+
+WireGuard 設定を投入する前に、両拠点のサブネットが重複していないことを必ず確認してください。
+
+```bash
+# 両拠点で、対向サブネットと自サブネットが重複しないことを事前に確認する
+ip route show
+```
+
+- {{ site_a.name }} 側サブネット: {{ site_a.local_subnet }}
+- {{ site_b.name }} 側サブネット: {{ site_b.local_subnet }}
+
+重複するサブネット同士は WireGuard で接続できません（経路が一意に定まらないため）。重複がある場合は、どちらか一方のサブネットを再設計してから作業を再開してください。
+
+## 2. {{ site_a.name }} 側で wg0 を構成する
+
+```bash
+# 秘密鍵はここで新規生成せず、既に払い出し済みの鍵ペアを利用する想定
+sudo mkdir -p /etc/wireguard
+sudo tee /etc/wireguard/wg0.conf > /dev/null <<'EOF'
+[Interface]
+Address = {{ site_a.local_subnet }}
+ListenPort = 51820
+PrivateKey = <site-a-private-key-here>
+MTU = {{ site_a.mtu }}
+
+[Peer]
+PublicKey = {{ site_a.remote_pubkey }}
+Endpoint = {{ site_a.remote_endpoint }}
+AllowedIPs = {{ site_a.remote_subnet }}
+PersistentKeepalive = 25
+EOF
+
+sudo chmod 600 /etc/wireguard/wg0.conf
+```
+
+## 3. {{ site_b.name }} 側で wg0 を構成する
+
+```bash
+sudo mkdir -p /etc/wireguard
+sudo tee /etc/wireguard/wg0.conf > /dev/null <<'EOF'
+[Interface]
+Address = {{ site_b.local_subnet }}
+ListenPort = 51820
+PrivateKey = <site-b-private-key-here>
+MTU = {{ site_b.mtu }}
+
+[Peer]
+PublicKey = {{ site_b.remote_pubkey }}
+Endpoint = {{ site_b.remote_endpoint }}
+AllowedIPs = {{ site_b.remote_subnet }}
+PersistentKeepalive = 25
+EOF
+
+sudo chmod 600 /etc/wireguard/wg0.conf
+```
+
+公開鍵の対応関係は以下の通りです。設定投入前に必ず突き合わせて確認してください（左右で取り違えると認証に失敗しトンネルが確立しません）。
+
+- {{ site_a.name }} の公開鍵: {{ site_a.local_pubkey }}
+- {{ site_b.name }} の公開鍵: {{ site_b.local_pubkey }}
+
+## 4. 両拠点で ip_forward と NAT 除外を設定する
+
+両拠点のルータで、パケット転送を有効化し、対向サブネット宛の通信を NAT（マスカレード）から除外します。既存の NAT ルールを変更する前に、必ず現在のルール番号を控えておいてください（ロールバック用）。
+
+```bash
+# パケット転送を有効化（永続化）
+sudo sysctl -w net.ipv4.ip_forward=1
+echo 'net.ipv4.ip_forward=1' | sudo tee -a /etc/sysctl.d/99-wireguard.conf
+
+# 既存の NAT ルールを確認・退避してから、トンネル宛通信を除外するルールを先頭に追加する
+sudo iptables -t nat -L POSTROUTING -n --line-numbers
+sudo iptables -t nat -I POSTROUTING 1 -s {{ site_a.local_subnet }} -d {{ site_a.remote_subnet }} -j ACCEPT
+```
+
+## 5. wg0 を起動する
+
+```bash
+sudo wg-quick up wg0
+sudo systemctl enable wg-quick@wg0
+```
+
+MTU と MSS clamp を設定します（TCP の断片化・パケットロスを防ぐため）。
+
+```bash
+sudo iptables -t mangle -A FORWARD -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+```
+
+## 動作確認
+
+新しい経路（WireGuard トンネル）が実際に機能することを、既存の経路を変更・撤去する前に必ず確認してください。
+
+1. 両拠点で `wg show` を実行し、`latest handshake` が直近の時刻になっていることを確認する
+
+```bash
+sudo wg show wg0
+```
+
+2. {{ site_a.name }} の {{ verify.site_a_test_host }} から {{ site_b.name }} の {{ verify.site_b_test_host }} へ ping を実行し、応答があることを確認する
+
+```bash
+ping -c 4 {{ verify.site_b_test_host }}
+```
+
+3. 逆方向（{{ site_b.name }} → {{ site_a.name }}）も同様に ping を実行する。AllowedIPs の左右非対称設定ミスがあると、この逆方向だけが不通になることが多いため、必ず両方向を確認する
+
+```bash
+ping -c 4 {{ verify.site_a_test_host }}
+```
+
+4. `traceroute` で経路がトンネル経由（余分なホップを挟まない直接経路）になっていることを確認する
+
+```bash
+traceroute {{ verify.site_b_test_host }}
+```
+
+5. 疎通確認後、再度 `wg show` の `transfer` 欄を確認し、送受信バイト数が増加していることを確認する（トンネルに実際にトラフィックが流れている証拠になる）
+
+```bash
+sudo wg show wg0 transfer
+```
+
+## 注意事項
+
+- **重複するサブネット同士は接続できません。** 作業開始前に必ず両拠点のサブネットが重複していないことを確認してください（手順 1 参照）。重複がある場合はアドレス再設計が必要です。
+- **AllowedIPs は両拠点で対になるように設定してください。** {{ site_a.name }} 側の AllowedIPs には {{ site_a.name }} 自身のサブネットではなく対向（{{ site_b.name }}）のサブネットを指定します。左右を取り違えたり、どちらか一方だけ設定を反映し忘れたりすると、片方向だけ疎通する（もう片方は不通になる）事象が発生します。
+- **MTU は 1420 程度を目安にしてください。** 通常のイーサネット MTU（1500）のままだとトンネル内でパケットが断片化し、特に大きな TCP パケットで通信が不安定になります。MSS clamp（手順 5）と併用してください。
+- **既存の NAT ルール・経路は、新しい WireGuard トンネルでの疎通確認（動作確認セクションの ping / traceroute / `wg show` transfer 増加）が完了するまで変更・削除しないでください。** ルール変更前に控えたルール番号・設定を使えば、疎通に問題があった場合すぐにロールバックできます。
+- 秘密鍵は `chmod 600` で保護し、Git 等のバージョン管理には含めないでください。鍵の払い出し・保管場所は別途、鍵管理手順に従ってください。
+- 作業はコンソールまたは別セッションから実施し、`wg-quick up` 実行後に現在の管理接続（SSH 等）が切断されないことを確認してから、ロールバック用の旧経路情報を破棄してください。

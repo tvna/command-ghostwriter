@@ -1,0 +1,14 @@
+hub_address = "10.100.0.1/24"
+listen_port = 51820
+
+[[spokes]]
+name = "branch-tokyo"
+pubkey = "SPOKE1PUBKEYbase64AAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+allowed_ips = "10.100.0.2/32"
+endpoint = "203.0.113.11:51820"
+
+[[spokes]]
+name = "branch-osaka"
+pubkey = "SPOKE2PUBKEYbase64BBBBBBBBBBBBBBBBBBBBBBBBBBBB="
+allowed_ips = "10.100.0.3/32"
+endpoint = "203.0.113.12:51820"

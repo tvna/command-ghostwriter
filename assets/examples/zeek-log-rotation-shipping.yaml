@@ -1,0 +1,16 @@
+rotation_interval_sec: 3600
+expire_days: 30
+compress: true
+json_output: true
+shipper: Promtail
+zeek_log_dir: /opt/zeek/logs
+archive_root: /opt/zeek/logs
+target_logs:
+  - name: conn.log
+    contains: 接続5-tuple・バイト数・duration
+  - name: dns.log
+    contains: クエリ・応答・TTL
+  - name: http.log
+    contains: リクエストURI・User-Agent・ステータス
+shipper_endpoint: https://loki.example.internal:3100/loki/api/v1/push
+shipper_tls_ca: /etc/promtail/certs/loki-ca.crt

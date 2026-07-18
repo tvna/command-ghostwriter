@@ -1,0 +1,9 @@
+cis_control,lynis_test_id,status,evidence,remediation,priority
+5.2.1 sshd_config permissions,SSH-7408,warn,/etc/ssh/sshd_config permissions is 644 (expected 600),chmod 600 /etc/ssh/sshd_config,high
+5.2.10 SSH root login disabled,SSH-7412,pass,PermitRootLogin no confirmed in sshd_config,-,low
+1.1.2 /tmp separate partition,FILE-6310,fail,/tmp is not mounted as a separate partition,add /tmp entry to /etc/fstab with noexec/nosuid/nodev then remount,medium
+5.4.1 Password expiration policy,AUTH-9262,warn,PASS_MAX_DAYS is 99999 in /etc/login.defs,set PASS_MAX_DAYS 90 in /etc/login.defs and re-run chage --maxdays for existing users,medium
+3.3.1 IP forwarding disabled,KRNL-6000,pass,net.ipv4.ip_forward=0 confirmed via sysctl,-,low
+3.5.1.1 Firewall installed and enabled,FIRE-4590,fail,ufw status reports inactive with no default-deny policy,sudo ufw default deny incoming then sudo ufw enable,high
+1.7.1 File integrity tool installed (AIDE),FINT-4350,warn,AIDE package is installed but no periodic check is scheduled,create /etc/cron.daily/aide-check or an aidecheck.timer unit,medium
+4.2.1.1 rsyslog service enabled,LOGG-2190,pass,rsyslog.service is active and enabled at boot,-,low

@@ -1,0 +1,4 @@
+source_client,target_audience,permission_policy,allowed_subjects,scope
+gateway-svc,orders-api,orders-api-exchange-policy,gateway-svc-service-account,openid orders:read
+gateway-svc,billing-api,billing-api-exchange-policy,gateway-svc-service-account,openid billing:read
+reporting-batch,orders-api,orders-api-exchange-policy,reporting-batch-service-account,openid orders:read

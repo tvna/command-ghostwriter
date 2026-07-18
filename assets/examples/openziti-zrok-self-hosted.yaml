@@ -1,0 +1,27 @@
+ziti_ctrl: ziti-ctrl-01.example.internal:1280
+zrok_admin_endpoint: https://zrok-ctrl-01.example.internal:8441
+frontend_host: share.example.internal
+frontend_identity: zrok-public-frontend
+tls:
+  cert_path: /etc/caddy/zrok-frontend.crt
+  key_path: /etc/caddy/zrok-frontend.key
+accounts:
+  - email: ops-taro@example.internal
+    password_env: ZROK_OPS_TARO_PW
+    role: admin
+  - email: dev-hanako@example.internal
+    password_env: ZROK_DEV_HANAKO_PW
+    role: member
+services:
+  - name: internal-wiki
+    target: 127.0.0.1:8080
+    share_mode: public
+    backend_mode: proxy
+    owner: ops-taro@example.internal
+    reserved_token: 9f3k2a1kx0
+  - name: build-artifacts
+    target: 127.0.0.1:9000
+    share_mode: private
+    backend_mode: proxy
+    owner: dev-hanako@example.internal
+    reserved_token: 7bq1z4xwq2

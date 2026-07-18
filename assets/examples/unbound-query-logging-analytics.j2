@@ -1,0 +1,151 @@
+# Unboundクエリログ収集と分析基盤 — {{ unbound_host }}
+
+Unboundのクエリログ（またはdnstap）を有効化し、NXDOMAINの多発や見慣れないドメインへの問い合わせを継続的に分析できる基盤を構築します。
+
+## 目的
+
+**{{ unbound_host }}** で稼働するUnboundのクエリ/応答ログを有効化し、NXDOMAIN率・上位クエリドメイン・稀少ドメイン（DGAやデータ持ち出しの兆候になり得るもの）を定期集計してSIEMへ転送できる状態にすることを目指します。
+
+## 用語解説
+
+- **クエリログ (log-queries/log-replies)**: Unboundが受けた問い合わせと返した応答をテキスト行としてsyslog/ファイルに書き出す機能。手軽だが、全クエリを記録するとログ量が非常に大きくなる
+- **dnstap**: Unboundの問い合わせ/応答をUnixソケット経由でProtocol Buffers形式の構造化データとして外部プロセスへストリーミングする仕組み。テキストのクエリログより解析しやすく、専用ツール（`dnstap-ldns`、Fluent Bitのdnstap入力プラグイン等）と組み合わせて使う
+- **クエリログとdnstapの違い**: クエリログはUnbound自身がテキスト行を書き込む方式で手軽だがパースの手間とI/O負荷が大きい。dnstapはバイナリの構造化ログをソケット経由で外部に流すため、パースが容易で高頻度環境でもUnbound本体への負荷が小さい
+- **NXDOMAIN率**: 全問い合わせのうち、存在しないドメイン名として応答されたものの割合。急上昇はDGA（Domain Generation Algorithm）マルウェアが生成したドメインへの問い合わせなどの兆候になり得る
+- **稀少ドメイン**: 集計期間内に1回しか問い合わせられていないドメイン。DGAが生成した使い捨てドメインや、C2/データ持ち出し(exfiltration)用に生成された一意なサブドメインへの問い合わせで多く見られる傾向
+- **DNSアナリティクス**: クエリログを母数・頻度・パターンの観点で集計し、マルウェアのC2通信やデータ持ち出しの兆候を検知する分析手法。単一クエリの内容判定ではなく、統計的な逸脱を見る点が特徴
+
+## シナリオ設定
+
+| 項目 | 値 |
+|---|---|
+| 対象ホスト | {{ unbound_host }} |
+| クエリログ有効化 | {{ log_queries }} |
+| dnstap有効化 | {{ dnstap_enabled }} |
+| ログ出力先 | {{ log_path }} |
+| ログ転送シッパー | {{ shipper }} |
+| SIEM転送先 | {{ siem_host }}:{{ siem_port }} |
+| ログ保持期間 | {{ retention_days }}日 |
+| NXDOMAIN率アラート閾値 | {{ nxdomain_threshold_percent }}% |
+| 動作確認用テストドメイン | {{ test_domain }} |
+
+## 1. クエリログの有効化
+
+`unbound.conf` にクエリログ・応答ログの出力設定を追加します。
+
+```bash
+sudo cp /etc/unbound/unbound.conf /etc/unbound/unbound.conf.bak.$(date +%Y%m%d)
+sudo tee -a /etc/unbound/unbound.conf > /dev/null <<'EOF'
+server:
+    log-queries: yes
+    log-replies: yes
+    logfile: "{{ log_path }}"
+    log-time-ascii: yes
+    verbosity: 1
+EOF
+```
+
+参考として、dnstapを採用する場合は以下のブロックを追加します（本手順ではテキストのクエリログ方式を採用しています）。
+
+```yaml
+dnstap:
+    dnstap-enable: yes
+    dnstap-socket-path: "/var/run/unbound/dnstap.sock"
+    dnstap-log-client-query-messages: yes
+    dnstap-log-client-response-messages: yes
+```
+
+設定構文を検証してからUnboundを再起動します。
+
+```bash
+sudo unbound-checkconf
+sudo systemctl restart unbound
+sudo systemctl status unbound --no-pager
+```
+
+## 2. クエリ発生時のログ記録の確認
+
+存在しないドメインへ問い合わせを発生させ、ログに記録されることを確認します。
+
+```bash
+dig @127.0.0.1 nxdomain-check.{{ test_domain }} A
+sudo tail -n 5 {{ log_path }}
+```
+
+→ クエリ行と、応答行（`NXDOMAIN`のrcodeを含む）の両方が `{{ log_path }}` に記録されていることを確認します。
+
+## 3. ログの集計とメトリクス算出
+
+NXDOMAIN率・上位クエリドメイン・稀少ドメインを算出する集計スクリプトを作成します。
+
+```bash
+sudo tee /usr/local/bin/unbound-query-analytics.sh > /dev/null <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+LOGFILE="{{ log_path }}"
+
+total_queries=$(grep -c ' IN ' "$LOGFILE" || true)
+nxdomain_count=$(grep -c 'NXDOMAIN' "$LOGFILE" || true)
+
+echo "=== nxdomain_rate ==="
+awk -v t="$total_queries" -v n="$nxdomain_count" \
+  'BEGIN { if (t > 0) printf "queries=%d nxdomain=%d rate=%.2f%%\n", t, n, (n/t)*100; else print "no queries in log" }'
+
+echo "=== top_queried_domains ==="
+awk '{print $6}' "$LOGFILE" | sort | uniq -c | sort -rn | head -20
+
+echo "=== rare_domains (queried exactly once) ==="
+awk '{print $6}' "$LOGFILE" | sort | uniq -c | awk '$1 == 1 {print $2}'
+EOF
+sudo chmod 750 /usr/local/bin/unbound-query-analytics.sh
+sudo /usr/local/bin/unbound-query-analytics.sh
+```
+
+収集するメトリクス一覧:
+{% for m in metrics %}
+- {{ m }}
+{% endfor %}
+
+→ `nxdomain_rate` が {{ nxdomain_threshold_percent }}% を継続的に超える場合や、`rare_domains` にランダムな英数字文字列のドメインが多数現れる場合は、DGAマルウェアやデータ持ち出しの兆候として調査対象にします。
+
+## 4. SIEMへの転送設定
+
+{{ shipper }} を用いてクエリログを {{ siem_host }}:{{ siem_port }} のSIEMへ転送します。
+
+```bash
+sudo tee /etc/filebeat/filebeat.yml > /dev/null <<'EOF'
+filebeat.inputs:
+  - type: log
+    paths:
+      - "{{ log_path }}"
+    fields:
+      log_type: unbound_query
+      source_host: {{ unbound_host }}
+    fields_under_root: true
+
+output.logstash:
+  hosts: ["{{ siem_host }}:{{ siem_port }}"]
+EOF
+sudo filebeat test config
+sudo filebeat test output
+sudo systemctl restart filebeat
+sudo systemctl status filebeat --no-pager
+```
+
+→ SIEM側で `source_host: {{ unbound_host }}` かつ `log_type: unbound_query` のイベントが取り込まれていることを確認します。
+
+## 動作確認
+
+- 手順2の `dig` 実行後、`{{ log_path }}` にクエリ行・応答行の両方が追記されていること
+- `/usr/local/bin/unbound-query-analytics.sh` の実行結果に `nxdomain_rate` / `top_queried_domains` / `rare_domains` の3区分すべてが出力されること
+- `sudo filebeat test output` が {{ siem_host }}:{{ siem_port }} への到達を正常と報告すること
+- SIEM側の検索画面で、手順2のテストクエリ（`nxdomain-check.{{ test_domain }}`）に対応するイベントが確認できること
+
+## 注意事項
+
+- クエリログは全問い合わせを記録するため、トラフィック量の多い環境ではログが急速に肥大化する。`{{ retention_days }}` 日を超えるログはlogrotate等で確実に削除し、ディスク枯渇を防ぐ。
+- クエリログには内部クライアントが問い合わせた社内ホスト名やドメインが含まれ、これは個人情報・機密情報（PII/内部情報）に該当し得る。ログファイル（`{{ log_path }}`）とSIEM転送先の双方でアクセス制御（読み取り権限の限定、暗号化転送）を行うこと。
+- dnstapを採用する場合、テキストのクエリログよりUnbound本体への性能負荷は小さいが、受信側プロセス（Fluent Bit等）の可用性が途切れるとログが欠落する点に注意する。まずは既存のログ収集経路を維持したまま新しい収集方式を並行稼働させ、欠落がないことを確認してから旧方式を無効化すること。
+- 本手順のDNSアナリティクス（NXDOMAIN率・稀少ドメイン集計）はDNSクエリの統計的な逸脱検知に留まる。ペイロード内容や通信全体の文脈を伴う検知にはSuricata/ZeekのDNSモジュールによる分析と組み合わせ、相互に補完すること。
+- `unbound.conf` の変更前には必ずバックアップを取得し、`unbound-checkconf` で構文検証してから再起動する。設定ミスによるUnboundの起動失敗は社内DNS解決全体を停止させるため、影響範囲を理解した上で作業すること。

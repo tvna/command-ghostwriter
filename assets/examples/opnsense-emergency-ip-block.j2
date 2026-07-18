@@ -1,0 +1,165 @@
+# OPNsenseによる攻撃元IPの緊急遮断対応 — blocklist_emergency
+
+攻撃検知時に、事前に用意した遮断用エイリアス `blocklist_emergency` とそれを
+参照するWAN/Floatingの遮断ルールに対し、OPNsenseのAPIで攻撃元IPを即時投入
+する初動対応手順です。CSVで定義した {{ csv_rows | length }} 件の攻撃元IPを
+対象とし、投入後の遮断確認・既存セッションの強制切断・記録と解除基準の設定
+までを行います。
+
+## 目的
+
+`blocklist_emergency` エイリアスへ攻撃元IPをAPI経由で即時投入し、既存の
+確立済みセッションを `pfctl -k` で強制切断したうえで、ライブログにより
+再アクセスが遮断されていることと管理アクセス経路自体を巻き込んでいない
+ことを確認できるようになることを目指します。あわせて、投入前に自組織の
+正規IP（監視元・VPN対向）を誤って遮断しないための照合と、対応記録を証跡
+として残す手順を身につけます。
+
+## 用語解説
+
+- **エイリアス (Alias)**: `Firewall > Aliases` で定義する、IPアドレスの集合
+  に名前を付けたオブジェクト。ルールからは実体ではなく名前で参照する
+- **alias_util**: `firewall/alias/addItem` + `reconfigure` のような恒久的な
+  設定変更とは別に、稼働中のエイリアス実体（pfテーブル）へ直接アドレスを
+  追加・削除・一覧表示できるAPIエンドポイント群。`reconfigure` を挟まず
+  即座にpfテーブルへ反映されるため緊急遮断に向くが、設定ファイル
+  （config.xml）には保存されない一時的な変更である点に注意する
+- **Floatingルール**: インターフェースを限定せず全体に適用できるOPNsense
+  のルール種別。WAN・LAN等をまたぐ遮断を1本のルールで表現できる
+- **pfctl -k**: OPNsense（FreeBSDのpfベース）で、指定したホストが送信元
+  または宛先になっている既存のステート（確立済み通信セッション）を強制
+  的に切断するコマンド。遮断ルールを追加しても、追加前から確立していた
+  セッションはそれだけでは切れないため必要になる
+- **解除基準 (unblock_criteria)**: 緊急遮断を恒久的な放置にしないための、
+  解除判断の具体的な条件。対応記録の1項目として残す
+
+## シナリオ設定
+
+今回投入する攻撃元IPは、次の {{ csv_rows | length }} 件です。
+
+| 対象IP | 検知日時 | 検知内容(証跡) | 報告者 | 解除基準 |
+|--------|----------|----------------|--------|----------|
+{% for r in csv_rows %}| {{ r["src_ip"] }} | {{ r["detected_at"] }} | {{ r["evidence"] }} | {{ r["reporter"] }} | {{ r["unblock_criteria"] }} |
+{% endfor %}
+
+## 1. 投入前に自組織の正規IPと重複していないか照合する
+
+`blocklist_emergency` は既存のWAN/Floating遮断ルールが参照する共有エイリ
+アスです。監視用SIEM/IDSセンサー、拠点間VPN対向ルータ、委託SOC/MSSPの監視
+用送信元など、自組織の正規IPが誤って含まれていないかを、投入前に必ず
+照合します。
+
+```bash
+for ip in {% for r in csv_rows %}{{ r["src_ip"] }}{% if not loop.last %} {% endif %}{% endfor %}; do
+  if grep -qxF "${ip}" /usr/local/etc/known-good-ips.txt; then
+    echo "WARN: ${ip} は正規IP一覧に一致 — このIPは投入しない"
+  else
+    echo "OK: ${ip} は正規IP一覧に非該当 — 投入対象とする"
+  fi
+done
+```
+
+`/usr/local/etc/known-good-ips.txt` は監視・VPN・SOC等の正規送信元IPを1行
+1件で維持している前提の照合台帳です。`WARN` が出たIPは、シナリオ設定の
+行から除外し、検知内容自体を再確認してください。
+
+## 2. alias_utilで攻撃元IPを遮断エイリアスへ即時投入する
+
+`System > Access > Users` で発行済みのAPIキー/シークレットを環境変数に
+読み込んでから実行します。
+
+```bash
+export OPNSENSE_API_KEY="<発行済みkey>"
+export OPNSENSE_API_SECRET="<発行済みsecret>"
+```
+
+```bash
+{% for r in csv_rows %}curl -sk -u "${OPNSENSE_API_KEY}:${OPNSENSE_API_SECRET}" \
+  -X POST -H "Content-Type: application/json" \
+  -d '{"address": "{{ r["src_ip"] }}"}' \
+  "https://fw01.internal.example.jp/api/firewall/alias_util/add/blocklist_emergency"
+{% endfor %}```
+
+`alias_util/add` は呼び出した時点で稼働中のpfテーブルへ即時反映されます。
+`firewall/alias/addItem` とは異なり `reconfigure` は不要です。
+
+## 3. 投入結果をlistで確認する
+
+```bash
+{% for r in csv_rows %}curl -sk -u "${OPNSENSE_API_KEY}:${OPNSENSE_API_SECRET}" \
+  "https://fw01.internal.example.jp/api/firewall/alias_util/list/blocklist_emergency" \
+  | grep -F "{{ r["src_ip"] }}"
+{% endfor %}```
+
+全件がヒットし、何も表示されない行がないことを確認します。表示されない
+IPがあれば手順2をやり直してください。
+
+## 4. 既存ステートをpfctlで強制切断する
+
+遮断ルール追加前から確立していたセッションは、ルールだけでは切断されない
+ため、対象IPごとにステートを強制切断します。
+
+```bash
+{% for r in csv_rows %}echo "=== {{ r["src_ip"] }} 切断前のステート数 ==="
+pfctl -s state | grep -F "{{ r["src_ip"] }}" | wc -l
+pfctl -k {{ r["src_ip"] }}
+echo "=== {{ r["src_ip"] }} 切断後のステート数 ==="
+pfctl -s state | grep -F "{{ r["src_ip"] }}" | wc -l
+{% endfor %}```
+
+切断後のステート数が0件であることを確認します。0件にならない場合は、
+NAT等を経由した別アドレスで再接続している可能性があるため、ライブログ
+（手順5）で実際の通信を確認してください。
+
+## 5. ライブログで遮断と管理アクセスの生存を確認する
+
+`Firewall > Log Files > Live View` を開き、送信元IPで絞り込んで、対象の
+{{ csv_rows | length }} 件それぞれについて新規接続試行が
+`blocklist_emergency` を参照するルールでブロック(Block)されていることを
+確認します。
+
+続けて、今回の遮断がGUI/API自体へのアクセス経路を巻き込んでいないかを、
+遮断作業に使っているセッションとは別の端末またはセッションから確認しま
+す。手順3のlist確認コマンドを再度別セッションから実行し、401/403や接続
+不可にならず正常にレスポンスが返ることを確認したうえで、この対応を完了
+とします。
+
+```bash
+curl -sk -u "${OPNSENSE_API_KEY}:${OPNSENSE_API_SECRET}" \
+  "https://fw01.internal.example.jp/api/firewall/alias_util/list/blocklist_emergency"
+```
+
+## 動作確認
+
+- 手順3の `alias_util/list` に、{{ csv_rows | length }} 件の対象IPすべてが含まれていること
+- 手順4の実行後、各対象IPの `pfctl -s state` 該当行が0件になっていること
+- `Firewall > Log Files > Live View` で、各対象IPからの新規接続試行が `blocklist_emergency` 参照ルールでブロックされていること
+- 手順5で、遮断作業とは別セッションからのGUI/API管理アクセスが引き続き成功すること（自組織の管理経路を巻き込んでいないこと）
+- シナリオ設定の検知日時・証跡・報告者・解除基準が対応記録として保存されていること
+
+## 注意事項
+
+- 手順1の照合を必ず投入前に行うこと。監視用SIEM/IDSセンサーや拠点間VPN
+  対向、委託SOC/MSSPの送信元IPを誤って `blocklist_emergency` に投入する
+  と、監視・VPN経路そのものが遮断され、検知・対応能力が失われるおそれが
+  ある。
+- 遮断が完了したとみなす前に、手順5で必ず別セッション・別経路から管理
+  アクセス（GUI/API）が生きていることを確認すること。攻撃元IPのレンジが
+  自組織の管理アクセス元と重なっていた場合、確認を怠ると自分自身の管理
+  経路を遮断してしまうおそれがある。
+- `alias_util/add` は稼働中のpfテーブルへの即時反映であり、config.xmlには
+  保存されない一時的な変更である。再起動や設定同期(HA構成でのCARP同期等)
+  で消える可能性があるため、緊急遮断はあくまで初動措置と位置づけ、恒久化
+  する場合は `firewall/alias/addItem` + `reconfigure`（またはGUIでの
+  エイリアス編集）で改めて永続化すること。
+- 各対象IPは、シナリオ設定の解除基準(unblock_criteria)を満たすまで
+  `blocklist_emergency` から外さないこと。満たしたら `alias_util/delete`
+  （または `Firewall > Aliases > blocklist_emergency` のGUI編集）で解除
+  し、対応記録に解除日時と判断根拠を追記する。
+- 検知日時・証跡・報告者・投入日時・解除基準を含む対応記録を証跡として
+  保存し、恒久対策（WAN/Floatingルールの見直し、脅威フィード連携等）の
+  検討に引き継ぐこと。
+- APIキー/シークレットはコマンドライン引数やシェル履歴に直書きせず、
+  環境変数や `chmod 600` のファイルから読み込むこと。
+- `-k`（curlの`--insecure`）は自己署名証明書環境向けのオプション。社内CA
+  署名済み証明書を使える環境では外し、証明書検証を行わせること。

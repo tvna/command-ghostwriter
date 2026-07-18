@@ -1,0 +1,133 @@
+# WireGuardコンテナ用トンネルゲートウェイ構築
+
+コンテナ群の出口をWireGuardトンネルへ集約する専用ゲートウェイコンテナ(`wg-gateway`)をsidecar構成で構築し、下流ネットワークのdefault routeをゲートウェイへ向けます。
+
+## 目的
+
+コンテナ単位でWireGuardクライアントを個別に持たせるのではなく、`wg-gateway`という単一の出口コンテナに`NET_ADMIN`を集約し、他コンテナは通常権限のままdefault routeをゲートウェイへ向けるだけでトンネル経由の出口に切り替えられる状態を作ります。
+
+## 用語解説
+
+- **ネットワーク単位でのトンネル出口集約**: コンテナごとにWireGuardクライアントを持たせる方式は、鍵管理・`NET_ADMIN`付与・設定ドリフトの対象がコンテナ数だけ増える。ゲートウェイコンテナへ集約すれば、鍵・許可IP・監視対象は1箇所に閉じ、下流コンテナは経路設定のみで済む
+- **wg0**: WireGuardが作成する仮想トンネルインターフェース。`wg-gateway`コンテナ内でこのインターフェースを介してのみ暗号化トンネルへ出入りする
+- **ip_forward**: カーネルがコンテナ間・インターフェース間でパケットを転送するために必要な設定(`net.ipv4.ip_forward=1`)。`wg-gateway`が下流コンテナの代わりにトンネルへ中継するには必須で、これが無効だと下流からの通信がゲートウェイで止まる
+- **NAT(マスカレード)**: 下流コンテナのプライベートIPはトンネル相手側にそのままでは経路が無いため、`wg-gateway`が`wg0`向けの送信元アドレスを自身のトンネルIPへ書き換えて中継する。`iptables -t nat -A POSTROUTING -o wg0 -j MASQUERADE`で実現する
+- **AllowedIPs**: WireGuardのピア設定で「このトンネル越しにルーティングしてよい宛先」を指定するCIDRの集合。`0.0.0.0/0`を指定すると全トラフィックがトンネル経由になる(フルトンネル)
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| ゲートウェイのトンネル内アドレス | `{{ gateway_address }}` |
+| トンネル終端(サーバ側)エンドポイント | `{{ tunnel_endpoint }}` |
+| AllowedIPs | {% for ip in allowed_ips %}`{{ ip }}`{% if not loop.last %}, {% endif %}{% endfor %} |
+| default routeを向ける下流ネットワーク | {% for net in downstream_networks %}`{{ net }}`{% if not loop.last %}, {% endif %}{% endfor %} |
+
+## 手順
+
+### 1. wg-gatewayコンテナ用の鍵ペアを生成する
+
+```bash
+mkdir -p ./wg-gateway/keys
+wg genkey | tee ./wg-gateway/keys/privatekey | wg pubkey > ./wg-gateway/keys/publickey
+chmod 600 ./wg-gateway/keys/privatekey
+```
+
+生成した公開鍵をトンネル終端側(`{{ tunnel_endpoint }}`を提供するピア)にも登録しておきます。
+
+### 2. wg-gatewayコンテナのwg0設定を作成する
+
+```bash
+sudo tee ./wg-gateway/wg0.conf <<'EOF'
+[Interface]
+Address = {{ gateway_address }}
+PrivateKey = <./wg-gateway/keys/privatekeyの内容をここに貼り付け>
+PostUp = sysctl -w net.ipv4.ip_forward=1
+PostUp = iptables -t nat -A POSTROUTING -o wg0 -j MASQUERADE
+PostDown = iptables -t nat -D POSTROUTING -o wg0 -j MASQUERADE
+
+[Peer]
+{% for ip in allowed_ips %}
+Endpoint = {{ tunnel_endpoint }}
+AllowedIPs = {{ ip }}
+PersistentKeepalive = 25
+{% endfor %}
+EOF
+```
+
+`PostUp`/`PostDown`で`ip_forward`の有効化とNATルールの追加・削除をインターフェースの起動・停止に合わせて自動化します。
+
+### 3. wg-gatewayコンテナを`NET_ADMIN`付きでsidecar起動する
+
+```yaml
+services:
+  wg-gateway:
+    image: linuxserver/wireguard:latest
+    cap_add:
+      - NET_ADMIN
+    volumes:
+      - ./wg-gateway/wg0.conf:/config/wg_confs/wg0.conf:ro
+    networks:
+      - app-net
+      - batch-net
+    restart: unless-stopped
+```
+
+`NET_ADMIN`は`wg-gateway`コンテナのみに付与し、下流の`app-net`/`batch-net`上のアプリケーションコンテナには一切付与しません。
+
+### 4. wg-gatewayコンテナ内でトンネルを起動する
+
+```bash
+docker exec wg-gateway wg-quick up wg0
+docker exec wg-gateway wg show
+```
+
+`wg show`の出力に`interface: wg0`と設定した`AllowedIPs`が表示されることを確認します。
+
+### 5. 下流ネットワークからwg-gatewayへの経路を先行テストする
+
+既存の出口(ホストのdefault gateway)を切り替える前に、対象コンテナ1台だけで一時的な静的ルートを追加し、ゲートウェイ経由の経路が実際に機能するかを検証します。
+
+```bash
+docker exec app-container ip route add 0.0.0.0/1 via <wg-gatewayのapp-net内IP>
+docker exec app-container ip route add 128.0.0.0/1 via <wg-gatewayのapp-net内IP>
+docker exec app-container curl -s ifconfig.co
+```
+
+この時点で`curl ifconfig.co`の応答がトンネル出口のIPになっていれば、経路そのものが機能していると判断できます。まだ既存経路は変更していないため、問題があればこのテスト用ルートを削除するだけで即座に元の経路へ戻せます。
+
+### 6. 検証が通ったネットワーク単位でdefault routeを切り替える
+
+```yaml
+services:
+  app:
+    networks:
+      app-net:
+        # docker composeのネットワーク定義側でgatewayを明示し、
+        # app-net全体のdefault routeをwg-gatewayへ向ける
+    dns:
+      - 9.9.9.9
+networks:
+  app-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+          gateway: <wg-gatewayのapp-net内IP>
+```
+
+`{% for net in downstream_networks %}{{ net }}{% if not loop.last %}, {% endif %}{% endfor %}`の各ネットワークについて、手順5で検証したテスト用ルートを撤去したうえで、ネットワーク定義の`gateway`を`wg-gateway`のアドレスへ更新し、コンテナを再作成して反映します。
+
+## 動作確認
+
+1. 下流コンテナから`curl -s ifconfig.co`を実行し、応答がトンネル終端側のグローバルIP(ホストの直接出口IPではない)になっていること
+2. `docker exec wg-gateway wg show`の出力で対象ピアに`latest handshake`が数十秒~数分以内の値で表示され、ハンドシェイクが継続していること
+3. `docker exec wg-gateway iptables -t nat -L POSTROUTING -n`に`MASQUERADE`ルールが存在すること
+4. 下流ネットワーク上の他コンテナ(`{% for net in downstream_networks %}{{ net }}{% if not loop.last %}, {% endif %}{% endfor %}`に属さないもの)には`NET_ADMIN`が付与されていないこと(`docker inspect`の`CapAdd`を確認)
+
+## 注意事項
+
+- `wg-gateway`は複数の下流ネットワークの出口を一手に引き受けるため単一障害点になる。停止すると集約対象ネットワーク全体が外部へ出られなくなるため、`restart: unless-stopped`だけでなく、可能であればアクティブ/スタンバイの二重化やヘルスチェックによる自動再起動を別途検討する
+- `NET_ADMIN`は`wg-gateway`コンテナにのみ付与し、他のコンテナへ広げない。付与範囲を広げるとそのコンテナからネットワーク名前空間やルーティングテーブルを操作できてしまい、トンネルを迂回した通信や盗聴が可能になる
+- default routeをトンネル経由に切り替えると、下流コンテナが参照するDNSサーバへの到達性も変わる場合がある。手順6で明示したように、DNSサーバ自体への経路がトンネル経由でも解決できることを確認してから切り替えること。確認前に既存経路を削除しない
+- 手順5のテスト用ルート追加は必ず既存経路を残したまま行い、`curl ifconfig.co`とハンドシェイクの両方で新経路の疎通を確認してから、手順6で本来のdefault routeを切り替える。既存経路を先に消してから検証すると、切り戻し不能な通信断につながる

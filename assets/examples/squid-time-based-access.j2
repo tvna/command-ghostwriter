@@ -1,0 +1,113 @@
+# Squid 時間帯・グループ別アクセス制御手順
+
+CSV で定義した {{ csv_rows | length }} 件の ACL 定義から、Squid の time ACL と
+グループ(src) ACL を組み合わせた時間帯×部門別アクセスポリシーを構成します。
+squid パッケージ導入済み、`/etc/squid/squid.conf` を編集できる権限を前提とします。
+
+## 目的
+
+部門ごとのサブネット(グループACL)と業務時間帯(time ACL)を掛け合わせ、
+「営業時間中のみ、許可済みサイトへのアクセスを許可する」ポリシーを Squid に
+安全に構成できるようになることを目指します。オンコール等の例外運用も含めて
+理解します。
+
+## 用語解説
+
+- **acl**: Squid の条件定義。`acl <名前> <種別> <パラメータ>` の形式で、以後の
+  `http_access` 行から名前で参照する。
+- **time ACL**: `acl <名前> time <曜日コード> <開始時刻>-<終了時刻>` の形式で
+  時間帯を定義する ACL。曜日コードは `M`(月) `T`(火) `W`(水) `H`(木) `F`(金)
+  `A`(土) `S`(日) の1文字を組み合わせて指定する(例: `MTWHF`=平日)。
+- **src ACL**: `acl <名前> src <CIDR>` で送信元サブネットを定義する ACL。
+- **combined ACL (組み合わせACL)**: `http_access allow dept_a worktime
+  allowed_sites` のように、1行の `http_access` に複数の ACL 名を並べると
+  **AND 論理**として評価される。すべての ACL が真になった場合のみ許可される。
+- **first match(最初に一致したルールで確定)**: `http_access` は上から順に
+  評価され、いずれかの行が一致した時点でそこで評価が確定する(以降の行は
+  評価されない)。そのため、許可ルールは必ず最終行の `http_access deny all`
+  より前に書く必要がある。
+
+## シナリオ設定
+
+| acl_name | acl_type | parameter | combined_policy | note |
+|----------|----------|-----------|------------------|------|
+{% for r in csv_rows %}| {{ r["acl_name"] }} | {{ r["acl_type"] }} | {{ r["parameter"] }} | {{ r["combined_policy"] }} | {{ r["note"] }} |
+{% endfor %}
+
+## 1. ACL を squid.conf に定義する
+
+CSV の各行を `acl` 定義として追加します。`allowed_sites` (許可済みサイトの
+dstdomain ACL)はグループ・時間帯に依存しない固定リストのため、CSV には含めず
+別途定義します。
+
+```bash
+sudo cp /etc/squid/squid.conf /etc/squid/squid.conf.bak.$(date +%Y%m%d)
+```
+
+`/etc/squid/squid.conf` の ACL 定義ブロックに以下を追記します。
+
+```
+acl allowed_sites dstdomain .example.co.jp .intranet.example.co.jp
+{% for r in csv_rows %}acl {{ r["acl_name"] }} {{ r["acl_type"] }} {{ r["parameter"] }}
+{% endfor %}```
+
+## 2. 時間帯×グループの http_access ポリシーを組む
+
+`worktime`(time ACL)と `dept_a`/`dept_b`(src ACL)、`allowed_sites`(dstdomain
+ACL)を1行にまとめて指定することで、「その部門のサブネットから」「営業時間内に」
+「許可サイトへ」のアクセスのみを許可する AND 条件になります。オンコール担当
+端末は `offhours`(終日 time ACL)と組み合わせ、時間帯制限を受けない例外として
+扱います。既存の暗黙 deny を壊さないよう、必ず末尾の `http_access deny all`
+より前に追加してください。
+
+```
+http_access allow dept_a worktime allowed_sites
+http_access allow dept_b worktime allowed_sites
+http_access allow oncall_host offhours allowed_sites
+http_access deny all
+```
+
+## 3. 設定を検証してから反映する
+
+新しいポリシー行は、既存の `http_access` ルール群より前に位置していても
+既存の許可ルールを壊さないよう、まず構文チェックのみを行い、次に reconfigure
+(プロセスを止めない設定再読込)で反映します。フルの `systemctl restart` は
+既存の全接続を切断するため使用しません。
+
+```bash
+sudo squid -k parse
+sudo squid -k reconfigure
+```
+
+## 動作確認
+
+1. 構文チェック `squid -k parse` がエラーなく完了すること。
+2. `worktime` の時間帯境界前後(例: 08:59 と 09:01、17:59 と 18:01)で、
+   `dept_a`/`dept_b` サブネットの端末から許可サイトへのアクセス可否が
+   想定どおり切り替わること(境界内は許可、境界外は拒否)。
+3. `dept_a`/`dept_b` 以外のサブネットからは、時間帯に関わらず許可サイトへの
+   アクセスが拒否されること。
+4. `oncall_host` の端末からは、時間帯に関わらず(深夜・休日を含め)許可サイト
+   へアクセスできること。
+5. `sudo tail -f /var/log/squid/access.log` で、許可行は `TCP_TUNNEL/200` 等
+   の成功コード、拒否行は `TCP_DENIED/403` が記録されていることを確認する。
+
+## 注意事項
+
+- 曜日コードは `M T W H F A S`(月火水木金土日)の1文字。木曜日が `H`、土曜日が
+  `A` である点(直感的な `T`/`S` と衝突するため)に注意する。
+- 日をまたぐ時間帯(例: 22:00-06:00)は、Squid の time ACL では
+  `22:00-23:59` と `00:00-06:00` の2行に分けて同じ ACL 名で定義するか、
+  もしくは `time` ACL を2つ用意して `http_access` 側を OR (行を分けて複数
+  `allow` 行を書く)にする必要がある。1行で `22:00-06:00` のようには書けない。
+- `reconfigure` は実行中の接続を切断せずに設定を再読込するが、必ずその前に
+  `squid -k parse` で構文エラーがないことを確認してから実行する。
+- オンコール等の業務例外は、時間帯 ACL を緩めるのではなく、`oncall_host` の
+  ように対象を送信元(端末・利用者)で限定した専用 ACL を用意し、必要な例外の
+  範囲を最小限に保つこと。
+- 新しいポリシーの適用後は、旧来の許可設定を削除・変更する前に、上記の動作
+  確認(時間帯境界・グループ別の可否、access.log)を必ず実施し、意図した部門・
+  時間帯以外への意図しない許可・遮断が発生していないことを確認してから
+  旧設定を整理すること。
+- 本番反映前に必ず `squid.conf` のバックアップを取得し、意図しない遮断が
+  発生した場合は速やかにバックアップへ復元できるようにしておく。

@@ -1,0 +1,120 @@
+# OPA評価遅延・bundle未反映の調査 — {{ policy_package }}
+
+認可判定「{{ policy_package }}」({{ slow_rule }})の評価遅延やポリシー未反映について、opa eval --profileによる評価コスト計測、GET /v1/statusによるbundle活性化状態確認、非効率なRegoの発見、partial evaluationの活用で原因を切り分けます。
+
+## 目的
+
+OPA(Open Policy Agent)の認可判定が遅い、あるいはポリシー変更が反映されない事象について、「評価そのものが重い(Regoロジックの非効率)」のか「bundleが正しくロードされていない(配布・署名・pollingの問題)」のかを、profilingとbundle statusという2つの一次情報から切り分けられるようになることを目指します。
+
+## 用語解説
+
+- **opa eval --profile**: 評価にかかったコストをルール単位・式単位で計測するプロファイリング機能。NUM_EVAL(評価回数)・NUM_REDO(バックトラック回数)・TIME(所要時間)・LOCATION(ソース位置)を出力する
+- **bundle status API (GET /v1/status)**: 各bundleのactive_revision、last_successful_activation、last_successful_download、直近のエラー内容、polling設定を返すエンドポイント
+- **bundle未反映**: polling間隔が経過していない、ダウンロード失敗、署名検証(bundle signing)失敗などによりディスク上/メモリ上のポリシーが更新されない状態
+- **非効率なRego**: `some i` を使った配列の線形探索や、インデックスの効かないcomprehension(内包表記)の多用によりO(n)以上の評価コストがかかるルール
+- **partial evaluation (opa eval --partial)**: 既知の入力の一部を畳み込んで残りの条件式(residual policy)だけに圧縮し、本番評価前にコストを事前検証する手法
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| OPA URL | {{ opa_url }} |
+| ポリシーパッケージ | {{ policy_package }} |
+| 調査対象ルール | {{ slow_rule }} |
+| 入力ファイル | {{ input_file }} |
+| bundle名 | {{ bundle_name }} |
+| profile調査を行うか | {{ profile_enabled }} |
+| bundle status確認を行うか | {{ bundle_status_check }} |
+| partial evaluationを行うか | {{ partial_eval }} |
+
+## 手順
+
+{% if profile_enabled %}
+### 1. opa eval --profileで評価コストの重いルールを特定する
+
+```bash
+opa eval --data policy/ --input {{ input_file }} --profile --format=pretty '{{ slow_rule }}'
+```
+
+出力の `NUM_EVAL`(評価回数)・`NUM_REDO`(バックトラック回数)・`TIME`(所要時間)・`LOCATION`(該当するRegoの行)を確認し、TIMEが突出して大きい式を遅延の第一容疑と見なします。
+{% endif %}
+
+{% if bundle_status_check %}
+### 2. bundle statusでactivation状態とエラーを確認する
+
+```bash
+curl -s {{ opa_url }}/v1/status | jq '.bundles["{{ bundle_name }}"]'
+```
+
+`active_revision` が期待するリビジョンと一致しているか、`last_successful_activation` が最新の変更時刻より新しいか、`errors` フィールドに署名検証失敗やダウンロード失敗のメッセージが出ていないかを確認します。ポリシーが未反映の場合はここで原因が判明することが多いです。
+
+```bash
+curl -s {{ opa_url }}/v1/status | jq '.bundles["{{ bundle_name }}"].last_request, .bundles["{{ bundle_name }}"].polling'
+```
+
+`polling.min_delay_seconds` / `polling.max_delay_seconds` を確認し、直近のpollingが実行されるまでの残り時間を見積もります。
+{% endif %}
+
+### 3. bundle未反映の原因を切り分ける
+
+上記statusのerrorsに `bundle signature verification failed` のようなメッセージがある場合は、bundleサーバー側の署名鍵とOPA起動時の `--verification-key` の対応を確認します。
+
+```bash
+opa run --server \
+  --set "bundles.{{ bundle_name }}.resource=bundles/{{ bundle_name }}.tar.gz" \
+  --verification-key /etc/opa/keys/public.pem \
+  --set "bundles.{{ bundle_name }}.signing.keyid=global_key"
+```
+
+pollingを待たずに即時反映を確認したい場合は、OPAサーバーを再起動せず、bundleサーバー側のファイルを更新した後に再度 `GET /v1/status` を叩いて `active_revision` が更新されるまで待つか、diagnostic用に一時的な低いbundleサーバーへの疎通確認を行います。
+
+{% if partial_eval %}
+### 4. 非効率なRegoを特定し、partial evaluationで検証する
+
+線形探索の典型例と、setによるインデックス化での改善例を比較します。
+
+```rego
+# 非効率: 配列に対する毎回の線形探索(comprehension未使用の反復)
+allow {
+    some i
+    input.user.roles[i] == "admin"
+}
+```
+
+```rego
+# 改善: setへ変換してからのメンバーシップ判定に置き換える
+allow {
+    role_set := {r | some r in input.user.roles}
+    "admin" in role_set
+}
+```
+
+改善後のルールに対してpartial evaluationを実行し、既知の入力条件が畳み込まれて残余ルール(residual)が単純化されることを確認します。
+
+```bash
+opa eval --partial --data policy/ --input {{ input_file }} --format=pretty '{{ slow_rule }}'
+```
+{% endif %}
+
+### 5. 修正後の改善を再測定する
+
+```bash
+opa eval --data policy/ --input {{ input_file }} --profile --format=pretty '{{ slow_rule }}'
+```
+
+修正前と同じコマンドを再実行し、`TIME` と `NUM_EVAL` が修正前の計測値より減少していることを確認します。
+
+## 動作確認
+
+- opa eval --profileで特定した最も重いルールの `LOCATION` と `TIME` を修正前後で比較し、TIMEが減少していること
+- `GET {{ opa_url }}/v1/status` の `active_revision` が最新のポリシー変更を反映しており、`errors` に署名検証・ダウンロード失敗が残っていないこと
+- 新しいRegoルール({{ slow_rule }})が旧ルールと同じ入力({{ input_file }})に対して同一の許可/拒否結果を返すことを確認してから、旧ルールを削除・無効化していること
+- partial evaluationの残余ルールが想定通り単純化されていること
+
+## 注意事項
+
+- bundleの署名検証(`--verification-key`)を切り分けのために一時的に無効化する場合は、診断目的に限定し、原因特定後は必ず検証設定を元に戻す。無効化したまま放置しない
+- pollingの `min_delay_seconds` / `max_delay_seconds` を検証のために短縮する場合は、本番のbundleサーバーやネットワークへの負荷影響を検証環境で確認してから適用する
+- 認可ロジック(Rego)を変更する際は、新旧ルールを同じ入力セットに対して両方評価し、出力(allow/denyの結果)が一致することを確認してから旧ルールを削除する。差分がある場合は直ちに旧ルールへロールバックできる状態を維持する
+- 非効率なRegoの最適化(comprehension・線形探索の見直し)は評価結果を変えないことを最優先とし、性能改善のために許可条件を緩めない
+- bundle statusの監視をアラート化し、`active_revision` の更新遅延や `errors` の発生を継続的に検知できるようにする

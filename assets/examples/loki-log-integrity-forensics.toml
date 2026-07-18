@@ -1,0 +1,11 @@
+tenant_id = "audit-longterm"
+loki_endpoint = "https://loki.example.internal:3100"
+s3_bucket = "s3-loki-longterm-audit"
+retention_long_days = 2555
+object_lock = true
+export_schedule = "毎週月曜 02:00 (cron: 0 2 * * 1)"
+export_dir = "/mnt/loki-exports/audit-longterm"
+integrity_hash = true
+hash_algorithm = "sha256"
+log_job_label = "auth-gateway"
+incident_id = "INC-2026-0717"

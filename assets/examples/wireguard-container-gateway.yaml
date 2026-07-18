@@ -1,0 +1,8 @@
+gateway_address: 10.88.0.2/24
+tunnel_endpoint: vpn.example.com:51820
+allowed_ips:
+  - 0.0.0.0/0
+  - ::/0
+downstream_networks:
+  - app-net
+  - batch-net

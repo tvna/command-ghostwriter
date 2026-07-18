@@ -1,0 +1,5 @@
+router_name: er-branch01
+ctrl_endpoint: ziti-ctrl.example.internal:6262
+router_advertised: er-branch01.example.com:3022
+listener_port: 3022
+tunneler_mode: true

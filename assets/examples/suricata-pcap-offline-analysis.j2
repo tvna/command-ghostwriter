@@ -1,0 +1,122 @@
+# Suricataによる保全pcapのオフライン解析手順
+
+保全済みの pcap **{{ analysis.pcap_path }}** を Suricata でオフライン再生し、当時のルールセット（{{ analysis.ruleset_snapshot }}）で検知とプロトコルログを再構成します。
+
+## 目的
+
+このシナリオでは、インシデント対応や事後調査で取得した保全済み pcap を、証跡性を保ったまま Suricata でオフライン解析し、`eve.json` からアラートおよびプロトコルログ（HTTP/DNS/TLS/ファイル転送）を event_type 別に抽出できるようになることを目指します。
+
+## 用語解説
+
+- **pcap**: パケットキャプチャファイル。tcpdump や保全ツールで取得した通信の生データ
+- **オフライン解析（-r）**: ライブインタフェースではなく、既存の pcap ファイルを入力として Suricata を実行するモード
+- **runmode single**: 単一スレッドで決定的に処理を進める実行モード。解析順序の再現性を優先する場合に用いる
+- **ruleset snapshot**: 当時検知に使われていたルールセットのスナップショット。後日の解析では現在の最新ルールではなく、事案発生当時のスナップショットを使う
+- **eve.json**: Suricata が出力する JSON Lines 形式の統合ログ。`event_type` フィールドで alert/http/dns/tls/fileinfo などに分類される
+- **fast.log**: アラートのみを簡潔な1行形式で記録するログ
+- **file-store**: HTTP 等で転送されたファイル実体をディスクに保存する機能。保存ファイルには sha256 が付与される
+- **checksum-validation**: パケットのチェックサム検証設定。NIC のチェックサムオフロードでキャプチャされた pcap は不正なチェックサムを含むことがあるため、オフライン解析では無効化を検討する
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| pcapパス | {{ analysis.pcap_path }} |
+| 出力ディレクトリ | {{ analysis.output_dir }} |
+| ルールセットスナップショット | {{ analysis.ruleset_snapshot }} |
+| ハッシュ検証(sha256) | {{ analysis.checksum_verify }} |
+| Suricata設定ファイル | {{ suricata.config_path }} |
+| runmode | {{ suricata.runmode }} |
+| file-store有効化 | {{ file_store.enabled }} |
+| file-storeハッシュ方式 | {{ file_store.hash_algorithm }} |
+| file-store保存先 | {{ file_store.stored_dir }} |
+| 抽出対象event_type | {{ event_types.list | join(', ') }} |
+
+## 1. 解析前に pcap のハッシュを記録する（証跡性の確保）
+
+解析によって pcap 自体を書き換えることはありませんが、証跡性を保つため解析着手前に必ずハッシュを記録し、解析後にも再計算して一致を確認します。
+
+```bash
+mkdir -p {{ analysis.output_dir }}
+sha256sum {{ analysis.pcap_path }} | tee {{ analysis.output_dir }}/pcap.sha256
+```
+
+## 2. オフライン解析を実行する
+
+事案発生当時のルールセットスナップショットを指定して、single runmode でオフライン再生します。キャプチャ環境でチェックサムオフロードが有効だった場合、正しいペイロードでもチェックサム不正としてドロップされることがあるため、`suricata.yaml` の `checksum-checks: no`（もしくは起動時 `--set` オプション）で検証を無効化することを検討してください。
+
+```bash
+suricata \
+  -r {{ analysis.pcap_path }} \
+  -c {{ suricata.config_path }} \
+  -S {{ analysis.ruleset_snapshot }}/suricata.rules \
+  -l {{ analysis.output_dir }} \
+  --runmode {{ suricata.runmode }} \
+  --set stream.checksum-validation=no \
+  --set file-store.enabled={{ file_store.enabled }} \
+  --set file-store.hash-force-sha256=yes
+```
+
+解析完了後、`{{ analysis.output_dir }}/eve.json` と `{{ analysis.output_dir }}/fast.log` が生成されていることを確認します。
+
+## 3. eve.json を event_type 別に抽出する
+
+`jq` を使い、`event_type` ごとにログを分割して解析観点を整理します。
+
+```bash
+# アラート（検知内容: sid/rev/classtype/msg を確認）
+jq -c 'select(.event_type=="alert") | {timestamp, src_ip, dest_ip, alert: {signature: .alert.signature, sid: .alert.signature_id, rev: .alert.rev, classtype: .alert.category, severity: .alert.severity}}' \
+  {{ analysis.output_dir }}/eve.json > {{ analysis.output_dir }}/alerts.jsonl
+
+# HTTPリクエスト（ホスト・URL・UA）
+jq -c 'select(.event_type=="http") | {timestamp, src_ip, dest_ip, http: {hostname: .http.hostname, url: .http.url, method: .http.http_method, status: .http.status}}' \
+  {{ analysis.output_dir }}/eve.json > {{ analysis.output_dir }}/http.jsonl
+
+# DNSクエリ・応答（C2ドメイン特定に利用）
+jq -c 'select(.event_type=="dns") | {timestamp, src_ip, dest_ip, dns: {rrname: .dns.rrname, rrtype: .dns.rrtype, rcode: .dns.rcode}}' \
+  {{ analysis.output_dir }}/eve.json > {{ analysis.output_dir }}/dns.jsonl
+
+# TLSハンドシェイク（SNI・証明書情報）
+jq -c 'select(.event_type=="tls") | {timestamp, src_ip, dest_ip, tls: {sni: .tls.sni, subject: .tls.subject, issuerdn: .tls.issuerdn, version: .tls.version}}' \
+  {{ analysis.output_dir }}/eve.json > {{ analysis.output_dir }}/tls.jsonl
+
+# ファイル転送メタデータ（file-storeで保存された実体との突合に利用）
+jq -c 'select(.event_type=="fileinfo") | {timestamp, src_ip, dest_ip, fileinfo: {filename: .fileinfo.filename, sha256: .fileinfo.sha256, size: .fileinfo.size, stored: .fileinfo.stored}}' \
+  {{ analysis.output_dir }}/eve.json > {{ analysis.output_dir }}/fileinfo.jsonl
+```
+
+## 4. file-store で抽出された転送ファイルを検証する
+
+file-store が有効な場合、転送されたファイル実体は `{{ file_store.stored_dir }}/filestore/` 配下に sha256 のファイル名で保存されます。`fileinfo.jsonl` に記録された sha256 と、保存ファイルの実測ハッシュを突き合わせて改ざん・欠落がないことを確認します。
+
+```bash
+find {{ file_store.stored_dir }}/filestore -type f -name '*.*' -exec sha256sum {} \; \
+  | tee {{ analysis.output_dir }}/filestore.sha256
+
+# fileinfo.jsonl に記録された sha256 のうち、filestore.sha256 に存在しないものを洗い出す
+jq -r '.fileinfo.sha256' {{ analysis.output_dir }}/fileinfo.jsonl | sort -u \
+  > {{ analysis.output_dir }}/expected.sha256
+awk '{print $1}' {{ analysis.output_dir }}/filestore.sha256 | sort -u \
+  > {{ analysis.output_dir }}/actual.sha256
+comm -23 {{ analysis.output_dir }}/expected.sha256 {{ analysis.output_dir }}/actual.sha256
+```
+
+## 動作確認
+
+- `{{ analysis.output_dir }}/eve.json` と `fast.log` が生成され、サイズが 0 バイトでないこと
+- `alerts.jsonl` に、対象事案に関連する sid の検知が含まれていること
+- `dns.jsonl` / `tls.jsonl` に、疑わしい通信先（SNI・rrname）の記録があること
+- `comm -23` の出力が空である（fileinfo に記録された全ファイルが filestore に実体として保存されている）こと
+- 解析後に再計算した pcap の sha256sum が、手順1で記録したハッシュと一致すること
+
+```bash
+sha256sum -c {{ analysis.output_dir }}/pcap.sha256
+```
+
+## 注意事項
+
+- pcap は証跡（エビデンス）であるため、解析はコピーに対して行い、原本には書き込み禁止属性を設定してから着手すること。
+- 解析には事案発生当時の `ruleset_snapshot`（{{ analysis.ruleset_snapshot }}）を使用し、最新のルールセットで代替しないこと。検知結果の意味合いが当時と変わってしまう。
+- `--set stream.checksum-validation=no` はオフライン解析専用の設定であり、本番のライブキャプチャ環境には適用しないこと。キャプチャ時点でオフロードの影響を受けていない通常運用系にこの設定を持ち込むと、本来検知すべき破損パケットを見逃す可能性がある。
+- file-store によるファイル抽出は、マルウェア等の実体を含む可能性がある。抽出後のファイルは隔離された解析環境でのみ開き、実行しないこと。
+- 手順1・動作確認の sha256sum 突合が一致しない場合は解析結果の証跡性が損なわれるため、直ちに作業を中断し、pcap の複製経路を再確認すること。

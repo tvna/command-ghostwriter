@@ -1,0 +1,32 @@
+server_public_ip: 203.0.113.10
+instances:
+  - name: wg0
+    purpose: 管理
+    listen_port: 51820
+    address: 10.10.0.1/24
+    firewall_zone: wg-mgmt
+    allowed_peers:
+      - name: admin-laptop
+        public_key: "8vXKp2Q9y1J5t3nQxWvL6mR4sD7fH0aB2cE9gI3jKl0="
+        allowed_ips: 10.10.0.2/32
+  - name: wg1
+    purpose: 業務
+    listen_port: 51821
+    address: 10.10.1.1/24
+    firewall_zone: wg-business
+    allowed_peers:
+      - name: staff-tanaka
+        public_key: "1aB3cD5eF7gH9iJ1kL3mN5oP7qR9sT1uV3wX5yZ7aB0="
+        allowed_ips: 10.10.1.2/32
+      - name: staff-suzuki
+        public_key: "2bC4dE6fG8hI0jK2lM4nO6pQ8rS0tU2vW4xY6zA8bC1="
+        allowed_ips: 10.10.1.3/32
+  - name: wg2
+    purpose: 委託先
+    listen_port: 51822
+    address: 10.10.2.1/24
+    firewall_zone: wg-vendor
+    allowed_peers:
+      - name: vendor-acme
+        public_key: "3cD5eF7gH9iJ1kL3mN5oP7qR9sT1uV3wX5yZ7aB9cD2="
+        allowed_ips: 10.10.2.2/32

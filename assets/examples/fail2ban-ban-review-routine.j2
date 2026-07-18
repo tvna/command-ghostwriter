@@ -1,0 +1,106 @@
+# fail2ban/CrowdSec遮断状況の定期レビュー
+
+fail2ban の Banned IP list と CrowdSec の decisions/alerts を定期的に集計し、CSVで記録したレビュー結果（ban/decisionの発生傾向）をもとに、誤banの是正・繰り返し攻撃元の恒久遮断化・ignoreip/whitelistの除外漏れ是正を行う運用手順です。
+
+## 目的
+
+fail2ban-client と cscli の出力を定期集計してレビュー記録を残す方法を理解し、誤banの検出と解除、繰り返し攻撃元の恒久遮断化、除外設定の是正を安全に実施できるようになることを目指します。
+
+## 用語解説
+
+- **fail2ban jail**: 特定サービスのログを監視し、条件に一致したIPを一時的に遮断する設定単位
+- **Banned IP list**: `fail2ban-client status <jail>` で確認できる、現在遮断中のIP一覧
+- **CrowdSec decision**: `cscli decisions list` で確認できる、シナリオ（scenario）に基づく遮断・警告などの判定
+- **CrowdSec alert**: 判定の元になった検知イベントの記録（`cscli alerts list`）
+- **誤ban(false positive)**: 正規サービスや監視元IPなど、攻撃者ではない送信元を誤って遮断すること
+- **ignoreip/whitelist**: fail2banの`ignoreip`設定やCrowdSecの`cscli decisions add`除外・パーサ除外により、特定IPを遮断対象から外す仕組み
+- **恒久遮断(permanent ban)**: 一時的なbanではなく、期限を設けずに遮断し続けると判断すること
+
+## シナリオ設定
+
+| period | source_ip | jail_or_scenario | ban_count | verdict | disposition |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["period"] }} | {{ r["source_ip"] }} | {{ r["jail_or_scenario"] }} | {{ r["ban_count"] }} | {{ r["verdict"] }} | {{ r["disposition"] }} |
+{% endfor %}
+
+上記は前回レビューで記録された判定結果の例です。今回のレビューではこれを台帳として参照し、同じ送信元が再度検知された場合の傾向判断に使います。
+
+## 1. 現在の遮断状況を集計する
+
+fail2banの各jailのBanned IP listと、CrowdSecのdecisions/alertsを取得します。
+
+```bash
+{% for r in csv_rows %}fail2ban-client status {{ r["jail_or_scenario"] }} 2>/dev/null | grep -A1 "Banned IP list"
+{% endfor %}```
+
+```bash
+cscli decisions list -o json > /var/log/review/crowdsec-decisions-$(date +%F).json
+cscli alerts list -o json > /var/log/review/crowdsec-alerts-$(date +%F).json
+cscli decisions list --ip {{ csv_rows[0]["source_ip"] }}
+```
+
+## 2. 発生傾向をCSVレビュー記録として集計する
+
+前回の判定（シナリオ設定の表）と突き合わせながら、対象IPごとにban回数と直近の判定・処置(disposition)を記録します。
+
+```bash
+sudo tee /var/log/review/ban-review-$(date +%F).csv <<'EOF'
+period,source_ip,jail_or_scenario,ban_count,verdict,disposition
+{% for r in csv_rows %}{{ r["period"] }},{{ r["source_ip"] }},{{ r["jail_or_scenario"] }},{{ r["ban_count"] }},{{ r["verdict"] }},{{ r["disposition"] }}
+{% endfor %}EOF
+```
+
+## 3. 誤banを判定し、正規サービス・監視元を除外する
+
+`verdict` が `false_positive` の送信元について、まず現在の遮断を解除し、次に再遮断されないよう恒久的な除外を設定します。除外設定を先に反映し、対象IPからの通信が実際に許可されることを確認してから、恒久遮断中の他IPの整理に進みます。
+
+```bash
+{% for r in csv_rows %}{% if r["verdict"] == "false_positive" %}sudo fail2ban-client set {{ r["jail_or_scenario"] }} unbanip {{ r["source_ip"] }}
+sudo cscli decisions delete --ip {{ r["source_ip"] }}
+{% endif %}{% endfor %}```
+
+`/etc/fail2ban/jail.local` の該当jailに恒久除外を追記します。
+
+```ini
+[{{ csv_rows[2]["jail_or_scenario"] }}]
+ignoreip = 127.0.0.1/8 ::1 {{ csv_rows[2]["source_ip"] }}
+```
+
+CrowdSecには恒久的な明示的許可を追加します。
+
+```bash
+sudo cscli decisions add --ip {{ csv_rows[2]["source_ip"] }} --type allow --duration 0
+sudo systemctl reload fail2ban
+```
+
+除外設定の反映後、監視元IPからの本来の通信（ヘルスチェックや監視SSH接続など）が正常に到達することを確認してから、次のステップに進みます。到達しない場合は除外設定を見直すまでロールバックしません。
+
+```bash
+sudo fail2ban-client get {{ csv_rows[2]["jail_or_scenario"] }} ignoreip
+cscli decisions list --ip {{ csv_rows[2]["source_ip"] }}
+```
+
+## 4. 繰り返し攻撃元を恒久遮断化する
+
+`verdict` が `true_positive` かつ `disposition` が `permanent` の送信元は、一時ban（bantimeによる自動失効）ではなく期限なしの遮断に切り替えます。
+
+```bash
+{% for r in csv_rows %}{% if r["verdict"] == "true_positive" and r["disposition"] == "permanent" %}sudo cscli decisions add --ip {{ r["source_ip"] }} --type ban --duration 0 --reason "repeated-{{ r["jail_or_scenario"] }}"
+{% endif %}{% endfor %}```
+
+fail2ban側で恒久遮断する場合は、iptables/nftablesのbanactionを使うjailでも`bantime`を明示的に無期限化できないため、恒久遮断はCrowdSec側（または`/etc/hosts.deny`などの静的ブロックリスト）に寄せる運用とします。
+
+## 動作確認
+
+- Step 2 で作成したレビューCSVが対象日付で生成されていること
+- Step 3 の `unbanip` / `cscli decisions delete` 実行後、`fail2ban-client status` と `cscli decisions list` から該当IPの遮断が消えていること
+- Step 3 の除外設定追加後、監視元IPからの通信が到達し、かつ再ban（新しいdecision）が発生していないこと
+- Step 4 で恒久遮断に切り替えたIPが `cscli decisions list` に `duration` 無期限（`-1` または `0` 相当の永続表示）で表示されること
+
+## 注意事項
+
+- unbanと除外設定の追加は必ずセットで行う。unbanのみでは同じ条件のログが再発した時点で即座に再banされる。
+- 恒久遮断化はfail2banの一時ban（bantimeによる自動失効）とは性質が異なる決定であり、`verdict`と`disposition`が揃った場合のみ実施する。誤って一時的な攻撃を恒久遮断すると、後日IPが再利用された別ホスト（正規ユーザ）を継続して遮断し続けるリスクがある。
+- ignoreip/whitelistの変更は、監視元やAPI連携元などの正規送信元からの実通信を確認できるまでロールバックしない。確認できない場合は除外設定を戻し、原因調査を優先する。
+- 攻撃傾向（特定シナリオの急増、分散送信元からの同一パターンなど）が確認された場合は、インシデント対応手順（`ssh-bruteforce-response` 等）に連携し、本レビュー単体で対処を完結させない。
+- レビュー記録（CSV）は改変不可な保管領域（追記専用ログ収集基盤やバージョン管理下のリポジトリ）に保存し、次回レビュー時の突き合わせ台帳として利用する。

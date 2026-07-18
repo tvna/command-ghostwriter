@@ -1,0 +1,5 @@
+ctrl_address: ziti-ctrl01.internal.example.jp
+ctrl_port: 8441
+pki_root: /opt/ziti/pki
+admin_user: admin
+advertised_address: ziti-ctrl01.internal.example.jp

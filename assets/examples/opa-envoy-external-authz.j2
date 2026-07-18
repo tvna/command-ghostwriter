@@ -1,0 +1,194 @@
+# OPA-Envoyによるサービスメッシュ認可
+
+OPA-Envoy pluginを使い、Envoy/サービスメッシュのL7認可をRegoポリシーで統制する構成手順です。認可判断をアプリケーションから外部化するため、誤設定は即座に全リクエストの遮断（またはノーガード状態）に直結します。段階的に検証してから強制適用します。
+
+## 目的
+
+ext_authzフィルタとOPA-Envoy pluginの連携を理解し、Regoでメソッド・パス・JWTを検証するL7認可ポリシーを、ロックアウトを起こさずに段階的に導入・強制できるようになることを目指します。
+
+## 用語解説
+
+- **ext_authz**: Envoyのフィルタの一つで、リクエストごとに外部の認可サーバーへ判断を委譲する仕組み
+- **OPA-Envoy plugin**: OPAにEnvoy ext_authz gRPC APIを実装したプラグイン（`opa run`に組み込まれた拡張バイナリ）
+- **Rego**: OPAのポリシー記述言語。`input`に渡されたリクエスト属性から`allow`等の判断を返す
+- **failure_mode_allow**: OPA（認可サーバー）が応答不能・エラーの際に、Envoyがリクエストを許可（fail open）するか拒否（fail close）するかの設定
+- **default deny**: 明示的に許可条件を満たさない限りすべて拒否するポリシー設計の原則
+- **JWT検証**: Rego内で`io.jwt.decode_verify`等を使い、トークンの署名・claimを検証すること
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| ext_authzクラスタ名 | `{{ ext_authz_cluster }}` |
+| Regoポリシーパッケージ | `{{ policy_package }}` |
+| JWT検証 | {{ "有効" if jwt_verification else "無効" }} |
+| デフォルト判断ルール | `{{ default_decision }}` |
+| 許可済みヘッダ | {{ allowed_headers | join("、") }} |
+
+## 手順
+
+### 1. OPA-Envoy pluginをデプロイする
+
+サイドカーとしてOPA-Envoy pluginを起動します。まずは`failure_mode_allow: true`（fail open）で導入し、既存トラフィックを止めないことを優先します。
+
+```bash
+cat <<'EOF' > opa-envoy-config.yaml
+plugins:
+  envoy_ext_authz_grpc:
+    addr: :9191
+    path: {{ policy_package }}
+    dry-run: true
+decision_logs:
+  console: true
+EOF
+
+opa run --server \
+  --addr=:8181 \
+  --set=plugins.envoy_ext_authz_grpc.addr=:9191 \
+  --set=plugins.envoy_ext_authz_grpc.path={{ policy_package }} \
+  --set=plugins.envoy_ext_authz_grpc.dry-run=true \
+  --config-file opa-envoy-config.yaml &
+```
+
+### 2. Envoyのext_authzフィルタを設定する
+
+`envoy.yaml`のHTTPフィルタチェーンに`envoy.filters.http.ext_authz`を追加し、gRPCクラスタとして`{{ ext_authz_cluster }}`を参照させます。**この時点では`failure_mode_allow: true`のまま**にしておきます。
+
+```bash
+cat <<'EOF' > envoy-ext-authz-filter.yaml
+- name: envoy.filters.http.ext_authz
+  typed_config:
+    "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+    grpc_service:
+      envoy_grpc:
+        cluster_name: {{ ext_authz_cluster }}
+      timeout: 0.5s
+    failure_mode_allow: true
+    transport_api_version: V3
+EOF
+
+cat <<'EOF' > envoy-ext-authz-cluster.yaml
+- name: {{ ext_authz_cluster }}
+  type: STRICT_DNS
+  connect_timeout: 0.25s
+  typed_extension_protocol_options:
+    envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+      "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+      explicit_http_config:
+        http2_protocol_options: {}
+  load_assignment:
+    cluster_name: {{ ext_authz_cluster }}
+    endpoints:
+      - lb_endpoints:
+          - endpoint:
+              address:
+                socket_address: { address: 127.0.0.1, port_value: 9191 }
+EOF
+```
+
+### 3. Regoポリシーでメソッド/パス/JWTを検証する
+
+`{{ policy_package }}`パッケージに、HTTPメソッド・パスの許可条件と、JWT検証（{{ "有効" if jwt_verification else "無効" }}設定）を実装します。許可時は`allowed_headers`をレスポンスヘッダとして付与します。
+
+```bash
+cat <<'EOF' > policy.rego
+package envoy.authz
+
+import future.keywords.if
+
+default allow := false
+
+allow if {
+	input.attributes.request.http.method == "GET"
+	startswith(input.attributes.request.http.path, "/api/public")
+}
+
+allow if {
+	input.attributes.request.http.method in {"GET", "POST"}
+	startswith(input.attributes.request.http.path, "/api/private")
+	jwt_valid
+}
+
+jwt_valid if {
+{% if jwt_verification %}
+	auth_header := input.attributes.request.http.headers.authorization
+	startswith(auth_header, "Bearer ")
+	token := substring(auth_header, 7, -1)
+	io.jwt.verify_rs256(token, opa.runtime().env.JWT_PUBLIC_KEY)
+	[_, payload, _] := io.jwt.decode(token)
+	payload.exp > time.now_ns() / 1000000000
+{% else %}
+	true
+{% endif %}
+}
+
+headers["x-user-id"] := payload.sub if {
+	jwt_valid
+	auth_header := input.attributes.request.http.headers.authorization
+	token := substring(auth_header, 7, -1)
+	[_, payload, _] := io.jwt.decode(token)
+}
+EOF
+
+opa test policy.rego -v
+```
+
+### 4. failure_mode_allowを検証環境で確認する
+
+強制（fail close）に切り替える前に、OPAを意図的に停止し、Envoyがfail open設定通りにリクエストを通すことを検証環境で確認します。
+
+```bash
+docker stop opa-envoy-test || kill %1
+curl -s -o /dev/null -w "%{http_code}\n" http://staging.internal/api/private/ping
+# 200等が返ればfailure_mode_allow: trueが機能している（OPA障害時にロックアウトしないことの確認）
+```
+
+### 5. default denyポリシーをdry-run的に観察する
+
+`opa-envoy-config.yaml`の`dry-run: true`を維持したまま実トラフィックの決定ログを観察し、意図せぬdenyが出ないことを確認します。
+
+```bash
+tail -f /var/log/opa/decision.log | grep '"result":false'
+# 想定外のfalse（拒否）が出ないことを一定期間（例: 1営業日）確認してから次に進む
+```
+
+### 6. 強制を有効化する
+
+観察期間に問題がなければ、`dry-run: false`と`failure_mode_allow: false`（fail close）へ切り替え、default denyを実際に強制します。旧設定（dry-run/fail open）はロールバック用に手元に残しておきます。
+
+```bash
+sed -i 's/dry-run: true/dry-run: false/' opa-envoy-config.yaml
+sed -i 's/failure_mode_allow: true/failure_mode_allow: false/' envoy-ext-authz-filter.yaml
+# Envoy/OPAへ設定を再読み込みさせる（実装に応じてhot restartまたはSIGHUP）
+```
+
+## 動作確認
+
+1. 許可リクエストが`{{ default_decision }}`によって通過し、`{{ allowed_headers | join("、") }}`が付与されていることを確認する
+
+```bash
+curl -sD - -H "Authorization: Bearer $TEST_JWT" http://staging.internal/api/private/ping -o /dev/null \
+  | grep -Ei "^(x-user-id|x-user-role): "
+```
+
+2. 拒否リクエスト（不正パスまたはJWTなし）が403で拒否されることを確認する
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" http://staging.internal/api/private/ping
+# 期待値: 403
+```
+
+3. JWT検証が有効な場合、期限切れ・改ざんトークンが拒否されることを確認する
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" -H "Authorization: Bearer $EXPIRED_JWT" http://staging.internal/api/private/ping
+# 期待値: 403
+```
+
+## 注意事項
+
+- `failure_mode_allow`はfail open（`true`）とfail close（`false`）のどちらかを明示的に選択すること。デフォルト値に依存せず、可用性と安全性のどちらを優先するか運用判断として文書化する。
+- default denyへの強制切り替えは、必ず手順4（fail openでのOPA障害時挙動の検証）と手順5（dry-runでのdecision log観察）を完了してから行う。順序を飛ばして強制すると、想定外のdeny判定で本番トラフィックが即座にロックアウトされる。
+- ext_authzは全リクエストにgRPC呼び出しを追加するため、レイテンシ増加（`timeout`設定値まで）を監視し、SLOに影響しないか確認する。
+- JWT検証鍵（`JWT_PUBLIC_KEY`等）はRegoポリシーにハードコードせず、OPAランタイム環境変数やシークレットストアから注入し、鍵ローテーション手順を別途整備する。
+- 強制適用後に問題が発覚した場合は、`failure_mode_allow: true`と`dry-run: true`への設定差し戻し（ロールバック）をすぐ実施できるよう、旧設定ファイルを保持しておく。

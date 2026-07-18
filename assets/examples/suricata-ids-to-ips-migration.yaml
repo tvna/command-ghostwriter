@@ -1,0 +1,17 @@
+change_id: "CHG-2026-0714"
+cutover_window: "2026-07-20 02:00-04:00 JST"
+nic_interface: "ens19"
+nft_table: "inet filter"
+nft_chain: "forward"
+queue_num: 0
+protected_net: "192.168.10.0/24"
+suricata_yaml_path: "/etc/suricata/suricata.yaml"
+fast_log_path: "/var/log/suricata/fast.log"
+kernel_drops_threshold_pct: 0.1
+initial_drop_sids:
+  - 2024897
+  - 2019401
+rollback_trigger: "kernel_dropsが1%を超える、または業務セグメントで疎通断が確認された場合"
+fail_open: false
+business_test_host: "192.168.10.50"
+baseline_latency_ms: 2.5

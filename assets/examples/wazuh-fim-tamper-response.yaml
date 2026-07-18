@@ -1,0 +1,8 @@
+changed_files:
+  - "/var/www/html/index.php"
+  - "/etc/cron.d/backup"
+  - "/root/.ssh/authorized_keys"
+changed_by: "www-data (uid=33)"
+change_time: "2026-07-17T03:14:22+0900"
+legitimate_change: false
+evidence_dir: "/forensics/wazuh/20260717_0314"

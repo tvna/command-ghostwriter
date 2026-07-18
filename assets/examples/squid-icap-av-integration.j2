@@ -1,0 +1,112 @@
+# Squid + ICAP(c-icap/ClamAV)によるコンテンツ検査構成手順
+
+Squid のプロキシ通過トラフィックを ICAP 経由で c-icap + ClamAV に検査させ、マルウェアを含む HTTP レスポンスをダウンロード前に遮断します。
+
+## 目的
+
+このシナリオでは、Squid が中継する HTTP 通信を ICAP プロトコルで外部のコンテンツ検査エンジン（c-icap + ClamAV）に委譲し、リクエスト・レスポンスの両方でウイルススキャンを行った上でマルウェアを遮断できる状態を構築することを目指します。
+
+## 用語解説
+
+- **ICAP（Internet Content Adaptation Protocol）**: プロキシが中継するHTTPリクエスト/レスポンスの内容を、外部の専用エンジンに転送して検査・改変させるためのプロトコル（RFC 3507）。Squid 自身はウイルススキャン機能を持たないため、ICAP で検査を委譲する。
+- **REQMOD（Request Modification）**: クライアントからサーバへ送るHTTPリクエストをICAPサーバへ転送し、検査・改変させるモード。
+- **RESPMOD（Response Modification）**: サーバからのHTTPレスポンス（ダウンロードされるファイル本体を含む）をICAPサーバへ転送し検査させるモード。マルウェア入りファイルのダウンロード遮断はこちらで行われる。
+- **c-icap**: ICAPサーバの実装の1つ。モジュール（`srv_clamav`）経由でClamAVデーモン（clamd）と連携し、ICAP経由で受け取ったコンテンツをスキャンする。
+- **fail-open / fail-close**: ICAPサーバが停止・無応答になった際に、検査なしで通信を許可する（fail-open/bypass）か、通信を遮断する（fail-close/block）かの選択。可用性とセキュリティのトレードオフ。
+- **ssl_bump**: SquidがTLS通信を中間者的に復号してから中継する機能。ICAPはHTTPペイロードしか検査できないため、HTTPS内のファイルを検査するにはssl_bumpの併用が前提となる。
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| squid.conf パス | {{ global.squid_conf_path }} |
+| c-icap.conf パス | {{ global.cicap_conf_path }} |
+| squid サービス名 | {{ global.squid_service }} |
+| c-icap サービス名 | {{ global.cicap_service }} |
+| ICAPホスト | {{ icap.icap_host }} |
+| ICAPポート | {{ icap.icap_port }} |
+| REQMODサービス名 | {{ icap.reqmod_service }} |
+| RESPMODサービス名 | {{ icap.respmod_service }} |
+| ICAP障害時の挙動 | {{ icap.fail_action }} |
+| clamd ソケット | {{ clamav.clamd_socket }} |
+| 検査対象最大サイズ | {{ clamav.max_object_size_mb }} MB |
+
+## 1. c-icap と ClamAV連携モジュールを設定する
+
+`{{ global.cicap_conf_path }}` に ClamAV 連携モジュール（`srv_clamav`）とサービス定義を追加します。REQMOD用・RESPMOD用の2つのサービス名で同一モジュールを登録します。
+
+```bash
+sudo tee -a {{ global.cicap_conf_path }} <<'EOF'
+Module srv_clamav.so /etc/c-icap/srv_clamav.conf
+Service {{ icap.reqmod_service }} srv_clamav.so
+Service {{ icap.respmod_service }} srv_clamav.so
+EOF
+```
+
+`srv_clamav.conf` に clamd との接続先と検査上限サイズを設定します。
+
+```bash
+sudo tee /etc/c-icap/srv_clamav.conf <<'EOF'
+clamd_scan_type ClamdScanSharedMemory
+ClamdSocket unix:{{ clamav.clamd_socket }}
+MaxObjectSize {{ clamav.max_object_size_mb }}M
+SendPercentData 20
+StartSendPercentDataAfter 1M
+EOF
+```
+
+c-icap を再起動し、リスニング状態を確認します。
+
+```bash
+sudo systemctl restart {{ global.cicap_service }}
+sudo systemctl status {{ global.cicap_service }} --no-pager
+ss -ltnp | grep {{ icap.icap_port }}
+```
+
+## 2. Squid にICAP連携を設定する
+
+`{{ global.squid_conf_path }}` にICAP有効化・REQMOD/RESPMODサービス・適用先を追記します。`fail_action` の値に応じて `bypass=1`（fail-open）または `bypass=0`（fail-close）を選択します。
+
+```bash
+sudo tee -a {{ global.squid_conf_path }} <<'EOF'
+icap_enable on
+icap_send_client_ip on
+icap_service service_req reqmod_precache {% if icap.fail_action == "bypass" %}bypass=1{% else %}bypass=0{% endif %} icap://{{ icap.icap_host }}:{{ icap.icap_port }}/{{ icap.reqmod_service }}
+icap_service service_resp respmod_precache {% if icap.fail_action == "bypass" %}bypass=1{% else %}bypass=0{% endif %} icap://{{ icap.icap_host }}:{{ icap.icap_port }}/{{ icap.respmod_service }}
+adaptation_access service_req allow all
+adaptation_access service_resp allow all
+EOF
+```
+
+設定文法を検証してからリロードします（構文エラー時に稼働中のプロキシを壊さないため、`-k parse` で必ず事前検証する）。
+
+```bash
+sudo squid -k parse
+sudo systemctl reload {{ global.squid_service }}
+```
+
+## 3. 動作確認
+
+EICAR テストファイル（無害なウイルス検知テスト用文字列）をSquid経由でダウンロードし、RESPMOD検査によって遮断されることを確認します。
+
+```bash
+curl -x http://localhost:3128 -o {{ test.eicar_download_path }} {{ test.eicar_url }}
+```
+
+- ダウンロードが完了せず、Squidからブロックページ（403等）が返ること
+- `sudo tail -n 50 /var/log/squid/access.log` に該当リクエストが記録され、ICAP適用の形跡（TCP_DENIED等）があること
+- `sudo tail -n 50 {{ clamav.virus_action_log }}` にEICARファイルの検知記録が残っていること
+
+続けて、通常の無害なファイルのダウンロードが従来通り成功することも確認し、誤検知や過剰遮断が起きていないことを確かめます。
+
+```bash
+curl -x http://localhost:3128 -o /tmp/normal.html https://example.com/
+```
+
+## 注意事項
+
+- ICAP連携はHTTPペイロードの検査に限られる。TLS暗号化されたHTTPSの中身を検査するには `ssl_bump` によるSquid側のTLS復号が前提であり、bump設定なしのHTTPSはICAP検査を素通りする。
+- ICAPサーバ（c-icap）が停止・無応答になった場合の挙動を `fail_action`（bypass=検査なしで通過／block=通信遮断）で明示的に選択すること。可用性を優先してbypassにする場合は、検査が無効化されている期間が発生しうる点を関係者に周知する。
+- ICAP検査により応答遅延が発生する（特にRESPMODでの大きいファイル検査）。`MaxObjectSize` を超えるファイルは検査対象外となるため、業務影響を踏まえてサイズ上限を調整すること。
+- 変更を本番のSquidに適用する前に、`sudo squid -k parse` での構文検証に加え、可能であれば検証用ホスト経由（別ポートやステージング環境のSquid）でEICARテストを実施し、新しいICAP連携が正しく遮断・素通しの両方を行うことを確認してから、本番設定を切り替えること。
+- 設定変更前に `{{ global.squid_conf_path }}` と `{{ global.cicap_conf_path }}` のバックアップを取得し、問題発生時は元の設定に戻して `systemctl reload {{ global.squid_service }}` で切り戻せるようにしておく。

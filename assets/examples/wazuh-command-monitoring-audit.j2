@@ -1,0 +1,119 @@
+# Wazuhコマンド実行監視によるaudit連携
+
+auditd の execve 監査と Wazuh の who-data 収集を組み合わせ、特権コマンドの実行を監査記録し、不正操作の兆候を検知する構成手順です。
+
+## 目的
+
+auditd で root 権限のコマンド実行（execve）を記録し、Wazuh でそのログを収集・相関させてアラートを発報するまでの一連の連携を構成・検証できるようになることを目指します。
+
+## 用語解説
+
+- **auditd**: Linux カーネルの監査サブシステム（audit）を制御するデーモン。システムコール単位でイベントを記録できる
+- **execveシステムコール**: プロセスが新しいプログラムを実行する際に呼び出されるシステムコール。コマンド実行の監査ポイントになる
+- **auditルールのkey**: `-F key=<name>` で付与するタグ。ausearch や Wazuh のルールで該当イベントを絞り込むための識別子
+- **who-data**: Wazuh の syscheck/audit 連携機能で、変更や実行を「誰が」行ったかを auditd から補完取得する仕組み
+- **localfile(audit)**: Wazuh エージェントが auditd のログファイルを収集対象として読み込む設定
+- **Wazuhデコーダ/ルール**: 収集したログをフィールドに分解（デコード）し、条件に応じてアラートレベルを判定する定義
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 監査対象キー | {% for k in monitored_keys %}`{{ k }}`{% if not loop.last %}, {% endif %}{% endfor %} |
+| 監視対象コマンド | {% for c in alert_commands %}`{{ c }}`{% if not loop.last %}, {% endif %}{% endfor %} |
+| アラートレベル | {{ alert_level }} |
+| auditルールファイル | `{{ auditd.rules_file }}` |
+| auditログ | `{{ auditd.log_path }}` |
+| Wazuhエージェント設定 | `{{ wazuh.agent_conf_path }}` |
+| Wazuhローカルルール | `{{ wazuh.local_rules_path }}` |
+| ルールID起点 | {{ wazuh.rule_id_base }} |
+| Wazuhアラートログ | `{{ wazuh.alerts_log }}` |
+
+## 1. auditdルールを設定する
+
+`{{ auditd.rules_file }}` に execve 監査ルールを定義します。全 execve を無条件に採取すると負荷が大きいため、必ず `-F key=` で絞り込みます。
+
+```bash
+sudo tee {{ auditd.rules_file }} <<'EOF'
+{% for r in audit_rules %}{{ r }}
+{% endfor %}EOF
+sudo augenrules --load
+sudo auditctl -l | grep exec_audit
+```
+
+## 2. auditdサービスを再起動し反映を確認する
+
+```bash
+sudo systemctl restart auditd
+sudo systemctl status auditd --no-pager
+sudo auditctl -s
+```
+
+## 3. Wazuhエージェントにaudit収集を設定する
+
+`{{ wazuh.agent_conf_path }}` の `<ossec_config>` 内に、auditd ログを読み込む localfile ブロックを追加します。
+
+```bash
+sudo tee -a {{ wazuh.agent_conf_path }} <<'EOF'
+<ossec_config>
+  <localfile>
+    <log_format>audit</log_format>
+    <location>{{ auditd.log_path }}</location>
+  </localfile>
+</ossec_config>
+EOF
+sudo systemctl restart wazuh-agent
+```
+
+## 4. Wazuhローカルルールでexecveイベントを検知する
+
+`{{ wazuh.local_rules_path }}` に、監視キーおよび監視対象コマンドに応じたルールを追加します。ルールIDは組織のカスタム範囲（100000番台以降）を使用します。
+
+```bash
+sudo tee -a {{ wazuh.local_rules_path }} <<'EOF'
+<group name="audit_exec,">
+  <rule id="{{ wazuh.rule_id_base }}" level="5">
+    <if_group>audit_command</if_group>
+    <field name="audit.key">exec_audit</field>
+    <description>auditd: exec_audit key に一致するコマンド実行を検知</description>
+    <group>audit_exec,</group>
+  </rule>
+{% for c in alert_commands %}  <rule id="{{ wazuh.rule_id_base + loop.index }}" level="{{ alert_level }}">
+    <if_sid>{{ wazuh.rule_id_base }}</if_sid>
+    <field name="audit.exe">{{ c }}</field>
+    <description>特権コマンド {{ c }} の実行を検知（who-data連携）</description>
+    <group>audit_exec,privileged_command,</group>
+  </rule>
+{% endfor %}</group>
+EOF
+sudo /var/ossec/bin/wazuh-control restart
+```
+
+## 動作確認
+
+1. 監視対象コマンドの1つを実際に実行し、auditログへ記録されることを確認します。
+
+```bash
+sudo {{ alert_commands[0] }} --help >/dev/null 2>&1
+sudo ausearch -k exec_audit -ts recent
+```
+
+2. auditログのイベントが Wazuh マネージャ側のアラートとして相関・発報されることを確認します。
+
+```bash
+sudo tail -n 50 {{ wazuh.alerts_log }} | grep exec_audit
+sudo /var/ossec/bin/wazuh-logtest
+```
+
+3. who-data により実行者（uid/euid）とコマンドパスがアラートのフィールドに含まれることを確認します。
+
+```bash
+sudo tail -n 50 {{ wazuh.alerts_log }} | grep -E "audit.exe|audit.uid"
+```
+
+## 注意事項
+
+- execve を key で絞り込まずに全採取すると、システム全体のプロセス起動を逐一記録するためパフォーマンス影響が大きい。必ず `-F key=` を付与し、監視対象キー（{% for k in monitored_keys %}`{{ k }}`{% if not loop.last %}, {% endif %}{% endfor %}）に絞る。
+- execve の引数（`a0`, `a1`, ...）にはパスワードやトークンなど機微情報がそのまま渡される場合がある。auditログとWazuhアラートの両方で、引数フィールドを外部共有・ダッシュボード転記する前にマスキングの要否を確認する。
+- audit.log および `{{ wazuh.local_rules_path }}` 自体が改ざんされると検知が無効化される。`auditctl -e 2`（設定変更不可ロック）の適用や、ログの追記専用化・別ホストへの転送（syslog/リモートWazuhマネージャ）を検討し、改ざん防止を担保する。
+- 本手順はルール追加・auditd再起動・Wazuhエージェント/マネージャ再起動を伴う。既存の監査基盤や他のauditルールに影響しないよう、Step 1〜2 は非本番環境で新ルールの読み込みを確認してから、Step 3〜4 で Wazuh 側の検知（動作確認1〜3）が機能することを確かめたうえで、本番ホストへ展開する。

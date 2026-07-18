@@ -1,0 +1,135 @@
+# Squidアクセスログの構造化とSIEM転送
+
+Squidのアクセスログを`logformat`でJSON構造化し、logrotateでのローテーションと{{ shipper }}によるSIEM転送までを設定する手順です。
+
+## 目的
+
+Squidの`logformat`ディレクティブでアクセスログをカスタムフィールド定義に基づき構造化し、`access_log`への割当、ログローテーション、{{ shipper }}経由でのSIEM転送までを一連の運用として構築できるようになることを目指します。
+
+## 用語解説
+
+- **logformat**: Squidの設定ディレクティブ。ログ1行に出力するフィールドと区切り文字をカスタム定義できる
+- **%un**: ログフォーマットのコード。プロキシ認証で確立された認証ユーザー名を記録する。認証を経由しない匿名アクセスでは`-`になる
+- **%ts.%03tu**: エポック秒とミリ秒(3桁)からなるタイムスタンプフィールド。SIEM側での時刻正規化を容易にする
+- **%Ss/%03>Hs**: Squidのキャッシュ結果コード(例: TCP_MISS)とオリジンサーバから返却されたHTTPステータスコード
+- **構造化ログの利点**: 正規表現による自由形式ログの分解が不要になり、SIEM側のパース処理負荷とパースエラー率を下げられる
+- **{{ shipper }}**: ログファイルを監視し、ラベル付けした上でSIEMの取り込みエンドポイントへ転送するログ収集エージェント
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| log_format | {{ log_format }} |
+| log_fields | {{ log_fields | join(' ') | safe }} |
+| rotate_schedule | {{ rotate_schedule }} |
+| shipper | {{ shipper }} |
+| siem_endpoint | {{ siem_endpoint }} |
+
+## 手順
+
+### 1. カスタムlogformatを定義する
+
+`/etc/squid/squid.conf`に、SIEM転送用の構造化フォーマットを追記します。
+
+```
+logformat siem_json {"time":"{{ log_fields[0] | safe }}","client":"{{ log_fields[1] | safe }}","result_code":"{{ log_fields[2] | safe }}","bytes":"{{ log_fields[3] | safe }}","method":"{{ log_fields[4] | safe }}","url":"{{ log_fields[5] | safe }}","user":"{{ log_fields[6] | safe }}","hier":"{{ log_fields[7] | safe }}","mime":"{{ log_fields[8] | safe }}"}
+```
+
+### 2. 既存フォーマットと並行して新フォーマットのログ出力を追加する
+
+いきなり`access_log`を新フォーマットへ切り替えず、まず既存の標準ログはそのまま残し、新フォーマット用のログファイルを別パスで追加します。既存パーサへの影響を確認してから切り替えるためです。
+
+```
+access_log /var/log/squid/access.log squid
+access_log /var/log/squid/access-siem.json siem_json
+```
+
+### 3. Squidを再起動せずに設定を反映する
+
+```bash
+squid -k parse
+squid -k reconfigure
+```
+
+### 4. logrotateでのローテーションを設定する
+
+`/etc/logrotate.d/squid-siem`を作成します。
+
+```
+/var/log/squid/access-siem.json {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    sharedscripts
+    postrotate
+        /usr/sbin/squid -k rotate
+    endscript
+}
+```
+
+cron相当のスケジュール `{{ rotate_schedule }}` でlogrotateを実行するcronジョブも登録します。
+
+```bash
+echo "{{ rotate_schedule }} root /usr/sbin/logrotate /etc/logrotate.d/squid-siem" > /etc/cron.d/squid-siem-rotate
+```
+
+### 5. {{ shipper }}でSIEMへ転送する
+
+`/etc/promtail/config.yml`にscrape_configsとして新フォーマットのログファイルを登録し、TLSで{{ siem_endpoint }}へ転送します。
+
+```yaml
+clients:
+  - url: {{ siem_endpoint }}
+    tls_config:
+      insecure_skip_verify: false
+scrape_configs:
+  - job_name: squid-siem
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: squid-siem
+          __path__: /var/log/squid/access-siem.json
+```
+
+rsyslogを使う場合は、`/etc/rsyslog.d/squid-siem.conf`でファイル監視とTLS転送(`omfwd`)を設定します。
+
+```
+module(load="imfile")
+input(type="imfile" File="/var/log/squid/access-siem.json" Tag="squid-siem:")
+action(type="omfwd" target="siem.corp.local" port="6514" protocol="tcp"
+       StreamDriver="gtls" StreamDriverMode="1" StreamDriverAuthMode="x509/name")
+```
+
+```bash
+systemctl restart promtail
+```
+
+### 6. 新フォーマットのSIEM取り込みを確認してから旧ログ出力を廃止する
+
+新フォーマットのログがSIEM側で正しく取り込まれ、既存の検索・アラートルールが新フィールドでも動作することを確認できた後に限り、手順2で残していた旧フォーマットの`access_log`行を削除します。
+
+```
+access_log /var/log/squid/access-siem.json siem_json
+```
+
+```bash
+squid -k parse
+squid -k reconfigure
+```
+
+## 動作確認
+
+- 新フォーマットで`/var/log/squid/access-siem.json`にJSON形式のログが出力されていること(`tail -f /var/log/squid/access-siem.json`)
+- 出力された1行がJSONとしてパース可能で、`user`フィールドに認証ユーザー名(`%un`)、匿名アクセスは`-`が記録されていること
+- {{ shipper }}経由でSIEM({{ siem_endpoint }})側にログが取り込まれ、検索・アラートが新フィールドで動作すること
+- `squid -k rotate`を実行し、ローテーション後に新規ログファイルへの書き込みが継続していること(`ls -lt /var/log/squid/access-siem.json*`)
+
+## 注意事項
+
+- アクセスログにはアクセス先URL・認証ユーザー名などのPIIが含まれる。{{ shipper }}からSIEMへの転送経路は必ずTLSで暗号化し、SIEM側の保管データもアクセス制御(RBAC)で閲覧範囲を限定する。
+- `logformat`を変更すると、既存の正規表現ベースのログ解析スクリプトやSIEMの取り込みルールが新フォーマットを解釈できず壊れる可能性がある。手順2のように新旧フォーマットを一定期間並行出力し、SIEM側の取り込みとアラートが新フォーマットで正しく機能することを確認してから、手順6で旧フォーマットの出力を廃止する。
+- logrotateの`postrotate`で`squid -k rotate`を呼ばないと、ローテーション後もSquidが古い(リネーム済み)ファイルディスクリプタへ書き込み続け、新規ログが失われる。

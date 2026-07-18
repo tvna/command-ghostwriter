@@ -1,0 +1,11 @@
+realm_name = "corp-employees"
+user_or_client = "user: yamada.taro / client: intranet-portal"
+error_type = "invalid_user_credentials"
+federation_check = true
+bruteforce_locked = false
+kcadm_config_path = "~/.keycloak/kcadm.config"
+keycloak_url = "https://sso.example.internal"
+client_id_target = "intranet-portal"
+redirect_uri_expected = "https://portal.example.internal/callback"
+ldap_provider_alias = "corp-ldap"
+escalation = "IAM基盤チーム (内線 1305)"

@@ -1,0 +1,106 @@
+# Unbound stub-zoneによる内部権威連携
+
+社内の権威DNSサーバ(BIND/PowerDNS)が管理する内部ゾーンについて、Unbound から stub-zone を使って直接問い合わせる構成を導入します。
+
+## 目的
+
+内部ゾーンの名前解決を、上位フォワーダ経由ではなく内部権威DNSサーバへの直接問い合わせに切り替え、内部ホスト名解決の応答経路を明確にし、外部ゾーンの解決経路と分離できるようになることを目指します。
+
+## 用語解説
+
+- **stub-zone**: 指定したゾーンについて、Unbound がキャッシュを介さず指定した権威サーバへ直接(再帰扱いで)問い合わせる設定。委任情報をUnbound自身が保持するイメージに近い
+- **forward-zone**: 指定したゾーン(または全体)の問い合わせを、指定した別のリゾルバ(フォワーダ)へ丸投げする設定。フォワーダ側が再帰解決を行う
+- **stub-zoneとforward-zoneの違い**: stub-zoneは「権威サーバへの直接問い合わせ」であり相手は権威応答(AA=1)を返す想定。forward-zoneは「別リゾルバへの委譲」であり相手はキャッシュ結果や再帰結果を返してよい。内部の自社ゾーンにはstub-zone、社外の上位DNSへの転送にはforward-zoneを使い分ける
+- **stub-addr**: stub-zoneで問い合わせ先とする権威サーバのIPアドレス
+- **stub-prime**: yesにするとNSレコードをまずそのゾーンへ問い合わせて委任情報を確定してから解決する。内部ゾーンでは権威サーバのアドレスを直接指定済みのため通常 `no` とする
+- **stub-first**: stub-zoneへの問い合わせに失敗した場合に、通常の再帰解決へフォールバックするかどうかを決めるUnboundのオプション
+- **内部ゾーン委任**: 社内ネットワークが管理するドメイン(例: internal.example.)の名前解決権限を、社内の権威DNSサーバに委ねること。外部の公開DNSはこのゾーンを一切保持しない
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| Unboundリスンアドレス | {{ resolver_host }} |
+| 内部ゾーン数 | {{ stub_zones | length }} |
+| stub-first | {{ stub_first }} |
+| 内部確認ホスト | {{ internal_test_host }} |
+| 外部確認ドメイン | {{ external_domain }} |
+| Unbound自体のDNSSEC検証 | {{ dnssec_validation }} |
+| 内部ゾーン自体の署名有無 | {{ internal_zone_signed }} |
+
+対象の内部ゾーンと権威サーバは以下の通りです。
+
+{% for z in stub_zones %}- ゾーン `{{ z.name }}` の権威サーバ: {{ z.addr | join(", ") }}
+{% endfor %}
+
+## 手順
+
+### 1. stub-zone を設定する
+
+```bash
+cat > /etc/unbound/unbound.conf.d/stub-internal.conf <<'EOF'
+server:
+    stub-first: {{ stub_first }}
+
+{% for z in stub_zones %}stub-zone:
+    name: "{{ z.name }}"
+{% for a in z.addr %}    stub-addr: {{ a }}
+{% endfor %}    stub-prime: no
+
+{% endfor %}EOF
+```
+
+参考として、同じゾーンをforward-zoneで書いた場合との違いを示します(本手順では採用しません)。
+
+```
+# forward-zone の場合(フォワーダへの委譲。相手が権威かどうかは問わない)
+forward-zone:
+    name: "internal.example."
+    forward-addr: 10.0.30.5
+```
+
+stub-zoneでは相手が権威応答(AA=1)を返すことを前提とし、forward-zoneでは相手が再帰解決した結果を返してもよい点が異なります。内部ゾーンの直接問い合わせにはstub-zoneを選択します。
+
+### 2. 構文を検証する
+
+```bash
+unbound-checkconf
+```
+
+### 3. 再起動して稼働を確認する
+
+```bash
+systemctl restart unbound
+systemctl status unbound --no-pager
+```
+
+### 4. 内部ゾーンの解決が内部権威サーバから返ることを確認する
+
+```bash
+dig @{{ resolver_host }} {{ internal_test_host }} A +short
+# 権威フラグ相当の応答経路であることを、内部権威サーバ側のクエリログでも突き合わせて確認する
+dig @{{ resolver_host }} {{ internal_test_host }} A
+```
+
+### 5. 外部ゾーンの解決が分離されていることを確認する
+
+```bash
+dig @{{ resolver_host }} {{ external_domain }} A +short
+# 内部権威サーバのクエリログに external_domain への問い合わせが記録されていないことを確認する
+```
+
+## 動作確認
+
+- `unbound-checkconf` がエラーなく通ること
+- `systemctl status unbound` が `active (running)` であること
+- `{{ internal_test_host }}` への問い合わせが内部権威サーバ({{ stub_zones[0].addr | join(", ") }})から応答され、内部権威サーバ側のクエリログにも到達していること
+- `{{ external_domain }}` への問い合わせが内部権威サーバのログに現れず、通常の再帰解決経路で処理されていること
+- stub-zone設定変更前後で、内部ゾーン以外の解決結果に変化がないこと
+
+## 注意事項
+
+- stub-addrに指定した内部権威サーバが停止すると、内部ゾーンの解決が丸ごと失敗する。内部権威サーバは冗長化(複数stub-addr指定、または権威側の可用性確保)しておくこと。
+- 内部ゾーンが署名されていない({{ internal_zone_signed }})状態でUnbound全体のDNSSEC検証({{ dnssec_validation }})を有効にしている場合、内部ゾーンには署名がないため検証はスキップされる(INSECUREとして扱われる)。内部ゾーンを将来署名する計画がある場合は、その段階で検証結果が変わることを事前に周知すること。
+- forward-zoneとの使い分けを誤ると、内部ゾーンの問い合わせが意図せず外部フォワーダへ漏れる、あるいは外部向け問い合わせが内部権威サーバへ誤送されるおそれがある。ゾーン名の重複や記述漏れがないか設定投入前に確認すること。
+- 内部権威サーバ側でレコードを更新した場合、Unboundのstub-zoneはキャッシュTTLに従って古い応答を返し続けることがある。反映確認時はTTL経過後に再度digで確認するか、必要に応じて `unbound-control flush_zone internal.example.` でキャッシュを明示的に破棄すること。
+- 本設定を投入する際は、既存の名前解決経路(既存のforward-zoneや通常の再帰解決)を停止・削除する前に、まず本stub-zoneを並行稼働させた状態で内部ホスト解決が正しく行われることを確認してから、古い経路の整理に進むこと。

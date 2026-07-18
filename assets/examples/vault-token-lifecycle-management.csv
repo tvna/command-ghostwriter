@@ -1,0 +1,5 @@
+token_role,ttl,max_ttl,num_uses,orphan,use_case
+ci-batch-short,15m,1h,1,true,CI一回限りのbatchトークン
+svc-api-periodic,1h,-,0,false,常駐サービス用periodicトークン
+human-operator,30m,8h,0,false,運用担当者の対話的セッション
+legacy-admin-longlived,24h,720h,0,true,廃止対象の長寿命アンチパターン

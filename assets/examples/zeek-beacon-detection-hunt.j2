@@ -1,0 +1,118 @@
+# Zeek conn.logによるビーコン通信の探索
+
+特定の内部→外部ペアについて`conn.log`の接続間隔(delta)と転送量の規則性からC2ビーコンの周期性を調査する手順です。判定は「疑いの提示」であり、確定判定ではありません。
+
+## 目的
+
+`conn.log`のタイムスタンプ(`ts`)を時系列にソートし、接続間隔の分散と`orig_bytes`/`resp_bytes`の均一性を数値で評価することで、C2ビーコンに特徴的な周期性を検出できるようになることを目指します。
+
+## 用語解説
+
+- **ビーコン(beacon)**: マルウェアが感染端末からC2サーバへ定期的に接続を試みる通信。生存確認やコマンド取得が目的
+- **delta(接続間隔)**: 同一の送信元/宛先ペアにおける、連続する接続の`ts`(タイムスタンプ)の差分秒数
+- **変動係数(CV: Coefficient of Variation)**: 標準偏差を平均で割った値。値が小さいほど間隔や転送量のばらつきが少なく規則的
+- **jitter付きビーコン**: 検知回避のため、一定間隔にランダムな揺らぎ(jitter)を加えたビーコン。CVはやや大きくなるが人手操作ほど不規則ではない
+- **ビーコンの特徴**: (1)低頻度な接続、(2)一定間隔(またはjitter付きの一定間隔)、(3)小さく均一なペイロードサイズ、の3点が典型
+- **正規のポーリングとの違い**: 監視エージェントのヘルスチェック・NTP同期・アプリの更新確認なども定期通信だが、既知の宛先・既知のポート・公開されたスケジュールを持つ点でC2ビーコンと区別できる
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| Zeekログディレクトリ | `{{ log_dir }}` |
+| 疑わしい送信元(内部) | `{{ suspect_pair_src }}` |
+| 疑わしい宛先(外部) | `{{ suspect_pair_dst }}` |
+| 規則性の判定目安 | {{ interval_regularity_note }} |
+
+## 手順
+
+### 1. 対象ペアの接続レコードを抽出しtsでソートする
+
+`zeek-cut`で必要なフィールドだけを取り出し、対象の送信元/宛先ペアに絞り込んでからタイムスタンプ順に並べ替えます。
+
+```bash
+cat {{ log_dir }}/conn.log \
+  | zeek-cut id.orig_h id.resp_h ts orig_bytes resp_bytes \
+  | awk -v src={{ suspect_pair_src }} -v dst={{ suspect_pair_dst }} '$1 == src && $2 == dst' \
+  | sort -k3,3n > /tmp/beacon_candidate.tsv
+
+wc -l /tmp/beacon_candidate.tsv
+```
+
+抽出件数が極端に少ない(数件以下)場合は、周期性の統計評価自体が信頼できないため、観測期間を延長してから再実施します。
+
+### 2. awkで接続間隔(delta)を計算する
+
+連続する行の`ts`の差分を計算し、転送量とあわせて1行1接続のdeltaテーブルを作ります。
+
+```bash
+awk 'NR > 1 { printf "%.3f\t%s\t%s\n", $3 - prev_ts, $4, $5 } { prev_ts = $3 }' \
+  /tmp/beacon_candidate.tsv > /tmp/beacon_delta.tsv
+
+column -t /tmp/beacon_delta.tsv | head -n 20
+```
+
+1列目がdelta(秒)、2列目が`orig_bytes`、3列目が`resp_bytes`です。
+
+### 3. deltaの平均・標準偏差・変動係数を算出する
+
+```bash
+awk '{
+  sum += $1; sumsq += $1 * $1; n++
+} END {
+  mean = sum / n
+  stdev = sqrt(sumsq / n - mean * mean)
+  cv = stdev / mean
+  printf "delta: n=%d mean=%.2f stdev=%.2f cv=%.3f\n", n, mean, stdev, cv
+}' /tmp/beacon_delta.tsv
+```
+
+`{{ interval_regularity_note }}`を目安に、算出したCVから規則性の強さを判定します。
+
+### 4. 転送量(orig_bytes/resp_bytes)の均一性を同じ考え方で確認する
+
+```bash
+awk '{
+  sum += $2; sumsq += $2 * $2; n++
+} END {
+  mean = sum / n
+  stdev = sqrt(sumsq / n - mean * mean)
+  cv = (mean > 0) ? stdev / mean : 0
+  printf "orig_bytes: n=%d mean=%.1f stdev=%.1f cv=%.3f\n", n, mean, stdev, cv
+}' /tmp/beacon_delta.tsv
+```
+
+deltaのCVが小さく、かつ`orig_bytes`も毎回ほぼ同じサイズ(小さく均一)であれば、ビーコンの疑いがより強まります。
+
+### 5. 疑わしい宛先をIntelフレームワークで照合する
+
+Zeekの`Intel::`フレームワーク用フィード(既知のC2インジケータ一覧)に対象宛先が含まれるかを`intel.log`で確認します。
+
+```bash
+cat {{ log_dir }}/intel.log | zeek-cut seen.indicator seen.indicator_type matched | grep {{ suspect_pair_dst }}
+```
+
+統計的な規則性のみでは正規ポーリングとの誤判定があり得るため、この宛先評価の結果と必ず併せて判断します。
+
+## 動作確認
+
+- 既知の周期通信(例: 60秒間隔のヘルスチェック)のログで本手順を試し、手順3のCVが小さい値(規則性が高いと判定される水準)として観測できること
+- 検証には以下のような合成`conn.log`相当のTSVで手順2・3を試すことができる
+
+```bash
+awk 'BEGIN {
+  for (i = 0; i < 30; i++) {
+    ts = 1700000000 + i * 60
+    printf "%s\t%s\t%d\t64\t64\n", "{{ suspect_pair_src }}", "{{ suspect_pair_dst }}", ts
+  }
+}' | sort -k3,3n > /tmp/beacon_candidate.tsv
+```
+
+- 上記の合成データで手順2・3を再実行し、delta CVがほぼ0(60秒間隔が完全に一定)になることを確認する
+- 手順5で`intel.log`に一致がある場合、規則性の判定結果と合わせて疑いの根拠が二重に揃っていることを確認する
+
+## 注意事項
+
+- 本手順が示すのはあくまで「ビーコンの疑い」であり、確定的なマルウェア判定ではない。CVが小さいだけで正規の監視・NTP・アプリ更新確認と誤判定する場合があるため、必ず手順5の宛先評価(Intel照合)や追加のログ(`dns.log`、`http.log`など)と併用して判断する。
+- `/tmp/beacon_candidate.tsv`・`/tmp/beacon_delta.tsv`には内部IPアドレスと通信パターンという機微情報が含まれるため、調査終了後は削除するか、アクセス権限を絞った保管場所へ移動する。
+- `{{ log_dir }}`のログはローテーションされる場合があるため、調査対象期間のログファイル(`conn.log`のほか、必要に応じて`conn.log.<timestamp>.gz`等)がすべて揃っているかを事前に確認してから抽出する。

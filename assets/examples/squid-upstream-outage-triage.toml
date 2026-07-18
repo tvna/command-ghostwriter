@@ -1,0 +1,4 @@
+symptom = "外部サイト全般への接続が遅い、または全く繋がらない"
+affected_scope = "本社セグメント(10.10.0.0/16)配下の全クライアントからのインターネット向け通信"
+parent_host = "parentproxy.isp.example:3128"
+dns_servers = ["10.10.0.53", "10.10.0.54"]

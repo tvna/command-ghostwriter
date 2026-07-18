@@ -1,0 +1,36 @@
+logger_host: "10.20.0.10"
+worker_nic: "eth1"
+local_networks:
+  - "10.20.0.0/16"
+  - "192.168.100.0/24"
+cluster_nodes:
+  - name: manager
+    type: manager
+    host: "10.20.0.10"
+    interface: "-"
+    lb_procs: 0
+    pin_cpus: "-"
+  - name: logger
+    type: logger
+    host: "10.20.0.10"
+    interface: "-"
+    lb_procs: 0
+    pin_cpus: "-"
+  - name: proxy-1
+    type: proxy
+    host: "10.20.0.10"
+    interface: "-"
+    lb_procs: 0
+    pin_cpus: "-"
+  - name: worker-1
+    type: worker
+    host: "10.20.0.21"
+    interface: "af_packet::eth1"
+    lb_procs: 4
+    pin_cpus: "4,5,6,7"
+  - name: worker-2
+    type: worker
+    host: "10.20.0.22"
+    interface: "af_packet::eth1"
+    lb_procs: 4
+    pin_cpus: "4,5,6,7"

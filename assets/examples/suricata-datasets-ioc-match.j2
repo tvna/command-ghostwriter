@@ -1,0 +1,121 @@
+# Suricata dataset による IoC 照合の運用手順
+
+CSV で管理する {{ csv_rows | length }} 件の IoC（ドメイン・SNI・ハッシュ）を、
+Suricata の `dataset` キーワードを使って高速照合するための手順書です。
+数千〜数万件規模の IoC でもルール本数を増やさずに照合できる運用を目指します。
+
+## 目的
+
+CSV 由来の IoC リストを Suricata の dataset ファイルへ変換し、`dns.query` /
+`tls.sni` / ファイルハッシュ照合と組み合わせた検知ルールを投入し、
+`suricatasc` による動的追加までを含めて、IoC の鮮度を保ったまま運用できる
+ようになることを目指します。
+
+## 用語解説
+
+- **dataset**: Suricata 4.1 以降が持つ、文字列・MD5・SHA256・IPv4/IPv6 の
+  集合を外部ファイルとして読み込み、ルール本体を増やさずに大量の値と
+  高速に照合できる仕組み。ハッシュテーブルで保持されるため、数万件規模でも
+  1 ルールあたりの照合コストがほぼ一定になる。
+- **ruleset 肥大との対比**: IoC 1 件ごとに `content:"..."` を持つ個別ルールを
+  書くと、IoC が増えるほどルール本数・シグネチャロード時間・メモリ使用量が
+  線形に増加し、ルールセットの保守が破綻する。dataset を使えば、ルールは
+  `sid:9100701` など数本のまま、IoC の追加・削除はファイルまたは
+  `suricatasc` の操作だけで完結する。
+- **type string**: dataset の値を base64 エンコードした文字列として保持する
+  型。ドメイン名や SNI 値を照合する際に使う。
+- **suricatasc**: Suricata のユニックスソケット経由で稼働中インスタンスへ
+  コマンドを送るユーティリティ。`dataset-add` でルールリロードなしに
+  値を追加できる。
+
+## シナリオ設定
+
+| ioc_value | ioc_type | source | added_at | expire_at |
+|-----------|----------|--------|----------|-----------|
+{% for r in csv_rows %}| {{ r["ioc_value"] }} | {{ r["ioc_type"] }} | {{ r["source"] }} | {{ r["added_at"] }} | {{ r["expire_at"] }} |
+{% endfor %}
+
+## 1. dataset ファイルを作成する
+
+`type string` の dataset は、値を base64 エンコードした文字列を 1 行 1 件で
+並べたファイルとして保持します。CSV の `ioc_type` ごとに、ドメイン/SNI 用
+（`bad-domains.lst`）とハッシュ用（`bad-hashes.lst`、こちらは type sha256
+なので生の16進文字列のまま）に分けて作成します。
+
+```bash
+mkdir -p /var/lib/suricata/data
+: > /var/lib/suricata/data/bad-domains.lst
+: > /var/lib/suricata/data/bad-hashes.lst
+
+{% for r in csv_rows %}{% if r["ioc_type"] == "domain" or r["ioc_type"] == "sni" %}echo -n "{{ r["ioc_value"] }}" | base64 -w0 >> /var/lib/suricata/data/bad-domains.lst
+echo >> /var/lib/suricata/data/bad-domains.lst
+{% elif r["ioc_type"] == "sha256" %}echo "{{ r["ioc_value"] }}" >> /var/lib/suricata/data/bad-hashes.lst
+{% endif %}{% endfor %}```
+
+`source` 列（{% for r in csv_rows %}{{ r["source"] }}{% if not loop.last %}, {% endif %}{% endfor %}）ごとに投入元を記録しておくと、
+後で該当フィードだけを差し替えたい場合に追跡しやすくなります。
+
+## 2. dataset 参照ルールを投入する
+
+`/etc/suricata/rules/ioc-datasets.rules` に、ドメイン/SNI 照合用と
+ハッシュ照合用のルールを追加します。`load` は Suricata 起動時に
+一度だけファイルを読み込み、以後はメモリ上のハッシュテーブルと照合します。
+
+```bash
+cat <<'EOF' >> /etc/suricata/rules/ioc-datasets.rules
+alert dns any any -> any any (msg:"IOC domain match via dataset (bad-domains)"; dns.query; dataset:isset,bad-domains,type string,load bad-domains.lst; sid:9100701; rev:1; classtype:bad-unknown;)
+alert tls any any -> any any (msg:"IOC SNI match via dataset (bad-domains)"; tls.sni; dataset:isset,bad-domains,type string,load bad-domains.lst; sid:9100702; rev:1; classtype:bad-unknown;)
+alert http any any -> any any (msg:"IOC file sha256 match via dataset (bad-hashes)"; filestore; file.sha256; dataset:isset,bad-hashes,type sha256,load bad-hashes.lst; sid:9100703; rev:1; classtype:bad-unknown;)
+EOF
+
+suricata -T -c /etc/suricata/suricata.yaml -v
+systemctl reload suricata
+```
+
+`-T` はルール文法チェックのみを行うテストモードです。文法エラーがある
+状態のまま `reload` すると稼働中のルールセットが壊れるため、必ず
+テストが通ってから reload してください。
+
+## 3. suricatasc で動的に IoC を追加する
+
+新しい IoC が届くたびにファイルを書き換えて reload するのではなく、
+`suricatasc` を使えば稼働中のまま dataset にエントリを追加できます。
+値は type string の場合 base64 エンコードして渡します。
+
+```bash
+echo -n "phishing-portal.example-bad.net" | base64 -w0
+# => cGhpc2hpbmctcG9ydGFsLmV4YW1wbGUtYmFkLm5ldA==
+
+suricatasc -c "dataset-add bad-domains string cGhpc2hpbmctcG9ydGFsLmV4YW1wbGUtYmFkLm5ldA=="
+suricatasc -c "dataset-lookup bad-domains string cGhpc2hpbmctcG9ydGFsLmV4YW1wbGUtYmFkLm5ldA=="
+```
+
+`dataset-lookup` の応答が `exists` であれば、reload なしで即時に
+照合対象へ反映されたことを確認できます。
+
+## 4. 模擬ドメインで検知を確認する
+
+CSV に登録した `{{ csv_rows[0]["ioc_value"] }}` を疑似的な C2 ドメインとして
+名前解決させ、DNS ログ（`eve.json` の `dns` イベント）にアラートが
+記録されることを確認します。
+
+```bash
+dig {{ csv_rows[0]["ioc_value"] }} @127.0.0.1
+
+tail -n 20 /var/log/suricata/eve.json | jq 'select(.alert.signature_id==9100701)'
+```
+
+## 動作確認
+
+- `suricata -T -c /etc/suricata/suricata.yaml -v` がエラーなく完了すること
+- `systemctl reload suricata` 後、`suricatasc -c "dataset-lookup bad-domains string <b64>"` が既存 IoC に対して `exists` を返すこと
+- 手順4の `dig` 実行後、`eve.json` に `signature_id":9100701` のアラートが記録されること
+- `suricatasc -c "dataset-add ..."` で追加した IoC も、reload なしで `dataset-lookup` から検知できること
+
+## 注意事項
+
+- 本手順のルール投入は `-T` によるテストモード検証を経てから `reload` すること。検証をスキップして本番へ反映すると、文法エラー時にルールセット全体が読み込めなくなり検知が全面停止するおそれがある。
+- `dataset-add` による動的追加はプロセスのメモリ上にのみ保持され、Suricata 再起動で失われる。恒久化するには `bad-domains.lst` / `bad-hashes.lst` 本体にも追記し、次回 reload で反映されることを確認する。
+- `expire_at` を過ぎた IoC は定期ジョブ（cron 等）で dataset ファイルから除外し、`suricatasc -c "dataset-clear bad-domains"` 相当の運用で鮮度を保つこと。失効した IoC を放置すると誤検知や無関係な通信への誤アラートが蓄積する。
+- `source` 列のフィード（内部SOC由来か、コミュニティ由来か）ごとに信頼性評価を行い、コミュニティフィード由来の IoC は誤検知率が高い場合があるため、アラートを自動遮断に直結させず、まず `alert` アクションで運用してから `drop` への昇格を検討すること。
+- 新しい dataset ルールを本番投入する際は、既存の検知ルールを無効化する前に、新ルールが期待通りに動作すること（手順4の dig 検証)を確認してから旧ルールを整理すること。

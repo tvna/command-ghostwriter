@@ -1,0 +1,116 @@
+# WireGuard複数インスタンスによる用途別分離
+
+サーバー {{ server_public_ip }} 上に、用途ごとに独立した {{ instances | length }} 本の
+WireGuardインターフェース（{% for i in instances %}{{ i.name }}{% if not loop.last %} / {% endif %}{% endfor %}）を構築し、
+ListenPort・AllowedIPs・firewalldゾーンをすべて分離します。
+
+## 目的
+
+単一のWireGuardトンネルに全Peerを収容するのではなく、用途（管理／業務／委託先）ごとに
+別インターフェースへ分離することで、アクセス制御・障害分離・鍵管理を容易にすることを
+目指します。
+
+## 用語解説
+
+- **wgインターフェース**: `wg0` `wg1` のようにOS上に見えるWireGuardの仮想NIC。1インターフェース＝1つの秘密鍵・1つのListenPortを持つ
+- **ListenPort**: UDPで待ち受けるポート番号。同一ホスト上で複数インスタンスを動かす場合、インスタンスごとに重複しないポートが必須
+- **AllowedIPs**: Peerごとに許可する送信元/宛先IP範囲。インターフェースを分ければ、用途間でAllowedIPsが混在するリスクを構造的に排除できる
+- **firewalldゾーン**: インターフェースを紐づける信頼度グループ。ゾーンを分けることで、あるゾーンのPeerが別ゾーンの資産へ到達しないよう強制できる
+- **単一トンネル収容との比較**: 全Peerを1インターフェースに収容すると、AllowedIPsの設定ミス1つで委託先が管理セグメントに到達し得る。インスタンス分離ならゾーン単位でrejectがデフォルトになり、鍵漏洩時の影響範囲もインスタンス単位に限定できる
+
+## シナリオ設定
+
+| インターフェース | 用途 | ListenPort | Address | firewalldゾーン | Peer数 |
+|---|---|---|---|---|---|
+{% for i in instances %}| {{ i.name }} | {{ i.purpose }} | {{ i.listen_port }} | {{ i.address }} | {{ i.firewall_zone }} | {{ i.allowed_peers | length }} |
+{% endfor %}
+
+## 1. 各インスタンスのサーバー鍵ペアを生成する
+
+インターフェースごとに秘密鍵を分離します。1つの鍵を使い回さないでください。
+
+```bash
+umask 077
+{% for i in instances %}wg genkey | tee /etc/wireguard/{{ i.name }}_private.key | wg pubkey > /etc/wireguard/{{ i.name }}_public.key
+{% endfor %}```
+
+## 2. ListenPortの重複がないことを事前確認する
+
+```bash
+{% for i in instances %}ss -lunp | grep ':{{ i.listen_port }} ' && echo "警告: {{ i.listen_port }} は既に使用中です" || echo "{{ i.listen_port }} は空きポートです"
+{% endfor %}```
+
+## 3. インターフェースごとのwg-quick設定を作成する
+
+{% for i in instances %}### 3-{{ loop.index }}. {{ i.name }}（{{ i.purpose }}）
+
+```ini
+# /etc/wireguard/{{ i.name }}.conf
+[Interface]
+PrivateKey = $(cat /etc/wireguard/{{ i.name }}_private.key)
+Address = {{ i.address }}
+ListenPort = {{ i.listen_port }}
+PostUp = firewall-cmd --zone={{ i.firewall_zone }} --add-interface={{ i.name }}
+PostDown = firewall-cmd --zone={{ i.firewall_zone }} --remove-interface={{ i.name }}
+
+{% for p in i.allowed_peers %}[Peer]
+# {{ p.name }}
+PublicKey = {{ p.public_key }}
+AllowedIPs = {{ p.allowed_ips }}
+
+{% endfor %}```
+
+{% endfor %}
+## 4. firewalldゾーンを用途ごとに用意する
+
+各ゾーンは既定でtarget=DROPとし、そのゾーンに属するPeerが他ゾーンへ到達できないようにします。
+
+```bash
+{% for i in instances %}firewall-cmd --permanent --new-zone={{ i.firewall_zone }} 2>/dev/null || true
+firewall-cmd --permanent --zone={{ i.firewall_zone }} --set-target=DROP
+firewall-cmd --permanent --zone={{ i.firewall_zone }} --add-source={{ i.address }}
+{% endfor %}firewall-cmd --reload
+```
+
+## 5. 既存の単一トンネル運用が残っている場合の移行手順
+
+既存の単一トンネル（例: 旧`wg0`に全Peerを収容していた構成）を廃止する前に、
+新しい用途別インターフェースが並行稼働する状態で疎通・分離の両方を検証します。
+
+```bash
+{% for i in instances %}wg-quick up {{ i.name }}
+{% endfor %}```
+
+上記ですべての新インターフェースが起動し、下記「動作確認」の各項目を満たすことを
+確認できてから、旧単一トンネルの設定ファイルを無効化してください。
+
+```bash
+# 検証が完了するまでは無効化しない
+# wg-quick down /etc/wireguard/wg0-legacy.conf
+```
+
+## 動作確認
+
+- 各インターフェースが起動していること
+  ```bash
+{% for i in instances %}  wg show {{ i.name }}
+{% endfor %}  ```
+- 各インターフェースのListenPortが設定どおりで、重複していないこと（`wg show <name> listen-port`）
+- 用途間で意図しない到達がないこと（例: {{ instances[0].name }} 側Peerから{{ instances[-1].name }}側Address宛のpingが失敗すること）
+  ```bash
+  ping -c 1 -W 2 {{ instances[-1].address }}
+  ```
+- 各ゾーンの許可済みPeerからは、自ゾーン内の想定宛先に到達できること
+- `firewall-cmd --get-active-zones` に全用途分のゾーンとインターフェースが表示されていること
+
+## 注意事項
+
+- ListenPortはインスタンス間で絶対に重複させない。重複するとwg-quick起動時にbind失敗し、
+  先に起動した側の通信が意図せず巻き込まれる。
+- インスタンス数が増えるほど、ルーティングテーブルとfwmark（ポリシールーティング）の管理が
+  複雑化する。増設時は`ip rule`・`ip route table`の一覧を都度棚卸しし、インスタンスとの対応表を
+  更新すること。
+- 秘密鍵ファイル（`*_private.key`）はumask 077で作成し、rootまたはwireguard実行ユーザー以外に
+  読み取り権限を与えない。
+- 旧単一トンネル構成を廃止する際は、必ず新インターフェース側で疎通と分離の両方を確認してから
+  廃止する。確認前に旧構成を止めると、切り分け不能な通信断につながる。

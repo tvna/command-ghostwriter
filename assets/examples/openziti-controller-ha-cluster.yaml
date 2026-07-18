@@ -1,0 +1,12 @@
+cluster_name: ztna-ctrl-cluster
+data_dir: /var/lib/ziti-controller/raft
+min_cluster_size: 3
+edge_api: https://ctrl1.ztna.internal:1280
+admin_user: admin
+cluster_members:
+  - name: ctrl1
+    advertised: ctrl1.ztna.internal:6262
+  - name: ctrl2
+    advertised: ctrl2.ztna.internal:6262
+  - name: ctrl3
+    advertised: ctrl3.ztna.internal:6262

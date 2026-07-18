@@ -1,0 +1,17 @@
+[jail]
+name = "nginx-reverse-proxy"
+port = "http,https"
+logpath = "/var/log/nginx/access.log"
+bantime = "1h"
+findtime = "10m"
+maxretry = 20
+
+[action]
+action_name = "cloudflare-edge-block"
+ban_endpoint = "https://api.cloudflare.com/client/v4/zones/abc123def456/firewall/access_rules/rules"
+api_key_env = "CF_API_TOKEN"
+unban_supported = true
+
+[test]
+attacker_ip = "203.0.113.77"
+xff_header = "CF-Connecting-IP"

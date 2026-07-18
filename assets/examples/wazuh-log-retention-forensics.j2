@@ -1,0 +1,127 @@
+# Wazuhログ長期保全と証跡完全性の確保
+
+Wazuhの全イベントアーカイブ（archives.log/archives.json）を有効化し、ローテーション・圧縮・オフサイト保全と日次ハッシュ検証によって、フォレンジック調査に耐える証跡完全性を確保します。
+
+## 目的
+
+Wazuhマネージャの `ossec.conf` でアーカイブログを有効化し、`{{ paths.archives_dir }}` 配下のログをローテーション・圧縮のうえ長期保全し、`sha256sum` による日次ハッシュ検証で改ざんの有無を検知できるようになることを目指します。
+
+## 用語解説
+
+- **アラートログ(alerts.log/alerts.json)**: ルールに合致し、かつ `rule.level` が閾値を超えたイベントのみを記録するログ。ノイズは少ないが全量ではない。
+- **アーカイブログ(archives.log/archives.json)**: ルール合致の有無やレベルに関わらず、エージェントから受信した全イベントを記録するログ。`logall`/`logall_json` で有効化する。
+- **アラートとアーカイブの違い**: アラートは「検知結果の要約」、アーカイブは「生の証跡そのもの」であり、フォレンジック調査ではアラートに現れなかった周辺イベント（誤検知の裏付け、攻撃の予兆・横展開の痕跡）を再構成するためにアーカイブ側の全量参照が不可欠になる。
+- **ログローテーション**: 一定サイズ・周期でログファイルを切り替え、旧ファイルを圧縮・退避すること。
+- **オフサイト保全**: 障害・侵害を受けた本番機とは別の場所（別ホスト・別ストレージ）へログを複製し、単一障害点を排除すること。
+- **WORM(Write Once Read Many)/追記専用ストレージ**: 一度書き込んだデータの変更・削除ができない、または追記のみ許可されるストレージ方式。証跡の改ざん防止に用いる。
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| アーカイブ有効化 | {{ archive.archive_enabled }} |
+| 保存期間(日) | {{ archive.retention_days }} |
+| オフサイト転送先 | {{ archive.offsite_target }} |
+| 完全性検証 | {{ archive.integrity_check }} |
+| ossec.conf パス | {{ paths.ossec_conf }} |
+| アーカイブディレクトリ | {{ paths.archives_dir }} |
+| ハッシュ台帳ディレクトリ | {{ paths.ledger_dir }} |
+
+## 1. アーカイブログを有効化する
+
+`{{ paths.ossec_conf }}` の `<global>` セクションに `logall`(プレーンテキスト)と `logall_json`(JSON形式)を追加します。JSON形式は後段のスクリプトによる機械処理・検索に向いています。
+
+```xml
+<ossec_config>
+  <global>
+    <logall>yes</logall>
+    <logall_json>yes</logall_json>
+    <rotation>
+      <enabled>yes</enabled>
+      <max_size>200M</max_size>
+      <max_files>30</max_files>
+      <schedule>daily</schedule>
+      <compress>yes</compress>
+    </rotation>
+  </global>
+</ossec_config>
+```
+
+設定を反映するため、マネージャを再起動します。
+
+```bash
+sudo /var/ossec/bin/wazuh-control restart
+sudo /var/ossec/bin/wazuh-control status
+```
+
+## 2. アーカイブの生成を確認する
+
+```bash
+ls -lh {{ paths.archives_dir }}/archives.log {{ paths.archives_dir }}/archives.json
+sudo tail -n 5 {{ paths.archives_dir }}/archives.json
+```
+
+`archives.json` に、アラート化されなかった通常イベントも含め全イベントが記録されていることを確認します（`alerts.json` と比較すると件数が明確に多いはずです）。
+
+```bash
+wc -l < {{ paths.archives_dir }}/archives.json
+wc -l < /var/ossec/logs/alerts/alerts.json
+```
+
+## 3. 日次ハッシュ台帳を作成し完全性を検証する
+
+ローテーションで圧縮された前日分のアーカイブ(`archives-YYYYMMDD.log.gz` 相当)を対象に、保全対象ログとは別の場所にハッシュ台帳を作成します。
+
+```bash
+sudo mkdir -p {{ paths.ledger_dir }}
+cd {{ paths.archives_dir }}
+sudo find . -name "archives-*.gz" -mtime -1 -print0 \
+  | xargs -0 sha256sum | sudo tee -a {{ paths.ledger_dir }}/$(date +%F).sha256
+```
+
+台帳と現物を突合し、改ざんの有無を確認します。
+
+```bash
+cd {{ paths.archives_dir }} && sudo sha256sum -c {{ paths.ledger_dir }}/$(date +%F).sha256
+```
+
+このハッシュ生成・突合を日次cronに登録し、継続的に実行します。
+
+```bash
+echo "0 1 * * * root cd {{ paths.archives_dir }} && find . -name \"archives-*.gz\" -mtime -1 -print0 | xargs -0 sha256sum >> {{ paths.ledger_dir }}/\$(date +\%F).sha256" \
+  | sudo tee /etc/cron.d/wazuh-archive-hash
+```
+
+## 4. オフサイトへ保全転送する
+
+ハッシュ検証済みの圧縮ログのみをオフサイト先へ転送します（保存期間 {{ archive.retention_days }} 日を超えたローカル分は転送後に削除します）。
+
+```bash
+sudo rsync -avz --remove-source-files \
+  --include="archives-*.gz" --include="*.sha256" --exclude="*" \
+  {{ paths.archives_dir }}/ {{ paths.ledger_dir }}/ {{ archive.offsite_target }}
+```
+
+```bash
+sudo find {{ paths.archives_dir }} -name "archives-*.gz" -mtime +{{ archive.retention_days }} -delete
+```
+
+## 動作確認
+
+1. `{{ paths.archives_dir }}/archives.json` が生成され、`alerts.json` より行数が多いこと（全イベント記録の確認）。
+2. Step 3 のハッシュ突合コマンドが対象ファイルすべてについて `OK` を報告すること。
+3. 期間を指定した過去イベント検索が想定件数を返すこと。
+
+```bash
+sudo grep '"timestamp":"{{ search.start_time }}' {{ paths.archives_dir }}/archives.json | head -n 1
+sudo awk -v s="{{ search.start_time }}" -v e="{{ search.end_time }}" \
+  '$0 >= s && $0 <= e' {{ paths.archives_dir }}/archives.json | wc -l
+```
+
+## 注意事項
+
+- `logall`/`logall_json` を有効化すると全イベントを記録するためディスク使用量が急増する。事前に `{{ paths.archives_dir }}` の空き容量と保存期間({{ archive.retention_days }}日)から必要容量を試算し、監視アラートを設定してから有効化する。
+- アーカイブログには機密情報・PIIが含まれ得る（認証ログ、アプリケーションログの内容など）。アクセス権限を最小化し(`chmod`/`chown` でrootまたは監査担当者のみに限定)、オフサイト転送先(`{{ archive.offsite_target }}`)でも同等のアクセス制御を適用する。
+- ハッシュ台帳(`{{ paths.ledger_dir }}`)は保全対象ログと同一ストレージ・同一権限に置かない。可能であればWORM/追記専用ストレージ(オブジェクトロック付きS3、`chattr +a` 等)を転送先に用い、法定・社内規程上の保持要件(retention_days = {{ archive.retention_days }})と実際のストレージ設定が一致しているか定期的に確認する。
+- ローテーション・オフサイト転送・削除は必ずこの順(生成→ハッシュ化→転送確認→ローカル削除)で行い、ハッシュ突合が `OK` になったことを確認するまでローカルの元ファイルを削除しない。
+- マネージャ再起動(Step 1)は既存の監視が一時的に途切れる可能性があるため、業務影響の小さい時間帯に実施し、再起動後は `wazuh-control status` で全プロセスが起動していることを確認する。

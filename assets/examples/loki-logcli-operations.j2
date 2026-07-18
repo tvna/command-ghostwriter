@@ -1,0 +1,117 @@
+# logcliによるLokiログ運用・調査
+
+Grafana Loki に対して `logcli` を使い、LogQLクエリでの調査・ラベル調査・バッチエクスポートを行う手順です。
+
+## 目的
+
+`logcli` を使って Loki 上のログを LogQL で調査し、`labels`/`series` によるラベル探索、`--output=jsonl`/`raw` でのバッチエクスポートまでを一貫して行えるようになることを目指します。
+
+## 用語解説
+
+- **logcli**: Loki が提供するCLIクライアント。LogQLクエリの実行、ラベル調査、結果のエクスポートをコマンドラインから行う
+- **LogQL**: Loki のログクエリ言語。`{job="x"}` のようなラベルセレクタと `|=`（部分一致）、`|~`（正規表現一致）、`| json` / `| logfmt`（構造化パース）などのパイプラインで構成する
+- **バッチエクスポート**: `logcli query` の結果をファイルへリダイレクトし、後から`grep`/`jq`等で二次加工できる形（jsonl/raw）で保存すること
+- **org-id**: マルチテナント構成のLokiで、テナントを識別するヘッダ（`X-Scope-OrgID`）に対応する値。省略すると意図しないテナントに問い合わせるか拒否される
+- **--addr / --username / --org-id**: logcliの接続先・認証・テナントを指定する主要フラグ
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| Loki接続先(loki_addr) | {{ loki_addr }} |
+| org-id | {{ org_id }} |
+| エクスポート形式(export_format) | {{ export_format }} |
+| デフォルト時間窓(time_window) | {{ time_window }} |
+
+調査に使うLogQLクエリ例:
+
+{% for q in query_examples %}
+{{ loop.index }}. `{{ q | safe }}`
+{% endfor %}
+
+## 手順
+
+### 1. 認証情報を環境変数に設定する（コマンド履歴に残さない）
+
+パスワードを `--password` フラグへ直接書くとシェル履歴・`ps`出力に残るため、必ず環境変数経由で渡します。
+
+```bash
+read -s -p "Loki password: " LOKI_PASSWORD
+export LOKI_PASSWORD
+export LOKI_ADDR="{{ loki_addr }}"
+export LOKI_USERNAME="ops-readonly"
+export LOKI_ORG_ID="{{ org_id }}"
+unset HISTFILE  # このシェルでの以降のコマンドを履歴に残さない
+```
+
+### 2. ラベルとラベル値を調査する
+
+```bash
+logcli labels --addr="{{ loki_addr }}" --org-id="{{ org_id }}"
+logcli labels job --addr="{{ loki_addr }}" --org-id="{{ org_id }}"
+```
+
+### 3. series でアクティブなストリームを確認する
+
+```bash
+logcli series '{job=~".+"}' \
+  --addr="{{ loki_addr }}" \
+  --org-id="{{ org_id }}" \
+  --since={{ time_window }}
+```
+
+### 4. LogQLクエリで調査する
+
+```bash
+logcli query '{{ query_examples[0] | safe }}' \
+  --addr="{{ loki_addr }}" \
+  --org-id="{{ org_id }}" \
+  --from="$(date -u -d '-{{ time_window }}' +%Y-%m-%dT%H:%M:%SZ)" \
+  --to="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --limit=500
+```
+
+より条件を絞った例:
+
+```bash
+logcli query '{{ query_examples[1] | safe }}' \
+  --addr="{{ loki_addr }}" \
+  --org-id="{{ org_id }}" \
+  --since={{ time_window }} \
+  --limit=200
+```
+
+### 5. 結果を{{ export_format }}形式でバッチエクスポートする
+
+```bash
+logcli query '{{ query_examples[2] | safe }}' \
+  --addr="{{ loki_addr }}" \
+  --org-id="{{ org_id }}" \
+  --since={{ time_window }} \
+  --limit=5000 \
+  --output={{ export_format }} \
+  --batch=200 \
+  > /tmp/loki-export-$(date +%Y%m%d-%H%M%S).{{ export_format }}
+```
+
+大量エクスポート時は `--batch` でページングサイズを制御し、Loki側のクエリレート制限（429応答）を避けるため一度に取得する `--limit` を段階的に引き上げます。
+
+## 動作確認
+
+1. `logcli labels --addr="{{ loki_addr }}" --org-id="{{ org_id }}"` がラベル一覧を返し、認証エラー(401)・テナントエラー(403)が出ないこと
+2. `logcli query` の実行結果に対象ログ行が含まれ、`--from`/`--to` または `--since` の範囲が意図通りであること
+3. エクスポートファイル `/tmp/loki-export-*.{{ export_format }}` が生成され、`wc -l` で行数が0でないこと
+4. エクスポートファイルの先頭数行を `head` で確認し、`{{ export_format }}` 形式として想定通りにパースできること
+
+```bash
+ls -la /tmp/loki-export-*.{{ export_format }}
+head -n 5 /tmp/loki-export-*.{{ export_format }}
+```
+
+## 注意事項
+
+- `--password` フラグへの直接指定は避け、`LOKI_PASSWORD` 環境変数（手順1）を使う。既にシェル履歴に平文パスワードが残っている場合は該当行を削除し、パスワードそのものをローテーションする。
+- 大量エクスポート（`--limit`を大きくする、長期間の`--since`）はLoki側のクエリ負荷とレート制限(429)の原因になるため、`--batch`でページングし、必要な時間窓（time_window）に絞ってから実行する。
+- `--org-id`（`{{ org_id }}`）の指定漏れは、マルチテナント環境で意図しないテナントへの問い合わせ・アクセス拒否につながるため、`logcli`を呼ぶ全コマンドで明示指定する。
+- エクスポートしたログファイルにはIPアドレス・ユーザー名・リクエストパラメータ等のPIIが含まれ得るため、保管場所へのアクセス制御を行い、調査完了後は保持ポリシーに従って削除する。
+- 認証方式や接続先を切り替える際は、既存の運用スクリプト・ダッシュボードから参照している`--addr`/`--org-id`を先に新設定で疎通確認（本手順の2.のlabels確認）してから、旧設定への参照を外すこと。

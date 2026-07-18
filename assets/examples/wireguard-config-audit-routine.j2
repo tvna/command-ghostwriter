@@ -1,0 +1,117 @@
+# WireGuard設定・Peer棚卸しの定期監査
+
+登録済みPeerの利用状況（最終ハンドシェイク）とAllowedIPsの妥当性を定期的に棚卸しし、退職者・廃止端末のPeerや過剰に広いAllowedIPsを是正するための手順です。
+
+## 目的
+
+`wg show all dump` の latest-handshake から長期未接続のPeerを抽出し、confファイルのAllowedIPsが過剰に広くないか、退職者・廃止端末のPeerが残っていないかを定期棚卸しし、台帳（CSV）と実機の状態を一致させることを目指します。
+
+## 用語解説
+
+- **latest-handshake**: Peerと最後に鍵交換（ハンドシェイク）が成立した時刻。長期間更新がなければ、そのPeerは実質的に使われていないと判断できる
+- **AllowedIPs**: そのPeer経由で許可する通信先レンジ。トンネル内ルーティングとファイアウォール的な許可範囲の両方を兼ねるため、必要以上に広いと過剰許可になる
+- **wg set ... remove**: 実行中のWireGuardインターフェースからPeerをランタイムで即時削除するコマンド。conf ファイルには自動反映されない
+- **disposition（処置区分）**: 棚卸しの結果として台帳に記録する keep（維持）/ tighten（AllowedIPsの絞り込み）/ disable（無効化して観察）/ remove（削除）の区分
+- **二段階廃止**: Peerをいきなり削除せず、まず無効化して一定期間の再接続試行を観察し、問題がなければ削除する運用
+
+## シナリオ設定
+
+今回の棚卸し対象は {{ csv_rows | length }} 件のPeerです。台帳には `peer_name` / `pubkey` / `last_handshake_days`（前回確認からの未接続日数）/ `allowed_ips` / `owner` / `disposition` を記録します。
+
+| peer_name | last_handshake_days | allowed_ips | owner | disposition |
+| --- | --- | --- | --- | --- |
+{% for r in csv_rows %}| {{ r["peer_name"] }} | {{ r["last_handshake_days"] }} | {{ r["allowed_ips"] }} | {{ r["owner"] }} | {{ r["disposition"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 現状のPeer一覧と実際のハンドシェイク状況を取得する
+
+台帳の記載内容と、実機の `wg show` の出力を突き合わせます。
+
+```bash
+wg show wg0 dump
+wg show wg0 latest-handshakes
+wg show wg0 allowed-ips
+```
+
+### 2. confファイルを事前バックアップする
+
+是正・削除作業に入る前に、必ず現在の設定を退避します。
+
+```bash
+mkdir -p /etc/wireguard/backups
+cp /etc/wireguard/wg0.conf /etc/wireguard/backups/wg0.conf.$(date +%Y%m%d%H%M).bak
+wg showconf wg0 > /etc/wireguard/backups/wg0.runtime.$(date +%Y%m%d%H%M).conf
+```
+
+### 3. 台帳の棚卸し対象を確認する
+
+```bash
+echo "棚卸し対象Peer数: {{ csv_rows | length }}"
+{% for r in csv_rows %}echo "- {{ r["peer_name"] }} ({{ r["pubkey"] }}): last_handshake_days={{ r["last_handshake_days"] }}, allowed_ips={{ r["allowed_ips"] }}, owner={{ r["owner"] }}, disposition={{ r["disposition"] }}"
+{% endfor %}```
+
+### 4. 長期未接続Peerと所有者不明Peerを検出する
+
+```bash
+{% for r in csv_rows %}{% if r["last_handshake_days"] != "-" and r["last_handshake_days"] | int > 90 %}echo "要確認: {{ r["peer_name"] }} は{{ r["last_handshake_days"] }}日間未接続 (owner={{ r["owner"] }})"
+{% endif %}{% if r["owner"] == "不明" %}echo "要確認: {{ r["peer_name"] }} の所有者が台帳上で不明。関係部署へ照会するまで disposition は remove ではなく disable 止まりとする"
+{% endif %}{% endfor %}```
+
+### 5. AllowedIPsが過剰に広いPeerを検出し、絞り込み(tighten)を行う
+
+`disposition` が `tighten` のPeerは、実際に必要な最小のレンジへAllowedIPsを是正します。ランタイムへの反映後、confファイルにも保存します。
+
+```bash
+{% for r in csv_rows %}{% if r["disposition"] == "tighten" %}echo "絞り込み対象: {{ r["peer_name"] }} 現行 allowed_ips={{ r["allowed_ips"] }}"
+wg set wg0 peer {{ r["pubkey"] }} allowed-ips {{ r["allowed_ips"] }}
+{% endif %}{% endfor %}wg showconf wg0 > /etc/wireguard/wg0.conf
+```
+
+絞り込み直後は、必ず対象拠点からの疎通確認（`ping` や実業務通信）を実施し、新しい狭いAllowedIPsでも必要な通信が継続することを確認してから、台帳の disposition を `keep` に更新してください。
+
+### 6. disposition=disable のPeerを無効化し、観察する
+
+いきなり削除せず、まずランタイムから外して再接続の試行有無を一定期間（目安1〜2週間）観察します。confファイル上の `[Peer]` 定義自体はこの時点では残します。
+
+```bash
+{% for r in csv_rows %}{% if r["disposition"] == "disable" %}echo "無効化して観察開始: {{ r["peer_name"] }} ({{ r["owner"] }})"
+wg set wg0 peer {{ r["pubkey"] }} allowed-ips 127.0.0.1/32
+{% endif %}{% endfor %}wg showconf wg0 > /etc/wireguard/wg0.conf
+```
+
+観察期間中に当該端末からの再接続試行（クライアント側のエラー報告や `wg show wg0 latest-handshakes` での更新）がないことを確認できて初めて、次のステップの削除対象とします。
+
+### 7. disposition=remove のPeerを二段階目として削除する
+
+無効化観察を経て問題がないと確認できたPeer（および今回すでに `remove` 判定のPeer）を、ランタイムとconfの両方から削除します。
+
+```bash
+{% for r in csv_rows %}{% if r["disposition"] == "remove" %}echo "削除対象: {{ r["peer_name"] }} ({{ r["pubkey"] }})"
+wg set wg0 peer {{ r["pubkey"] }} remove
+{% endif %}{% endfor %}wg showconf wg0 > /etc/wireguard/wg0.conf
+```
+
+confファイル上に残っている該当Peerの `[Peer]` ブロック（PublicKey / AllowedIPs 等）も手動で削除し、`wg-quick strip wg0` で構文エラーがないことを確認してください。
+
+### 8. 台帳を更新する
+
+```bash
+echo "peer_name,pubkey,last_handshake_days,allowed_ips,owner,disposition" > /tmp/wireguard-audit-updated.csv
+{% for r in csv_rows %}echo "{{ r["peer_name"] }},{{ r["pubkey"] }},{{ r["last_handshake_days"] }},{{ r["allowed_ips"] }},{{ r["owner"] }},{{ r["disposition"] }}" >> /tmp/wireguard-audit-updated.csv
+{% endfor %}```
+
+## 動作確認
+
+- 棚卸し後の `wg show wg0` のPeer数（`wg show wg0 peers | wc -l`）が、削除確定後の台帳の行数と一致すること
+- `tighten` 対象Peerについて、絞り込み後も必要な通信が継続することを疎通確認済みであること
+- `disable` 対象Peerについて、観察期間中に再接続試行がないことを確認してから `remove` に進んでいること
+- `remove` 対象Peerが、ランタイム（`wg show`）とconfファイルの両方から消えていること
+
+## 注意事項
+
+- 所有者不明Peerは、関係部署への照会が完了するまで `remove` 判定にせず、必ず `disable` で観察を挟むこと。誤って現用端末のPeerを削除すると即座に接続断となるため、断定できない場合は保留を優先する。
+- AllowedIPsの絞り込み(tighten)は、新しい狭いレンジで実際に必要な通信が成立することを確認する前に、旧設定（バックアップ済みのconf）を破棄しないこと。狭めすぎて疎通不可になった場合は、バックアップから即座に復元できる状態を保つ。
+- 削除(remove)は必ず「無効化して観察→問題なければ削除」の二段階で行い、confのバックアップを取得してから着手すること。ランタイムの `wg set` だけでは変更がconfファイルに永続化されないため、`wg showconf` での保存を都度行う。
+- 棚卸し記録（更新後の台帳CSV、実行前後のconfバックアップ）は、次回棚卸しまで参照できるよう保管し、いつ・誰が・どのPeerをどう処置したかを追跡できるようにする。

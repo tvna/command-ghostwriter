@@ -1,0 +1,112 @@
+# WireGuard 経由の内部DNS強制解決 — {{ global.interface_name }}
+
+クライアント **{{ global.interface_name }}** がトンネル {{ global.endpoint }} に接続した際、社内名前空間（{{ global.search_domains | join(', ') }}）を内部リゾルバ {{ global.internal_dns }} へ強制解決させ、外部への DNS リークを防ぐ設定を行います。
+
+## 目的
+
+このシナリオでは、WireGuard クライアント設定の `[Interface] DNS` と `resolvconf` / `systemd-resolved` 連携を用いて、トンネル接続時のみ社内ドメインの名前解決を内部 DNS に振り向ける（あるいは全 DNS クエリを強制する）手順を、CLI を含む形で理解し安全に適用できるようになることを目指します。
+
+## 用語解説
+
+- **split DNS（分割DNS）**: `~ドメイン` 形式のルーティングドメインを使い、社内ドメイン宛のクエリのみ内部 DNS に転送し、それ以外は既存の DNS（ISP等）で解決する方式。外部サイトの名前解決性能を落とさずに社内名だけを解決できる
+- **フルDNS強制**: ルーティングドメインを `~.`（全ドメイン）に設定し、トンネル確立中はすべての DNS クエリを内部リゾルバへ強制する方式。社内ポリシーで外部 DNS への漏洩を一切許さない場合に使う
+- **resolvconf 連携**: `wg-quick` が接続/切断時に `resolvconf -a`/`-d` を呼び出し、システムの DNS 設定にトンネル用の値を反映する仕組み
+- **systemd-resolved**: resolvconf の代替として `resolvectl`（旧 `systemd-resolve`）経由でインターフェース単位の DNS とルーティングドメインを管理する仕組み
+- **DNS リーク**: VPN 接続中にもかかわらず、意図せず ISP 等の外部 DNS へ問い合わせが漏れてしまう状態
+- **PostUp/PostDown での53番強制リダイレクト**: OS の DNS スタックが split DNS に対応できない場合に、`iptables` で全ての DNS(53/udp,tcp)宛パケットを内部リゾルバへ強制転送する保険的手段
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| インターフェース名 | {{ global.interface_name }} |
+| クライアントアドレス | {{ global.client_address }} |
+| エンドポイント | {{ global.endpoint }} |
+| 内部DNS (internal_dns) | {{ global.internal_dns }} |
+| 検索ドメイン (search_domains) | {{ global.search_domains | join(', ') }} |
+| 全DNS強制 (force_all_dns) | {{ global.force_all_dns }} |
+| 社内許可サフィックス | {{ global.split_dns.allowed_suffix }} |
+| 外部疎通確認先 | {{ global.split_dns.external_probe_host }} |
+| 社内疎通確認先 | {{ global.split_dns.internal_probe_host }} |
+
+## 1. クライアント設定ファイルを用意する
+
+`/etc/wireguard/{{ global.interface_name }}.conf` に以下を記載します。DNS 行にはカンマ区切りで内部リゾルバと検索ドメインを併記します。
+
+```ini
+[Interface]
+Address = {{ global.client_address }}
+DNS = {{ global.internal_dns }}, {{ global.search_domains | join(', ') }}
+PrivateKey = <クライアント秘密鍵>
+
+[Peer]
+PublicKey = <サーバー公開鍵>
+Endpoint = {{ global.endpoint }}
+{% if global.force_all_dns %}
+AllowedIPs = 0.0.0.0/0, ::/0
+{% else %}
+AllowedIPs = 10.20.0.0/16, {{ global.internal_dns }}/32
+{% endif %}
+PersistentKeepalive = 25
+```
+
+{% if global.force_all_dns %}
+`force_all_dns` が有効なため `AllowedIPs` を `0.0.0.0/0` とし、全トラフィック（DNSを含む）をトンネル経由にしています。
+{% else %}
+`force_all_dns` が無効なため、社内サブネットと内部DNSのみをトンネル経由にする split DNS 構成です。既存の外部向けDNS経路は温存されます。
+{% endif %}
+
+## 2. resolvconf / systemd-resolved 連携を確認する
+
+`wg-quick` が呼び出す DNS 反映バックエンドを事前に確認します。
+
+```bash
+resolvectl status {{ global.interface_name }}
+cat /etc/resolvconf.conf 2>/dev/null || echo "resolvconf 未導入 — systemd-resolved 直接連携を利用"
+```
+
+systemd-resolved 環境では、`wg-quick` が自動的に以下相当の設定をインターフェース単位で適用します。
+
+```bash
+resolvectl dns {{ global.interface_name }} {{ global.internal_dns }}
+{% if global.force_all_dns %}
+resolvectl domain {{ global.interface_name }} "~."
+{% else %}
+resolvectl domain {{ global.interface_name }} {% for d in global.search_domains %}"~{{ d }}" {% endfor %}
+{% endif %}
+```
+
+## 3. resolvconf が無い環境向けの53番強制リダイレクト（保険策）
+
+resolvconf 系の仕組みが使えないミニマル環境では、`PostUp`/`PostDown` で 53番ポート宛のパケットを内部リゾルバへ強制転送します。既存の名前解決経路を無効化する前に、必ず 4章の並行確認を先に実施してください。
+
+```ini
+PostUp = iptables -t nat -A OUTPUT -p udp --dport 53 -j DNAT --to-destination {{ global.internal_dns }}
+PostUp = iptables -t nat -A OUTPUT -p tcp --dport 53 -j DNAT --to-destination {{ global.internal_dns }}
+PostDown = iptables -t nat -D OUTPUT -p udp --dport 53 -j DNAT --to-destination {{ global.internal_dns }}
+PostDown = iptables -t nat -D OUTPUT -p tcp --dport 53 -j DNAT --to-destination {{ global.internal_dns }}
+```
+
+## 4. トンネルを起動し、旧経路と並行して新経路を確認する
+
+既存の DNS 設定（`/etc/resolv.conf` の元の内容）を無効化・上書きする前に、トンネルを起動した状態のまま新しい名前解決経路が機能することを確認します。
+
+```bash
+wg-quick up {{ global.interface_name }}
+resolvectl status {{ global.interface_name }}
+```
+
+## 動作確認
+
+- `resolvectl status {{ global.interface_name }}` の DNS Servers に `{{ global.internal_dns }}` が、Domains に社内ドメイン（{{ global.search_domains | join(', ') }}）が割り当てられていること
+- `dig {{ global.split_dns.internal_probe_host }}` が内部リゾルバ経由で解決され、社内アドレス帯を返すこと
+- `dig {{ global.split_dns.external_probe_host }}` が想定通りの経路（split DNS なら既存の外部DNS、force_all_dns なら内部リゾルバ経由の転送）で解決されること
+- DNS リークテスト: `resolvectl query {{ global.split_dns.external_probe_host }}` の応答元サーバーが想定した DNS サーバーと一致し、意図しない外部 DNS への問い合わせが発生していないこと
+- 上記すべてが確認できた後にのみ、旧来の DNS 設定（トンネル無効時の resolv.conf）を恒久的に置き換えること
+
+## 注意事項
+
+- **旧経路を先に無効化しないこと**: 内部DNSへの強制切り替えが機能することを 4章・動作確認の手順で確認する前に、既存の `/etc/resolv.conf` や DNS 設定を削除・上書きしてはならない。確認前に無効化すると、切り分けの手段自体を失い、名前解決が全面的に不能になるおそれがある。
+- resolvconf が導入されていない環境（コンテナやミニマルディストリビューションなど）では、`wg-quick` の DNS 行が反映されず、内部DNSへの切り替えが無言で失敗することがある。3章の PostUp/PostDown リダイレクトか、`resolvectl` を用いた明示的な設定で代替すること。
+- 複数の VPN トンネルを同時に張る環境では、各トンネルが `resolvectl domain` で異なるルーティングドメインの優先度を主張し、DNS の割り当てが競合することがある。`resolvectl status` で各インターフェースの Domains/DNS Servers を確認し、意図した優先順位になっているか都度検証すること。
+- `force_all_dns` を有効にする場合、内部DNSが単一障害点になる。内部リゾルバがダウンするとトンネル経由の全名前解決が停止するため、冗長化またはフォールバック経路を検討すること。

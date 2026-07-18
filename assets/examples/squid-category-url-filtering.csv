@@ -1,0 +1,9 @@
+list_name,domain,category,action,note
+sns_block,.facebook.com,SNS,deny,先頭ドットでサブドメインを含めて一致させる
+sns_block,.twitter.com,SNS,deny,-
+sns_block,.instagram.com,SNS,deny,-
+gambling_block,.bet-example.com,ギャンブル,deny,-
+gambling_block,.casino-example.net,ギャンブル,deny,-
+streaming_block,.video-stream-example.com,動画配信,deny,業務時間帯のみtime ACLと組み合わせて制限
+streaming_block,.watch-example.net,動画配信,deny,業務時間帯のみtime ACLと組み合わせて制限
+partner_allow,.partner-example.co.jp,取引先連携,allow,ブロック対象カテゴリでも許可する例外ドメイン

@@ -1,0 +1,19 @@
+drill_date: "2026-07-20"
+participants:
+  - "山田 (ネットワーク運用) - 切替実行・MASTER機操作"
+  - "佐藤 (SRE) - セッション維持監視・計測"
+  - "鈴木 (運用責任者) - 中断判断"
+measured_failover_seconds_target: 3
+test_sessions:
+  - type: ssh
+    target: 203.0.113.10
+  - type: ping
+    target: 203.0.113.1
+rollback_deadline: "2026-07-20T16:00:00+09:00"
+master_host: opnsense-fw01
+backup_host: opnsense-fw02
+vip_interface: igb0
+vip_address: 203.0.113.1
+pfsync_interface: igb2
+config_version_master: "26.1.5_1"
+config_version_backup: "26.1.5_1"

@@ -1,0 +1,10 @@
+journal_path: "/var/log/journal"
+max_age: "12h"
+unit_labels: true
+relabel_rules:
+  - source: "__journal__systemd_unit"
+    target: "unit"
+  - source: "__journal__hostname"
+    target: "host"
+  - source: "__journal_priority_keyword"
+    target: "level"

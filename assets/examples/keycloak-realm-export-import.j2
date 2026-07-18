@@ -1,0 +1,109 @@
+# Keycloak realmのエクスポートとIaC管理 — {{ realm.realm_name }}
+
+realm **{{ realm.realm_name }}** の設定をエクスポートし、機密情報を除いたJSONをバージョン管理下に置いた上で、別環境（{{ realm.target_env }}）へimportして反映するまでの手順です。
+
+## 目的
+
+realm設定（クライアント・ロール・IdP連携・認証フロー等）を宣言的なJSONとしてエクスポートし、Gitで版管理しながら環境間（dev/staging/prod）で再現可能に移送できるようになることを目指します。あわせて、エクスポートに含まれ得る機密情報（クライアントシークレット等）を版管理対象から除外する運用を身につけます。
+
+## 用語解説
+
+- **宣言的realm管理（realm JSON as code）**: realmの設定をUI操作ではなくJSONファイルとして記述・版管理し、`kc.sh import` で反映する運用スタイル。差分がGit履歴として残るため、変更理由の追跡とレビューが可能になる。
+- **full export / partial export**: `kc.sh export` はrealm全体（クライアント・ロール・グループ・場合によってはユーザーを含む）を出力するfull exportのみをサポートする。ユーザーを含めずクライアント・ロール等の構成だけを対象にしたい場合は、Admin REST APIの `partial-export` エンドポイント（`exportClients` / `exportGroupsAndRoles` をtrue/falseで指定）を使う。
+- **環境差分（hostname / IdP secret）**: エクスポートしたJSONにはエクスポート元環境の `redirectUris` や `frontendUrl` 等のホスト名、外部IdP（SAML/OIDCフェデレーション）のクライアントシークレットがそのまま残る。別環境へimportする前に、これらを対象環境の値へ置換する必要がある。
+- **クライアントシークレット (client secret)**: confidentialクライアントがKeycloakに対して自身を認証するための秘密値。exportに含めると平文でJSONに残るため、`include_secrets = false` の運用では別途シークレット管理（Vault等）に切り離す。
+- **既存上書き (`--override`)**: `kc.sh import` で対象realmが既に存在する場合の挙動を制御するオプション。`true` を指定すると同名realmの既存設定を丸ごと上書きするため、import前に差分レビューが必須となる。
+
+## シナリオ設定
+
+| キー | 値 |
+| --- | --- |
+| realm名 | {{ realm.realm_name }} |
+| エクスポート先ディレクトリ | {{ realm.export_dir }} |
+| シークレットを含めるか | {{ realm.include_secrets }} |
+| 反映先環境 | {{ realm.target_env }} |
+| 版管理対象とするか | {{ realm.vcs_managed }} |
+
+## 1. realmをエクスポートする
+
+Keycloakサーバを一時的に `export` モードで起動し、realm設定をJSONとしてファイルへ書き出します（サーバは稼働を停止し、エクスポート専用モードで起動する点に注意）。
+
+```bash
+{{ realm.export_dir }}/../bin/kc.sh export --dir {{ realm.export_dir }} --realm {{ realm.realm_name }} --users skip
+```
+
+`--users skip` はユーザーデータ（PIIを含み得る）をエクスポート対象から除外します。ユーザーも含めて棚卸ししたい場合のみ `--users realm_file` や `--users different_files --users-per-file 1000` を検討してください。
+
+出力ファイルは次のパスに生成されます。
+
+```bash
+ls {{ realm.export_dir }}/{{ realm.realm_name }}-realm.json
+```
+
+## 2. クライアントのみ・ロールのみの部分エクスポートを行う場合
+
+サーバを止めずに管理REST API経由で部分エクスポートすることもできます。
+
+```bash
+curl -s -X POST \
+  "https://{{ realm.target_env }}.example.internal/admin/realms/{{ realm.realm_name }}/partial-export?exportClients=true&exportGroupsAndRoles=true" \
+  -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+  -o {{ realm.export_dir }}/{{ realm.realm_name }}-partial.json
+```
+
+`${ADMIN_TOKEN}` はシェル環境変数として事前に取得しておいたAdmin CLIトークンを参照するものとし、コマンドやログへ値そのものを出力しないでください。
+
+## 3. 機密情報を除去してから版管理に載せる
+
+{% if realm.include_secrets %}
+このシナリオでは `include_secrets = true` のため、エクスポートJSONにクライアントシークレットが平文で含まれています。**版管理へコミットする前に必ず除去してください。**
+{% else %}
+`include_secrets = false` の運用のため、版管理へコミットする前に `jq` でクライアントシークレットのキーを除去・マスクします。
+{% endif %}
+
+```bash
+jq '(.clients[]? | select(.secret != null) | .secret) = "REDACTED"' \
+  {{ realm.export_dir }}/{{ realm.realm_name }}-realm.json > {{ realm.export_dir }}/{{ realm.realm_name }}-realm.sanitized.json
+```
+
+除去した実シークレットは、このリポジトリではなく別のシークレット管理システム（Vault等）に保管し、import後の環境ごとに管理者コンソールまたは `kcadm.sh update` で個別に設定してください。
+
+```bash
+kcadm.sh update clients/<client-id> -r {{ realm.realm_name }} -s 'secret=<vaultから取得した値>'
+```
+
+## 4. Gitへコミットする
+
+```bash
+git add {{ realm.export_dir }}/{{ realm.realm_name }}-realm.sanitized.json
+git commit -m "chore: {{ realm.realm_name }} realmエクスポートを{{ realm.target_env }}向けに更新"
+```
+
+## 5. 別環境（{{ realm.target_env }}）へimportする
+
+import前に、対象環境のホスト名・IdPシークレットへ置換したファイルを用意します（`sed` や環境別overlay等、対象環境専用の値注入手順を別途整備してください）。
+
+```bash
+{{ realm.export_dir }}/../bin/kc.sh import --dir {{ realm.export_dir }} --override true
+```
+
+`--override true` は対象environmentに同名realmが既に存在する場合、既存設定を丸ごと上書きします。**必ず事前に差分レビューを終えてから実行してください。**
+
+## 動作確認
+
+1. エクスポートJSON（`{{ realm.realm_name }}-realm.sanitized.json`）が生成され、クライアントシークレットが `REDACTED` に置換されていることを確認する。
+2. 別環境（{{ realm.target_env }}）でimportを実行し、Keycloak管理コンソールにログインしてrealm設定（クライアント一覧・ロール・認証フロー）が再現されていることを確認する。
+3. import前後で `diff` により旧realm設定と新しい設定の差分をレビューし、意図しない変更が含まれていないことを確認する。
+
+```bash
+diff <(jq -S . {{ realm.export_dir }}/{{ realm.realm_name }}-realm.sanitized.json) \
+     <(jq -S . {{ realm.export_dir }}/{{ realm.realm_name }}-realm.previous.json)
+```
+
+## 注意事項
+
+- エクスポートJSONにはクライアントシークレットや秘密鍵が平文で含まれ得る。版管理へ載せる前に必ず除去・マスクし、実際のシークレットはVault等の別システムで管理する。
+- `--users skip` を付けずにユーザーデータを含めてエクスポートした場合、氏名・メールアドレス等のPIIがJSONに含まれる。版管理対象にする場合は特にPIIの取り扱いに注意し、必要であれば除外・匿名化する。
+- `kc.sh import --override true` は対象environmentの既存realm設定を丸ごと上書きする。import前に必ず差分（本番運用中の認証フロー変更やクライアント追加等）をレビューし、意図しない設定の巻き戻しがないことを確認する。
+- hostname・IdPシークレットなど環境固有の値をそのままimportすると、別環境のリダイレクトURIやフェデレーション先を誤って上書きする恐れがある。import前に対象環境向けへ値を置換したことを確認する。
+- 認証系の変更となるため、import後は旧環境（現在稼働中のrealm設定）を即座に無効化せず、新しいimport結果でログインできることを別セッションで確認してから、旧設定への切り戻し手順を破棄すること。

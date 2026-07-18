@@ -1,0 +1,21 @@
+[global]
+squid_conf_path = "/etc/squid/squid.conf"
+cicap_conf_path = "/etc/c-icap/c-icap.conf"
+cicap_service = "c-icap"
+squid_service = "squid"
+
+[icap]
+icap_host = "127.0.0.1"
+icap_port = 1344
+reqmod_service = "avreq"
+respmod_service = "avresp"
+fail_action = "block"
+
+[clamav]
+clamd_socket = "/var/run/clamav/clamd.ctl"
+max_object_size_mb = 10
+virus_action_log = "/var/log/c-icap/clamav_mod.log"
+
+[test]
+eicar_url = "https://secure.eicar.org/eicar.com.txt"
+eicar_download_path = "/tmp/eicar.com.txt"
