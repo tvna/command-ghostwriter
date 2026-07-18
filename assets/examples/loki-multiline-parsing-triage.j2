@@ -1,0 +1,129 @@
+# Promtail複数行ログ・パース不良の調査
+
+スタックトレースなど複数行にまたがるログが1行ずつ別エントリに分割されてしまう事象と、timestampステージの書式不一致による時刻ずれを切り分けて是正する調査手順です。
+
+## 目的
+
+`{{ app_name }}`のログで「スタックトレースが1行ごとにバラバラのエントリとしてLokiに取り込まれる」「エントリの時刻が実際のログ出力時刻とずれている」という申告に対し、`pipeline_stages`の`multiline`ステージと`timestamp`ステージの設定不備を特定し、正しく結合・時刻付けされた状態に是正できるようになることを目指します。
+
+## 用語解説
+
+- **pipeline_stages**: promtailの`scrape_configs`配下に記述する、1エントリごとの加工処理(パース・ラベル付与・行結合など)を順に適用するステージのリスト
+- **multilineステージ**: `firstline`正規表現に一致した行を新しいエントリの開始とみなし、一致しない後続行(スタックトレースの`at ...`行など)を同じエントリに結合するステージ。`firstline`に一致しないまま`max_wait_time`が経過すると、その時点までの内容を強制的に1エントリとして確定する
+- **firstline正規表現**: 新エントリの先頭行(通常はタイムスタンプ始まりの行)にのみ一致し、継続行(スタックトレースの中身)には一致しない設計が必要。広すぎると継続行まで新エントリ扱いされ分割が再発し、狭すぎると本来の新エントリまで結合されてしまう
+- **max_wait_time**: `firstline`に一致する次の行が来ない場合に、現在バッファ中のエントリを強制確定するまでの待機時間。短すぎると継続行が届く前に確定してしまい分割が再発し、長すぎると取り込みまでの遅延が増える
+- **timestampステージ**: エントリ内の時刻文字列を`source`で指定したフィールドから取り出し、`format`(Goのリファレンスタイム書式)で解釈してLokiに送るエントリの実時刻とするステージ。`format`が実際のログの書式と一致しないとパースに失敗し、パース失敗時はpromtailの受信時刻がそのまま使われるため、実際の出力時刻とのずれ(スキュー)として観測される
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 対象アプリケーション | `{{ app_name }}` |
+| ジョブラベル | `{{ job_label }}` |
+| ログファイル | `{{ log_path }}` |
+| promtail設定ファイル | `{{ promtail_config_path }}` |
+| Loki問い合わせURL | `{{ loki_query_url }}` |
+| テナントID | `{{ tenant_id }}` |
+| firstline正規表現 | `{{ multiline_firstline }}` |
+| max_wait_time | `{{ max_wait_time }}` |
+| timestampソースフィールド | `{{ timestamp_source }}` |
+| 現行(誤り)のtimestamp書式 | `{{ wrong_timestamp_format }}` |
+| 正しいtimestamp書式 | `{{ timestamp_format }}` |
+| 観測された時刻ずれ | `{{ observed_skew }}` |
+
+## 手順
+
+### 1. 現状の分割・ずれを確認する
+
+対象のスタックトレースを含むサンプルログです。
+
+```text
+{{ test_log_sample }}
+```
+
+このサンプルが実際にどう取り込まれているかをLogQLで確認します。
+
+```bash
+curl -sG {{ loki_query_url }} \
+  --data-urlencode 'query={job="{{ job_label }}"}' \
+  --data-urlencode 'start='$(date -d '30 minutes ago' +%s%N) \
+  --data-urlencode 'end='$(date +%s%N) \
+  -H "X-Scope-OrgID: {{ tenant_id }}" | jq '.data.result[].values'
+```
+
+→ `java.lang.NullPointerException`以下の`at ...`行がそれぞれ独立したエントリとして返ってくる場合、`multiline`ステージ未設定または`firstline`正規表現の不一致が原因です。あわせて各エントリのタイムスタンプが実際のログ出力時刻(`{{ observed_skew }}`のずれ)からかけ離れている場合は、`timestamp`ステージの書式不一致も併発している可能性があります。
+
+### 2. multilineステージを設定してスタックトレースを結合する
+
+```bash
+sudo cp {{ promtail_config_path }} {{ promtail_config_path }}.bak.$(date +%Y%m%d%H%M)
+sudo vi {{ promtail_config_path }}
+```
+
+`scrape_configs`の`pipeline_stages`に`multiline`ステージを追加します。
+
+```yaml
+scrape_configs:
+  - job_name: {{ job_label }}
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: {{ job_label }}
+          __path__: {{ log_path }}
+    pipeline_stages:
+      - multiline:
+          firstline: '{{ multiline_firstline }}'
+          max_wait_time: {{ max_wait_time }}
+```
+
+`firstline`は新規エントリの先頭行(タイムスタンプ始まりの行)にのみ一致し、`    at ...`のようなスタックトレース継続行には一致しないことを、適用前に手元でも確認しておきます。
+
+```bash
+echo '{{ test_log_sample }}' | grep -E '{{ multiline_firstline }}'
+```
+
+→ タイムスタンプ始まりの行のみがマッチし、継続行がマッチしないことを確認したうえで設定を反映します。
+
+### 3. timestampステージの書式不一致を是正する
+
+```yaml
+    pipeline_stages:
+      - multiline:
+          firstline: '{{ multiline_firstline }}'
+          max_wait_time: {{ max_wait_time }}
+      - regex:
+          expression: '^(?P<{{ timestamp_source }}>\S+)\s+(?P<level>\w+)'
+      - timestamp:
+          source: {{ timestamp_source }}
+          format: '{{ timestamp_format }}'
+```
+
+現行設定の書式`{{ wrong_timestamp_format }}`はログ実体の書式と一致していなかったため`{{ timestamp_format }}`へ修正します。書式差分はタイムゾーンオフセット桁数など細部であることが多いため、変更後は必ず手順1と同じサンプルで再検証します。
+
+```bash
+sudo systemctl reload promtail || sudo systemctl restart promtail
+```
+
+## 動作確認
+
+1. サービス再読込後、対象アプリからスタックトレースを含むログを実際に再送出し、下記クエリで結果を確認します。
+
+```bash
+curl -sG {{ loki_query_url }} \
+  --data-urlencode 'query={job="{{ job_label }}"} |= "NullPointerException"' \
+  --data-urlencode 'start='$(date -d '5 minutes ago' +%s%N) \
+  --data-urlencode 'end='$(date +%s%N) \
+  -H "X-Scope-OrgID: {{ tenant_id }}" | jq '.data.result[].values'
+```
+
+2. スタックトレース全体(`java.lang.NullPointerException`から`Thread.java:840`まで)が1エントリの`values`として結合されていること(`at ...`行が別エントリに分かれていないこと)を確認する。
+3. 返却されたエントリのタイムスタンプと、ログ内の実時刻(`{{ timestamp_source }}`フィールド)との差が`{{ observed_skew }}`から解消し、数秒未満のずれに収まっていることを確認する。
+4. `{{ promtail_config_path }}`の変更後もpromtailが再起動ループに陥っていないことを`sudo systemctl status promtail --no-pager`で確認する。
+
+## 注意事項
+
+- `firstline`正規表現は必ず新規エントリの先頭行にのみ一致するよう設計すること。継続行まで拾ってしまう(広すぎる)と本来のエントリまで結合されて別内容が混在し、逆に狭すぎると分割が再発する。変更後は手順2の`grep`確認を必ず再実施すること。
+- `max_wait_time`を短くしすぎると、継続行がまだ届く前にエントリが強制確定され分割が再発する。長くしすぎると取り込みからLokiへの反映までの遅延が増えるため、対象アプリの実際の出力間隔を踏まえて設定すること。
+- `timestamp`ステージの`format`は対象ログの書式と1文字単位で一致している必要がある。タイムゾーンオフセットの指定(`Z07:00`等)漏れは、時刻ずれとしてではなく検索時刻範囲の外側に記録されて「ログが出てこない」ように見える形で顕在化することがあるため、書式変更後は必ず手順1・動作確認と同じ実データで再検証すること。
+- `timestamp`ステージがパースに失敗した場合、設定によってはエントリがドロップされずpromtail受信時刻がそのまま使われる一方、`drop`アクションと組み合わせている構成ではエントリ自体が破棄されうる。現行の`pipeline_stages`に`drop`ステージが含まれていないか事前に`{{ promtail_config_path }}`を確認し、含まれる場合は本手順の適用前後でドロップ件数(`promtail_dropped_bytes_total`等)に変化がないか確認すること。
+- `pipeline_stages`の変更は、まず1ホスト(または1ジョブ)に適用し、手順1・動作確認と同じLogQLクエリで結合・時刻付けが正常化することを確認してから他ホストへ展開すること。切り戻し用に`{{ promtail_config_path }}.bak.*`を必ず保持し、異常が見られた場合は旧設定に戻したうえでpromtailを再起動できるようにしておくこと。
