@@ -53,10 +53,13 @@ view stanza 自体は転送設定を持てないため、view の `local-data` �
 
 ```bash
 cat > /etc/unbound/unbound.conf.d/forwarders.conf <<'EOF'
-{% for r in csv_rows %}{% if r["forward_target"] != "-" %}forward-zone:
+forward-zone:
     name: "."
-    forward-addr: {{ r["forward_target"] }}
-{% endif %}{% endfor %}EOF
+    forward-addr: {{ csv_rows[1]["forward_target"] }}
+forward-zone:
+    name: "partner-cloud.example."
+    forward-addr: {{ csv_rows[2]["forward_target"] }}
+EOF
 ```
 
 ### 4. 構文を検証してから反映する
@@ -98,6 +101,13 @@ dig @127.0.0.1 -b {{ csv_rows[1]["client_net"] }} example.com A +short
 
 ```bash
 dig @127.0.0.1 -b 192.0.2.1 app.internal.example.com A +short
+```
+
+5. ドメイン単位のグローバル `forward-zone`(`partner-cloud.example.`)が、view に関わらず全クライアント網から同じ転送先に解決されること(view専用の転送ではないこと)を確認する
+
+```bash
+dig @127.0.0.1 -b {{ csv_rows[2]["client_net"] }} partner-cloud.example. A +short
+dig @127.0.0.1 -b {{ csv_rows[0]["client_net"] }} partner-cloud.example. A +short
 ```
 
 ## 注意事項

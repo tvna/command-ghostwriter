@@ -1,0 +1,126 @@
+# fail2ban正規ユーザー誤ban事象の調査
+
+正規ユーザー `{{ affected_user }}` が締め出された事象について、`{{ jail.name }}` jailの誤ban(false ban)を、failregexの過剰マッチ・共有IP/NAT巻き込みの2軸で切り分けます。**緊急unbanを先に実施し、業務影響を止めてから原因調査に進みます。**
+
+## 目的
+
+正規ユーザーの誤ban事象に対して、`fail2ban-client status`とログの突き合わせから原因を切り分け、failregexの是正またはignoreip登録によって再発を防止できるようになることを目指します。
+
+## 用語解説
+
+- **誤ban(false ban)**: 正規の利用者やアクセスを、攻撃と誤認して遮断してしまう事象
+- **failregex**: fail2banがログの「失敗」を検出するための正規表現。緩すぎる(過剰マッチする)と、アプリの正常な失敗ログまで攻撃と誤検知する
+- **共有出口IP(NAT配下)**: オフィスや事業者NATの背後で複数ユーザーが同一のグローバルIPを共有している状態。1人の失敗の積み重ねが、同じIPを使う他の正規ユーザーの巻き込みbanを招く
+- **fail2ban-regex**: 実際のログ行に対してfailregexが何行マッチするかをドライランで検証するツール
+- **ignoreip**: 遮断対象から常に除外するIP/CIDRの一覧
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 対象jail | {{ jail.name }} |
+| 認証ログ | {{ jail.logpath }} |
+| fail2banログ | {{ jail.fail2ban_log }} |
+| 現行failregex | `{{ jail.failregex }}` |
+| Banされた IP | {{ banned_ip }} |
+| 影響を受けた正規ユーザー | {{ affected_user }} |
+| failregex過剰マッチの疑い | {{ failregex_review }} |
+| 共有出口IP/NATの疑い | {{ shared_ip }} |
+
+## 1. 緊急unbanで業務影響を止める
+
+原因調査に入る前に、正規ユーザーの業務を止めないよう先にunbanします。
+
+```bash
+sudo fail2ban-client status {{ jail.name }}
+sudo fail2ban-client set {{ jail.name }} unbanip {{ banned_ip }}
+sudo fail2ban-client status {{ jail.name }}
+```
+
+`Banned IP list` から `{{ banned_ip }}` が消えていることを確認します。
+
+## 2. ban根拠行をfail2banログから確認する
+
+```bash
+sudo grep "{{ banned_ip }}" {{ jail.fail2ban_log }} | grep -i ban
+```
+
+`Ban {{ banned_ip }}` 行の直前に記録されている検知回数・時刻を控え、次のステップで元になった認証ログ行と突き合わせます。
+
+## 3. 該当IPからのアクセス元と正規ユーザーの行動を突き合わせる
+
+```bash
+sudo grep "{{ banned_ip }}" {{ jail.logpath }} | tail -n 50
+sudo grep -E "{{ affected_user }}|{{ banned_ip }}" {{ app.logpath }} | tail -n 50
+```
+
+`{{ affected_user }}` 自身の正常なログイン試行・アプリ側の一時的な失敗(`{{ app.normal_failure_pattern }}`など)が、同じ時間帯に `{{ jail.logpath }}` 上で「失敗」としてカウントされていないかを確認します。
+
+## 4. failregexの過剰マッチを再現する(fail2ban-regexドライラン)
+
+現行のfailregexが、アプリ側の正常な失敗ログ(認証エラーではなく再試行要求など)まで拾っていないかを、実際にfail2banを動かさずに検証します。
+
+```bash
+sudo fail2ban-regex {{ jail.logpath }} '{{ jail.failregex }}'
+```
+
+出力の `Failregex: N matched` の内訳行を確認し、`{{ affected_user }}` の正常アクセスに対応する行が含まれていれば、failregexの過剰マッチが確定します。
+
+{% if failregex_review %}
+本事象では failregex過剰マッチの疑いがあるため、厳格化した候補で再検証します。
+
+```bash
+sudo fail2ban-regex {{ jail.logpath }} '{{ strict_failregex.after }}'
+```
+
+厳格化前後でマッチ数を比較し、`{{ affected_user }}` の正常アクセス行が厳格化後に除外されていることを確認します。
+{% endif %}
+
+## 5. 共有出口IP/NAT巻き込みを切り分ける
+
+```bash
+sudo grep "{{ banned_ip }}" {{ jail.logpath }} | grep -oE "for [^ ]+ from {{ banned_ip }}" | sort | uniq -c
+```
+
+同一IPに対して複数の異なるユーザー名(アカウント)が出現する場合、NATや共有プロキシ配下から複数の正規ユーザーが同じ出口IPを使っている可能性が高く、1ユーザーの失敗蓄積が他ユーザーを巻き込みbanした構図です。
+
+{% if shared_ip %}
+本事象では共有出口IPの疑いがあるため、既知のオフィス出口(`{{ whitelist.label }}`: `{{ whitelist.ignoreip_cidr }}`)からのアクセスであるかを確認します。
+
+```bash
+sudo grep "{{ whitelist.ignoreip_cidr }}" {{ jail.logpath }} | tail -n 20
+```
+{% endif %}
+
+## 6. 恒久対策を適用し、再発しないことを検証する
+
+原因(failregex過剰マッチ/共有IP)に応じて是正を行い、**新しい設定が正しく機能することを、再banの発生有無で確認してから**旧設定への依存を止めます。
+
+```bash
+sudo tee -a /etc/fail2ban/jail.local <<'EOF'
+[{{ jail.name }}]
+failregex = {{ strict_failregex.after }}
+ignoreip = 127.0.0.1/8 {{ whitelist.ignoreip_cidr }}
+EOF
+sudo fail2ban-client reload {{ jail.name }}
+```
+
+```bash
+sudo fail2ban-regex {{ jail.logpath }} '{{ strict_failregex.after }}'
+sudo fail2ban-client status {{ jail.name }}
+```
+
+反映後も `{{ jail.name }}` jailが正常稼働しており、`{{ affected_user }}` の正常アクセス行が新failregexでマッチしなくなったことを確認したうえで、旧failregexの設定行を削除します。
+
+## 動作確認
+
+- Step 1で `{{ banned_ip }}` の unban が `fail2ban-client status {{ jail.name }}` の `Banned IP list` に反映されていること
+- Step 4/該当時のStep 4補足で `fail2ban-regex` により、是正前は `{{ affected_user }}` の正常ログ行が誤マッチし、是正後は誤マッチが解消することを再現できていること
+- Step 6でignoreip追加・failregex厳格化後、`{{ jail.name }}` jailの `Currently banned` に `{{ affected_user }}` の利用IPが再度現れないこと
+
+## 注意事項
+
+- 業務影響を止めるため、原因調査より先に緊急unban(Step 1)を実施する。原因未特定のままでも、一時的な `ignoreip` 追加やunbanで影響を止めてよい。
+- 恒久対策(failregex厳格化・ignoreip追加・ホワイトリスト整備)は、新しい設定(厳格化failregexや追加ignoreip)が実際に正規ユーザーを誤banしなくなることを`fail2ban-regex`ドライランと`fail2ban-client status`で確認してから、旧failregexの記述を削除する。設定を並行稼働させず一気に置き換えると、検証不能な状態で再発する恐れがある。
+- NAT/共有出口IP配下では、fail2banのIP単位banには本質的な限界がある。同一IPを共有する正規ユーザーが存在する環境では、IP単位ではなくユーザー名・セッション単位の失敗カウント(アプリ側の多要素認証やレート制限)との併用を検討する。
+- `jail.conf` を直接編集せず、`jail.local` への追記で運用する(パッケージ更新で設定が失われないようにするため)。

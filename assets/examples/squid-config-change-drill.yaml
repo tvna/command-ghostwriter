@@ -1,0 +1,10 @@
+change_id: "CHG-2026-0714-squid-acl-update"
+backup_path: "/etc/squid/backup/squid.conf.20260714"
+verify_urls:
+  - "https://www.example.com/"
+  - "https://update.example.internal/"
+  - "https://blocked-test.example.org/"
+rollback_step: "cp /etc/squid/backup/squid.conf.20260714 /etc/squid/squid.conf && squid -k reconfigure"
+participants:
+  - "山田 太郎（プロキシ管理者・作業実施）"
+  - "佐藤 花子（ネットワーク運用・立会い）"

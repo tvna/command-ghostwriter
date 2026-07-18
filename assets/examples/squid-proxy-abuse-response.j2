@@ -1,6 +1,6 @@
 # Squid 踏み台化・不正利用検知時の初動対応手順
 
-access.log で検知した {{ rows | length }} 件の異常送信元について、Squid の
+access.log で検知した {{ csv_rows | length }} 件の異常送信元について、Squid の
 ACL で遮断し、オープンプロキシ化の原因となった設定ミスを是正します。root 権限
 で `/etc/squid/squid.conf` を編集し、上から順に実施してください。
 
@@ -23,7 +23,7 @@ Squid プロキシが踏み台にされた（不正中継・大量アクセス�
 
 | 送信元IP | リクエスト数 | 検知パターン | 対応 | 根本原因 | フォローアップ |
 |----------|-------------|--------------|------|----------|----------------|
-{% for r in rows %}| {{ r["source_ip"] }} | {{ r["request_count"] }} | {{ r["pattern"] }} | {{ r["action"] }} | {{ r["root_cause"] }} | {{ r["followup"] }} |
+{% for r in csv_rows %}| {{ r["source_ip"] }} | {{ r["request_count"] }} | {{ r["pattern"] }} | {{ r["action"] }} | {{ r["root_cause"] }} | {{ r["followup"] }} |
 {% endfor %}
 
 ## 1. access.log で異常アクセスを集計する
@@ -45,7 +45,7 @@ grep ' CONNECT ' /var/log/squid/access.log | awk '{print $3, $7}' | sort | uniq 
 前で deny します。`/etc/squid/squid.conf` に以下を追記してください。
 
 ```
-acl blocked_abusers src {% for r in rows %}{{ r["source_ip"] }}/32 {% endfor %}
+acl blocked_abusers src {% for r in csv_rows %}{{ r["source_ip"] }}/32 {% endfor %}
 
 http_access deny blocked_abusers
 ```

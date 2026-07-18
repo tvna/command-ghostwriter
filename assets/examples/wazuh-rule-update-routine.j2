@@ -1,0 +1,120 @@
+# Wazuhルールセット更新の定期運用
+
+公式ルールセット（`ossec-ruleset` パッケージ）の更新とローカルルールの保全を両立させる、定期更新の運用手順書です。**ローカルルールのバックアップを取ってから更新を適用し、`wazuh-logtest` で回帰確認したうえで manager を再起動**します。
+
+## 目的
+
+パッケージ更新に伴う公式ルールセットの更新を、ローカルルール（`local_rules.xml` / `local_decoder.xml`）を壊さずに定期実施できるようになることを目指します。更新前後で検知挙動が変わっていないことを `wazuh-logtest` で確認する回帰テストの型を身につけます。
+
+## 用語解説
+
+- **公式ルールセット**: `/var/ossec/ruleset/rules/` 以下に配置される、Wazuh/OSSECが提供する標準ルール・デコーダ群。パッケージ更新のたびに上書きされる。
+- **ローカルルール(local_rules.xml / local_decoder.xml)**: `/var/ossec/etc/rules/local_rules.xml` と `/var/ossec/etc/decoders/local_decoder.xml` に置く、利用者独自のルール・デコーダ。公式ルールセットとは別ディレクトリで管理され、パッケージ更新でマージ・上書きされることはない。
+- **wazuh-logtest**: 実際のログ1行を manager 上のルールエンジンに通し、どのルールがマッチし、どのレベルでアラートが発報するかを確認できる回帰テスト用CLIツール。
+- **rule_id / level**: ルールに一意に割り当てられる識別子と、アラートの重大度(0-15)。
+- **overwriteルール**: 公式ルールの一部を独自内容で置き換える(`overwrite="yes"`)ローカルルール。公式側のIDやロジックが更新で変わると、overwrite側との版ずれが発生し得る。
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| バックアップ先ディレクトリ | {{ backup_dir }} |
+| 更新スケジュール | {{ update_schedule }} |
+| 通知チャネル | {{ notify_channel }} |
+| 回帰テストケース数 | {{ regression_test_cases | length }} |
+
+| テストケース | 想定rule_id | 想定level | ログサンプル |
+| --- | --- | --- | --- |
+{% for tc in regression_test_cases %}| {{ tc.name }} | {{ tc.expected_rule_id }} | {{ tc.expected_level }} | `{{ tc.log_sample }}` |
+{% endfor %}
+
+## 1. 更新前にローカルルールをバックアップする
+
+公式ルールセットの更新パッケージは `/var/ossec/ruleset/` 配下のみを書き換える設計ですが、誤操作や手順ミスに備えて、ローカルルール一式は更新の都度バックアップします。
+
+```bash
+sudo mkdir -p {{ backup_dir }}/$(date +%Y%m%d)
+sudo cp -a /var/ossec/etc/rules/local_rules.xml {{ backup_dir }}/$(date +%Y%m%d)/local_rules.xml
+sudo cp -a /var/ossec/etc/decoders/local_decoder.xml {{ backup_dir }}/$(date +%Y%m%d)/local_decoder.xml
+sudo /var/ossec/bin/wazuh-control status > {{ backup_dir }}/$(date +%Y%m%d)/pre-update-status.txt
+```
+
+## 2. 更新前の回帰ベースラインを記録する
+
+更新でアラート挙動が変化していないかを判定するため、更新を当てる**前**に各テストケースの発報結果を記録しておきます。
+
+```bash
+sudo mkdir -p {{ backup_dir }}/$(date +%Y%m%d)/logtest-before
+{% for tc in regression_test_cases %}
+printf '%s\n' "{{ tc.log_sample }}" | sudo /var/ossec/bin/wazuh-logtest \
+  > {{ backup_dir }}/$(date +%Y%m%d)/logtest-before/{{ tc.expected_rule_id }}.txt
+{% endfor %}
+```
+
+## 3. 公式ルールセットを更新する
+
+ディストリビューションのパッケージマネージャ経由で、Wazuh manager 本体および同梱ルールセットを更新します。この操作は `/var/ossec/ruleset/` を上書きしますが、`/var/ossec/etc/rules/local_rules.xml` と `/var/ossec/etc/decoders/local_decoder.xml` には触れません。
+
+```bash
+sudo apt-get update
+sudo apt-get install --only-upgrade -y wazuh-manager
+sudo /var/ossec/bin/wazuh-logtest -t
+```
+
+`wazuh-logtest -t` はルール・デコーダの構文チェックのみを行い、manager 本体には影響しません。構文エラーが出た場合は次の再起動に進まず、ロールバック（本手順末尾の注意事項を参照）します。
+
+## 4. local_rules.xmlの保持を確認する
+
+```bash
+diff -q {{ backup_dir }}/$(date +%Y%m%d)/local_rules.xml /var/ossec/etc/rules/local_rules.xml
+diff -q {{ backup_dir }}/$(date +%Y%m%d)/local_decoder.xml /var/ossec/etc/decoders/local_decoder.xml
+```
+
+両方とも差分なし（`diff -q` が無出力）であることを確認します。差分がある場合は更新パッケージの侵食であり、バックアップから復元したうえで原因調査に切り替えます。
+
+## 5. wazuh-logtestで代表テストケースの回帰確認を行う
+
+各テストケースについて、更新後も同じ `rule_id` / `level` でマッチすることを確認します。
+
+```bash
+{% for tc in regression_test_cases %}
+echo "=== {{ tc.name }} (期待 rule_id={{ tc.expected_rule_id }}, level={{ tc.expected_level }}) ==="
+printf '%s\n' "{{ tc.log_sample }}" | sudo /var/ossec/bin/wazuh-logtest
+{% endfor %}
+```
+
+出力中の `**Phase 3: Completed filtering (rules)**` セクションに表示される `id` と `level` を、シナリオ設定表の想定値と突き合わせます。
+
+## 6. manager を再起動し反映する
+
+回帰確認がすべて一致した場合のみ、変更を反映します。再起動中は数秒〜数十秒のイベント受信断が発生するため、業務影響の小さい時間帯（{{ update_schedule }}）に実施します。
+
+```bash
+sudo systemctl restart wazuh-manager
+sudo systemctl status wazuh-manager --no-pager
+```
+
+## 7. 再起動後に代表テストケースを再実行し、通知する
+
+```bash
+{% for tc in regression_test_cases %}
+printf '%s\n' "{{ tc.log_sample }}" | sudo /var/ossec/bin/wazuh-logtest
+{% endfor %}
+echo "Wazuhルールセット更新完了: $(date -Iseconds) を {{ notify_channel }} へ報告してください"
+```
+
+## 動作確認
+
+- Step 4 で `local_rules.xml` / `local_decoder.xml` がバックアップと差分なし（更新でマージ・上書きされていない）こと
+- Step 5・Step 7 で、各回帰テストケースが更新前後で同じ `rule_id`（{% for tc in regression_test_cases %}{{ tc.expected_rule_id }}{% if not loop.last %}, {% endif %}{% endfor %}）・同じ `level` で発報し続けること
+- Step 3 の `wazuh-logtest -t` が構文エラーなく完了していること
+- Step 6 の `systemctl status wazuh-manager` が `active (running)` であること
+- 更新完了が {{ notify_channel }} へ報告されていること
+
+## 注意事項
+
+- **overwriteルールの版ずれに注意する**: 公式ルールをoverwriteするローカルルールがある場合、公式側のID・条件が更新で変わるとoverwrite対象が一致せず、想定した上書きが働かなくなることがある。Step 5の回帰確認で対象ルールのlevel・発報有無が変わっていないかを必ず見る。
+- **更新によるalert挙動の変化を検知する**: 回帰ベースライン（Step 2）と更新後（Step 5・7）を機械的に突き合わせ、目視だけに頼らない。差異があれば適用を止め、バックアップ済みのローカルルールと合わせて原因（公式ルール変更/ローカル側の前提崩れ）を切り分ける。
+- **restart時のイベント断を考慮する**: `systemctl restart wazuh-manager` の間はログ受信・相関処理が一時停止する。本番環境では{{ update_schedule }}のような影響の小さい時間帯に限定し、事前に監視チームへ断が発生し得ることを共有する。
+- 新しいルールセットが期待どおり動作する（Step 5の回帰確認がすべて一致する）ことを確認してから manager を再起動する。回帰確認前に再起動して古いルールセットを廃棄しない。
+- 回帰確認で不一致が出た場合は、Step 1で取得したバックアップから `local_rules.xml` / `local_decoder.xml` を復元し、公式ルールセット側の変更点（changelog）を確認したうえで再適用を計画する。
