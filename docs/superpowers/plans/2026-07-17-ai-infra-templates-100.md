@@ -2,8 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: このプランは通常の
 > subagent-driven-development / executing-plans とは異なる実行体制を取る
-> （オーナー指定: fableサブエージェントによる計画 + sonnetダイナミック
-> ワークフローによる並行実装）。Task 1はAgentツール（`model: "fable"`）を
+> （オーナー指定: 計画用サブエージェントによる計画 + ダイナミック
+> ワークフローによる並行実装）。Task 1はAgentツールを
 > 単一メッセージで10並列実行し、Task 4はWorkflowツールを1回呼び出す。
 > それ以外のタスクはこのセッションでインラインに実行する。
 > Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -11,9 +11,9 @@
 **Goal:** `web/src/lib/templates.ts` の `ai` カテゴリに、新規100件のテンプレート
 （`assets/examples/<id>.j2` + データファイルのペア）を追加する。
 
-**Architecture:** (1) 10クラスタそれぞれについて `fable` エージェントが12件程度
+**Architecture:** (1) 10クラスタそれぞれについて計画用エージェントが12件程度
 ブレインストーミングして上位10件を選定 → (2) 選定結果を集約・重複解消して単一
-のマスタースペックにする → (3) タクソノミー許可リストを拡張 → (4) `sonnet` の
+のマスタースペックにする → (3) タクソノミー許可リストを拡張 → (4) 実装用の
 ダイナミックワークフローが100件を並行生成し、`scripts/local_render_check.py`
 で自己検証・修復する → (5) `templates.ts` に単一編集でMETA追加 → (6) 全体検証
 → (7) クラスタ単位で分割コミットしてpush。
@@ -26,7 +26,7 @@ TypeScript (`templates.ts` のデータリテラル), pytest, `Workflow`/`Agent`
 
 ---
 
-### Task 1: クラスタ別プランニング（fableサブエージェント、10並列）
+### Task 1: クラスタ別プランニング（計画用サブエージェント、10並列）
 
 **Files:**
 - Create: `docs/superpowers/specs/2026-07-17-cluster-<N>-<slug>.json`（N=1〜10、
@@ -44,7 +44,7 @@ Expected: `246 /tmp/existing_ids.txt`
 - [ ] **Step 2: 10クラスタ分の`Agent`呼び出しを単一メッセージで並列実行する**
 
 各クラスタについて、下記テンプレートの `{{...}}` を埋めて `Agent` ツールを
-呼ぶ（`model: "fable"`, `subagent_type: "general-purpose"`, 10件を1メッセージ
+呼ぶ（`subagent_type: "general-purpose"`, 10件を1メッセージ
 にまとめて並列発火する）。
 
 プロンプトテンプレート:
@@ -184,7 +184,7 @@ open('docs/superpowers/specs/2026-07-17-ai-infra-templates-100-master.md', 'w').
 print('wrote master.md')
 "
 git add docs/superpowers/specs/2026-07-17-ai-infra-templates-100-master.md
-git commit -m "$(printf 'docs: record AI infra template 100-item master spec\n\nOutput of the 10-cluster fable planning pass (Task 1-2 of the\nimplementation plan).\n\nRefs #576')"
+git commit -m "$(printf 'docs: record AI infra template 100-item master spec\n\nOutput of the 10-cluster planning pass (Task 1-2 of the\nimplementation plan).\n\nRefs #576')"
 ```
 Expected: commit succeeds; `git log -1 --stat` shows the new file.
 
@@ -253,7 +253,7 @@ EOF
 
 ---
 
-### Task 4: sonnetダイナミックワークフローによる並行生成・自己検証
+### Task 4: ダイナミックワークフローによる並行生成・自己検証
 
 **Files:**
 - Create: `assets/examples/<id>.j2` × 100
@@ -397,14 +397,21 @@ Expected: 最終的に100件全てで `ok: true`。
 
 - [ ] **Step 1: マスタースペックからMETA行を生成する**
 
+`today`は実行時の日付を使う（ハードコードしない）。既に`templates.ts`に登録済みのid（Task 4の content agent が計画の範囲外で先行登録した場合など）はスキップし、二重登録を防ぐ。
+
 Run:
 ```bash
 python3 -c "
-import json
+import datetime, json, re
 items = json.load(open('docs/superpowers/specs/2026-07-17-ai-infra-templates-100-master.json'))
-today = '2026-07-17'
+today = datetime.date.today().isoformat()
+existing_ids = set(re.findall(r'id: \"([^\"]+)\"', open('web/src/lib/templates.ts').read()))
 lines = []
+skipped = []
 for it in items:
+    if it['id'] in existing_ids:
+        skipped.append(it['id'])
+        continue
     activity_part = f\", activity: \\\"{it['activity']}\\\"\" if it.get('activity') else ''
     lines.append(
         f'  {{ id: \"{it[\"id\"]}\", name: \"{it[\"name\"]}\", desc: \"{it[\"desc\"]}\", '
@@ -412,10 +419,10 @@ for it in items:
         f'output: \"markdown\"{activity_part}, updated: \"{today}\", live: true }},'
     )
 open('/tmp/meta_lines.ts', 'w').write('\n'.join(lines) + '\n')
-print(f'wrote {len(lines)} META lines')
+print(f'wrote {len(lines)} META lines, skipped {len(skipped)} already-registered ids: {skipped}')
 "
 ```
-Expected: `wrote 100 META lines`
+Expected: `wrote 100 META lines, skipped 0 already-registered ids: []` (or `wrote 99 ... skipped 1 ...` if one id was already registered ahead of this step)
 
 - [ ] **Step 2: `];` の直前に挿入する**
 
