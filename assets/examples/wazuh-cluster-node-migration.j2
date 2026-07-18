@@ -1,0 +1,162 @@
+# Wazuhマネージャのクラスタ化・移行変更
+
+単一のWazuhマネージャ構成から、master/workerによるクラスタ構成へ、エージェントの接続断を最小化しながら移行する変更手順です。
+
+## 目的
+
+`<cluster>`設定によるmaster/worker構成の役割分担と、`cluster_key`によるノード間認証の仕組みを理解し、エージェントを段階的に振り分けながら無停止寄りでクラスタ移行を完了できるようになることを目指します。
+
+## 用語解説
+
+- **cluster_name**: クラスタ全体の識別名。`ossec.conf`の`<cluster><name>`に設定し、全ノードで一致させる
+- **node_name / node_type**: 各ノードの`ossec.conf`に設定する自ノードの名前と役割。`master`は1台のみ、それ以外は`worker`とする
+- **cluster_key**: ノード間通信を認証・暗号化する共有鍵。`<cluster><key>`に設定し、全ノードで同一の値を使う。漏洩するとクラスタに不正ノードを参加させられる機微情報
+- **cluster_control -l**: masterで実行し、クラスタに参加している全ノードの状態(接続可否・バージョン)を一覧表示するコマンド
+- **エージェントの複数server指定**: エージェント側`ossec.conf`の`<server>`ブロックを複数記述し、上から順にフェイルオーバー先とする設定。段階移行の要
+- **cluster.disabled**: `<cluster><disabled>`。`yes`にするとクラスタ機能そのものを無効化し、単一マネージャ動作に戻せる
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| クラスタ名 | `{{ cluster_name }}` |
+| ノード数 | {{ nodes | length }} |
+| cluster_key設定済み | {{ "済み" if cluster_key_set else "未設定" }} |
+| 移行実施ウィンドウ | {{ cutover_window }} |
+| ロールバック手順概要 | {{ rollback_step }} |
+
+ノード一覧:
+
+| ノード名 | 役割 | ホスト |
+| --- | --- | --- |
+{% for n in nodes %}| {{ n.name }} | {{ n.type }} | {{ n.host }} |
+{% endfor %}
+
+## 手順
+
+### 1. masterで`<cluster>`設定を作成する
+
+現行の単一マネージャを、そのままmasterノードとしてクラスタ設定に組み込みます。
+
+```bash
+sudo cp /var/ossec/etc/ossec.conf /var/ossec/etc/ossec.conf.bak.$(date +%Y%m%d)
+
+sudo tee -a /var/ossec/etc/ossec.conf <<'EOF'
+<ossec_config>
+  <cluster>
+    <name>{{ cluster_name }}</name>
+    <node_name>{% for n in nodes %}{% if n.type == "master" %}{{ n.name }}{% endif %}{% endfor %}</node_name>
+    <node_type>master</node_type>
+    <key>REPLACE_WITH_GENERATED_CLUSTER_KEY</key>
+    <port>1516</port>
+    <bind_addr>0.0.0.0</bind_addr>
+    <nodes>
+{% for n in nodes %}{% if n.type == "master" %}      <node>{{ n.host }}</node>
+{% endif %}{% endfor %}    </nodes>
+    <hidden>no</hidden>
+    <disabled>no</disabled>
+  </cluster>
+</ossec_config>
+EOF
+
+sudo /var/ossec/bin/wazuh-control restart
+```
+
+### 2. cluster_keyを生成し、全ノードへ安全に配布する
+
+masterでのみ生成し、workerへは制御されたチャネル(踏み台経由SSH等)で配布します。平文メールやチャットには絶対に貼り付けません。
+
+```bash
+sudo /var/ossec/bin/cluster_control -h
+openssl rand -hex 16 | sudo tee /var/ossec/etc/cluster.key.tmp
+CLUSTER_KEY=$(cat /var/ossec/etc/cluster.key.tmp)
+echo "生成したcluster_keyをossec.confの<key>に反映してください: ${CLUSTER_KEY}"
+shred -u /var/ossec/etc/cluster.key.tmp
+```
+
+生成した値を、master・全workerの`ossec.conf`内`<cluster><key>`にそれぞれ手動で反映します(同一値であることが必須)。
+
+### 3. workerノードを追加し、設定を配布する
+
+既存の単一構成を壊さないよう、まずworkerを追加登録するだけに留め、エージェントの振り分けはまだ行いません。
+
+```bash
+{% for n in nodes %}{% if n.type == "worker" %}ssh {{ n.host }} "sudo cp /var/ossec/etc/ossec.conf /var/ossec/etc/ossec.conf.bak.$(date +%Y%m%d)"
+{% endif %}{% endfor %}
+```
+
+各workerの`ossec.conf`に以下を追記し、`node_type`を`worker`、`node_name`を自ノード名とします。
+
+```xml
+<cluster>
+  <name>{{ cluster_name }}</name>
+  <node_name>WORKER_NODE_NAME_HERE</node_name>
+  <node_type>worker</node_type>
+  <key>MASTERと同一のcluster_key</key>
+  <port>1516</port>
+{% for n in nodes %}{% if n.type == "master" %}  <nodes>
+    <node>{{ n.host }}</node>
+  </nodes>
+{% endif %}{% endfor %}
+  <disabled>no</disabled>
+</cluster>
+```
+
+```bash
+{% for n in nodes %}{% if n.type == "worker" %}ssh {{ n.host }} "sudo /var/ossec/bin/wazuh-control restart"
+{% endif %}{% endfor %}
+```
+
+### 4. cluster_control -lで同期状態を確認してからエージェントを振り分ける
+
+ロックアウト防止のため、必ずこの順序を守ります。全ノードが`connected`になるまではエージェント側の設定を一切変更しません。
+
+```bash
+sudo /var/ossec/bin/cluster_control -l
+```
+
+出力で全{{ nodes | length }}ノードが`connected`であることを確認したら、エージェント側`ossec.conf`に複数`<server>`を段階的に追記します(既存masterを1番目に残したまま追記するため、切断は発生しません)。
+
+```xml
+<client>
+{% for n in nodes %}  <server>
+    <address>{{ n.host }}</address>
+    <port>1514</port>
+  </server>
+{% endfor %}
+</client>
+```
+
+```bash
+sudo /var/ossec/bin/agent-auth -m {{ nodes[0].host }}
+sudo systemctl restart wazuh-agent
+```
+
+一部のエージェントから順に反映し、`agent_control -lc`で新旧どちらのノードにも分散接続できていることを確認しながら、残りのエージェントへ展開します。
+
+### 5. 問題発生時に単一構成へロールバックする
+
+worker追加後・エージェント振り分け後のどの段階でも、以下でmasterのみの単一構成へ戻せます。
+
+```bash
+{% for n in nodes %}{% if n.type == "worker" %}ssh {{ n.host }} "sudo cp /var/ossec/etc/ossec.conf.bak.$(date +%Y%m%d) /var/ossec/etc/ossec.conf && sudo /var/ossec/bin/wazuh-control restart"
+{% endif %}{% endfor %}
+sudo cp /var/ossec/etc/ossec.conf.bak.$(date +%Y%m%d) /var/ossec/etc/ossec.conf
+sudo /var/ossec/bin/wazuh-control restart
+```
+
+{{ rollback_step }}の手順に沿って、エージェント側の`<server>`もmaster1台のみに戻します。
+
+## 動作確認
+
+1. `sudo /var/ossec/bin/cluster_control -l`で{{ nodes | length }}ノード全てが`connected`と表示されること
+2. `sudo /var/ossec/bin/agent_control -lc`でエージェントが複数ノードへ分散していること(masterに集中していないこと)
+3. `sudo tail -f /var/ossec/logs/alerts/alerts.log`で移行前後を通してアラートが継続して記録され、欠落や重複がないこと
+
+## 注意事項
+
+- `cluster_key`はクラスタへの不正ノード参加を許してしまう機微情報のため、平文での送付・Gitへのコミット・ログ出力を避け、生成後は安全に破棄・保管する。
+- 全ノードでのNTP/chronyによる時刻同期は必須。時刻がずれるとクラスタの認証・イベント順序に不整合が生じる。
+- 移行手順は必ず「workerを追加してcluster_controlで同期を確認」→「問題なければエージェントを段階的に振り分け」の順で行い、同期未確認のままエージェントを一括切り替えない。これを守らないとエージェントがどのマネージャにも接続できなくなるロックアウト状態になり得る。
+- 移行中はエージェントの接続先が新旧ノード間で切り替わるため、アラートの重複または一時的な欠落が発生し得る。監視SLAに影響する場合は事前に関係者へ周知する。
+- ロールバックが必要な場合は{{ cutover_window }}のウィンドウ内で判断し、{{ rollback_step }}に従って単一構成へ戻す。
