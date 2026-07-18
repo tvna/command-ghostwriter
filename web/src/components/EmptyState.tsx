@@ -128,11 +128,11 @@ export function EmptyState({
       {/* app bar */}
       <header style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-4)', padding: '0 18px', height: 56, borderBottom: '1px solid var(--cg-border)', flexShrink: 0 }}>
         <img src={logoMark} alt="" style={{ width: 30, height: 30, flexShrink: 0 }} />
-        <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
-          <span style={{ fontWeight: 700, fontSize: 'var(--text-md)', whiteSpace: 'nowrap' }}>Command ghostwriter</span>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, minWidth: 0, overflow: 'hidden' }}>
+          <span style={{ fontWeight: 700, fontSize: 'var(--text-md)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>Command ghostwriter</span>
         </div>
         <div style={{ flex: 1 }} />
-        <a href="#" onClick={(e) => { e.preventDefault(); setHowto(true); }} style={{ color: 'var(--cg-text-muted)', textDecoration: 'none', fontSize: 'var(--text-sm)' }}>使い方</a>
+        <a href="#" onClick={(e) => { e.preventDefault(); setHowto(true); }} style={{ color: 'var(--cg-text-muted)', textDecoration: 'none', fontSize: 'var(--text-sm)', whiteSpace: 'nowrap', flexShrink: 0 }}>使い方</a>
       </header>
 
       {/* ===== haunting atmosphere (behind content) ===== */}
@@ -207,8 +207,8 @@ export function EmptyState({
           {/* start card */}
           <div style={{ background: 'var(--cg-bg-secondary)', border: '1px solid var(--cg-border)', borderRadius: 'var(--radius-lg)', padding: 24 }}>
             {/* primary: sample */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-              <div style={{ flex: 1 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
+              <div style={{ flex: '1 1 200px' }}>
                 <div style={{ fontSize: 'var(--text-base)', fontWeight: 700 }}>はじめてなら、サンプルで試す</div>
                 <div style={{ fontSize: 'var(--text-sm)', color: 'var(--cg-text-muted)', marginTop: 2 }}>
                   Ciscoスイッチ設定の例を読み込み、すぐに結果まで体験できます（30秒）。
@@ -225,7 +225,7 @@ export function EmptyState({
             </div>
 
             {/* uploads */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(220px, 100%), 1fr))', gap: 16 }}>
               <FileUploader
                 label="① 設定定義ファイル"
                 accept=".toml,.yaml,.yml,.csv"
