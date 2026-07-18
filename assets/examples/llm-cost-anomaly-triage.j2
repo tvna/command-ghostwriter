@@ -46,7 +46,7 @@ awk -F, 'NR>1 {day=substr($1,1,10); cost[day]+=$7} END {for (d in cost) printf "
 TARGET_DAY=$(date +%Y-%m-%d)
 {% for r in csv_rows %}echo "=== {{ r["team_name"] }}/{{ r["model_name"] }}: 急増判定 ==="
 BASE_START=$(date -d "$TARGET_DAY -{{ r["lookback_days"] }} days" +%Y-%m-%d)
-awk -F, -v today="$TARGET_DAY" -v start="$BASE_START" -v thr={{ r["anomaly_threshold_pct"] }} '
+awk -F, -v today="$TARGET_DAY" -v start="$BASE_START" -v thresh={{ r["anomaly_threshold_pct"] }} '
 NR>1 {
     day=substr($1,1,10)
     if (day==today) { t+=$7 }
@@ -56,8 +56,8 @@ END {
     n=0
     for (d in seen) n++
     avg=(n>0)?b/n:0
-    printf "today_cost=%.4f baseline_avg=%.4f threshold_pct=%d\n", t, avg, thr
-    if (avg>0 && t>avg*thr/100) print "ANOMALY_DETECTED: {{ r["team_name"] }}/{{ r["model_name"] }}"
+    printf "today_cost=%.4f baseline_avg=%.4f threshold_pct=%d\n", t, avg, thresh
+    if (avg>0 && t>avg*thresh/100) print "ANOMALY_DETECTED: {{ r["team_name"] }}/{{ r["model_name"] }}"
 }' {{ r["usage_log_path"] }}
 {% endfor %}
 ```

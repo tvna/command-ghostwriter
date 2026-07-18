@@ -41,9 +41,12 @@ export MLFLOW_TRACKING_URI={{ tracking_uri }}
 export RUN_ID=<学習実行で生成されたrun_id>
 python3 -c "
 import mlflow
-mlflow.register_model('runs:/$RUN_ID/model', '{{ model_name }}')
+mv = mlflow.register_model('runs:/$RUN_ID/model', '{{ model_name }}')
+print(f'registered version: {mv.version}')
 "
 ```
+
+登録済みモデルが未作成の場合はバージョン1として、既存の場合は既存の最大バージョン+1として登録されるため、出力される`registered version`は毎回変わり得ます。この値を次の手順の`REGISTERED_VERSION`にそのまま使います。
 
 登録結果を確認します。
 
@@ -58,24 +61,27 @@ for mv in client.search_model_versions(\"name='{{ model_name }}'\"):
 
 ### 3. エイリアスによるステージ運用
 
-新規バージョンにまず `{{ staging_alias }}` エイリアスを付与し、検証環境から参照させます。
+新規バージョンにまず `{{ staging_alias }}` エイリアスを付与し、検証環境から参照させます。**手順2で出力された`registered version`の値**を`REGISTERED_VERSION`に設定してください。固定のバージョン番号を使い回すと、初回登録時は存在しないバージョンを指してエラーになり、既存レジストリでは今回登録したものとは別の古いバージョンを誤って昇格させてしまいます。
 
 ```bash
 export MLFLOW_TRACKING_URI={{ tracking_uri }}
+export REGISTERED_VERSION=<手順2で出力されたバージョン番号>
 python3 -c "
 from mlflow import MlflowClient
 client = MlflowClient()
-client.set_registered_model_alias('{{ model_name }}', '{{ staging_alias }}', '2')
+client.set_registered_model_alias('{{ model_name }}', '{{ staging_alias }}', '$REGISTERED_VERSION')
 "
 ```
 
 検証が完了したら、同じバージョンに `{{ production_alias }}` エイリアスを付け替えて昇格させます。
 
 ```bash
+export MLFLOW_TRACKING_URI={{ tracking_uri }}
+export REGISTERED_VERSION=<手順2で出力されたバージョン番号>
 python3 -c "
 from mlflow import MlflowClient
 client = MlflowClient()
-client.set_registered_model_alias('{{ model_name }}', '{{ production_alias }}', '2')
+client.set_registered_model_alias('{{ model_name }}', '{{ production_alias }}', '$REGISTERED_VERSION')
 "
 ```
 

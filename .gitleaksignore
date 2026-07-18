@@ -54,3 +54,12 @@ dc3f2e5506116c16390a93f5d7e7ef7f87b02f5d:assets/examples/suricata-flowbits-multi
 0d2af55219ac53985aaf78e1927de8156b69fe62:docs/superpowers/plans/2026-07-17-zero-trust-oss-templates-plan.json:curl-auth-user:33
 0d2af55219ac53985aaf78e1927de8156b69fe62:docs/superpowers/plans/2026-07-17-zero-trust-oss-templates-plan.json:curl-auth-user:166
 0d2af55219ac53985aaf78e1927de8156b69fe62:docs/superpowers/plans/2026-07-17-zero-trust-oss-templates-plan.json:curl-auth-user:202
+
+# triton-model-repository-deploy.j2's verification step uses Triton's real
+# `perf_analyzer -u {{ grpc_port }}` flag (perf_analyzer's `-u` is the target
+# server URL, e.g. `-u localhost:8001`), not curl basic-auth's `-u user:pass`.
+# gitleaks' curl-auth-user rule pattern-matches any `-u <value>` in the
+# vicinity of a curl command in the same finding block, which is a false
+# positive here; there is no credential in this template. Refs #584.
+454849f090d14cbc286743e414c209f964726934:assets/examples/triton-model-repository-deploy.j2:curl-auth-user:83
+454849f090d14cbc286743e414c209f964726934:assets/examples/triton-model-repository-deploy.j2:curl-auth-user:95

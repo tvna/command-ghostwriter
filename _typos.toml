@@ -32,3 +32,9 @@ deprecat = "deprecat"
 # `TLS_RSA_WITH_3DES_EDE_CBC_SHA` (Triple DES Encrypt-Decrypt-Encrypt);
 # not a misspelling of "EDGE".
 EDE = "EDE"
+# DBE = Double Bit (ECC) Error, the real NVIDIA Xid/nvidia-smi terminology
+# for an uncorrectable 2-bit memory error; not a misspelling of "BE".
+DBE = "DBE"
+# TPE = the first three letters of Optuna's real `TPESampler` class name
+# (Tree-structured Parzen Estimator); not a misspelling of "TYPE".
+TPE = "TPE"
