@@ -15,7 +15,7 @@ whitelist:
 
 agent:
   name: "web01"
-  os: "linux"
+  platform: "linux"
 
 test:
   low_risk_rule_id: 5501

@@ -25,7 +25,7 @@ Wazuhのactive response機構（`<command>`と`<active-response>`）を理解し
 | trigger_rules | {% for rid in trigger_rules %}{{ rid }}{% if not loop.last %}, {% endif %}{% endfor %} |
 | timeout_seconds | {{ timeout_seconds }} |
 | repeated_offenders | {{ repeated_offenders }} |
-| 対象エージェント | {{ agent.name }} ({{ agent.os }}) |
+| 対象エージェント | {{ agent.name }} ({{ agent.platform }}) |
 | 低リスク検証用ルールID | {{ test.low_risk_rule_id }} |
 | 検証用攻撃元IP | {{ test.attacker_ip }} |
 
