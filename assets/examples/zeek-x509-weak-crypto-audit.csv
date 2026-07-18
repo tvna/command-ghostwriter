@@ -1,0 +1,6 @@
+server_name,tls_version,cipher,key_length,not_valid_after,disposition
+app01.internal.example.jp,TLSv1.2,TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,2048,2027-03-01T00:00:00Z,問題なし
+legacy-erp.internal.example.jp,TLSv1.0,TLS_RSA_WITH_RC4_128_SHA,1024,2026-01-15T00:00:00Z,是正候補
+mail01.internal.example.jp,TLSv1.1,TLS_RSA_WITH_3DES_EDE_CBC_SHA,2048,2026-08-20T00:00:00Z,是正候補
+vpn-gw.internal.example.jp,TLSv1.2,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,2048,2026-05-01T00:00:00Z,是正候補
+api.internal.example.jp,TLSv1.3,TLS_AES_256_GCM_SHA384,3072,2028-05-10T00:00:00Z,問題なし

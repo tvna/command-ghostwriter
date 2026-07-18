@@ -1,0 +1,116 @@
+# Wazuhブルートフォース検知時の対応 — {{ source_ip }}
+
+Wazuhが認証失敗系アラートからブルートフォース攻撃を検知した際に、攻撃状況を定量化し、送信元の遮断・侵入成否の確認・侵入成立時のアカウント無効化までを行う一次対応手順です。
+
+## 目的
+
+Wazuhダッシュボード上で発報した認証失敗アラートを起点に、送信元IP **{{ source_ip }}** による攻撃の規模と対象アカウントを定量化し、遮断と侵入成否確認を速やかに実施できるようになることを目指します。
+
+## 用語解説
+
+- **rule 5710/5712/5551**: Wazuhの認証失敗系ルール。5710はsshdの認証失敗、5712はsshdへの不正接続試行、5551はPAM認証失敗を検知する
+- **rule 5715**: sshdの認証成功を検知するルール。攻撃期間中にこのルールが発火していれば侵入成功の疑いが強い
+- **相関ルール(if_matched_sid + frequency)**: `<if_matched_sid>5710</if_matched_sid>` で指定した子ルールが `<frequency>` 回・`<timeframe>` 秒以内に同一送信元から繰り返し一致した場合にのみ発火する、ブルートフォース専用の親ルール(例: rule 5720)。単発の失敗ではなく「多発」を機械的に判定する仕組み
+- **Active Response**: Wazuhマネージャがアラートをトリガーに、エージェント側で自動的に遮断スクリプト(`firewall-drop`等)を実行させる機能
+- **agent_control / manage_agents**: Wazuhエージェントの状態確認・登録解除を行うCLIツール群
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 起点アラート | {% for r in alert_rules %}{{ r }}{% if not loop.last %}, {% endif %}{% endfor %} |
+| 送信元IP | {{ source_ip }} |
+| 標的アカウント | {% for a in targeted_accounts %}{{ a }}{% if not loop.last %}, {% endif %}{% endfor %} |
+| 攻撃後の成功ログイン有無 | {% if success_after_failures %}あり(侵入成功の疑い){% else %}なし{% endif %} |
+| エスカレーション先 | {{ escalation }} |
+
+## 手順
+
+### 1. 送信元IP別の失敗回数と対象アカウントを定量化する
+
+```bash
+sudo /var/ossec/bin/wazuh-logtest < /dev/null > /dev/null 2>&1 || true
+grep -E '"rule":\{"id":"(5710|5712|5551)"' /var/ossec/logs/alerts/alerts.json \
+  | grep "{{ source_ip }}" | wc -l
+```
+
+```bash
+for user in {% for a in targeted_accounts %}"{{ a }}" {% endfor %}; do
+  echo "=== ${user} ==="
+  grep -E '"rule":\{"id":"(5710|5712|5551)"' /var/ossec/logs/alerts/alerts.json \
+    | grep "{{ source_ip }}" | grep "\"dstuser\":\"${user}\"" | wc -l
+done
+```
+
+→ {{ source_ip }} から {% for a in targeted_accounts %}{{ a }}{% if not loop.last %}, {% endif %}{% endfor %} への試行回数を洗い出し、アラート(rule {% for r in alert_rules %}{{ r }}{% if not loop.last %}, {% endif %}{% endfor %})が示す規模と実ログを突き合わせます。
+
+### 2. 相関ルールの発火状況とActive Response適用状況を確認する
+
+```bash
+grep "5720" /var/ossec/logs/alerts/alerts.json | grep "{{ source_ip }}" | tail -20
+sudo grep "{{ source_ip }}" /var/ossec/logs/active-responses.log | tail -20
+```
+
+→ ブルートフォース相関ルール(if_matched_sid+frequency構成の親ルール)が発火し、Active Responseによる自動遮断が既に走っているかを確認します。
+
+### 3. 未遮断であれば手動でFW遮断する
+
+Active Responseが未発動、または対象範囲外だった場合は手動で遮断します。
+
+```bash
+sudo /var/ossec/active-response/bin/firewall-drop.sh add - {{ source_ip }} - - 5710 -
+sudo iptables -L INPUT -n | grep "{{ source_ip }}"
+```
+
+→ {{ source_ip }} からの新規接続がDROPされる状態になっていることを確認します。
+
+### 4. 成功ログインの有無を精査する(rule 5715)
+
+```bash
+grep '"rule":{"id":"5715"' /var/ossec/logs/alerts/alerts.json | grep "{{ source_ip }}"
+for user in {% for a in targeted_accounts %}"{{ a }}" {% endfor %}; do
+  sudo last "${user}" | head -5
+done
+```
+
+→ {{ source_ip }} からのrule 5715(認証成功)が1件でも存在する場合、標的アカウントの侵入成立として扱い、Step 5へエスカレーションします。
+
+{% if success_after_failures %}
+### 5. 侵入成立と判断しアカウントを無効化する
+
+攻撃元 {{ source_ip }} からの成功ログインが確認されているため、侵害を前提に対応します。
+
+```bash
+for user in {% for a in targeted_accounts %}"{{ a }}" {% endfor %}; do
+  sudo passwd -l "${user}"
+  sudo usermod -L "${user}"
+  echo "無効化: ${user}"
+done
+```
+
+→ 標的アカウント({% for a in targeted_accounts %}{{ a }}{% if not loop.last %}, {% endif %}{% endfor %})をロックし、{{ escalation }} へ侵入成立事案として引き継ぎます。
+{% else %}
+### 5. 遮断継続を確認しエスカレーション要否を判断する
+
+成功ログインは確認されていないため、遮断状態を維持しつつ監視を継続します。
+
+```bash
+sudo grep "{{ source_ip }}" /var/ossec/logs/alerts/alerts.json | tail -20
+```
+
+→ 遮断後に新たな認証失敗アラートが減少・停止していることを確認し、{{ escalation }} へ状況を報告します。
+{% endif %}
+
+## 動作確認
+
+- {{ source_ip }} からの新規接続試行がFWでDROPされ、その後の認証失敗アラート(rule {% for r in alert_rules %}{{ r }}{% if not loop.last %}/{% endif %}{% endfor %})が停止していること
+- rule 5715(認証成功)の有無を全標的アカウントについて精査済みであること
+- 成功ログインが確認された場合は該当アカウントがロック済みであること
+- 対応結果が {{ escalation }} へ報告済みであること
+
+## 注意事項
+
+- Active Responseまたは手動遮断を有効化する前に、{{ source_ip }} が自組織の正規アクセス(監視SaaS・VPNゲートウェイ等)でないことを事前に除外する。誤遮断は業務影響につながる。
+- rule 5715による成功ログインが1件でも確認された場合は、遮断が正しく機能していることを別セッションや`last`コマンドで確認したうえで、必ず侵害を前提とした対応(アカウント無効化・鍵の再発行)へ格上げする。「多分大丈夫」で終わらせない。
+- alerts.jsonおよびauth.log等の関連ログは対応前に読み取り専用でコピーし、改変せず証跡として保全する。
+- アカウントロックは業務影響が大きいため、実施前後に{{ escalation }}および利用者へ連絡する。

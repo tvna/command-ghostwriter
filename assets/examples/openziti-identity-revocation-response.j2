@@ -1,0 +1,83 @@
+# OpenZitiアイデンティティ漏洩時の失効対応
+
+端末・鍵の漏洩が疑われるOpenZitiアイデンティティを即時失効し、直近の接続状況と影響範囲を確認する初動対応手順です。
+
+## 目的
+
+漏洩疑いのアイデンティティを`ziti edge delete identity`で即時失効し、直近のセッション・回線（circuit）を確認したうえで、必要に応じて残存接続を断ち切る一連の初動対応を、実際のOpenZiti CLIコマンドを用いて実施できるようになることを目指します。
+
+## 用語解説
+
+- **identity**: OpenZitiネットワークに接続する端末・サービス・利用者ごとに割り当てられる認証単位。証明書またはJWTで登録される
+- **role-attributes**: identityやserviceに付与するタグ。service-policyがこのタグでマッチしたidentityにのみ到達を許可する
+- **service-policy**: 「どのrole-attributesを持つidentityが、どのrole-attributesを持つserviceに到達できるか」を定義するZTNAの許可ルール
+- **circuit**: identityがserviceへ実際に確立しているデータパス（`ziti edge list circuits`で確認できる、現に流れている接続）
+- **api-session**: identityがコントローラに認証済みであることを示すセッション。circuitの確立に先立って必要
+- **ZTNAにおける失効の即時性**: ZTNAはデフォルト拒否・明示許可のみのモデルであるため、identityを失効した瞬間にすべてのserviceへの到達経路が失われる（境界型VPNのようにネットワークセグメントへの残存到達性が残らない）
+
+## シナリオ設定
+
+| identity_name | role_attributes | reason | revoked_at | active_sessions | followup |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["identity_name"] }} | {{ r["role_attributes"] }} | {{ r["reason"] }} | {{ r["revoked_at"] }} | {{ r["active_sessions"] }} | {{ r["followup"] }} |
+{% endfor %}
+
+## 1. 対象アイデンティティの現状確認と証跡保全
+
+失効前に、対象identityの登録情報（role-attributes・enrollment状態・MFA有効状態を含む）をJSONで保存し、証跡として残します。
+
+```bash
+{% for r in csv_rows %}ziti edge list identities 'name="{{ r["identity_name"] }}"' -o json > revocation-evidence-{{ r["identity_name"] }}-$(date +%Y%m%dT%H%M%S).json
+{% endfor %}```
+
+保存したJSONの`isMfaEnabled`相当のフィールド（バージョンにより名称が異なる場合があるため公式ドキュメントで確認すること）で、対象identityがMFA登録済みかどうかを確認してください。MFA登録済みの場合、失効後に同一identityを再登録すると新規のMFA秘密鍵での再登録が必要になります。
+
+## 2. 同一identityの他端末利用有無を確認する
+
+`role_attributes`が組織共有のタグ（例: `remote-worker`）を含む場合、同じidentityの認証情報（証明書）が正規の複数端末で共用されていないかを確認します。共用がある場合は、正規利用者の接続断を避けるため、次のステップで失効する前に正規端末分の新規identityを個別に発行・enrollしてください。
+
+```bash
+{% for r in csv_rows %}ziti edge list circuits 'clientId="{{ r["identity_name"] }}"'
+{% endfor %}```
+
+上記で確認できたcircuitの数が、想定する正規端末数（`active_sessions`列の値）と一致するかを突き合わせ、想定外の接続元が含まれていないかを確認します。
+
+## 3. アイデンティティの即時失効
+
+`ziti edge delete identity`は対象identityのapi-sessionおよびcircuitを連鎖的に無効化するため、原則としてこちらを用います。
+
+```bash
+{% for r in csv_rows %}ziti edge delete identity "{{ r["identity_name"] }}"
+{% endfor %}```
+
+証跡保全のため識別子そのものを残す必要がある場合（例: 後日のフォレンジック照合のためidentity IDを維持したい場合）に限り、削除の代わりにrole-attributesを空にしてservice-policyの適用対象から外す方法を用いてください。ただしこの方法は既存のapi-sessionをただちには切断しないため、続く手順4での強制切断確認が必須です。
+
+```bash
+{% for r in csv_rows %}ziti edge update identity "{{ r["identity_name"] }}" --role-attributes ""
+{% endfor %}```
+
+## 4. 残存セッション・回線の強制切断確認（該当時）
+
+`active_sessions`が0でない対象について、失効後もcircuitが残っていないかを確認します。
+
+```bash
+{% for r in csv_rows %}{% if r["active_sessions"] != "0" %}ziti edge list circuits 'clientId="{{ r["identity_name"] }}"'
+{% endif %}{% endfor %}```
+
+上記コマンドの出力が空でない場合（手順3で役割属性除外の方式を選んだ場合など）、該当identityを完全に失効させて確実に接続を断ち切るため、手順3の`ziti edge delete identity`を実行して強制的に切断してください。
+
+## 動作確認
+
+- 手順1で保存した証跡ファイルが対象identityごとに存在すること
+- 失効後に`ziti edge list identities 'name="<identity_name>"'`を実行し、`ziti edge update identity`のみで対応した場合を除き対象identityが一覧に存在しないこと（削除済みの場合）
+- 失効後に`ziti edge list circuits 'clientId="<identity_name>"'`の出力が空であること（現存する接続が無いこと）
+- 失効させた証明書・JWTで対象端末から再接続を試みた場合に、接続が確立できず失敗すること
+- 手順2で確認した正規の他端末利用者について、必要な場合は新規identityでの接続が別途確立できていること
+
+## 注意事項
+
+- 失効は不可逆な操作です（`ziti edge delete identity`は削除であり復元できません）。実行前に手順1の証跡保存を必ず完了させてください。
+- 同一identityを複数端末で共用している場合、失効により正規端末も同時に接続不能になります。手順2で正規利用の有無を確認し、必要な場合は新しいidentityでの接続確立（新しい経路の疎通確認）を終えてから、本手順で旧identityを失効させてください。
+- MFA登録済みのidentityを再度enrollする場合、MFA秘密鍵は失効前のものと共有されないため、利用者へのMFA再設定手順の案内が別途必要です。
+- 失効操作・証跡ファイルは監査ログとして一定期間（社内規程に従う）保管し、インシデント報告書に添付してください。
+- `followup`列が`-`の対象は追加対応不要であることを示す明示的な値であり、空欄ではありません。

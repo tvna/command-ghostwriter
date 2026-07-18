@@ -1,0 +1,145 @@
+# Loki集約ログの長期保全と完全性確保
+
+重要ログをLokiの長期保持テナントへ分離し、オブジェクトストレージ側のバージョニング/オブジェクトロック(WORM)で改ざんを防止したうえで、logcliによる定期エクスポートとハッシュ保全で証跡の完全性を担保する手順です。
+
+## 目的
+
+Lokiは追記型ストレージのため通常運用でもログ内容そのものは書き換わりませんが、保持期間経過後の自動削除や、ストレージ層への不正アクセスによる削除・上書きは防げません。本手順では、長期保持が必要なログをテナント単位で分離し、オブジェクトストレージのバージョニングとオブジェクトロック(WORM: Write Once Read Many)で削除・上書きそのものを禁止したうえで、logcliでの定期エクスポートとハッシュ突合により、監査・インシデント対応時に「その時点のログが改ざんされていない」ことを証明できる状態を作ることを目指します。
+
+## 用語解説
+
+- **テナント分離**: Lokiのマルチテナント機能で `X-Scope-OrgID` ごとにログストリームと保持設定を分離すること。長期保全対象は専用テナントに隔離し、通常ログの短い保持期間の影響を受けないようにする
+- **retention_period / overrides**: Lokiのcompactorが保持期間経過後にチャンクを削除する設定。`limits_config.retention_period` が既定値、`runtime_config` の `overrides` でテナント単位に上書きできる
+- **オブジェクトロック(WORM)**: S3互換オブジェクトストレージの機能で、指定期間内はオブジェクトの削除・上書きをルート権限でも禁止する。バケット作成時にのみ有効化でき、後から有効化はできない
+- **バージョニング**: オブジェクトの上書き・削除時に旧バージョンを保持する機能。オブジェクトロックの前提として必須
+- **logcli**: LokiへHTTP経由でLogQLクエリを発行し、結果を取得するCLIツール。証跡エクスポートに使う
+- **証跡完全性(integrity)**: エクスポートしたログファイルのハッシュ値を記録し、後日の突合で内容が改変されていないことを証明できる状態
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 長期保全テナントID | `{{ tenant_id }}` |
+| Lokiエンドポイント | `{{ loki_endpoint }}` |
+| オブジェクトストレージバケット | `{{ s3_bucket }}` |
+| 長期保持日数 | {{ retention_long_days }}日 |
+| オブジェクトロック有効化 | {{ object_lock }} |
+| エクスポートスケジュール | {{ export_schedule }} |
+| エクスポート先ディレクトリ | `{{ export_dir }}` |
+| ハッシュ保全 | {{ integrity_hash }} |
+| ハッシュアルゴリズム | {{ hash_algorithm }} |
+| 対象LogQLセレクタ | `{tenant="{{ tenant_id }}", job="{{ log_job_label }}"}` |
+| 参照事案ID(監査/インシデント時) | `{{ incident_id }}` |
+
+## 手順
+
+### 1. 長期保全テナントの保持設定を分離する
+
+`runtime_config` の overrides で対象テナントのみ保持期間を延長します。他テナントの既定 `retention_period` には影響しません。
+
+```yaml
+# loki runtime-overrides.yaml
+overrides:
+  {{ tenant_id }}:
+    retention_period: {{ retention_long_days }}d
+```
+
+```yaml
+# loki config.yaml (抜粋)
+limits_config:
+  retention_period: 30d
+compactor:
+  retention_enabled: true
+  retention_delete_delay: 2h
+runtime_config:
+  file: /etc/loki/runtime-overrides.yaml
+```
+
+反映後、compactorをリロードします。
+
+```bash
+curl -s -X POST {{ loki_endpoint }}/compactor/ring | head -n 5
+kill -HUP "$(pgrep -f 'loki .*compactor')"
+```
+
+### 2. オブジェクトストレージのバージョニングとオブジェクトロックを設定する
+
+オブジェクトロックはバケット作成時にのみ有効化できるため、既存バケットに未設定の場合は新規バケットを作成して移行します。まずバージョニングを確認・有効化します。
+
+```bash
+aws s3api get-bucket-versioning --bucket {{ s3_bucket }}
+aws s3api put-bucket-versioning \
+  --bucket {{ s3_bucket }} \
+  --versioning-configuration Status=Enabled
+```
+
+新規バケットでオブジェクトロックを有効化する場合の作成コマンドです（既存バケットには後付けできない点に注意）。
+
+```bash
+aws s3api create-bucket --bucket {{ s3_bucket }} --object-lock-enabled-for-bucket
+aws s3api put-object-lock-configuration \
+  --bucket {{ s3_bucket }} \
+  --object-lock-configuration '{
+    "ObjectLockEnabled": "Enabled",
+    "Rule": { "DefaultRetention": { "Mode": "COMPLIANCE", "Days": {{ retention_long_days }} } }
+  }'
+```
+
+COMPLIANCEモードは保持期間の短縮・解除ができない不可逆設定です。本番バケットへ適用する前に、必ずテスト用バケットで同設定を検証してから適用してください。
+
+```bash
+aws s3api create-bucket --bucket {{ s3_bucket }}-dryrun --object-lock-enabled-for-bucket
+aws s3api put-object-lock-configuration \
+  --bucket {{ s3_bucket }}-dryrun \
+  --object-lock-configuration '{"ObjectLockEnabled":"Enabled","Rule":{"DefaultRetention":{"Mode":"COMPLIANCE","Days":1}}}'
+aws s3api get-object-lock-configuration --bucket {{ s3_bucket }}-dryrun
+```
+
+### 3. logcliでエクスポートし、ハッシュを記録する
+
+エクスポートスケジュールは {{ export_schedule }} です。cron等から以下を実行します。
+
+```bash
+mkdir -p {{ export_dir }}
+export LOKI_ADDR={{ loki_endpoint }}
+export LOKI_ORG_ID={{ tenant_id }}
+
+TS=$(date -u '+%Y%m%dT%H%M%SZ')
+logcli query '{tenant="{{ tenant_id }}", job="{{ log_job_label }}"}' \
+  --since=168h --limit=5000 --output=raw --timezone=UTC \
+  > {{ export_dir }}/export-${TS}.log
+
+{{ hash_algorithm }}sum {{ export_dir }}/export-${TS}.log \
+  | tee -a {{ export_dir }}/integrity-ledger.{{ hash_algorithm }}
+```
+
+### 4. エクスポート結果をオブジェクトロック付きバケットへ転送する
+
+```bash
+aws s3 cp {{ export_dir }}/export-${TS}.log s3://{{ s3_bucket }}/{{ tenant_id }}/export-${TS}.log
+aws s3 cp {{ export_dir }}/integrity-ledger.{{ hash_algorithm }} s3://{{ s3_bucket }}/{{ tenant_id }}/integrity-ledger.{{ hash_algorithm }}
+```
+
+## 動作確認
+
+- 長期テナントの保持設定が反映されていることを確認する
+  ```bash
+  curl -s {{ loki_endpoint }}/loki/api/v1/status/limits -H "X-Scope-OrgID: {{ tenant_id }}"
+  ```
+- logcliでのエクスポートファイルが `{{ export_dir }}` に存在し、サイズが0でないことを確認する
+  ```bash
+  ls -la {{ export_dir }}/export-*.log
+  ```
+- エクスポートファイルのハッシュを再計算し、`integrity-ledger.{{ hash_algorithm }}` の記録値と一致することを突合する
+  ```bash
+  {{ hash_algorithm }}sum -c {{ export_dir }}/integrity-ledger.{{ hash_algorithm }}
+  ```
+- 監査・インシデント（例: `{{ incident_id }}`）対応時は、該当期間のエクスポート済みファイルとハッシュ台帳から過去ログを参照し、Lokiへの再クエリと突合して整合性を確認する
+
+## 注意事項
+
+- オブジェクトロックのCOMPLIANCEモードは、root権限を含めいかなるユーザーも保持期間中の削除・短縮ができない不可逆設定です。必ず手順2のとおりテスト用バケットで動作確認してから本番バケットへ適用してください。
+- 長期保持({{ retention_long_days }}日)はストレージコストに直結します。保持要件（監査規程・法定保存期間等）とコストのバランスを事前に関係者と合意してから設定を変更すること。
+- エクスポートしたログファイルには認証情報やアクセス元IPなどのPIIが含まれ得るため、`{{ export_dir }}` および `s3://{{ s3_bucket }}/{{ tenant_id }}/` へのアクセスは関係者のみに制限し、保管先のバケットポリシー・IAMで最小権限を徹底すること。
+- テナント分離の設定変更（手順1）を既存の短期保持テナントへ誤って適用すると、意図せずログが早期削除される可能性があるため、overrides適用前に `{{ tenant_id }}` の宛先が正しいことを必ず確認すること。
+- 保持期間経過後や誤アップロードによる削除は、オブジェクトロック解除待ちも含め取り消せません。削除操作は関係者の承認を得てから実施すること。

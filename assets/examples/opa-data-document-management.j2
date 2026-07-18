@@ -1,0 +1,168 @@
+# OPA外部データ(data document)の管理
+
+RBACロール表や許可リストをdata documentとしてOpen Policy Agent(OPA)へ供給し、
+ポリシー本体を書き換えずに動的更新するための手順です。
+
+## 目的
+
+ポリシー(Rego)とデータ(可変な許可表)を分離し、data documentの供給経路(bundle同梱 /
+API更新 / レプリケーション)を使い分けて、ロール表や許可リストを安全に更新できるように
+なることを目指します。
+
+## 用語解説
+
+- **data document**: Regoポリシーが参照する外部JSONデータ。`data.<path>` として
+  ポリシー内から参照できる、ポリシー本体とは別に管理される可変データ
+- **ポリシーとデータの分離**: 「誰が何をできるか」の判断ロジック(Rego)と、
+  「誰がどのロールか」といった変化しやすい値(data document)を分けて管理する設計原則。
+  ロール表の更新にRegoの再デプロイを不要にする
+- **bundle**: `.manifest` とpolicy/dataファイル一式をtar.gz化したもの。OPAが
+  `opa run --server --bundle` や `bundle.json` の設定で定期的にpullして読み込む配布形式
+- **PUT /v1/data/{path}**: OPAのREST APIで特定の `data.<path>` 配下を即時に
+  上書き更新するエンドポイント。bundleのpull間隔を待たずに反映したい場合に使う
+- **replicated data**: 外部システム(DBやKVS)からOPAへ継続的に同期されるdata document。
+  bundle配布やAPI更新を定期実行して疑似的に実現する運用パターン
+- **data参照**: Rego内で `data.roles[input.user]` のように書き、data documentの
+  値をポリシー評価に取り込む構文
+
+## シナリオ設定
+
+管理対象のdata document {{ csv_rows | length }} 件は以下のとおりです。
+
+| data_path | content_type | update_method | consumer_policy | refresh |
+| --- | --- | --- | --- | --- |
+{% for r in csv_rows %}| {{ r["data_path"] }} | {{ r["content_type"] }} | {{ r["update_method"] }} | {{ r["consumer_policy"] }} | {{ r["refresh"] }} |
+{% endfor %}
+
+`update_method` が `bundle` のものはbundle同梱で配布し、`api_put` のものは
+`PUT /v1/data/{data_path}` で即時更新します。`refresh` はbundleのpull間隔、
+またはAPI更新が反映されるまでの目安時間です。
+
+## 手順
+
+### 1. ポリシーとデータの分離を確認する
+
+各 `consumer_policy` が対応する `data_path` を `data.<path>` として参照している
+ことを確認します。ロール表の例(`roles.rego` が `data.roles` を参照):
+
+```rego
+package rbac
+
+default allow := false
+
+allow if {
+	some role in data.roles[input.user]
+	role in {"admin", "editor"}
+}
+```
+
+```bash
+{% for r in csv_rows %}echo "{{ r["consumer_policy"] }} は data.{{ r["data_path"] }} を参照 (update_method={{ r["update_method"] }})"
+{% endfor %}```
+
+### 2. bundle経由でdata documentを組み込む
+
+`update_method` が `bundle` のデータは、ポリシーと同じbundleディレクトリにJSONとして
+配置します。
+
+```bash
+mkdir -p bundle/roles bundle/features_flags
+cat <<'EOF' > bundle/roles/data.json
+{
+  "roles": {
+    "alice": ["admin"],
+    "bob": ["editor"]
+  }
+}
+EOF
+cat <<'EOF' > bundle/.manifest
+{"revision": "r1", "roots": ["roles", "feature_flags"]}
+EOF
+tar -C bundle -czf bundle.tar.gz .
+```
+
+```bash
+opa run --server \
+  --bundle bundle.tar.gz \
+  --set "bundles.main.resource=bundle.tar.gz"
+```
+
+bundleのpull(または再読込)間隔は、それぞれの `refresh` 値を目安にします。
+
+```bash
+{% for r in csv_rows %}{% if r["update_method"] == "bundle" %}echo "{{ r["data_path"] }}: bundle refresh 目安 {{ r["refresh"] }}"
+{% endif %}{% endfor %}```
+
+### 3. REST API経由でdata documentを動的更新する
+
+`update_method` が `api_put` のデータは、bundleのpullを待たずに
+`PUT /v1/data/{data_path}` で即時反映します。
+
+```bash
+{% for r in csv_rows %}{% if r["update_method"] == "api_put" %}curl -sS -X PUT \
+  --data-binary @{{ r["data_path"] }}.json \
+  "http://localhost:8181/v1/data/{{ r["data_path"] }}"
+{% endif %}{% endfor %}```
+
+更新前後の差分は `GET` で必ず確認します。
+
+```bash
+{% for r in csv_rows %}{% if r["update_method"] == "api_put" %}curl -sS "http://localhost:8181/v1/data/{{ r["data_path"] }}" | tee /tmp/{{ r["data_path"] }}.before.json
+{% endif %}{% endfor %}```
+
+### 4. 新しいdataで評価結果を検証してから切り替える
+
+本番の `consumer_policy` を切り替える前に、更新後のdataを別入力(テストユーザー/
+ドライランのinput)で評価し、意図した許可/拒否になることを確認します。旧data
+(更新前の応答)を退避してあるため、想定外の挙動が出た場合は同じAPIで
+即座に書き戻せます。
+
+```bash
+{% for r in csv_rows %}opa eval -d bundle/ -i /dev/stdin "data.{{ r["data_path"] }}" <<'EOF'
+{}
+EOF
+{% endfor %}```
+
+```bash
+{% for r in csv_rows %}echo "{{ r["consumer_policy"] }}: {{ r["data_path"] }} をテスト入力で評価し、期待どおりの allow/deny か確認"
+{% endfor %}```
+
+### 5. 更新結果を監査ログに記録する
+
+誰が・いつ・どの `data_path` を・どの経路(bundleのrevision、またはAPI呼び出し)で
+更新したかを記録します。
+
+```bash
+{% for r in csv_rows %}echo "$(date -u +%FT%TZ) user=$(whoami) data_path={{ r["data_path"] }} update_method={{ r["update_method"] }} consumer_policy={{ r["consumer_policy"] }}" >> /var/log/opa-data-audit.log
+{% endfor %}```
+
+## 動作確認
+
+- 全 {{ csv_rows | length }} 件のdata documentについて、更新後に `GET /v1/data/{data_path}`
+  (bundle方式は再読込後のバンドル内容)が期待値と一致していること
+- 各 `consumer_policy` を `opa eval` で評価し、更新後のdataが `allow`/`deny` の
+  判定に反映されていること(data投入から評価反映までの遅延が `refresh` の目安内であること)
+- テスト入力での検証を経てから本番切り替えを行い、切り替え前のdataを退避して
+  即時に書き戻せる状態を確保できていること
+- 更新の実施者・日時・対象 `data_path` が監査ログに記録されていること
+
+## 注意事項
+
+- data documentは認可判断(RBACロール表・許可リスト)に直結する。更新時は
+  必ずテスト入力での評価確認(手順4)を経てから本番の `consumer_policy` に
+  適用し、旧dataを退避した状態を維持したまま切り替えること。想定外の
+  拒否/許可が起きた場合は退避したdataで即座に書き戻す。
+- bundleとAPI更新(`update_method`)を混在させると、同じ `data_path` に対して
+  bundleのpullとAPI更新が競合し、片方の変更が意図せず上書きされることがある。
+  1つの `data_path` に対する更新経路は1つに固定する。
+- API更新(`PUT /v1/data/{path}`)は部分更新ではなく指定パス配下を丸ごと置き換える。
+  他のプロセスが同じパスを同時に更新すると後勝ちで上書きされるため、更新前に
+  必ず現在値を取得(手順3)し、更新後も差分を確認する。
+- data document配布経路(bundleサーバやAPIエンドポイント)自体の可用性・認証が
+  失われると、古いデータのまま評価が継続する。bundleのstatus APIやAPI疎通を
+  監視し、配布経路の信頼性を担保すること。
+- `partner_attrs` のようなユーザー属性を含むdata documentは機微データとして扱い、
+  bundle転送・API通信ともにTLSを用い、アクセス権限を最小化する。ログや監査記録に
+  属性の値そのものを書き出さない。
+- すべてのdata document更新は監査ログ(手順5)に記録し、誰が・いつ・どの経路で
+  何を変更したかを追跡できる状態を維持すること。

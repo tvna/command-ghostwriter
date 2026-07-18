@@ -1,0 +1,104 @@
+# Zeekによるデータ持ち出し疑い時の分析対応
+
+大量アップロード検知を受けて、Zeekのconn.log/files.log/http.log/ssl.logを時系列で突き合わせ、持ち出し内容と経路を特定して証跡を保全する初動対応手順です。本手順は分析と証跡保全に徹し、通信の遮断はFW/IPS側の手順に委ねます。
+
+## 目的
+
+大量アップロード検知時に、Zeekの各ログから送信量・転送ファイル種別・宛先を時系列で特定し、正規のクラウドストレージ利用か不正な持ち出しかを判断できる材料を整えた上で、証跡をハッシュ付きで保全できるようになることを目指します。
+
+## 用語解説
+
+- **conn.log**: 全接続のフロー情報（送受信バイト数など）を記録するZeekの基本ログ
+- **files.log**: 転送されたファイルの種別・サイズ・ハッシュ値を記録するZeekのログ
+- **orig_bytes**: 接続の発信元（内部ホスト）から送信されたバイト数
+- **SNI (server_name)**: TLSハンドシェイクで平文のまま送られる接続先ホスト名。ssl.logのserver_nameフィールドに記録される
+- **zeek-cut**: Zeekログからタブ区切りの列を抽出するコマンドラインツール
+- **Intelフレームワーク**: 既知の不正ドメイン・IPと通信を突き合わせ、一致時にintel.logへ記録するZeekの仕組み
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 調査対象ホスト (suspect_src) | `{{ suspect_src }}` |
+| 対象期間 (timeframe) | `{{ timeframe }}` |
+| 証跡保全先 (evidence_dir) | `{{ evidence_dir }}` |
+| 大量送信判定しきい値 (upload_bytes_threshold, bytes) | `{{ upload_bytes_threshold }}` |
+| エスカレーション連絡先 (escalation_contact) | `{{ escalation_contact }}` |
+
+## 手順
+
+### 1. conn.logから外部宛て大量送信を抽出する
+
+対象ホストが発信元(orig)となっている接続のうち、送信バイト数(orig_bytes)がしきい値を超えるものを送信量順に並べます。
+
+```bash
+mkdir -p {{ evidence_dir }}
+zeek-cut -d ts uid id.orig_h id.orig_p id.resp_h id.resp_p proto service orig_bytes resp_bytes < conn.log \
+  | awk -v src="{{ suspect_src }}" -v th="{{ upload_bytes_threshold }}" '$3==src && ($9+0)>(th+0)' \
+  | sort -k9,9nr > {{ evidence_dir }}/conn-large-uploads.tsv
+wc -l {{ evidence_dir }}/conn-large-uploads.tsv
+```
+
+抽出結果の宛先IP(id.resp_h)とuidの一覧を控え、次のfiles.log突き合わせに使います。
+
+### 2. files.logで転送ファイルの種別とハッシュを確認する
+
+conn.logで抽出したuidに対応する転送ファイルの種類・サイズ・sha256を確認します。
+
+```bash
+zeek-cut -d ts fuid tx_hosts rx_hosts conn_uids filename mime_type seen_bytes sha256 < files.log \
+  | awk 'NR==FNR{u[$1];next} {for (c in u) if (index($4, c) > 0) print}' \
+        <(cut -f2 {{ evidence_dir }}/conn-large-uploads.tsv) - \
+  > {{ evidence_dir }}/files-matched.tsv
+cat {{ evidence_dir }}/files-matched.tsv
+```
+
+mime_typeが圧縮・アーカイブ形式(application/zip, application/gzip等)やデータベースダンプに該当する場合は特に優先して確認します。
+
+### 3. http.log/ssl.logで宛先(host/SNI)を特定し、Intel評価と突き合わせる
+
+平文HTTPはhostヘッダ、TLSはssl.logのserver_name(SNI)から実際の宛先ドメインを特定します。
+
+```bash
+zeek-cut -d ts uid id.orig_h id.resp_h method host uri < http.log \
+  | awk -v src="{{ suspect_src }}" '$3==src' > {{ evidence_dir }}/http-matched.tsv
+
+zeek-cut -d ts uid id.orig_h id.resp_h server_name established < ssl.log \
+  | awk -v src="{{ suspect_src }}" '$3==src' > {{ evidence_dir }}/ssl-matched.tsv
+
+grep -F -f <(cut -f4 {{ evidence_dir }}/ssl-matched.tsv | sort -u) intel.log > {{ evidence_dir }}/intel-hits.log || true
+cat {{ evidence_dir }}/ssl-matched.tsv {{ evidence_dir }}/intel-hits.log
+```
+
+intel-hits.logに一致がある場合は既知の不正インジケータとの通信であり、優先度を上げます。一致がない場合でも、宛先ドメインが自社で許可した正規のクラウドストレージ(バックアップ用S3バケット等)かどうかを許可リストと突き合わせて判定してください。判定だけでは不正・正常を断定せず、業務担当への確認も併用します。
+
+### 4. 該当期間のログを証跡保全先へコピーし、sha256で固定する
+
+分析対象とした期間分のログ原本をコピーし、改変されていないことをハッシュで保証します。
+
+```bash
+mkdir -p {{ evidence_dir }}/raw-logs
+cp conn.log files.log http.log ssl.log intel.log {{ evidence_dir }}/raw-logs/
+cd {{ evidence_dir }} && sha256sum raw-logs/* conn-large-uploads.tsv files-matched.tsv http-matched.tsv ssl-matched.tsv \
+  > evidence-ledger.sha256
+cat evidence-ledger.sha256
+echo "対象期間: {{ timeframe }}" >> {{ evidence_dir }}/work.log
+echo "調査対象ホスト: {{ suspect_src }}" >> {{ evidence_dir }}/work.log
+echo "エスカレーション先: {{ escalation_contact }}" >> {{ evidence_dir }}/work.log
+```
+
+不正な持ち出しと判断した場合は、この時点でwork.logの記録とともにエスカレーション連絡先へ一次報告を行います。通信の遮断はFW/IPS担当の手順に引き継ぎ、本手順の中では実施しません。
+
+## 動作確認
+
+- 検証用に模擬的な大量アップロード(しきい値超えのファイル転送)を発生させ、`conn-large-uploads.tsv` にその接続のorig_bytesが記録されること
+- `files-matched.tsv` に対応する転送ファイルのsha256が記録されること
+- `evidence-ledger.sha256` に保全した全ファイルのハッシュ値が記録され、後日の再計算で一致すること
+
+## 注意事項
+
+- 本手順は分析と証跡保全に徹する。通信の遮断・IP拒否はFW/IPS担当の手順と連携して実施し、本手順単独では遮断操作を行わない。
+- 宛先が正規のクラウドストレージか不正な持ち出し先かは、Intelフレームワークの一致結果とSNI/hostの許可リスト照合を必ず併用して判断し、いずれか一方のみで断定しない。
+- `{{ evidence_dir }}` 配下のログ原本は直接編集・削除せず、コピーに対してのみ加工・抽出を行う。
+- 保全した証跡には内部ホスト名やアクセス先URLなどの機微情報が含まれるため、`{{ evidence_dir }}` へのアクセス権限を関係者のみに限定する。
+- 誤検知の可能性がある段階でエスカレーション連絡先へ報告する際は、確定事実(送信量・宛先・ハッシュ)と推測(不正持ち出しの疑い)を明確に区別して伝える。

@@ -1,0 +1,4 @@
+tenant,mount_path,policy_name,auth_method,isolation_note
+team-alpha,secret/alpha,policy-alpha,approle,-
+team-beta,secret/beta,policy-beta,approle,-
+shared-pki,pki/shared,policy-shared-pki-read,approle,全テナント共通で読み取りのみ許可するPKIマウント

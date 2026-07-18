@@ -1,0 +1,16 @@
+appsec_listen: "127.0.0.1:7422"
+appsec_configs:
+  - "crowdsecurity/appsec-default"
+appsec_rules:
+  - "crowdsecurity/vpatch-generic-rules"
+  - "crowdsecurity/crs"
+inband_outband:
+  inband_rules: "crowdsecurity/vpatch-generic-rules"
+  outofband_rules: "crowdsecurity/crs"
+  default_remediation: "ban"
+  default_pass_action: "allow"
+bouncer_name: "crowdsec-nginx-bouncer"
+bouncer_conf_path: "/etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf"
+appsec_acquis_path: "/etc/crowdsec/acquis.d/appsec.yaml"
+appsec_config_path: "/etc/crowdsec/appsec-configs/custom-appsec.yaml"
+target_url: "https://app.example.com/"

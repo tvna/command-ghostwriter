@@ -1,0 +1,23 @@
+[jail]
+name = "sshd"
+logpath = "/var/log/auth.log"
+fail2ban_log = "/var/log/fail2ban.log"
+failregex = "^%(__prefix_line)sFailed password for .* from <HOST>"
+
+banned_ip = "203.0.113.77"
+affected_user = "alice"
+failregex_review = true
+shared_ip = true
+
+[app]
+name = "webapp"
+logpath = "/var/log/webapp/access.log"
+normal_failure_pattern = "AUTH_RETRY_REQUIRED"
+
+[strict_failregex]
+before = "^%(__prefix_line)sFailed password for .* from <HOST>"
+after = "^%(__prefix_line)sFailed password for (?!invalid user )\\S+ from <HOST> port \\d+ ssh2$"
+
+[whitelist]
+ignoreip_cidr = "203.0.113.0/24"
+label = "オフィス共有出口(NAT)"

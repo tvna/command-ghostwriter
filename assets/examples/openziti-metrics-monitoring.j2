@@ -1,0 +1,205 @@
+# OpenZitiメトリクスとイベント監視の構築
+
+OpenZitiコントローラ({{ controller_host }})のイベントストリームとメトリクスを収集し、回線(サーキット)数・アクティブセッション・edge router(ルータ)のオンライン状況をPrometheusで監視できる状態を作ります。作業はコントローラ機のroot権限(sudo)またはzitiユーザーで実施してください。
+
+## 目的
+
+controller.yamlの`events`設定でcircuit/edge.sessions/fabric.usage等のイベントをファイルにJSON出力し、Prometheus形式のメトリクス(`ziti_`プレフィックス)をスクレイプできるようにして、回線数・アクティブセッション・ルータのオンライン状態を継続的に監視できるようになることを目指します。
+
+## 用語解説
+
+- **イベントサブスクリプション(event subscriptions)**: コントローラ内部で発生する出来事(サーキット確立、edgeセッションの開始・終了、ファブリック使用状況等)を購読し、ファイルやstdoutへ出力する仕組み
+- **サーキット(circuit)**: edge routerを経由してクライアントとサービス間に確立される、実際にトラフィックが流れる論理回線
+- **オンラインルータ数(routers online)**: コントローラに現在接続し、サーキットの中継が可能な状態にあるedge routerの数。この数が想定を下回ると、新規接続やフェイルオーバー時の中継能力が不足する
+- **アクティブサーキット数(active circuits)**: 現時点で確立されている回線の数。急減は障害、急増は想定外の負荷やポリシー変更の兆候になり得る
+- **失敗ダイヤル(dial failures)**: クライアントがサービスへの接続(dial)を試みて失敗した回数。急増はservice policy/edge router policyの誤設定、あるいは許可されていないアイデンティティからの接続試行(攻撃の兆候)を示す
+- **スクレイプ間隔(scrape_interval)**: Prometheusがメトリクスエンドポイントへポーリングする周期
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| コントローラホスト(controller_host) | {{ controller_host }} |
+| イベント出力先ディレクトリ(events_output_dir) | {{ events_output_dir }} |
+| イベントサブスクリプション(event_subscriptions) | {% for s in event_subscriptions %}{{ s }}{% if not loop.last %}, {% endif %}{% endfor %} |
+| メトリクスエンドポイント(metrics_endpoint) | {{ metrics_endpoint }} |
+| スクレイプ間隔(scrape_interval) | {{ scrape_interval }} |
+| Prometheusジョブ名(prometheus_scrape_job) | {{ prometheus_scrape_job }} |
+
+## 手順
+
+### 1. controller.yamlにイベント出力を設定する
+
+`/opt/ziti/etc/controller.yaml`に`events`セクションを追記します。イベントには接続元アドレスやアイデンティティ識別子が含まれるため、出力先ディレクトリは後述の注意事項に従って権限を絞ってください。
+
+```bash
+sudo mkdir -p "{{ events_output_dir }}"
+sudo chown ziti:ziti "{{ events_output_dir }}"
+sudo chmod 750 "{{ events_output_dir }}"
+
+sudo tee -a /opt/ziti/etc/controller.yaml >/dev/null <<'EOF'
+events:
+  jsonLogger:
+    subscriptions:
+{% for s in event_subscriptions %}      - type: {{ s }}
+{% endfor %}    handler:
+      type: file
+      format: json
+      path: {{ events_output_dir }}/events.jsonl
+EOF
+```
+
+設定を反映するため、コントローラを再起動します。
+
+```bash
+sudo systemctl restart ziti-controller
+sudo systemctl status ziti-controller --no-pager
+```
+
+### 2. イベントからPrometheus形式のメトリクスを生成するエクスポータを起動する
+
+`events.jsonl`を継続的にtailし、`metrics`イベントのカウンタ・ゲージをPrometheusのテキスト形式(`ziti_`プレフィックス)で`{{ metrics_endpoint }}`に公開する常駐プロセスを立てます。
+
+```bash
+sudo tee /opt/ziti/bin/ziti_metrics_exporter.py >/dev/null <<'EOF'
+#!/usr/bin/env python3
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+EVENTS_PATH = "{{ events_output_dir }}/events.jsonl"
+STATE_LOCK = threading.Lock()
+STATE = {
+    "ziti_routers_online": 0,
+    "ziti_active_circuits": 0,
+    "ziti_dial_failures_total": 0,
+}
+
+
+def tail_events():
+    with open(EVENTS_PATH, "r") as f:
+        f.seek(0, 2)
+        while True:
+            line = f.readline()
+            if not line:
+                continue
+            try:
+                evt = json.loads(line)
+            except ValueError:
+                continue
+            namespace = evt.get("namespace", "")
+            with STATE_LOCK:
+                if namespace == "fabric.usage" and evt.get("event_type") == "router.online":
+                    STATE["ziti_routers_online"] = evt.get("count", STATE["ziti_routers_online"])
+                elif namespace == "circuit" and evt.get("event_type") == "created":
+                    STATE["ziti_active_circuits"] += 1
+                elif namespace == "circuit" and evt.get("event_type") == "deleted":
+                    STATE["ziti_active_circuits"] = max(0, STATE["ziti_active_circuits"] - 1)
+                elif namespace == "edge.sessions" and evt.get("event_type") == "dial_failed":
+                    STATE["ziti_dial_failures_total"] += 1
+
+
+class MetricsHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path != "/metrics":
+            self.send_response(404)
+            self.end_headers()
+            return
+        with STATE_LOCK:
+            lines = [f"{k} {v}" for k, v in STATE.items()]
+        body = ("\n".join(lines) + "\n").encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; version=0.0.4")
+        self.end_headers()
+        self.wfile.write(body)
+
+
+threading.Thread(target=tail_events, daemon=True).start()
+HTTPServer(("127.0.0.1", 9186), MetricsHandler).serve_forever()
+EOF
+sudo chmod 750 /opt/ziti/bin/ziti_metrics_exporter.py
+
+sudo tee /etc/systemd/system/ziti-metrics-exporter.service >/dev/null <<'EOF'
+[Unit]
+Description=OpenZiti events -> Prometheus metrics exporter
+After=ziti-controller.service
+
+[Service]
+User=ziti
+ExecStart=/usr/bin/python3 /opt/ziti/bin/ziti_metrics_exporter.py
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now ziti-metrics-exporter
+```
+
+### 3. Prometheusにスクレイプ設定を追加する
+
+Prometheus本体の`prometheus.yml`に、以下のスクレイプジョブを追加します。
+
+```bash
+sudo tee -a /etc/prometheus/prometheus.yml >/dev/null <<'EOF'
+  - job_name: '{{ prometheus_scrape_job }}'
+    scrape_interval: {{ scrape_interval }}
+    static_configs:
+      - targets: ['{{ metrics_endpoint | replace("http://", "") | replace("https://", "") | replace("/metrics", "") }}']
+EOF
+sudo promtool check config /etc/prometheus/prometheus.yml
+sudo systemctl reload prometheus
+```
+
+### 4. アラートルールを配置する
+
+失敗ダイヤルの急増やルータのオフライン化を検知するアラートルールを配置します。
+
+```bash
+sudo tee /etc/prometheus/rules/openziti.rules.yml >/dev/null <<'EOF'
+groups:
+  - name: openziti
+    rules:
+{% for r in alert_rules %}      - alert: {{ r.name }}
+        expr: {{ r.expr }}
+        for: {{ r.for }}
+        labels:
+          severity: {{ r.severity }}
+        annotations:
+          description: "{{ r.description }}"
+{% endfor %}EOF
+sudo promtool check rules /etc/prometheus/rules/openziti.rules.yml
+sudo systemctl reload prometheus
+```
+
+## 動作確認
+
+メトリクスエンドポイントが応答し、想定した指標が含まれていることを確認します。
+
+```bash
+curl -s {{ metrics_endpoint }} | grep -E 'ziti_(routers_online|active_circuits|dial_failures_total)'
+```
+
+`ziti_routers_online`・`ziti_active_circuits`・`ziti_dial_failures_total`の3行がすべて出力されることを確認してください。
+
+イベント出力が実際に流れていることを確認します。
+
+```bash
+sudo tail -n 20 "{{ events_output_dir }}/events.jsonl"
+```
+
+{% for s in event_subscriptions %}`{{ s }}`{% if not loop.last %}、{% endif %}{% endfor %}それぞれのnamespaceを持つイベントが記録されていることを確認します。あわせて、コントローラ側のルータ台数と突き合わせます。
+
+```bash
+ziti fabric list routers
+```
+
+`ziti fabric list routers`の出力件数と`ziti_routers_online`の値が一致することを確認してください。一致しない場合はエクスポータのイベント集計ロジックまたはルータの接続状態を疑ってください。
+
+## 注意事項
+
+- イベント(`{{ events_output_dir }}/events.jsonl`)にはクライアントの接続元アドレスやアイデンティティ識別子が含まれます。ディレクトリの権限は`ziti`ユーザー・グループのみに絞り(`chmod 750`)、他のプロセス・ユーザーから読み取れないようにしてください。ログローテーション(`logrotate`等)を設定し、無期限に蓄積させないでください。
+- `DialFailureSpike`アラートが発報した場合、直近のservice policy/edge router policy変更を最初に確認してください。意図しないポリシー変更による誤設定である可能性と、許可されていないアイデンティティからの接続試行(攻撃の兆候)である可能性の両方を切り分け、後者と判断した場合はインシデント対応手順に従ってエスカレーションしてください。
+- `ziti_metrics_exporter.py`はローカルの`events.jsonl`のみを読み取り、外部への送信は行いません。Prometheus本体からのスクレイプのみを許可し、`metrics_endpoint`を外部ネットワークに公開しないでください(既定では127.0.0.1バインドです)。
+- `RoutersOffline`の閾値は本番のルータ冗長構成(最小台数)に合わせて`alert_rules`を調整してください。閾値を実際の最小稼働台数より低く設定すると、縮退中の障害を検知できません。

@@ -1,0 +1,7 @@
+num_threads = 4
+msg_cache_size = "256m"
+rrset_cache_size = "256m"
+slabs = 4
+prefetch = true
+so_rcvbuf = "4m"
+outgoing_range = 8192

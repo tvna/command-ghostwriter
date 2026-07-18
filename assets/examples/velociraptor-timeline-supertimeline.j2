@@ -1,0 +1,94 @@
+# Velociraptorによるタイムライン再構成
+
+MFT・イベントログ・レジストリなど複数の証跡ソースを収集し、Notebookの `timeline()` プラグインでスーパータイムラインとして統合し、インシデントのタイムラインを再構成します。
+
+## 目的
+
+複数の証跡ソース（ファイルシステムタイムスタンプ・イベントログ・レジストリ痕跡）をそれぞれ収集し、時刻フィールドを揃えて単一の時系列に統合（スーパータイムライン化）することで、侵害の開始から拡散までの攻撃フローを時系列で再構成できるようになることを目指します。
+
+## 用語解説
+
+- **MFT (Master File Table)**: NTFSのファイルごとの作成・更新・アクセス時刻（$STANDARD_INFORMATION / $FILE_NAME）を保持するメタデータ領域
+- **スーパータイムライン (Super Timeline)**: MFT・イベントログ・レジストリなど異種の証跡ソースを単一の時刻軸に統合したタイムラインで、log2timeline/plasoの用語としても知られる
+- **timeline() VQLプラグイン**: NotebookでVQLクエリ結果を時刻フィールド（`time_member`）に基づいて並べ替え、複数クエリの結果を1本のタイムラインに合成するVelociraptorのプラグイン
+- **source()プラグイン**: 既に収集済みのアーティファクト結果セット（client_id/flow_id/artifact指定）をVQLから参照するためのプラグイン
+- **timestomp（タイムスタンプ改ざん）**: 攻撃者がファイルの作成・更新時刻を意図的に書き換え、フォレンジック調査を妨害する手口
+- **インシデント再構成**: 複数証跡の時系列を突き合わせ、侵入から検知までの攻撃フロー（初期侵入→実行→永続化→拡散）を時系列で説明できる状態にすること
+
+## シナリオ設定
+
+| timeline_source | artifact | time_field | event_type | relevance |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["timeline_source"] }} | {{ r["artifact"] }} | {{ r["time_field"] }} | {{ r["event_type"] }} | {{ r["relevance"] }} |
+{% endfor %}
+
+以降の手順では `ClientId` は対象エンドポイントのクライアントID（例: `C.1a2b3c4d5e6f`）、`FlowId` は各アーティファクト収集後に払い出されるフローIDに読み替えてください。
+
+## 1. 証跡ソースごとにアーティファクトを収集する
+
+GUIの「New Collection」または以下のVQLで、シナリオ設定の各 `artifact` を対象クライアントに収集します。収集完了後、各行の `FlowId` を控えておきます。
+
+```vql
+{% for r in csv_rows %}SELECT collect_client(client_id=ClientId, artifacts=["{{ r["artifact"] }}"]) FROM scope()
+{% endfor %}```
+
+収集状況は次のVQLで確認します。
+
+```vql
+{% for r in csv_rows %}SELECT * FROM flow_results(client_id=ClientId, flow_id=FlowId, artifact="{{ r["artifact"] }}") LIMIT 5
+{% endfor %}```
+
+## 2. Notebookで各ソース単体のタイムラインを作成する
+
+Notebookセルで、各アーティファクトの結果を時刻フィールド（`time_field`）で正規化し、`event_type` をラベルとして付与した中間クエリを `LET` に保持します。
+
+```vql
+{% for r in csv_rows %}LET {{ r["event_type"] }} <= SELECT {{ r["time_field"] }} AS Timestamp, "{{ r["event_type"] }}" AS EventType, "{{ r["artifact"] }}" AS Artifact, "{{ r["timeline_source"] }}" AS Source FROM source(artifact='{{ r["artifact"] }}', client_id=ClientId, flow_id=FlowId)
+{% endfor %}```
+
+各 `LET` の中身は、下記のように単体でも時系列表示できることを確認します（`timeline_source` ごとの妥当性チェック）。
+
+```vql
+{% for r in csv_rows %}SELECT * FROM timeline(name="{{ r["event_type"] }}_only", query="SELECT * FROM {{ r["event_type"] }}", time_member="Timestamp")
+{% endfor %}```
+
+## 3. 複数ソースをスーパータイムラインとして統合する
+
+Step 2 で用意した各クエリを `timeline()` プラグインに列挙し、単一のタイムラインに統合します。`time_member` には正規化済みの `Timestamp` 列を指定し、タイムゾーンはNotebook側の表示設定でUTCに統一します。
+
+```vql
+SELECT * FROM timeline(
+    name="incident_supertimeline",
+    query="SELECT * FROM chain(
+{% for r in csv_rows %}        a{{ loop.index }}={{ r["event_type"] }}{% if not loop.last %},
+{% endif %}{% endfor %}
+    )",
+    time_member="Timestamp"
+)
+```
+
+統合結果を `relevance` で絞り込み、まず優先度の高い事象だけを見渡します。
+
+```vql
+SELECT * FROM timeline(name="incident_supertimeline")
+WHERE Source IN (
+{% for r in csv_rows %}{% if r["relevance"] == "high" %}    "{{ r["timeline_source"] }}"{% if not loop.last %},
+{% endif %}{% endif %}{% endfor %}
+)
+ORDER BY Timestamp ASC
+```
+
+## 動作確認
+
+1. Step 1のVQLで、シナリオ設定の全アーティファクトについて `flow_results` が空でないこと（各ソースの収集が成功していること）を確認する。
+2. Step 2の単体タイムラインが、それぞれ `time_field` に基づいて昇順に並んでいること（ソースごとの時刻正規化が正しいこと）を確認する。
+3. Step 3のスーパータイムラインで、異なる `timeline_source`（MFT・イベントログ・レジストリ等）の行が時刻順に混在して表示され、初期侵入から実行・永続化までの攻撃フローが1本の時系列として追えることを確認する。
+4. `relevance` が `high` の行だけに絞ったクエリで、件数が元のスーパータイムラインより少ないこと（絞り込みが機能していること）を確認する。
+
+## 注意事項
+
+- MFTの `$STANDARD_INFORMATION` 時刻はtimestomp（改ざん）の対象になりやすいため、`$FILE_NAME` 属性の時刻やイベントログなど独立した証跡ソースと突き合わせ、単一ソースの時刻のみで結論を出さない。
+- Notebookの表示タイムゾーンを収集元クライアントのタイムゾーンおよびNotebook設定の双方で確認し、UTCに統一してから統合すること。タイムゾーンが揃っていないと、スーパータイムライン上の前後関係を誤判定する。
+- 大量イベント（Sysmon等）をそのまま統合すると件数過多で埋もれるため、`relevance` や `event_type` によるWHERE絞り込みを先に行い、重要度の高い事象から確認する。
+- タイムライン自体が証跡となるため、各行がどの `artifact`・`client_id`・`flow_id` から得られたか（証跡性）をNotebookの記録またはエクスポート先に必ず残し、後日の検証・法的手続きに耐えられる状態にする。
+- 本手順は既存の証跡収集・監視体制を止めずに追加で実施する調査作業であり、認証経路やファイアウォール・DNS設定の変更を伴わないため、旧経路の無効化前検証は対象外。

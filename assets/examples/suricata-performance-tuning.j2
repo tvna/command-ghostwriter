@@ -1,0 +1,158 @@
+# Suricata スループット性能チューニング手順
+
+想定リンク帯域 **{{ expected_bandwidth_mbps }} Mbps** の高負荷環境で、ワーカースレッド・リングバッファ・Hyperscan（HS）マルチパターンマッチャーを調整し、パケット取りこぼし（カーネルドロップ）を抑える手順です。
+
+## 目的
+
+`suricata.yaml` のスレッド割当（CPU affinity）、af-packet のリングバッファ、MPMアルゴリズム（Hyperscan）、`max-pending-packets` を調整し、高負荷リンクでもパケットロス（kernel drop）や再構築失敗（reassembly gap）を発生させない性能設定を行えるようになることを目指します。
+
+## 用語解説
+
+- **ワーカースレッド（worker threads）**: パケットの検知処理（ルールマッチング）を並列に行う Suricata のスレッド。CPU コア数に応じて増やすことでスループットが向上する
+- **CPU affinity（CPU 割当）**: 特定のスレッドを特定の CPU コアに固定すること。`management-cpu-set` は管理系スレッド、`worker-cpu-set` は検知ワーカースレッド用
+- **af-packet**: Linux カーネルの `AF_PACKET` ソケットを使ったパケットキャプチャ方式。`ring-size`（1スレッドあたりのリングバッファに保持するパケット数）や `block-size`（1ブロックのバイト数）を持つ
+- **mpm-algo（マルチパターンマッチャー）**: ルール中の複数パターンを同時検索するアルゴリズム。`hs`（Hyperscan）は Intel 製の高速正規表現・パターンマッチングライブラリで、大量ルール環境で有効
+- **max-pending-packets**: キャプチャスレッドが検知スレッドの処理待ちで保持できる未処理パケットの最大数。大きくするとバースト耐性が上がるがメモリを消費する
+- **kernel_drops**: `stats.log` / `eve.json` の `stats` イベントに含まれる、カーネルレベルで破棄されたパケット数（`capture.kernel_drops`）
+- **reassembly_gap**: TCP ストリーム再構築時に欠落したセグメントの数（`tcp.reassembly_gap`）。値が増え続ける場合はパケットロスやリソース不足のシグナル
+- **RSS（Receive Side Scaling）**: NIC がハードウェアで受信キューを複数CPUに分散する機能。af-packet のスレッド数と RSS キュー数を揃えることで偏りを防ぐ
+- **NICオフロード**: NIC が TCP/IP 処理の一部（チェックサム計算やセグメント結合など）を肩代わりする機能。IDS/IPS ではパケットの内容が改変され誤検知・見逃しの原因になるため無効化が推奨される
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| ワーカースレッド数 (worker_threads) | {{ worker_threads }} |
+| リングサイズ (ring_size) | {{ ring_size }} |
+| MPMアルゴリズム (mpm_algo) | {{ mpm_algo }} |
+| CPU affinity (worker-cpu-set) | {{ cpu_affinity | join(', ') }} |
+| 想定リンク帯域 | {{ expected_bandwidth_mbps }} Mbps |
+
+## 1. 調整前の基準値を記録する
+
+チューニング前の状態で `stats.log` および `eve.json` の `stats` イベントから基準値を採取します。比較の基準にするため、必ず調整前に実施します。
+
+```bash
+# 現在の実効設定を確認
+suricata --build-info | grep -i hyperscan
+suricataasc -c /var/run/suricata/suricata-command.socket iface-list
+
+# stats.log から直近のカーネルドロップ数を確認
+grep -E "kernel_drops|kernel_packets" /var/log/suricata/stats.log | tail -n 20
+
+# eve.json の stats イベント（capture.kernel_drops / tcp.reassembly_gap）を抽出
+jq 'select(.event_type=="stats") | {ts: .timestamp, kernel_drops: .stats.capture.kernel_drops, reassembly_gap: .stats.tcp.reassembly_gap}' \
+  /var/log/suricata/eve.json | tail -n 5
+```
+
+## 2. NICオフロードを無効化し、RSSキュー数を揃える
+
+IDS/IPS ではハードウェアオフロードがパケット内容を書き換え、シグネチャの誤検知・見逃しを招くため無効化します。RSS キュー数は af-packet のワーカースレッド数（`{{ worker_threads }}`）に揃え、コア割当の偏りを防ぎます。
+
+```bash
+# NICオフロード（GRO/LRO/GSO/TSO/チェックサムオフロード）を無効化
+ethtool -K ens192 gro off lro off gso off tso off rx off tx off
+
+# 現在のRSSキュー数を確認し、ワーカースレッド数に合わせる
+ethtool -l ens192
+ethtool -L ens192 combined {{ worker_threads }}
+
+# 設定を確認
+ethtool -k ens192 | grep -E "generic-receive|large-receive|tcp-segmentation|checksum"
+ethtool -l ens192
+```
+
+## 3. suricata.yaml のCPU affinityを設定する
+
+管理スレッドと検知ワーカースレッドで使用する CPU コアを明示的に分離します（設定はコメントとして記載し、実際の反映はステップ5で行います）。
+
+```yaml
+# /etc/suricata/suricata.yaml
+threading:
+  set-cpu-affinity: yes
+  cpu-affinity:
+    - management-cpu-set:
+        cpu: [ 0, 1 ]
+        mode: "balanced"
+    - worker-cpu-set:
+        cpu: [ {{ cpu_affinity | join(', ') }} ]
+        mode: "exclusive"
+        threads: {{ worker_threads }}
+        prio:
+          default: "high"
+```
+
+## 4. af-packetとMPMアルゴリズムを調整する
+
+リングバッファのサイズと `mpm-algo` を Hyperscan に設定し、`max-pending-packets` を増やしてバースト耐性を上げます。
+
+```yaml
+# /etc/suricata/suricata.yaml
+af-packet:
+  - interface: ens192
+    threads: {{ worker_threads }}
+    ring-size: {{ ring_size }}
+    block-size: 32768
+    cluster-id: 99
+    cluster-type: cluster_qm
+    defrag: yes
+    use-mmap: yes
+
+detect-engine:
+  - profile: high
+  - custom-values:
+      toclient-groups: 3
+      toserver-groups: 25
+  - sgh-mpm-context: full
+  - inspection-recursion-limit: 3000
+
+mpm-algo: {{ mpm_algo }}
+spm-algo: hs
+
+max-pending-packets: 65535
+```
+
+## 5. 設定を反映する
+
+構文チェックの後、Suricata を再起動して設定を反映します。
+
+```bash
+# 設定ファイルの構文チェック（反映前に必ず実施）
+suricata -T -c /etc/suricata/suricata.yaml -v
+
+# 問題がなければ再起動して反映
+systemctl restart suricata
+systemctl status suricata --no-pager
+
+# ワーカースレッドがCPU affinity通りに配置されているか確認
+ps -T -o pid,tid,psr,comm -C suricata
+```
+
+## 6. 調整後の値を比較する（動作確認）
+
+ステップ1と同じ方法で調整後の値を採取し、`capture.kernel_drops` と `tcp.reassembly_gap` の増加が調整前より抑えられていることを確認します。
+
+```bash
+# 調整後、想定帯域相当のトラフィックを一定時間流した後に採取
+grep -E "kernel_drops|kernel_packets" /var/log/suricata/stats.log | tail -n 20
+
+jq 'select(.event_type=="stats") | {ts: .timestamp, kernel_drops: .stats.capture.kernel_drops, reassembly_gap: .stats.tcp.reassembly_gap}' \
+  /var/log/suricata/eve.json | tail -n 5
+
+# Hyperscanが実際にロードされているか確認
+suricatasc -c /var/run/suricata/suricata-command.socket -c "iface-stat ens192"
+```
+
+- ステップ1で採取した調整前の `capture.kernel_drops` の増分（一定時間あたり）に対し、調整後は同一負荷条件下で増分が減少していること
+- `tcp.reassembly_gap` が調整前と比べて増加傾向にないこと（横ばいまたは減少）
+- `ps -T` の出力でワーカースレッドが `worker-cpu-set` に指定したコア（{{ cpu_affinity | join(', ') }}）に配置されていること
+- `suricata -T` の構文チェックがエラーなく完了していること
+
+## 注意事項
+
+- 本手順は本番稼働中のIDS/IPSに対する変更を含む。`ethtool -K` によるオフロード無効化や `systemctl restart suricata` は瞬断・一時的な検知停止を伴うため、必ずメンテナンス時間帯に実施し、事前に影響範囲と関係者へ周知する。
+- Suricataが **IPSモード**（inline/NFQUEUE等）で稼働している場合、設定ミスによる再起動失敗はネットワーク遮断に直結する。旧設定ファイルを `suricata.yaml.bak` として必ずバックアップし、ステップ5の構文チェック（`suricata -T`）がエラーなく通ることを新設定・旧設定の両方で確認してから切替え、異常時は直ちにバックアップへロールバックできるようにしておく。
+- CPU affinity で指定するコアは、OSやNIC割り込み処理（IRQ affinity）と重複しないコアを選定する。重複するとかえって性能が低下する。
+- メモリ使用量の概算は `ring-size × block-size × worker_threads` で見積もる。本シナリオの設定では概算 {{ ring_size * 32768 * worker_threads }} バイト（約 {{ (ring_size * 32768 * worker_threads / 1048576) | round(1) }} MiB）をキャプチャバッファ用に消費するため、事前にホストの空きメモリを確認する。
+- RSSキュー数とワーカースレッド数を一致させないと、特定コアに負荷が偏り `kernel_drops` が増加する原因になる。`ethtool -L` 変更後は必ず `ethtool -l` で反映結果を確認する。
+- 変更後にトラフィックが正常に検知・通過していることを確認するまでは、旧設定ファイルや旧サービスユニットを削除しない。

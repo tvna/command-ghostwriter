@@ -1,0 +1,7 @@
+control_socket = "127.0.0.1@8953"
+control_cert_dir = "/etc/unbound/unbound_control"
+flush_scope = "name"
+target = "www.example.com"
+record_type = "A"
+verify_dig = "www.example.com"
+reload_needed = false

@@ -1,0 +1,121 @@
+# Vaultトークンのライフサイクル管理
+
+トークンロール（CSV）に基づき、TTL・renewal・orphan・revocationを設計し、Vaultトークンの濫用を防ぐ運用手順を実施します。
+
+## 目的
+
+HashiCorp Vaultのトークンは発行しっぱなしにすると失効漏れや長寿命化により攻撃対象領域が広がります。この手順では、トークンロールでTTL・最大TTL・使用回数・orphan有無を定義し、periodic tokenとbatch tokenを使い分け、accessor経由で安全に失効させ、棚卸しで取りこぼしを防げるようになることを目指します。
+
+## 用語解説
+
+- **token_ttl / token_max_ttl**: 発行時の初期有効期間(TTL)と、renewを繰り返しても超えられない絶対上限(max TTL)
+- **token_num_uses**: トークンを使用できる回数の上限。0は無制限、1は使い切り(single-use)
+- **orphan token**: 親トークンに従属しない独立したトークン。親が失効しても影響を受けない代わりに、棚卸しで見落とされやすい
+- **periodic token**: `token_period` に基づき、renewのたびにTTLが period 分だけリセットされる長期稼働向けトークン(max TTLの制約を受けない代わりに定期renewが必須)
+- **batch token**: ストレージに永続化されずaccessorを持たない軽量トークン。renew・orphan化はできないが大量発行に向く
+- **accessor**: トークン本体の値を含まない識別子。accessor経由でlookup/renew/revokeすればトークン値を晒さずに管理できる
+- **lease(リース)とトークンの二層失効**: トークンを失効させても、そのトークンが払い出した動的シークレットのリースは別管理されている場合があり、`vault lease revoke` で個別に失効させる必要がある
+
+## シナリオ設定
+
+| token_role | ttl | max_ttl | num_uses | orphan | use_case |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["token_role"] }} | {{ r["ttl"] }} | {{ r["max_ttl"] }} | {{ r["num_uses"] }} | {{ r["orphan"] }} | {{ r["use_case"] }} |
+{% endfor %}
+
+## 1. トークンロールを定義する
+
+`max_ttl` が `-` の行は periodic token として `token_period` を設定し、それ以外は `token_explicit_max_ttl` で絶対上限を明示します。
+
+```bash
+vault login -method=userpass username=vault-admin
+{% for r in csv_rows %}{% if r["max_ttl"] != "-" %}
+vault write auth/token/roles/{{ r["token_role"] }} \
+  token_ttl={{ r["ttl"] }} \
+  token_explicit_max_ttl={{ r["max_ttl"] }} \
+  token_num_uses={{ r["num_uses"] }} \
+  orphan={{ r["orphan"] }}
+{% else %}
+vault write auth/token/roles/{{ r["token_role"] }} \
+  token_period={{ r["ttl"] }} \
+  token_num_uses={{ r["num_uses"] }} \
+  orphan={{ r["orphan"] }}
+{% endif %}{% endfor %}
+```
+
+## 2. ロールからトークンを発行する
+
+`num_uses` が `1` の行は使い切りの batch token、それ以外は service token として発行します。
+
+```bash
+{% for r in csv_rows %}{% if r["num_uses"] == "1" %}
+vault token create -role={{ r["token_role"] }} -type=batch -field=token
+{% else %}
+vault token create -role={{ r["token_role"] }} -field=token -field=accessor
+{% endif %}{% endfor %}
+```
+
+発行結果（token本体とaccessor）はこの場では画面表示のみに留め、ログやチケットには書き写さないでください。
+
+## 3. periodic tokenをrenewし続ける
+
+periodic token（`max_ttl` が `-` の行）は period が尽きる前に renew を行い続けることで稼働を継続します。
+
+```bash
+{% for r in csv_rows %}{% if r["max_ttl"] == "-" %}
+vault token renew -accessor <{{ r["token_role"] }}のaccessor>
+{% endif %}{% endfor %}
+```
+
+## 4. max_ttl到達での自動失効を確認する
+
+`max_ttl` が設定されている行は、renewを繰り返しても max_ttl に到達した時点で失効します。
+
+```bash
+{% for r in csv_rows %}{% if r["max_ttl"] != "-" %}
+vault token renew -accessor <{{ r["token_role"] }}のaccessor>
+vault token lookup -accessor <{{ r["token_role"] }}のaccessor>
+{% endif %}{% endfor %}
+```
+
+`vault token lookup` の `ttl` が0に近づき、max_ttl超過後は `permission denied` となって renew もlookupも失敗することを確認します。
+
+## 5. accessor経由で失効させる
+
+トークン本体の値を扱わず、accessorのみで lookup・revoke を行います。
+
+```bash
+{% for r in csv_rows %}
+vault token lookup -accessor <{{ r["token_role"] }}のaccessor>
+vault token revoke -accessor <{{ r["token_role"] }}のaccessor>
+{% endfor %}
+```
+
+## 6. 未失効トークンの棚卸し（定期確認）
+
+accessor一覧を取得し、想定外に残っているトークンがないか定期的に突合します。
+
+```bash
+vault list auth/token/accessors
+{% for r in csv_rows %}vault token lookup -accessor <{{ r["token_role"] }}のaccessor> 2>&1 | grep -E "^(display_name|orphan|ttl|path)"
+{% endfor %}
+```
+
+台帳（シナリオ設定の表）に無いaccessorや、`orphan` が `true` なのに長期間放置されているトークンは棚卸し対象として個別に精査・失効させてください。
+
+## 動作確認
+
+- Step 2 で発行した各トークンで、対応するVaultポリシー配下の操作が実行できること
+- periodic token（`svc-api-periodic`）が Step 3 のrenewで有効期限を延長できること
+- max_ttlを持つトークン（`ci-batch-short` / `human-operator` / `legacy-admin-longlived`）が max_ttl到達後に `vault token lookup` で失効(permission denied)と表示されること
+- Step 5 でrevokeしたaccessorに対する `vault token lookup` が失効エラーを返すこと
+- Step 6 の棚卸しで、シナリオ設定の表に載っていないaccessorが存在しないこと
+
+## 注意事項
+
+- `legacy-admin-longlived`（ttl=24h, max_ttl=720h, orphan=true）のような長寿命トークンは新規発行を禁止し、既存分は棚卸しで検出し次第、短TTLのロールへ移行して失効させる。
+- root tokenは常用しない。作業のために発行した場合は、作業完了直後に `vault token revoke -self` で必ず自己失効させる。
+- トークンの失効・棚卸し作業では accessor のみを扱い、トークン本体の値をログ・チケット・チャットに残さない。
+- サービストークンをローテーションする際は、新トークンを先に発行して疎通確認（lookupおよび実際のAPI呼び出しが成功すること）を行ってから、旧トークンをStep 5でrevokeする。新旧を同時に無効化しない。
+- トークンをrevokeしても、そのトークンが発行した動的シークレットのリースが別途残る場合があるため、`vault lease revoke` によるリース側の失効も合わせて確認する（トークンとリースの二層失効）。
+- accessor一覧の取得・棚卸し(`vault list auth/token/accessors`)はroot/sudo権限相当の操作のため、実施者と実施ログを限定する。

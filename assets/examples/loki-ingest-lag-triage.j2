@@ -18,7 +18,7 @@
 
 | 項目 | 値 |
 | --- | --- |
-| 対象ストリーム | `{{ stream_selector }}` |
+| 対象ストリーム | `{job="{{ job_label }}", environment="{{ environment_label }}"}` |
 | テナントID | `{{ tenant_id }}` |
 | promtail positionsファイル | `{{ promtail_positions_file }}` |
 | promtailメトリクスURL | `{{ promtail_metrics_url }}` |
@@ -53,7 +53,7 @@ sudo journalctl -u loki --since "1 hour ago" | grep -i "429\|rate_limited\|per-s
 ```
 
 {% if rate_limit_429 %}
-→ `loki_discarded_samples_total{reason="rate_limited", tenant="{{ tenant_id }}"}`が増加しており、`{{ stream_selector }}`のストリームで`429 Too Many Requests`が発生していることを確認しました。現在の`per_stream_rate_limit`は`{{ per_stream_rate_limit_mb }}`MB/s(burst `{{ per_stream_rate_limit_burst_mb }}`MB)で、対象ストリームの実測書き込み速度がこれを上回っています。この時点で原因は特定できたため、手順4(是正)に進みます。
+→ `loki_discarded_samples_total{reason="rate_limited", tenant="{{ tenant_id }}"}`が増加しており、`{job="{{ job_label }}", environment="{{ environment_label }}"}`のストリームで`429 Too Many Requests`が発生していることを確認しました。現在の`per_stream_rate_limit`は`{{ per_stream_rate_limit_mb }}`MB/s(burst `{{ per_stream_rate_limit_burst_mb }}`MB)で、対象ストリームの実測書き込み速度がこれを上回っています。この時点で原因は特定できたため、手順4(是正)に進みます。
 {% else %}
 → `rate_limited`による破棄は見られませんでした。distributor側の制限は原因ではないため、次段(ingester)の確認に進みます。
 {% endif %}
@@ -68,7 +68,7 @@ sudo journalctl -u loki --since "1 hour ago" | grep -iE "ingester|flush|failed t
 {% if ingester_check %}
 → `loki_ingester_memory_chunks`が増加を続け`loki_ingester_chunks_flushed_total`が伸びていない場合、ingesterがチャンクをフラッシュできず滞留しています。`{{ storage_backend }}`(`{{ storage_bucket }}`)への書き込みエラーがログに出ていないか確認し、ストレージ側の認証情報・疎通・容量を点検してください。
 {% else %}
-→ 前段(手順2)で`{{ stream_selector }}`のレート制限超過を原因として特定できたため、本手順ではingesterのフラッシュ状況に異常が無いことの確認のみ行い、深追いは行いません。フラッシュ関連メトリクスに異常があれば別途この手順を主経路として調査してください。
+→ 前段(手順2)で`{job="{{ job_label }}", environment="{{ environment_label }}"}`のレート制限超過を原因として特定できたため、本手順ではingesterのフラッシュ状況に異常が無いことの確認のみ行い、深追いは行いません。フラッシュ関連メトリクスに異常があれば別途この手順を主経路として調査してください。
 {% endif %}
 
 ### 4. レート制限を是正する
@@ -106,7 +106,7 @@ curl -s {{ loki_metrics_url }} | grep -E "loki_ingester_oldest_unflushed_chunk_t
 
 ```bash
 curl -sG {{ loki_query_url }} \
-  --data-urlencode 'query={{ stream_selector }}' \
+  --data-urlencode 'query={job="{{ job_label }}", environment="{{ environment_label }}"}' \
   --data-urlencode 'start='$(date -d '5 minutes ago' +%s%N) \
   --data-urlencode 'end='$(date +%s%N) \
   -H "X-Scope-OrgID: {{ tenant_id }}"

@@ -1,0 +1,156 @@
+# OPAポリシー変更の段階ロールアウト — {{ service_name }}
+
+新しいRegoポリシー `{{ policy_name }}` を、既存トラフィックへ影響を与えないshadow評価から開始し、影響がないことを確認したうえでenforceへ昇格します。配布はbundle経由で段階的に行います。
+
+## 目的
+
+新ポリシーの適用によって正規トラフィックが誤って拒否される「ロックアウト」を防ぎつつ、shadow評価→enforceの順で安全に昇格させ、問題発生時はbundleのバージョンを戻すだけで即座に切り戻せる状態を維持できるようになることを目指します。
+
+## 用語解説
+
+- **shadow評価**: 新ポリシーを実際に判定させるが、その結果でリクエストを拒否/許可しない評価モード。アプリケーションは本番ポリシー(`{{ prod_package }}`)の結果のみで動作し、新ポリシー(`{{ shadow_package }}`)の結果はdecision logに記録するだけなので、本番トラフィックへは無影響のまま影響測定ができる
+- **decision log**: OPAが下した各判定(input・result・該当ルール)を記録するログ。shadow評価の影響分析はこのログを集計して行う
+- **enforce**: 新ポリシーの判定結果を実際にリクエストの許可/拒否に使う段階
+- **bundle**: Regoポリシーとデータをまとめて配布する単位。bundle-serverが配信し、OPAはリビジョン(版数)ごとポーリングして取得する
+- **ロックアウト**: 誤ったポリシーにより正規トラフィックが一括拒否されてしまう事故
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 対象サービス | {{ service_name }} |
+| ポリシー名 | {{ policy_name }} |
+| 本番パッケージ (enforce対象) | {{ prod_package }} |
+| shadow用パッケージ | {{ shadow_package }} |
+| OPAエンドポイント | {{ opa_url }} |
+| bundle配信元 | {{ bundle_service_url }} |
+| 現行bundleリビジョン | {{ current_bundle_revision }} |
+| 直前bundleリビジョン(切り戻し先) | {{ previous_bundle_revision }} |
+| 現在の段階 | {{ rollout_stage }} |
+| decision logでshadow記録するか | {{ shadow_decision_log }} |
+| 昇格中止のしきい値 | {{ impact_threshold }} |
+| エスカレーション先 | {{ escalation }} |
+
+## 手順
+
+### 1. 新ポリシーをshadow用パッケージとしてbundleに追加する
+
+本番の判定に使われている `{{ prod_package }}` パッケージには触れず、新ポリシーを別パッケージ `{{ shadow_package }}` として同じbundleに同梱します。
+
+```rego
+package authz_v2
+
+import future.keywords.if
+
+default allow := false
+
+allow if {
+    input.method == "GET"
+    input.path == ["healthz"]
+}
+
+allow if {
+    input.user.role == "admin"
+}
+
+allow if {
+    input.user.role == "service"
+    input.user.scope[_] == "payments:write"
+}
+```
+
+```bash
+opa build -b policies/ -o bundle.tar.gz
+```
+
+### 2. decision logを有効化してbundleを配布する
+
+OPAの設定でdecision logsを有効にし、`{{ shadow_package }}` への判定もすべて記録されるようにしてから、新リビジョンのbundleを配信します。
+
+```yaml
+# opa config.yaml (抜粋)
+services:
+  bundle_server:
+    url: {{ bundle_service_url }}
+bundles:
+  payments-authz:
+    service: bundle_server
+    resource: bundles/{{ policy_name }}/bundle.tar.gz
+    polling:
+      min_delay_seconds: 10
+      max_delay_seconds: 20
+decision_logs:
+  console: true
+```
+
+```bash
+curl -X PUT {{ bundle_service_url }}/bundles/{{ policy_name }}/bundle.tar.gz \
+  -H "X-Bundle-Revision: {{ current_bundle_revision }}" \
+  --data-binary @bundle.tar.gz
+```
+
+### 3. 現行の段階を確認する
+
+```bash
+curl -s {{ opa_url }}/v1/status | jq '.bundles["payments-authz"].active_revision'
+```
+
+active_revisionが `{{ current_bundle_revision }}` になり、shadow段階(`{{ rollout_stage }}`)であることを確認します。
+
+{% if shadow_decision_log %}
+### 4. shadow評価による判定ログを収集する
+
+アプリケーションは引き続き `{{ prod_package }}` の結果のみで動作させたまま、`{{ shadow_package }}` に対しても同じinputで並行評価させ、decision logへ記録させます。
+
+```bash
+curl -s {{ opa_url }}/v1/data/{{ shadow_package }}/allow -d @sample_input.json
+```
+
+一定期間(例: 24時間分の実トラフィック相当)のdecision logを収集し、`{{ shadow_package }}` がdenyと判定した件数のうち、実際には正規利用者のリクエストだった件数を集計します。
+{% endif %}
+
+### 5. shadowでの拒否を分析し例外を整備する
+
+```bash
+grep '"path":"{{ shadow_package }}/allow"' /var/log/opa/decision.log \
+  | jq 'select(.result == false)' \
+  | jq -s 'group_by(.input.user.role) | map({role: .[0].input.user.role, count: length})'
+```
+
+集計結果が `{{ impact_threshold }}` を下回っていることを確認します。正規トラフィックの誤拒否が見つかった場合は、ロックアウト防止のため必ずここで例外(allowルールの追加やロールの見直し)を整備してからenforceへ進みます。しきい値を超える場合は昇格を中止し、{{ escalation }} へ報告します。
+
+### 6. enforceへ昇格する
+
+shadowでの拒否分析が完了し、しきい値内であることを確認したら、アプリケーション側が参照するパッケージを `{{ shadow_package }}` の内容へ切り替え、新しいbundleリビジョンとして配布します。
+
+```bash
+opa build -b policies/ -o bundle.tar.gz --revision enforce-$(date +%Y%m%d%H)
+curl -X PUT {{ bundle_service_url }}/bundles/{{ policy_name }}/bundle.tar.gz \
+  --data-binary @bundle.tar.gz
+```
+
+```bash
+curl -s {{ opa_url }}/v1/status | jq '.bundles["payments-authz"].active_revision'
+```
+
+### 7. enforce後の正常系トラフィックを確認する
+
+```bash
+{% for c in verification_checks %}{{ c }}
+{% endfor %}```
+
+正規リクエストが引き続き許可されており、想定外の一括拒否が発生していないことを確認します。
+
+## 動作確認
+
+- Step 4〜5のshadow評価でdecision logが収集でき、拒否件数の内訳(ロール別)が確認できていること
+- shadowでの拒否分析の結果が `{{ impact_threshold }}` を下回っていること
+- enforce昇格後、`curl -s {{ opa_url }}/v1/status` のactive_revisionが新しいenforce用リビジョンになっていること
+- Step 7の全検証コマンドが、正規トラフィックに対して許可(allow: true相当)の応答を返していること
+
+## 注意事項
+
+- 誤ったポリシーをそのままenforceすると正規トラフィックが一括拒否される(ロックアウト)おそれがあるため、必ずshadowでの拒否分析(Step 4〜5)を先に行い、正規トラフィックの誤拒否がないことを確認してからenforceへ進むこと。しきい値(`{{ impact_threshold }}`)を超える場合は昇格を中止する。
+- bundleはshadow用パッケージ(`{{ shadow_package }}`)を追加する形で配布し、本番判定に使われる `{{ prod_package }}` には手を加えないことで、enforce昇格前は既存の認可挙動に一切影響を与えない。
+- enforce昇格後に問題が発覚した場合は、bundle-serverの `{{ policy_name }}` を直前のリビジョン `{{ previous_bundle_revision }}` へ即座に差し戻し、OPAのポーリング間隔を待たずに反映されたことをStep 3の確認コマンドで確かめる。
+- 段階配布・切り戻しの判断はいずれも{{ escalation }}と共有してから実施する。

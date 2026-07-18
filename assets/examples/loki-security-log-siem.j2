@@ -49,7 +49,7 @@ scrape_configs:
 {% for stage in parse_stages %}  # {{ stage.job_name }}: {{ stage.description }}
 {% if stage.stage_type == "regex" %}  pipeline_stages:
     - regex:
-        expression: '{{ stage.regex }}'
+        expression: '{{ stage.regex | safe }}'
     - labels:
         src_ip:
 {% else %}  pipeline_stages:

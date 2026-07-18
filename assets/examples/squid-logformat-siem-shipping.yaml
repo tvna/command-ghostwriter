@@ -1,0 +1,14 @@
+log_format: json
+log_fields:
+  - "%ts.%03tu"
+  - "%>a"
+  - "%Ss/%03>Hs"
+  - "%<st"
+  - "%rm"
+  - "%ru"
+  - "%un"
+  - "%Sh/%<a"
+  - "%mt"
+rotate_schedule: "0 3 * * *"
+shipper: Promtail
+siem_endpoint: "https://siem.corp.local:8443/loki/api/v1/push"

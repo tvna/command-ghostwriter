@@ -13,7 +13,6 @@ change_log_source = "変更管理台帳 (CHANGE-xxxx, Redmineチケット一覧)
 test_id = "SSH-7408"
 category = "SSH"
 message = "AllowTcpForwarding is enabled (default: yes) in sshd_config"
-
 suggestion = "Disable AllowTcpForwarding unless a documented business need exists"
 change_ticket = "unmanaged"
 

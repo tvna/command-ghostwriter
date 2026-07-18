@@ -1,0 +1,7 @@
+current_version: "0.72.0"
+target_version: "0.73.4"
+pilot_labels:
+  - "pilot-upgrade-linux"
+  - "pilot-upgrade-windows"
+cutover_window: "2026-07-20 02:00-04:00 JST"
+rollback_step: "旧バージョン(velociraptor_0.72.0)のパッケージを再配布し、client.config.yamlを変更せずサービスを再起動して切り戻す"

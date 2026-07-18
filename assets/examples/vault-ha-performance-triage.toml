@@ -1,0 +1,9 @@
+title = "Vault HAクラスタ性能・シール事象の調査"
+hostname = "vault-prod-01"
+cluster_name = "vault-ha-cluster"
+vault_addr = "https://127.0.0.1:8200"
+lease_count_threshold = 50000
+cluster_check = true
+audit_device_check = true
+raft_quorum = true
+escalation = "セキュリティ基盤チーム (内線 1340)"

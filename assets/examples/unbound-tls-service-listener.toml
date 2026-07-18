@@ -1,0 +1,8 @@
+tls_cert_path = "/etc/unbound/tls/fullchain.pem"
+tls_key_path = "/etc/unbound/tls/privkey.pem"
+dot_port = 853
+listen_interfaces = ["0.0.0.0", "::0"]
+allowed_clients = ["10.0.30.0/24", "127.0.0.0/8"]
+resolver_hostname = "resolver.example.internal"
+upstream_dot_addr = "1.1.1.1@853#cloudflare-dns.com"
+acme_renew_hook = "/etc/unbound/tls-reload.sh"

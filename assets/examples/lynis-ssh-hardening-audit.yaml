@@ -1,0 +1,42 @@
+server:
+  host: "app-02"
+  admin_user: "ops"
+
+paths:
+  sshd_dropin: "/etc/ssh/sshd_config.d/70-hardening.conf"
+  lynis_report: "/var/log/lynis-report.dat"
+
+ssh_findings:
+  - test_id: "SSH-7408"
+    item: "PermitRootLogin"
+    current_value: "yes"
+    risk: "root での直接ログインが許可されており、総当たり攻撃の標的になる"
+  - test_id: "SSH-7408"
+    item: "Protocol"
+    current_value: "(未設定・SSH1が黙示的に許容され得る)"
+    risk: "SSH1相当の脆弱なプロトコルが排除されていない"
+  - test_id: "SSH-7408"
+    item: "X11Forwarding"
+    current_value: "yes"
+    risk: "不要なX11転送が有効で攻撃対象領域が広がる"
+  - test_id: "SSH-7408"
+    item: "MaxAuthTries"
+    current_value: "6"
+    risk: "認証試行回数の上限が緩く、パスワード推測を許しやすい"
+  - test_id: "SSH-7408"
+    item: "AllowUsers"
+    current_value: "(未設定)"
+    risk: "ログイン可能なユーザーが制限されておらず、全ローカルアカウントが対象になる"
+
+target_settings:
+  PermitRootLogin: "no"
+  PasswordAuthentication: "no"
+  Protocol: "2"
+  X11Forwarding: "no"
+  MaxAuthTries: "3"
+  AllowUsers: "ops deploy"
+
+verify_second_session: true
+
+rollback:
+  backup_path: "/etc/ssh/sshd_config.d/70-hardening.conf.bak"

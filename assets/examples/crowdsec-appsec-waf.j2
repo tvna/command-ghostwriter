@@ -1,0 +1,143 @@
+# CrowdSec AppSecコンポーネントによるWAF防御
+
+CrowdSecのAppSecコンポーネントを使い、リバースプロキシとバックエンドの間でインラインのHTTP検査（WAF）を行います。まずout-of-band（非同期検知のみ）で運用して誤検知を潰し、問題がないことを確認してからinband（同期遮断）へ切り替える順序を徹底します。
+
+## 目的
+
+AppSecコンポーネントを有効化し、acquis設定・ルールコレクション導入・bouncerからのAppSec転送を構築したうえで、SQLiやパストラバーサルなどのHTTP攻撃を検知・遮断できるようになることを目指します。あわせて、いきなり遮断（inband）を有効化して正規リクエストを誤って締め出す事故を防ぐための段階的な移行手順を身につけます。
+
+## 用語解説
+
+- **AppSecコンポーネント**: CrowdSecが提供するインラインWAFエンジン。リバースプロキシやbouncerから転送されたリクエストをルールで検査する
+- **inband（同期遮断）**: リクエストがバックエンドに届く前にAppSecが同期的に判定し、`default_remediation`（例: ban）に従ってその場で遮断できるルール群
+- **out-of-band（非同期検知）**: AppSecの判定結果を待たずにリクエストは通過させ、検知結果だけを非同期でアラート・記録するルール群。誤検知があってもサービスには影響しない
+- **CRS（Core Rule Set）**: OWASPが公開する汎用WAFルールセット。`crowdsecurity/crs` としてAppSec向けに提供される
+- **vpatch（仮想パッチ）**: 特定CVE・既知脆弱性を狙った攻撃パターンに絞った軽量ルール群。`crowdsecurity/vpatch-*` の形式で提供される
+- **bouncer（リメディエーションコンポーネント）**: nginxなどのリバースプロキシに組み込まれ、リクエストをAppSecへ転送し判定結果に従って通過/遮断を行うモジュール
+- **cscli alerts**: CrowdSecが検知したアラート（AppSecの検知結果を含む）を一覧・確認するコマンド
+
+## シナリオ設定
+
+| 設定項目 | 値 |
+|---|---|
+| appsec_listen | {{ appsec_listen }} |
+| appsec_configs | {% for c in appsec_configs %}{{ c }}{% if not loop.last %}, {% endif %}{% endfor %} |
+| appsec_rules | {% for r in appsec_rules %}{{ r }}{% if not loop.last %}, {% endif %}{% endfor %} |
+| inband_rules（移行後） | {{ inband_outband.inband_rules }} |
+| outofband_rules（初期観察） | {{ inband_outband.outofband_rules }} |
+| default_remediation | {{ inband_outband.default_remediation }} |
+| default_pass_action | {{ inband_outband.default_pass_action }} |
+| bouncer_name | {{ bouncer_name }} |
+| 保護対象 | {{ target_url }} |
+
+## 1. AppSecコンポーネントを有効化する（acquis設定）
+
+`acquis.d` にAppSec専用の取得ファイルを作成し、待受アドレスと読み込む設定コレクションを指定します。
+
+```bash
+sudo tee {{ appsec_acquis_path }} <<'EOF'
+listen_addr: {{ appsec_listen }}
+appsec_configs:
+{% for c in appsec_configs %}  - {{ c }}
+{% endfor %}
+name: appsec-waf
+source: appsec
+labels:
+  type: appsec
+EOF
+sudo systemctl restart crowdsec
+sudo cscli appsec-configs list
+```
+
+## 2. appsec-rulesコレクション（vpatch/CRS）を導入する
+
+```bash
+{% for r in appsec_rules %}sudo cscli collections install {{ r }}
+{% endfor %}sudo systemctl reload crowdsec
+```
+
+## 3. カスタムAppSec設定ファイルを作成する（out-of-bandのみで開始）
+
+いきなり遮断（inband）を有効化せず、まずは全ルールをout-of-band（非同期検知のみ）で読み込み、誤検知の有無を観察します。
+
+```bash
+sudo tee {{ appsec_config_path }} <<'EOF'
+name: custom/appsec-waf
+outofband_rules:
+  - {{ inband_outband.outofband_rules }}
+  - {{ inband_outband.inband_rules }}
+default_remediation: {{ inband_outband.default_remediation }}
+default_pass_action: {{ inband_outband.default_pass_action }}
+blocked_http_code: 403
+passed_http_code: 200
+log_level: info
+EOF
+sudo systemctl reload crowdsec
+```
+
+この段階では `inband_rules` が空のため、いかなる検知もリクエストの通過自体を止めません（検知はcscli alertsに記録されるのみ）。
+
+## 4. リバースプロキシ（bouncer）からAppSecへ転送する
+
+nginx用bouncerの設定で `APPSEC_URL` を指定し、受信したリクエストをAppSecコンポーネントへ転送させます。
+
+```bash
+sudo tee -a {{ bouncer_conf_path }} <<'EOF'
+APPSEC_URL=http://{{ appsec_listen }}
+APPSEC_FAILURE_ACTION=passthrough
+EOF
+sudo systemctl restart {{ bouncer_name }}
+```
+
+`APPSEC_FAILURE_ACTION=passthrough` により、AppSecコンポーネント自体に障害が起きた場合でもリクエストは（検査なしで）通過します。これは可用性を優先する初期設定であり、後述の注意事項で扱います。
+
+## 5. 模擬攻撃でout-of-band検知を確認する（誤遮断が起きないことの確認）
+
+{{ target_url }} に対してSQLiとパストラバーサルを模した模擬リクエストを送り、まだリクエストが通過すること、かつcscli alertsに検知が記録されることを確認します。
+
+```bash
+curl -sk -o /dev/null -w '%{http_code}\n' "{{ target_url }}search?id=1' OR '1'='1"
+curl -sk -o /dev/null -w '%{http_code}\n' "{{ target_url }}download?file=../../../../etc/passwd"
+sudo cscli alerts list --limit 10
+```
+
+両リクエストとも200番台で通過し、かつ `cscli alerts list` にAppSec由来の検知（scenarioがappsec関連）が記録されていることを確認します。数日〜1週間程度、正規の業務トラフィックでも誤検知が出ないことを観察してから次のステップへ進みます。
+
+## 6. 誤検知がないことを確認したのちinbandへ切り替える
+
+Step 5の観察期間で誤検知（正規リクエストの意図しない検知）が出ていないことを確認できたら、対象ルールを `outofband_rules` から `inband_rules` へ移し、実際に同期遮断させます。
+
+```bash
+sudo tee {{ appsec_config_path }} <<'EOF'
+name: custom/appsec-waf
+inband_rules:
+  - {{ inband_outband.inband_rules }}
+outofband_rules:
+  - {{ inband_outband.outofband_rules }}
+default_remediation: {{ inband_outband.default_remediation }}
+default_pass_action: {{ inband_outband.default_pass_action }}
+blocked_http_code: 403
+passed_http_code: 200
+log_level: info
+EOF
+sudo systemctl reload crowdsec
+curl -sk -o /dev/null -w '%{http_code}\n' "{{ target_url }}search?id=1' OR '1'='1"
+curl -sk -o /dev/null -w '%{http_code}\n' "{{ target_url }}download?file=../../../../etc/passwd"
+sudo cscli alerts list --limit 10
+```
+
+## 動作確認
+
+- Step 5（out-of-band段階）で模擬攻撃が200番台で通過し、`cscli alerts list` にAppSecの検知記録が残ること
+- Step 5の観察期間中、正規リクエストに対する誤検知（意図しないアラート）が発生していないこと
+- Step 6（inband移行後）で同じ模擬攻撃が `blocked_http_code`（403）で遮断されること
+- `sudo cscli appsec-configs list` に `custom/appsec-waf` が反映されていること
+- `{{ bouncer_name }}` 経由のリクエストが `{{ appsec_listen }}` のAppSecコンポーネントを実際に通過していること（bouncerログでappsec呼び出しを確認）
+
+## 注意事項
+
+- **inbandへ切り替える前に、必ずout-of-bandで一定期間観察し、正規リクエストの誤検知（誤遮断）が無いことを確認する**（Step 5→6の順序を守る）。順序を逆にして最初からinbandで遮断すると、正規ユーザーが自己ロックアウトと同様にサービスへアクセスできなくなる。
+- inbandルールは同期処理のため、AppSecへの転送・判定分だけレイテンシが増える。`APPSEC_CONNECT_TIMEOUT` / `APPSEC_SEND_TIMEOUT` / `APPSEC_PROCESS_TIMEOUT` を業務要件に合わせて調整し、タイムアウト時の挙動（`APPSEC_FAILURE_ACTION`）を事前に決めておく。
+- `passthrough` は可用性優先（AppSec障害時は無検査で通過）だが、セキュリティ優先の要件では `deny` に変更する選択肢もある。どちらを選ぶかは事業影響とリスク許容度で判断する。
+- vpatchルールやCRSは `cscli collections upgrade` で定期的に更新する。更新後もStep 5と同様の観察を行い、ルール変更による新規の誤検知がないか確認する。
+- AppSec（WAF）はアプリケーション層の検知であり、ネットワークファイアウォールやfail2banのようなネットワーク層対策の代替ではない。既存の多層防御（fail2ban、ネットワークACL等）と併用し、WAF単体に依存しない。

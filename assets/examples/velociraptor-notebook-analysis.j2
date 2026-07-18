@@ -1,0 +1,98 @@
+# Velociraptor Notebookによる収集結果解析
+
+Hunt/collectionで収集済みのアーティファクトに対し、VelociraptorのNotebook上でVQL（Velociraptor Query Language）による絞り込み・相関・タイムライン化を行い、所見をMarkdownで文書化する手順です。
+
+## 目的
+
+Notebookの`source()`プラグインで既存の収集結果を再クエリし、絞り込み・相関・タイムライン化を経て所見を導出し、根拠となるVQLクエリとともにMarkdownセルへ記録できるようになることを目指します。
+
+## 用語解説
+
+- **Notebook**: 収集済みデータに対しVQLセルとMarkdownセルを交互に並べ、解析過程と所見を1つのノートとして保全できるVelociraptor GUI上の機能
+- **source()**: Notebookのセルから既存の収集結果（Hunt結果やクライアント個別のcollection結果）を`artifact`/`client_id`/`hunt_id`等の引数で参照するVQLプラグイン。新規収集を発生させず、保存済みデータを再クエリする
+- **post-processing**: 収集時点のVQLとは別に、Notebookのセルで収集後のデータに対して追加のフィルタ・集計・結合を行う解析工程
+- **相関(pivot)**: あるアーティファクトの結果から得たキー（PidやTimestamp等）を用いて、別のアーティファクトの結果と突き合わせる操作
+- **可視化**: Notebookのセル種別を`VQL`から`Markdown`やチャート表示に切り替え、集計結果を表・グラフとして提示する機能
+- **LET**: VQLでクエリ結果を変数として保持し、後続セルから再利用するための構文
+
+## シナリオ設定
+
+Notebook上で以下の {{ csv_rows | length }} セルを順に作成し、収集結果の解析を進めます。
+
+| cell_purpose | vql_summary | pivot | finding | note |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["cell_purpose"] }} | `{{ r["vql_summary"] | safe }}` | {{ r["pivot"] }} | {{ r["finding"] }} | {{ r["note"] }} |
+{% endfor %}
+
+## 1. Notebookを作成し収集結果の母集団を確認する
+
+対象のHunt（またはクライアント個別収集）に対応するNotebookをGUIの「Notebooks」タブから新規作成し、最初のVQLセルで収集件数のベースラインを確認します。
+
+```bash
+{% for r in csv_rows %}{% if r["pivot"] == "-" %}velociraptor --config server.config.yaml query "{{ r["vql_summary"] | safe }}"
+{% endif %}{% endfor %}```
+
+この時点では絞り込みを行わず、`source()`が期待どおりの件数を返すこと（収集自体が空でないこと）だけを確認します。
+
+## 2. VQLで不審な兆候を絞り込む
+
+`WHERE`句で正規のパス・許可されたコマンドラインを除外し、キーとなる列（`pivot`列）を後続セルで利用できる形に整えます。
+
+```bash
+{% for r in csv_rows %}{% if r["pivot"] != "-" and r["cell_purpose"] != "ネットワーク接続との相関" and r["cell_purpose"] != "タイムライン統合" %}velociraptor --config server.config.yaml query "{{ r["vql_summary"] | safe }}"
+{% endif %}{% endfor %}```
+
+絞り込んだ結果はNotebookの次のセルで`LET suspicious_pids = SELECT Pid FROM <このセルの結果>`のように変数化し、以降のセルから`suspicious_pids`として参照します。
+
+## 3. 相関セルで別アーティファクトと突き合わせる
+
+前セルで変数化したキー（`pivot`列の値）を使い、ネットワーク接続やレジストリ等、別のアーティファクトの収集結果と相関させます。
+
+```bash
+{% for r in csv_rows %}{% if r["cell_purpose"] == "ネットワーク接続との相関" %}velociraptor --config server.config.yaml query "{{ r["vql_summary"] | safe }}"
+{% endif %}{% endfor %}```
+
+相関結果から`{{ csv_rows[2]["finding"] }}`のような所見が得られた場合、根拠クエリと結果の抜粋をこの時点でメモしておきます（Markdownセルへの転記は手順5で行います）。
+
+## 4. タイムラインセルで時系列に統合する
+
+複数アーティファクトの結果を`ORDER BY Timestamp`で時系列に並べ、事象の前後関係を確認します。
+
+```bash
+{% for r in csv_rows %}{% if r["cell_purpose"] == "タイムライン統合" %}velociraptor --config server.config.yaml query "{{ r["vql_summary"] | safe }}"
+{% endif %}{% endfor %}```
+
+タイムゾーン表記が揃っていない場合は、統合前に各アーティファクトのタイムスタンプをUTCへ変換してから`ORDER BY`を適用します。
+
+## 5. 所見をMarkdownセルへ文書化する
+
+解析の最後に、Notebookの新規セルの種別を`Markdown`へ切り替え、各セルで得た`finding`列の所見を、対応するVQLクエリ（`vql_summary`列）とともに引用形式で記録します。
+
+```bash
+{% for r in csv_rows %}velociraptor --config server.config.yaml query "{{ r["vql_summary"] | safe }}"
+{% endfor %}```
+
+Markdownセルの記載例:
+
+```markdown
+{% for r in csv_rows %}### 所見: {{ r["finding"] }}
+
+- 対象セル: {{ r["cell_purpose"] }}
+- 根拠クエリ: `{{ r["vql_summary"] | safe }}`
+- 備考: {{ r["note"] }}
+
+{% endfor %}```
+
+## 動作確認
+
+1. Notebookの各VQLセルを上から順に再実行し、`{{ csv_rows | length }}`件のセルすべてがエラーなく結果を返すこと
+2. 手順3の相関セルで`{{ csv_rows[2]["finding"] }}`に対応する結果行が実際に確認できること
+3. 手順4のタイムラインセルで`{{ csv_rows[3]["finding"] }}`の根拠となる時刻順の結果が得られていること
+4. 手順5で作成したMarkdownセルに、全`finding`列の所見と対応するVQLクエリ文字列が省略なく記載されていること
+
+## 注意事項
+
+- 解析結果（プロセス一覧・ネットワーク接続・レジストリ等）には機微性の高い情報が含まれるため、Notebookの共有範囲は調査担当者のみに限定し、Velociraptorのロール（reader/analyst等）でアクセスを制御すること。
+- Notebook自体が調査の証跡となるため、セルの削除・上書きは避け、追記のみで解析過程を残すこと。エクスポート時はNotebook全体（VQLセルとMarkdownセル）をアーカイブし、収集時刻・Hunt IDと合わせて保全すること。
+- `source()`は保存済みの収集結果を再クエリするだけで対象クライアントへの新規アクセスを発生させないが、`suspicious_pids`のような変数を参照する後続セルの実行順序を誤ると意図しない空集合や古い結果を参照する場合があるため、セルは必ず上から順に再実行して確認すること。
+- 再現性を確保するため、各セルの`vql_summary`列に相当するクエリ文字列は省略・要約せず、Notebookおよび最終所見にそのまま記録すること。将来の解析者が同じクエリを再実行して同じ結果を得られることを再現可能性の基準とする。

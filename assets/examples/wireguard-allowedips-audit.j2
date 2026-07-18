@@ -1,0 +1,110 @@
+# WireGuard AllowedIPs妥当性の定期点検
+
+各PeerのAllowedIPsが最小権限かつ経路矛盾がないかを定期点検するWireGuard監査手順です。
+
+## 目的
+
+WireGuardの各PeerにおけるAllowedIPsが最小権限の範囲に収まっているか、Peer間でCIDRの重複（暗号ルーティング競合）が発生していないか、そして実際のルーティングテーブルと矛盾していないかを定期的に点検できるようになることを目指します。
+
+## 用語解説
+
+- **AllowedIPs**: WireGuardの各Peerに設定するCIDRリスト。暗号鍵の選択（このCIDR宛のパケットはどの公開鍵で暗号化するか）と実経路（このCIDR宛の経路として扱うか）を同時に兼ねるため、範囲を最小化すること自体がアクセス制御になる
+- **暗号ルーティング(cryptokey routing)**: WireGuardが送受信パケットの宛先/送信元CIDRとAllowedIPsを突き合わせ、使用する鍵ペアと経路を決定する仕組み
+- **overlap_with(CIDR重複)**: 複数のPeerに同一または包含関係のCIDRがAllowedIPsとして設定されている状態。どのPeerへ暗号化されるか不定・後勝ちになる危険がある
+- **scope(minimal/broad)**: そのPeerのAllowedIPsが業務上必要な最小範囲か（minimal）、`0.0.0.0/0` 等の過大な範囲か（broad）を表す区分
+- **disposition**: 点検結果として下す keep（維持）/ tighten（絞り込み）/ remove（削除）の判定
+
+## シナリオ設定
+
+今回の点検対象は {{ csv_rows | length }} 件のAllowedIPsエントリです。台帳には `peer_name` / `allowed_ips` / `overlap_with` / `scope` / `disposition` を記録します。
+
+| peer_name | allowed_ips | overlap_with | scope | disposition |
+| --- | --- | --- | --- | --- |
+{% for r in csv_rows %}| {{ r["peer_name"] }} | {{ r["allowed_ips"] }} | {{ r["overlap_with"] }} | {{ r["scope"] }} | {{ r["disposition"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 現行のwg showとwg showconfから設定を収集する
+
+```bash
+sudo wg show wg0 allowed-ips | tee /tmp/wg0-allowedips-snapshot.txt
+sudo wg showconf wg0 > /tmp/wg0-conf-snapshot.conf
+ip route show table all | tee /tmp/wg0-routes-snapshot.txt
+```
+
+### 2. 台帳上のAllowedIPsと突き合わせる
+
+```bash
+echo "点検対象エントリ数: {{ csv_rows | length }}"
+{% for r in csv_rows %}echo "- {{ r["peer_name"] }}: {{ r["allowed_ips"] }} (scope={{ r["scope"] }}, disposition={{ r["disposition"] }})"
+{% endfor %}```
+
+### 3. Peer間のCIDR重複(暗号ルーティング競合)を検出する
+
+同一または包含関係にあるCIDRが複数Peerに設定されていると、該当パケットの暗号化先が後勝ち・不定になります。
+
+```bash
+{% for r in csv_rows %}{% if r["overlap_with"] != "-" %}echo "要是正: {{ r["peer_name"] }} の {{ r["allowed_ips"] }} は {{ r["overlap_with"] }} と重複"
+{% endif %}{% endfor %}```
+
+### 4. 過大な0.0.0.0/0付与を検出する
+
+```bash
+{% for r in csv_rows %}{% if r["scope"] == "broad" %}echo "要是正: {{ r["peer_name"] }} に広範囲AllowedIPs {{ r["allowed_ips"] }} が設定されている"
+{% endif %}{% endfor %}```
+
+### 5. 実ルーティングテーブルとの矛盾を確認する
+
+台帳上のAllowedIPsごとに、同じCIDR宛の経路が `ip route` 側にも存在し、想定外の経路が優先されていないかを確認します。
+
+```bash
+{% for r in csv_rows %}ip route show {{ r["allowed_ips"] }} || echo "経路未検出: {{ r["peer_name"] }} ({{ r["allowed_ips"] }})"
+{% endfor %}```
+
+### 6. dispositionに沿って是正する（新経路の疎通確認を先行させる）
+
+`tighten` は絞り込んだCIDRでのAllowedIPs変更を、`remove` は当該Peer設定の削除を意味します。いずれも、是正後の経路で疎通できることを確認してから旧設定を無効化します。
+
+```bash
+{% for r in csv_rows %}{% if r["disposition"] == "tighten" %}echo "絞り込み対象: {{ r["peer_name"] }} ({{ r["allowed_ips"] }} -> 重複解消後の最小CIDRへ変更予定)"
+{% elif r["disposition"] == "remove" %}echo "削除対象: {{ r["peer_name"] }} ({{ r["allowed_ips"] }})。旧Peer経由の疎通が使えなくなる前に新経路での疎通確認を先に行うこと"
+{% endif %}{% endfor %}```
+
+是正の具体的な流れ（例: `tighten` 対象のPeer）:
+
+```bash
+# 1) 新しいAllowedIPsを別のダミーPeerセクションまたは並行構成で試験適用し、疎通確認する
+sudo wg set wg0 peer <該当PeerのPublicKey> allowed-ips 10.0.1.0/25
+sudo wg show wg0 allowed-ips
+ping -c 3 10.0.1.10
+
+# 2) 疎通が確認できてから、対向側(相手Peer)のAllowedIPs設定も揃える
+sudo wg set wg0 peer <相手PeerのPublicKey> allowed-ips 10.0.1.128/25
+
+# 3) 恒久化のためwg0.confへ反映し、systemdユニットで永続化する
+sudo wg-quick strip wg0 > /etc/wireguard/wg0.conf.new
+sudo diff /etc/wireguard/wg0.conf /etc/wireguard/wg0.conf.new
+sudo mv /etc/wireguard/wg0.conf.new /etc/wireguard/wg0.conf
+```
+
+### 7. 台帳を更新し、定期点検として記録する
+
+```bash
+{% for r in csv_rows %}echo "{{ r["peer_name"] }},{{ r["allowed_ips"] }},{{ r["overlap_with"] }},{{ r["scope"] }},{{ r["disposition"] }}" >> /tmp/wireguard-allowedips-audit-updated.csv
+{% endfor %}```
+
+## 動作確認
+
+- 全 {{ csv_rows | length }} 件のエントリについて、`sudo wg show wg0 allowed-ips` の出力内容と台帳の `allowed_ips` が一致していること
+- `ip route show table all` の経路と、台帳上の `allowed_ips` に矛盾（想定外の経路が優先される、経路が存在しない等）がないこと
+- `overlap_with` が `-` 以外のPeerがすべて是正対象として検出されていること
+- `scope` が `broad` のPeerがすべて是正対象として検出されていること
+- `tighten` / `remove` 対象のPeerについて、是正後の新経路でpingやTCP疎通が確認できてから旧設定を無効化していること
+
+## 注意事項
+
+- AllowedIPsのCIDR重複は、WireGuardの実装上どちらのPeerへ暗号化・ルーティングされるかが後勝ちや不定になりうる危険な状態であり、放置すると通信が意図しないPeerへ流れる可能性がある。
+- `tighten` / `remove` を適用する際は、必ず新しいAllowedIPs構成での疎通確認（別セッションでのping/TCP接続確認）を先に行ってから旧いAllowedIPsを無効化する。SSHやVPN管理アクセス自体がその経路に依存する場合は特に、旧経路を切る前に代替アクセス手段を確保すること。
+- 是正作業前に `sudo wg showconf wg0` の出力と `/etc/wireguard/wg0.conf` をバックアップし、疎通不良時は即座に復元できるようにする。
+- 正しいハブ&スポーク設計では、ハブ（中央Peer）のAllowedIPsのみ各スポークの範囲を束ねた `0.0.0.0/0` に近い広い許可を持ち、各スポーク側は自分自身のCIDRのみを最小範囲でAllowedIPsに設定する。スポーク同士が互いに重複・広範囲なAllowedIPsを持つ構成は誤りであり、本点検の是正対象になる。

@@ -1,0 +1,121 @@
+# WireGuard MTU/MSS調整による通信不良解消 — {{ interface | safe }}
+
+小さいパケット(ping等)は通るのに、大きなパケットを伴う通信(ファイル転送、SSHの大量出力、Webの大きなレスポンス等)だけが詰まる・ハングする事象を、WireGuardトンネルのMTU/MSS不整合として切り分け、`wg-quick` の MTU 設定と MSS clamp で解消します。
+
+## 目的
+
+インタフェース **{{ interface | safe }}** で発生している「大きいパケットだけ失敗する」通信不良について、`ping -M do -s <size>` によるサイズ切り分けでPMTUD破綻を確認し、MTU値 {{ mtu }} バイトへの調整と MSS を {{ mss_clamp }} バイトにクランプする対処で解消できるようになることを目指します。
+
+## 用語解説
+
+- **MTU(Maximum Transmission Unit)**: 1回の送信で運べるパケットの最大サイズ。WireGuardはUDPで外側にカプセル化するため、物理インタフェースのMTUよりも小さい値(暗号化・ヘッダのオーバーヘッド分)を設定する必要がある
+- **PMTUD(Path MTU Discovery)**: 経路上の最小MTUを送信側が自動検出する仕組み。経路上でICMP「Fragmentation Needed」が破棄・フィルタされると機能せず、パケットが無言で消える「PMTUDブラックホール」になる
+- **DF(Don't Fragment)ビット**: パケットを分割せず、収まらなければ破棄させるフラグ。`ping -M do` はこのビットを立てて送信するため、通過可能な最大サイズを段階的に特定できる
+- **MSS(Maximum Segment Size)**: TCPが1セグメントで運ぶペイロードの最大サイズ。IPヘッダ・TCPヘッダ分を差し引いた値で、通常 `MTU - 40`(IPv4+TCPヘッダ)程度になる
+- **MSS clamping**: ゲートウェイ上でTCPのSYNパケットのMSSオプション値を強制的に書き換え、送信元・宛先のMTU設定に関わらずトンネル経路で断片化・ブラックホールが起きないようにする対策
+- **典型症状**: pingや小さいAPI応答など小さいパケットは正常に通るのに、SCP/SFTPのような大きな転送やSSHの大量出力だけが特定のサイズを境にハング・タイムアウトする場合、MTU/MSS不整合を第一に疑う
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 対象インタフェース | {{ interface | safe }} |
+| 設定するMTU | {{ mtu }} バイト |
+| MSS clamp値 | {{ mss_clamp }} バイト |
+| 疎通確認先 | {{ test_target | safe }} |
+
+`{{ interface | safe }}` 経由の通信で、小さなpingは応答するのに、大きなペイロードを伴う通信(ファイル転送、SSHの大量出力等)だけが詰まる事象が発生しています。切り分け対象は `{{ test_target | safe }}` です。
+
+## 手順
+
+### 1. 症状を確認する(小さい通信は通る/大きい通信だけ詰まる)
+
+```bash
+ping -c 3 {{ test_target | safe }}
+```
+
+→ 通常サイズのpingが成功する一方、`scp` や `sftp` での大きめのファイル転送、あるいは `ssh` での大量出力表示だけがハングするなら、MTU/MSS不整合を疑う典型パターンです。
+
+### 2. ping -M do -s でPMTUD破綻を確認する
+
+DFビットを立てたpingでペイロードサイズを段階的に下げ、経路を通過できる最大サイズを特定します。
+
+```bash
+for size in 1472 1400 1380 1340 1300; do
+  echo "=== size=${size} ==="
+  ping -M do -c 2 -s "${size}" {{ test_target | safe }}
+done
+```
+
+→ あるサイズを境に `Frag needed and DF set` の応答や無応答に転じる場合、その閾値付近が実際に通過可能な最大ペイロードサイズです。応答が一切なく静かにタイムアウトするだけなら、経路上でICMPがフィルタされPMTUDが機能していない(ブラックホール化)可能性が高いです。
+
+### 3. 現在のWireGuard設定を確認する
+
+```bash
+sudo wg show {{ interface | safe }}
+ip link show dev {{ interface | safe }}
+```
+
+→ `ip link show` の `mtu` 値が既定値(多くのディストリビューションでは1420、環境によっては1500)のままで、実効経路のMTU(手順2で特定した値)より大きい場合、カプセル化オーバーヘッド分を考慮できていません。
+
+### 4. wg-quick confでMTUを設定する
+
+`/etc/wireguard/{{ interface | safe }}.conf` の `[Interface]` セクションにMTUを明記します。
+
+```ini
+[Interface]
+Address = 10.10.0.2/24
+PrivateKey = <interface-private-key>
+MTU = {{ mtu }}
+```
+
+→ `wg-quick` はこの `MTU` 値で仮想インタフェースを起動するため、以後 `ip link` で個別に設定し直す必要がなくなります。
+
+### 5. PostUpでMSS clampを設定する(nftables/iptables)
+
+MTU調整だけでは経路上の他ノードのMSSアナウンスに合わせきれない場合があるため、ゲートウェイ側でTCPのMSSを強制的にクランプします。iptablesの場合:
+
+```ini
+[Interface]
+Address = 10.10.0.2/24
+PrivateKey = <interface-private-key>
+MTU = {{ mtu }}
+PostUp = iptables -t mangle -A FORWARD -o %i -p tcp --tcp-flags SYN,SYN SYN -j TCPMSS --set-mss {{ mss_clamp }}
+PostDown = iptables -t mangle -D FORWARD -o %i -p tcp --tcp-flags SYN,SYN SYN -j TCPMSS --set-mss {{ mss_clamp }}
+```
+
+nftablesの場合は次のルールを既存の `mangle` 相当チェーンに追加します。
+
+```bash
+sudo nft add rule inet mangle forward oifname "{{ interface | safe }}" tcp flags syn / syn,rst tcp option maxseg size set {{ mss_clamp }}
+```
+
+→ `--set-mss {{ mss_clamp }}` (nftablesでは `size set {{ mss_clamp }}`) により、トンネル経由のTCPコネクションはSYN時点で {{ mss_clamp }} バイトのMSSに強制され、以後の断片化・ブラックホールを回避します。
+
+### 6. 設定を反映し、旧経路と並行して新設定を検証する
+
+既存セッションを切断する前に、設定変更用の別セッション(コンソールアクセスまたは別回線経由のSSH)を確保したうえで反映します。
+
+```bash
+sudo wg-quick down {{ interface | safe }}
+sudo wg-quick up {{ interface | safe }}
+ip link show dev {{ interface | safe }} | grep mtu
+```
+
+→ MTU反映後、既存の管理セッションが切れていないこと、新しい `{{ interface | safe }}` が期待どおりのMTU({{ mtu }})で起動していることを確認してから、次の動作確認に進みます。
+
+## 動作確認
+
+- 手順2で詰まっていたサイズすべてで `ping -M do -s <size> {{ test_target | safe }}` が成功すること
+- `scp` や `sftp` など実際の大きめファイル転送が {{ test_target | safe }} との間で完走し、ハングしないこと
+- `ssh {{ test_target | safe }}` での大量出力表示(`ls -la /` の繰り返しや `cat` での長大ファイル表示等)が途中で止まらないこと
+- `sudo wg show {{ interface | safe }}` および `ip link show dev {{ interface | safe }}` で、意図したMTU({{ mtu }})が反映されていること
+- `iptables -t mangle -L FORWARD -v` (またはnftablesの対応チェーン)にMSS clampルールが投入され、カウンタが増加していること
+
+## 注意事項
+
+- MTU変更・MSS clamp投入前に、コンソールアクセスや別回線経由のSSHなど、現在の管理経路とは独立した接続手段を必ず確保してから作業する。`wg-quick down/up` で新パスが機能しない場合に旧パスへ切り戻せることを確認するまで、既存の管理セッションを閉じない。
+- PPPoEや二重トンネル(WireGuard over IPsec、WireGuard越しのさらなるVPN等)を経由する経路では、各段でヘッダオーバーヘッドが積み上がるため、単純に1420等の既定値を当てはめず、実測した経路MTUから逆算してMTU/MSS clamp値を決める。
+- MTUを必要以上に低く設定するとパケット数が増えオーバーヘッド比率が上がり、スループット低下につながるため、手順2で特定した実効値に対して最小限のマージンで調整する。
+- MSS clampはトンネル終端となるゲートウェイでのみ有効であり、経路上の別区間(別のVPN終端やプロキシ等)で新たなMTU不整合が発生していないか、変更後も定期的に確認する。
+- 恒久対応後は変更したMTU/MSS clamp値と根本原因(カプセル化オーバーヘッド、ICMPフィルタ設定等)を記録し、同一構成の他インタフェースへの横展開を検討する。

@@ -1,0 +1,158 @@
+# fail2banのエッジ連携アクション構成
+
+オリジンサーバのローカルファイアウォールでの遮断だけでは、Cloudflareなどのエッジ/リバースプロキシ経由の攻撃を防げません。fail2banの`action.d/`にカスタムアクション（`actionban`/`actionunban`）を定義し、遮断をnginxのdeny mapとエッジAPIの両方へ伝播させます。
+
+## 目的
+
+fail2banの検知結果をローカルFWだけで完結させず、リバースプロキシ（nginx deny map）とエッジ（Cloudflare Firewall API）まで伝播させるカスタムアクションを構成できるようになることを目指します。
+
+## 用語解説
+
+- **actionban/actionunban**: fail2banのaction定義ファイル内で、遮断発生時・解除時にそれぞれ実行されるコマンド群
+- **エッジ連携**: CDN/リバースプロキシ側にも遮断ルールを反映すること。オリジンFWのみの遮断では、攻撃者がCDN経由でオリジンへ到達できてしまう経路（オリジンIP直叩き以外の正規CDN経路）を塞げないため必要
+- **deny map**: nginxで`map`ディレクティブを使い、特定IPからのリクエストを一括で拒否判定する仕組み
+- **XFF(X-Forwarded-For)/CF-Connecting-IP**: リバースプロキシ経由では`remote_addr`がプロキシのIPになるため、実クライアントIPを判定するために参照するヘッダ
+- **API鍵**: エッジAPIを呼び出すための認証情報。環境変数経由で渡し、設定ファイルへの平文記載を避ける
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 対象jail | {{ jail.name }} |
+| 監視ポート | {{ jail.port }} |
+| ログパス | {{ jail.logpath }} |
+| bantime | {{ jail.bantime }} |
+| findtime | {{ jail.findtime }} |
+| maxretry | {{ jail.maxretry }} |
+| カスタムアクション名 | {{ action.action_name }} |
+| エッジAPIエンドポイント | {{ action.ban_endpoint }} |
+| APIキー環境変数名 | {{ action.api_key_env }} |
+| unban対応 | {{ action.unban_supported }} |
+| 検証用攻撃元IP | {{ test.attacker_ip }} |
+| 実IP判定ヘッダ | {{ test.xff_header }} |
+
+## 1. オリジンFWのみでは不十分であることを確認する
+
+まず現状の遮断範囲を確認します。オリジンサーバの`iptables`によるbanは、リバースプロキシを経由したリクエストには効きません（`remote_addr`がプロキシIPになるため）。
+
+```bash
+sudo iptables -L -n | grep {{ test.attacker_ip }}
+curl -sS -o /dev/null -w "%{http_code}\n" -H "{{ test.xff_header }}: {{ test.attacker_ip }}" https://example.com/
+```
+
+この時点では、オリジンでbanしても上記curlが200を返すこと（＝プロキシ経由の攻撃を防げていないこと）を確認します。
+
+## 2. APIキーを環境変数として保管する
+
+APIキーはfail2banの設定ファイルやログに平文で残さず、systemdのEnvironmentFile経由で渡します。
+
+```bash
+sudo install -m 600 -o root -g root /dev/null /etc/fail2ban/cloudflare.env
+echo "{{ action.api_key_env }}=__REPLACE_WITH_ISSUED_TOKEN__" | sudo tee /etc/fail2ban/cloudflare.env >/dev/null
+sudo mkdir -p /etc/systemd/system/fail2ban.service.d
+sudo tee /etc/systemd/system/fail2ban.service.d/override.conf <<'EOF'
+[Service]
+EnvironmentFile=/etc/fail2ban/cloudflare.env
+EOF
+sudo systemctl daemon-reload
+```
+
+トークンはCloudflareダッシュボードの「My Profile > API Tokens」で、対象ゾーンの`Firewall Services:Edit`権限のみを付与して発行し、ローテーション予定日を運用台帳に記録します。`/etc/fail2ban/cloudflare.env`はroot以外読み取り不可（`600`）にします。
+
+## 3. カスタムアクション定義を作成する
+
+```bash
+sudo tee /etc/fail2ban/action.d/{{ action.action_name }}.conf <<'EOF'
+[Definition]
+actionstart =
+actionstop =
+actioncheck =
+actionban = echo "<ip> 1;" | sudo tee -a /etc/nginx/conf.d/fail2ban_blocklist.conf >/dev/null
+            sudo nginx -s reload
+            curl -sS -X POST "{{ action.ban_endpoint }}" \
+              -H "Authorization: Bearer $CF_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              --data "{\"mode\":\"block\",\"configuration\":{\"target\":\"ip\",\"value\":\"<ip>\"},\"notes\":\"fail2ban <name>\"}"
+actionunban = sudo sed -i "/^<ip> 1;$/d" /etc/nginx/conf.d/fail2ban_blocklist.conf
+              sudo nginx -s reload
+              RULE_ID=$(curl -sS -X GET "{{ action.ban_endpoint }}?configuration.value=<ip>" -H "Authorization: Bearer $CF_API_TOKEN" | jq -r '.result[0].id')
+              curl -sS -X DELETE "{{ action.ban_endpoint }}/$RULE_ID" -H "Authorization: Bearer $CF_API_TOKEN"
+EOF
+```
+
+nginx側でdeny mapを読み込むよう、あらかじめ`/etc/nginx/conf.d/blocklist_map.conf`に以下を設定しておきます。
+
+```bash
+sudo tee /etc/nginx/conf.d/blocklist_map.conf <<'EOF'
+map $http_{{ test.xff_header }}_norm $fail2ban_denied {
+    default 0;
+    include /etc/nginx/conf.d/fail2ban_blocklist.conf;
+}
+EOF
+```
+
+## 4. 既存jailを止めずに、テスト用jailで新アクションを先行検証する
+
+オリジンFWによる既存の遮断経路（{{ jail.name }}）は止めずに残したまま、新アクションだけを検証するテスト用jailを並行して用意します。新経路が正しく動くと確認できるまで、本番jailのaクション切り替えは行いません。
+
+```bash
+sudo tee -a /etc/fail2ban/jail.local <<EOF
+
+[{{ jail.name }}-edge-test]
+enabled = true
+port = {{ jail.port }}
+logpath = {{ jail.logpath }}
+bantime = {{ jail.bantime }}
+findtime = {{ jail.findtime }}
+maxretry = {{ jail.maxretry }}
+action = {{ action.action_name }}
+EOF
+sudo systemctl restart fail2ban
+```
+
+## 5. 手動banでエッジ連携の動作を検証する
+
+```bash
+sudo fail2ban-client set {{ jail.name }}-edge-test banip {{ test.attacker_ip }}
+grep {{ test.attacker_ip }} /etc/nginx/conf.d/fail2ban_blocklist.conf
+curl -sS -o /dev/null -w "%{http_code}\n" -H "{{ test.xff_header }}: {{ test.attacker_ip }}" https://example.com/
+curl -sS "{{ action.ban_endpoint }}?configuration.value={{ test.attacker_ip }}" -H "Authorization: Bearer $CF_API_TOKEN" | jq '.result'
+```
+
+deny mapにIPが追加され、実アクセス確認curlが403を返し、CloudflareのAPIレスポンスに対象ルールが含まれていることを確認します。
+
+## 6. unbanで解除されることを検証する
+
+```bash
+sudo fail2ban-client set {{ jail.name }}-edge-test unbanip {{ test.attacker_ip }}
+grep {{ test.attacker_ip }} /etc/nginx/conf.d/fail2ban_blocklist.conf || echo "deny mapから削除済み"
+curl -sS "{{ action.ban_endpoint }}?configuration.value={{ test.attacker_ip }}" -H "Authorization: Bearer $CF_API_TOKEN" | jq '.result'
+curl -sS -o /dev/null -w "%{http_code}\n" -H "{{ test.xff_header }}: {{ test.attacker_ip }}" https://example.com/
+```
+
+deny mapからIPが消え、Cloudflare側のルールも削除され、実アクセス確認curlが200へ戻ることを確認します。unban対応: {{ action.unban_supported }}。
+
+## 7. 本番jailへのアクション切り替え
+
+Step 4-6の検証がすべて成功したことを確認したうえで、既存jail（{{ jail.name }}）の`action`にも`{{ action.action_name }}`を追加し、テスト用jailを撤去します。
+
+```bash
+sudo sed -i "/^\[{{ jail.name }}\]/,/^\[/ s/^action = .*/action = %(action_)s\n         {{ action.action_name }}/" /etc/fail2ban/jail.local
+sudo sed -i "/^\[{{ jail.name }}-edge-test\]/,/^$/d" /etc/fail2ban/jail.local
+sudo systemctl restart fail2ban
+sudo fail2ban-client status {{ jail.name }}
+```
+
+## 動作確認
+
+- Step 1で、プロキシ経由の攻撃がオリジンFWのbanだけでは防げていないことを確認していること
+- Step 5で、手動banにより deny map への追記・nginx reload・Cloudflare API側のルール作成・実アクセス403化のすべてが確認できること
+- Step 6で、unbanにより deny map からの削除・Cloudflare API側のルール削除・実アクセス200復帰のすべてが確認できること
+- Step 7の切り替え後、`fail2ban-client status {{ jail.name }}`に`{{ action.action_name }}`が有効なアクションとして表示されること
+
+## 注意事項
+
+- APIキーは環境変数（`{{ action.api_key_env }}`）経由で渡し、`action.d`の設定ファイルやfail2banログへ平文で書き込まない。発行はCloudflareの「API Tokens」から対象ゾーンの`Firewall Services:Edit`権限のみで行い、`/etc/fail2ban/cloudflare.env`は`600`権限でroot以外読み取り不可にし、ローテーション予定日を運用台帳に記録する。
+- 新しいエッジ連携経路は、Step 4-6でテスト用jailにより正常動作（ban時のdeny map反映・API連携・実アクセス403化、unban時の解除・実アクセス200復帰）を確認するまで、既存jail（{{ jail.name }}）のアクション設定を変更しない。既存の遮断経路を止めてから新経路を試す順序にはしない。
+- Cloudflare API連携先が障害・レート制限などで応答しない場合、`actionban`のAPI呼び出しは失敗してもnginx deny mapへの追記自体は独立して成功する設計としているが、逆にAPI呼び出しのみに依存する構成にすると連携先障害時にban自体が失効し得るため、deny mapとAPIの二重化を維持する。
+- 実クライアントIPの判定は`remote_addr`ではなく`{{ test.xff_header }}`（Cloudflareが付与するヘッダ）を用いる。信頼できるプロキシ（CloudflareのIPレンジ）以外からこのヘッダが偽装されて届かないよう、nginx側で`set_real_ip_from`にCloudflareのIPレンジのみを設定していることを前提とする。

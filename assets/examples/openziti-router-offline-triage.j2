@@ -1,0 +1,120 @@
+# OpenZitiエッジルータoffline時の調査
+
+エッジルータが `offline` 化しオーバーレイが疎通しない事象を、接続性・証明書・時刻の順に切り分けます。
+
+## 目的
+
+コントローラ側で `offline` 表示となったエッジルータについて、ルータ→コントローラ間の制御接続(ctrl接続)の到達性、ルータ証明書の有効期限、ルータ・コントローラ間の時刻ずれの順に原因を切り分け、オーバーレイ経路を復旧できるようになることを目指します。
+
+## 用語解説
+
+- **edge-router**: OpenZitiのオーバーレイ上でデータプレーンを中継するコンポーネント。コントローラとのctrl接続を常時維持し、その状態が `online`/`offline` としてコントローラに反映される
+- **ctrl接続**: エッジルータからコントローラの advertised address(`{{ ctrl_endpoint }}`)へ張られるTCP制御コネクション。これが切れるとルータは即座に `offline` 判定になる
+- **enrollment(エンロールメント)**: ルータが発行済みJWTを使ってコントローラに登録し、相互TLS用のクライアント証明書を取得する初回手続き。この証明書が失効すると再エンロールが必要になる
+- **ルータoffline時の影響範囲**: 当該ルータがoffline化すると、そのルータを終端点(ingress/egress)として経路解決していた全サービスの回線が新規に張れなくなり、既存セッションも維持できなくなる。他の複数ルータを経由できるサービスは、そちらへフェイルオーバーする場合がある
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 対象ルータ名 | `{{ router_name }}` |
+| コントローラ advertised address | `{{ ctrl_endpoint }}` |
+| 証明書有効期限チェックの要否 | {% if cert_expiry_check %}実施する{% else %}実施しない{% endif %} |
+| 時刻同期チェックの要否 | {% if ntp_check %}実施する{% else %}実施しない{% endif %} |
+
+## 手順
+
+### 1. offline状態を確認する
+
+```bash
+ziti edge list edge-routers 'name="{{ router_name }}"'
+```
+
+→ `EDGE ROUTER STATE` 列が `offline` であることを確認します。あわせて当該ルータを経由していたサービスの一覧を確認します。
+
+```bash
+ziti edge list edge-router-policies 'anyOf(edgeRouters) = "{{ router_name }}"'
+```
+
+→ このルータをegress/ingressとして許可しているサービスが、現在他ルータ経由に縮退できているかを把握しておきます。
+
+### 2. ルータ→コントローラのctrl接続を確認する
+
+```bash
+ssh admin@{{ router_name }} -- getent hosts $(echo {{ ctrl_endpoint }} | cut -d: -f1)
+ssh admin@{{ router_name }} -- nc -zv $(echo {{ ctrl_endpoint }} | cut -d: -f1) $(echo {{ ctrl_endpoint }} | cut -d: -f2)
+```
+
+→ 名前解決とTCP到達性(`{{ ctrl_endpoint }}` へのconnect成功)を確認します。ここで失敗する場合は、ルータ側のNW経路・FW・DNSの問題であり、次の証明書・時刻確認より前にこちらを優先して解消します。
+
+```bash
+ssh admin@{{ router_name }} -- sudo systemctl status ziti-router --no-pager
+```
+
+→ `ziti-router` サービス自体が起動しているか、直近で再起動を繰り返していないかを確認します。
+
+{% if cert_expiry_check %}
+### 3. ルータ証明書の有効期限を確認する
+
+```bash
+ssh admin@{{ router_name }} -- openssl x509 -noout -enddate -in /opt/openziti/etc/certs/{{ router_name }}-client.cert
+ssh admin@{{ router_name }} -- openssl x509 -noout -enddate -in /opt/openziti/etc/certs/{{ router_name }}-server.cert
+```
+
+→ `notAfter` が過去日時であれば、enrollment由来のクライアント証明書が失効しており、ctrl接続の相互TLSハンドシェイクが失敗していると判断できます。手順6の再エンロールに進みます。
+{% endif %}
+
+{% if ntp_check %}
+### 4. ルータ・コントローラ間の時刻ずれを確認する
+
+```bash
+ssh admin@{{ router_name }} -- chronyc tracking
+ssh admin@{{ router_name }} -- timedatectl status
+```
+
+→ `System clock synchronized` が `no`、または `Last offset` が大きくずれている場合、TLS証明書の有効期間検証がクロックスキューにより失敗している可能性があります。
+
+```bash
+ssh admin@{{ router_name }} -- sudo systemctl restart chronyd
+ssh admin@{{ router_name }} -- chronyc makestep
+```
+
+→ 時刻を強制的に補正し、再度ctrl接続が確立するか手順2のTCP到達性確認とあわせて再確認します。
+{% endif %}
+
+### 5. ルータログのエラーを確認する
+
+```bash
+ssh admin@{{ router_name }} -- sudo journalctl -u ziti-router -n 200 --no-pager
+```
+
+→ `certificate has expired`、`x509: certificate signed by unknown authority`、`dial tcp: connection refused` などのエラー文字列を確認し、証明書起因・接続起因のどちらかを最終確定します。
+
+### 6. 証明書失効時の再エンロールを行う
+
+```bash
+ziti edge delete edge-router "{{ router_name }}"
+ziti edge create edge-router "{{ router_name }}" --tunneler-enabled -o /tmp/{{ router_name }}.jwt
+```
+
+```bash
+scp /tmp/{{ router_name }}.jwt admin@{{ router_name }}:/tmp/{{ router_name }}.jwt
+ssh admin@{{ router_name }} -- sudo systemctl stop ziti-router
+ssh admin@{{ router_name }} -- sudo ziti-router enroll /opt/openziti/etc/router.yaml --jwt /tmp/{{ router_name }}.jwt
+ssh admin@{{ router_name }} -- sudo systemctl start ziti-router
+```
+
+→ 再エンロールにより新しいクライアント証明書が発行され、ctrl接続が再確立されます。既存のルータ設定(`router.yaml`)自体は変更せず、証明書のみが更新されます。
+
+## 動作確認
+
+1. `ziti edge list edge-routers 'name="{{ router_name }}"'` で `EDGE ROUTER STATE` が `online` に変わっていることを確認する
+2. 手順1で確認したこのルータを経由するサービスについて、クライアント側から新規接続を張り直し、回線が再確立されることを確認する
+3. `ssh admin@{{ router_name }} -- sudo journalctl -u ziti-router -n 50 --no-pager` で新規のエラーが出力されていないことを確認する
+
+## 注意事項
+
+- 再エンロール(手順6)は既存のルータ証明書を失効させる操作です。`ziti edge delete edge-router` の実行前に、当該ルータを経由する全サービスが他ルータ経由で縮退動作可能か(手順1のポリシー確認)を必ず確認し、影響範囲を把握してから実施してください。
+- 複数ルータ構成の場合、対象ルータのoffline中は当該ルータのみを終端点とするサービスが完全に不通になります。他ルータを経由できるサービスは自動的にフェイルオーバーしますが、冗長化されていないサービスがないか事前に洗い出してください。
+- 時刻補正(`chronyc makestep`)やルータ再起動は、対象ルータ経由の通信を一時的に切断します。切り戻し可能なメンテナンス時間帯に実施し、実施前後で `ziti edge list edge-routers` の状態を記録しておいてください。
+- 再エンロール完了後は、新しいctrl接続(手順2の到達性確認)が確立してから旧JWT・旧証明書ファイルを削除してください。新経路の確立を確認する前に旧証明書を削除すると、復旧手段を失います。

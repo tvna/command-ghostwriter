@@ -1,0 +1,91 @@
+# Lynisによる監査前セルフチェック訓練
+
+外部監査・認証審査（CIS Benchmark / PCI DSS 準拠確認等）の前に、全対象ホストで `lynis audit system` を実施し、
+検出された warning を「想定される指摘事項」として台帳（CSV）に整理し、期限内に是正を回す準備訓練です。
+
+## 目的
+
+Lynis のセルフチェック結果を監査基準（CIS / PCI DSS）に対応付けて管理し、是正状況を追跡できるようになることを目指します。
+本番の外部監査で受ける指摘を事前に想定し、是正または合理的な説明を準備できる状態を作ります。
+
+## 用語解説
+
+- **Lynis**: Linux/Unix 向けのセキュリティ監査ツール。`lynis audit system` でホストの設定を走査し、warning / suggestion を出力する
+- **hardening_index**: Lynis が算出するシステムの堅牢化度スコア（0〜100）。`/var/log/lynis-report.dat` に記録される
+- **test_id**: Lynis の各チェック項目を識別するID（例: `AUTH-9262`, `SSH-7408`）。`lynis show details <test_id>` で詳細説明を確認できる
+- **CIS Benchmark**: Center for Internet Security が公開するOS/ミドルウェアの設定基準
+- **PCI DSS**: クレジットカード業界のセキュリティ基準。8章は認証、2章はシステム設定強化を扱う
+- **段階適用(カナリア適用)**: 是正を全ホストへ一斉反映せず、一部ホストや新経路の疎通を確認してから展開する方法
+
+## シナリオ設定
+
+| test_id | category | warning | likely_finding | remediation_status | owner |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["test_id"] }} | {{ r["category"] }} | {{ r["warning"] }} | {{ r["likely_finding"] }} | {{ r["remediation_status"] }} | {{ r["owner"] }} |
+{% endfor %}
+
+## 1. Lynisを全対象ホストにインストールし監査を実行する
+
+```bash
+# 対象ホスト一覧（例）に対して順次実行する
+sudo apt-get update && sudo apt-get install -y lynis
+sudo lynis audit system --cronjob > /var/log/lynis-audit-$(date +%F).log 2>&1
+
+# hardening_index（是正前）を記録しておく
+sudo grep '^hardening_index=' /var/log/lynis-report.dat | tee -a /var/log/lynis-index-history.log
+```
+
+## 2. warningを抽出し、台帳（CSV）の指摘想定項目と突合する
+
+```bash
+# 検出されたwarningのtest_idと文言を確認する
+sudo grep '^warning\[\]=' /var/log/lynis-report.dat
+
+{% for r in csv_rows %}echo "台帳照合: {{ r["test_id"] }} -> {{ r["likely_finding"] }}"
+lynis show details {{ r["test_id"] }}
+{% endfor %}```
+
+台帳の `likely_finding` 列で CIS / PCI DSS の該当条項に対応付け、`remediation_status` を最新化する。
+
+## 3. 認証・SSH経路の是正は新経路の疎通確認後に段階適用する
+
+認証（`AUTH-*`）や SSH（`SSH-*`）に関わる是正は、旧経路を止める前に新経路が機能することを別セッションで確認してから適用する。
+
+```bash
+{% for r in csv_rows %}{% if r["category"] == "認証" and r["remediation_status"] != "完了" %}# {{ r["test_id"] }}: PASS_MAX_DAYSを段階的に強制する（既存ユーザーには遡及しない）
+sudo sed -i 's/^PASS_MAX_DAYS.*/PASS_MAX_DAYS   90/' /etc/login.defs
+{% endif %}{% endfor %}
+{% for r in csv_rows %}{% if r["category"] == "SSH" and r["remediation_status"] != "完了" %}# {{ r["test_id"] }}: PermitRootLoginを無効化する前に、
+# 「別セッション」でsudo可能な一般ユーザーでSSHログインできることを必ず確認する
+ssh -o BatchMode=yes deploy-user@$(hostname -f) "echo new-path-ok"
+
+# 疎通確認できた場合のみ、設定ファイルを検証してから反映する
+sudo sed -i 's/^PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+sudo sshd -t
+sudo systemctl reload sshd
+{% endif %}{% endfor %}```
+
+## 4. 是正後に再監査し、hardening_indexの改善と残指摘を確認する
+
+```bash
+sudo lynis audit system --cronjob > /var/log/lynis-audit-$(date +%F)-after.log 2>&1
+sudo grep '^hardening_index=' /var/log/lynis-report.dat | tee -a /var/log/lynis-index-history.log
+
+# 是正後も残っている項目を抽出する（未是正の説明準備対象）
+{% for r in csv_rows %}{% if r["remediation_status"] != "完了" %}echo "残指摘: {{ r["test_id"] }} ({{ r["owner"] }}) status={{ r["remediation_status"] }}"
+{% endif %}{% endfor %}```
+
+## 動作確認
+
+- 全対象ホストで手順1・4の監査ログ（是正前・是正後）が `/var/log/lynis-audit-*.log` に存在すること
+- `/var/log/lynis-index-history.log` で是正後の hardening_index が是正前より改善していること
+- 台帳（シナリオ設定の表）の `remediation_status` が「完了」以外の行について、担当者（`owner`）が理由・対応予定を説明できる状態になっていること
+- SSH-7408 の是正を適用したホストで、一般ユーザーによる新経路のSSHログインが是正後も引き続き成功すること
+
+## 注意事項
+
+- 本セルフチェックは外部監査・認証審査の代替ではない。あくまで指摘想定と是正の事前準備であり、実際の監査結果を保証するものではない。
+- 認証・SSH経路の是正は、手順3のとおり新経路（一般ユーザーでのSSH疎通など）を別セッションで確認してから、旧経路（root ログイン等）を無効化する。確認前に `sshd` を reload しない。
+- 是正は全ホスト一斉ではなく、段階適用（一部ホストで検証してから展開）し、意図しないログイン不能などの影響がないか確認する。
+- 期限内に是正できない項目（`remediation_status` が「説明準備」等）は、リスク受容の理由と代替統制、対応予定日を owner が文書化しておく。
+- 本訓練の実行ログ・台帳・hardening_index の推移は、外部監査時の証跡として一定期間保管する。

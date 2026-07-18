@@ -1,0 +1,120 @@
+# fail2banがbanしない事象の切り分け調査
+
+攻撃が続いているのに `Currently banned` が増えない場合、原因は「検知(found)」と「遮断(ban)」のどちらの段階にあるかで切り分け方が異なります。ログパス → failregex → ban action → ignoreip の順に、段階を1つずつ潰していきます。
+
+## 目的
+
+「攻撃は続いているのにbanされない」事象を、ログ監視・パターン一致・遮断コマンド・除外設定の4段階に分解し、どの段階で機能していないかを特定できるようになることを目指します。
+
+## 用語解説
+
+- **found(検知)**: fail2banのfilterがログ中の失敗行を `failregex` に一致させ、カウントした状態。`fail2ban-client status <jail>` の `Currently failed` / `Total failed` に反映される。
+- **ban(遮断)**: found が `maxretry` に達した際に、fail2banが `action`（nftables/iptables等）を呼び出して実際に通信を遮断した状態。`Currently banned` に反映される。found しても ban に至らないケースがあり、この2段階の分離が切り分けの起点になる。
+- **backend**: fail2banがログの追記をどう検知するかの設定（`auto` / `systemd` / `pyinotify` / `polling`）。journald運用のディストリビューションでは `logpath` ではなく `journalmatch` が必要になる場合がある。
+- **failregex**: filter定義（`/etc/fail2ban/filter.d/*.conf`）内の、失敗ログ1行にマッチさせる正規表現。
+- **ban action**: 遮断を実行する `action.d/*.conf` の定義。実行コマンド（nftables/iptablesルール追加等）が失敗しても、fail2ban側は found を記録したまま黙って ban に失敗することがある。
+- **ignoreip**: 常に遮断対象から除外するIP/CIDRの一覧。誤って攻撃元を含む広いレンジを登録すると found はしても ban されない。
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 対象jail | {{ jail_name }} |
+| logpath | {{ logpath }} |
+| backend | {{ backend }} |
+| journalmatch(参考) | _SYSTEMD_UNIT={{ journal_unit }} |
+| fail2ban-regexでの想定一致件数 | {{ failregex_matches }} |
+| ban action | {{ ban_action }} |
+| ignoreip誤除外の疑い | {% if ignoreip_check %}あり(要確認){% else %}なし{% endif %} |
+| 検証用の模擬攻撃元IP | {{ test_attacker_ip }} |
+
+## 1. 現状確認: found と ban のどちらで止まっているかを見る
+
+```bash
+sudo fail2ban-client status {{ jail_name }}
+sudo fail2ban-client status
+```
+
+`Currently failed` / `Total failed` が増加し続けているのに `Currently banned` が0または低いままであれば、found はできているのでban action以降（3〜4節）を疑います。逆に `Total failed` 自体が増えていなければ、検知そのもの（2節）を疑います。
+
+## 2. logpathの切り分け: ログが正しい経路で読めているか
+
+```bash
+sudo fail2ban-client get {{ jail_name }} logpath
+sudo tail -n 5 {{ logpath }}
+sudo fail2ban-client get {{ jail_name }} logencoding
+```
+
+`logpath` にログが実際に追記されているか、ローテーション後のファイル（`{{ logpath }}.1` 等）を見続けていないかを確認します。journald中心のディストリビューションでは `rsyslog` が停止していると `{{ logpath }}` 自体が更新されなくなるため、backend設定も合わせて確認します。
+
+```bash
+sudo fail2ban-client get {{ jail_name }} logtype
+journalctl -u {{ journal_unit }} --since "10 min ago" | tail -n 20
+```
+
+現在のbackendは `{{ backend }}` です。`logtype` が `file` を返すのに `journalctl`側にしか新規ログが出ていない場合、`logpath` 監視が事実上失効しています。この場合は `backend = systemd` と `journalmatch = _SYSTEMD_UNIT={{ journal_unit }}` への切替を検討します。
+
+## 3. failregexの切り分け: パターンが実際に一致しているか
+
+```bash
+sudo fail2ban-regex {{ logpath }} /etc/fail2ban/filter.d/{{ jail_name }}.conf
+```
+
+出力末尾の `Lines: ... , matched N, ...` を確認します。ここで一致数が0または想定（{{ failregex_matches }}件程度）を大きく下回る場合、ログの出力フォーマットが想定と異なっている（OSやSSHのバージョン差でメッセージ文言が変わった等）ことが主因です。`--print-all-matched` で実際に一致した行を目視確認します。
+
+```bash
+sudo fail2ban-regex --print-all-matched {{ logpath }} /etc/fail2ban/filter.d/{{ jail_name }}.conf
+```
+
+## 4. ban actionの切り分け: 遮断コマンドが実際に反映されているか
+
+found はできているのにbanされない場合、action実行時のコマンド失敗（権限不足やnftables/iptablesのテーブル不整合）を疑います。
+
+```bash
+sudo fail2ban-client set {{ jail_name }} banip {{ test_attacker_ip }}
+sudo fail2ban-client status {{ jail_name }}
+```
+
+現在の `ban_action` は `{{ ban_action }}` です。実際に遮断ルールが反映されているかを、設定されているaction実装に応じて確認します。
+
+```bash
+sudo nft list ruleset | grep {{ test_attacker_ip }}
+sudo iptables -L -n | grep {{ test_attacker_ip }}
+```
+
+いずれにも `{{ test_attacker_ip }}` が現れない場合、`fail2ban-client status {{ jail_name }}` 上は `Currently banned` に計上されていても実ルールへの反映に失敗しています。`sudo journalctl -u fail2ban --since "5 min ago"` でaction実行時のエラー（権限不足、nftables/iptablesコマンド不在、テーブル名不一致等）を確認します。手動banの解除は以下で行います。
+
+```bash
+sudo fail2ban-client set {{ jail_name }} unbanip {{ test_attacker_ip }}
+```
+
+## 5. ignoreipの切り分け: 攻撃元を誤って除外していないか
+
+```bash
+sudo fail2ban-client get {{ jail_name }} ignoreip
+```
+
+{% if ignoreip_check %}
+`ignoreip` にCIDR表記の広いレンジ（例: 社内NAT越えの共有グローバルIPを含むレンジ）を登録していないかを確認します。攻撃元IPが誤ってこのレンジに含まれていると、found はしても遮断対象から常に除外され、ban action(4節)まで到達しません。
+```bash
+sudo fail2ban-client -t
+```
+`-t` でjail.local全体の構文検証を行い、ignoreip行の記述ミス（カンマ区切り漏れ等でIPが正しく分離されていない）も合わせて確認します。
+{% else %}
+現時点でignoreipの誤登録は疑われていません。念のため上記コマンドの出力に `{{ test_attacker_ip }}` を含む範囲がないことのみ確認してください。
+{% endif %}
+
+## 動作確認
+
+- 1節: `fail2ban-client status {{ jail_name }}` で `Currently failed` / `Total failed` / `Currently banned` の現況が把握できること
+- 2節: `logpath` への追記が継続しており、backend(`{{ backend }}`)とログ経路（file/journald）が一致していること
+- 3節: `fail2ban-regex` の実行結果で `matched` が0件でないこと（想定一致件数の目安: {{ failregex_matches }}件）
+- 4節: `{{ test_attacker_ip }}` への手動banip後、`{{ ban_action }}` の実ルール（nft ruleset / iptables）に当該IPが実際に出現し、unbanip後に消えること
+- 5節: `ignoreip` に攻撃元IPを含み得る誤ったレンジが含まれていないこと
+
+## 注意事項
+
+- 本手順はSSHサービスへの遮断ルールの追加・削除を伴います。作業前に必ず**別セッション（別ターミナルや別の管理者接続）を確保**し、切り分け中に誤って自分自身の接続元を遮断しても復旧できる経路を残してください。
+- 2節でbackendを `file` から `systemd` に切り替える、あるいは3節でfailregexを修正するなど、切り分け中に変更した設定は `jail.local` / `filter.d/*.conf` に恒久化し、`fail2ban-client reload` で反映したうえで再度1節から動作確認をやり直してください。切り分け用に一時変更した設定を放置すると、次回の障害時に再現しない・逆に過剰検知するといった不整合の原因になります。
+- 主な原因は次の4パターンに大別されます: (1) logpathがjournald/rsyslogの切替やログローテーションで実質的に失効している、(2) failregexのフォーマットがOS/ミドルウェアのバージョン差で一致しなくなっている、(3) backend設定（auto/systemd/polling）がログ経路と合っていない、(4) ban actionの実行コマンドが権限不足や存在しないコマンドで失敗している。
+- 4節の手動banip/unbanipはテスト用IPに対してのみ実施し、実際の攻撃元IPを恒久的に許可・除外する操作ではないことを確認してから次の手順に進んでください。

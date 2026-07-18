@@ -9,7 +9,7 @@ encryption: true
 collector_password_vault_path: "/secure/vault/velociraptor-collector-passwords/2026-07-17.txt"
 output_format: "Zip"
 transfer_medium: "検証済みUSBメモリ（write-protect有効）"
-import_method: "GUIドラッグ&ドロップアップロード"
+import_method: "GUIドラッグアンドドロップアップロード"
 notebook_name: "Offline Collector Drill 2026-07-17"
 participants:
   - alice

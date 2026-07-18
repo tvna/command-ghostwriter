@@ -1,0 +1,5 @@
+suspect_src: "10.20.31.44"
+timeframe: "2026-07-17T09:00:00Z/2026-07-17T13:00:00Z"
+evidence_dir: "/mnt/forensics/ZEEK-2026-0717"
+upload_bytes_threshold: "104857600"
+escalation_contact: "secops-oncall@example.internal"

@@ -1,0 +1,125 @@
+# Velociraptorオフラインコレクタ運用訓練 — {{ case_id }}
+
+隔離ホスト `{{ isolated_host }}`（ネットワーク非接続を想定）を対象に、Velociraptorのオフラインコレクタを使ったフォレンジック収集を、コレクタ生成 → 実行 → 取り込み → 解析まで一巡する訓練です。訓練実施日は {{ drill_date }}、参加者は {{ participants | join(", ") }} です。
+
+## 目的
+
+サーバに接続できない隔離済み・エアギャップ環境のホストからも、証拠保全に必要なアーティファクトを安全に収集し、後日サーバへ取り込んで解析できることを、実機操作を通じて確認します。
+
+## 用語解説
+
+- **オフラインコレクタ**: Velociraptorサーバに接続せずに単体で実行できる、アーティファクト収集専用のスタンドアロン実行ファイル。事前にサーバのGUIで対象アーティファクトと出力形式を選んでビルドする。
+- **オフライン収集の用途**: マルウェア感染などでネットワークから隔離済みのホストや、そもそもネットワークに接続されていないエアギャップホストから証拠を収集する場合に使う。収集後にUSBメモリ等の物理媒体でサーバ側へ結果を持ち込む。
+- **アーティファクト**: Velociraptorが収集対象とするデータ定義（例: `{{ collector_artifacts[0] }}` はホスト基本情報、`{{ collector_artifacts[1] }}` はKAPEターゲット定義に基づくファイル収集）。
+- **コレクタ暗号化**: 生成したコレクタ実行ファイルおよび収集結果zipをパスワードで暗号化する機能。収集物には機微な生データが含まれるため、輸送中・保管中の漏えいを防ぐ。
+- **chain of custody（証拠保全の連鎖）**: 証拠が収集されてから解析されるまで、誰がいつどの媒体で取り扱ったかを記録し、改ざん・混入がないことを証明する記録。
+- **Notebook解析**: サーバに取り込んだ収集結果に対し、VQL（Velociraptor Query Language）を使って対話的に調査するワークスペース。
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 訓練ID | {{ case_id }} |
+| 訓練実施日 | {{ drill_date }} |
+| 対象ホスト（隔離/エアギャップ想定） | {{ isolated_host }} |
+| 収集アーティファクト | {{ collector_artifacts | join(", ") }} |
+| コレクタ暗号化 | {{ encryption }} |
+| 出力形式 | {{ output_format }} |
+| 受け渡し媒体 | {{ transfer_medium }} |
+| サーバ取り込み方法 | {{ import_method }} |
+| 解析用Notebook名 | {{ notebook_name }} |
+| 参加者 | {{ participants | join(", ") }} |
+
+## 1. サーバGUIでオフラインコレクタを作成する
+
+Velociraptorサーバの管理GUIにログインし、画面上部の「Collect」（コレクタ生成）アイコンから「Offline collector」ウィザードを開きます。
+
+1. 対象OS（対象ホストのOSに合わせて Windows / Linux / macOS）を選択する。
+2. 「Select Artifacts」で以下のアーティファクトを追加する。
+
+```text
+{% for artifact in collector_artifacts %}{{ artifact }}
+{% endfor %}```
+
+3. 「Configure Collection」で、各アーティファクトのパラメータ（収集対象パスやレジストリキーなど）を確認する。
+4. 「Deployment」画面で出力形式を `{{ output_format }}` に設定する。
+5. 「Password protect collection」を有効化し（コレクタ暗号化: {{ encryption }}）、生成したパスワードは訓練用パスワード保管先 `{{ collector_password_vault_path }}` に記録する。パスワードをチャットやメールで共有しない。
+6. 「Launch」を押してビルドを開始し、完了後に表示されるダウンロードリンクから実行ファイル一式（zip）を取得する。
+
+## 2. コレクタの完全性を確認し、隔離ホストへ搬送する
+
+ビルド直後にサーバ側でハッシュを記録し、搬送後に同じ値であることを確認します。
+
+```bash
+sha256sum velociraptor_offline_collector.zip | tee collector-build.sha256
+```
+
+搬送は `{{ transfer_medium }}` を使用します。搬送前後でハッシュを突合し、chain of custodyの記録簿（誰が・いつ・どの媒体で運搬したか）に記載してください。
+
+```bash
+sha256sum -c collector-build.sha256
+```
+
+## 3. 隔離ホストでコレクタを実行する
+
+対象ホスト `{{ isolated_host }}` 上でzipを展開し、収集専用ホストの管理者権限で実行ファイルを起動します（ネットワーク接続は不要です）。
+
+```bash
+unzip -d ./velociraptor_offline_collector velociraptor_offline_collector.zip
+cd ./velociraptor_offline_collector
+sudo ./velociraptor_offline_collector
+```
+
+暗号化を有効にした場合、実行時にパスワード入力を求められます。`{{ collector_password_vault_path }}` に保管したパスワードを入力してください。実行が完了すると、収集結果として `Collection-{{ isolated_host }}-<timestamp>.zip` が同ディレクトリに生成されます。
+
+```bash
+ls -l Collection-{{ isolated_host }}-*.zip
+sha256sum Collection-{{ isolated_host }}-*.zip | tee collection-result.sha256
+```
+
+生成された `collection-result.sha256` も収集結果と一緒に搬送し、サーバ側取り込み前の完全性検証に使います。
+
+## 4. 収集結果をサーバへ取り込む
+
+収集結果zipを `{{ transfer_medium }}` でサーバ側の端末まで搬送し、ハッシュを再検証してから取り込みます。
+
+```bash
+sha256sum -c collection-result.sha256
+```
+
+取り込み方法は `{{ import_method }}` です。サーバGUIの「View Collected Artifacts」画面から、収集結果zipをアップロード領域へドラッグ&ドロップし、インポート完了まで待機します。暗号化されている場合はここでもパスワード入力が必要です。
+
+## 5. Notebookで収集内容を解析する
+
+サーバGUIで「Notebooks」から `{{ notebook_name }}` を新規作成し、取り込んだ収集結果に対してVQLで内容を確認します。
+
+```vql
+SELECT * FROM source(artifact='{{ collector_artifacts[0] }}')
+```
+
+```vql
+SELECT * FROM source(artifact='{{ collector_artifacts[1] }}')
+LIMIT 20
+```
+
+```vql
+SELECT * FROM source(artifact='{{ collector_artifacts[2] }}')
+LIMIT 20
+```
+
+各クエリの結果が空でないこと、想定したホスト名・タイムスタンプが収集データに含まれることを確認します。
+
+## 動作確認
+
+1. コレクタ生成: ダウンロードした `velociraptor_offline_collector.zip` のハッシュがサーバでの記録と一致すること。
+2. 実行: 隔離ホスト `{{ isolated_host }}` 上で `Collection-{{ isolated_host }}-*.zip` が生成され、そのハッシュを記録できたこと。
+3. 取り込み: `{{ import_method }}` によりサーバへのインポートがエラーなく完了したこと。
+4. 解析: `{{ notebook_name }}` で各アーティファクト（{{ collector_artifacts | join(", ") }}）のVQLクエリが結果を返し、期待した収集内容（対象ホスト情報・ファイル・イベントログ）が含まれること。
+
+## 注意事項
+
+- コレクタ暗号化（現在の設定: {{ encryption }}）は必ず有効のまま運用する。収集物には機微な生データ（メモリダンプ相当の情報やイベントログの詳細）が含まれるため、平文のzipを搬送・保管しない。パスワードは `{{ collector_password_vault_path }}` のような専用の保管先で管理し、収集物と同じ媒体・同じ経路で運ばない。
+- 隔離ホストでのコレクタ実行には管理者権限（Windowsなら管理者、Linux/macOSなら root 相当の実行権限）が必要になる。実行前に対象ホストの権限方針に反しないか確認する。
+- 収集物の受け渡し経路（`{{ transfer_medium }}`）とハッシュ照合の記録を chain of custody として残す。誰が・いつ・どの媒体で・どのホストからどのホストへ運搬したかを台帳に記載し、経路の途中でハッシュが変わった場合は取り込みを中止して原因を調査する。
+- 本訓練は既存の収集経路（サーバへ直接接続してのライブ収集など）を無効化・置き換えるものではない。オフライン経路はあくまで隔離/エアギャップ時の代替経路であり、新しい取り込み経路（{{ import_method }}）が正しく機能することをこの訓練で確認してから、実インシデント時の主経路として採用すること。
+- 訓練記録（コレクタのハッシュ、実行ログ、取り込み結果、Notebookのクエリ結果）は `{{ case_id }}` の名称で保管し、参加者（{{ participants | join(", ") }}）が後日レビューできるようにする。

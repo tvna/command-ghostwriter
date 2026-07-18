@@ -1,0 +1,111 @@
+# UnboundでのDNSトンネリング疑い対応
+
+クエリログ/dnstapで検出した {{ csv_rows | length }} 件のDNSトンネリング疑いドメインについて、RPZで遮断し送信元ホストを特定してフォレンジック調査へ引き継ぐ初動対応手順です。
+
+## 目的
+
+異常な長大クエリ・高頻度TXT/NULL問い合わせをログから特定し、Unbound の RPZ (Response Policy Zone) で該当ドメインを遮断したうえで、送信元ホストを感染疑いとして調査プロセスへ引き継げるようになることを目指します。
+
+## 用語解説
+
+- **DNSトンネリング**: DNSクエリ/応答のペイロードにデータを埋め込み、ファイアウォールを迂回して通信・データ持ち出しを行う手法
+- **長いラベル**: サブドメイン1ラベルが数十文字を超えるような、人間が入力したとは考えにくい文字列。エンコードされたデータであることが多い
+- **TXT/NULLレコード集中**: トンネリングツールは任意長データを運べるTXTやNULLタイプを好んで使うため、特定タイプへの問い合わせが偏る
+- **単一ドメインへの集中**: 通常のWeb閲覧では発生しない、同一の親ドメインへの高頻度・連続的な問い合わせ
+- **RPZ (Response Policy Zone)**: Unbound/BINDが対応する、特定ドメインへの応答をポリシーに従って書き換える機能。NXDOMAIN化などに使う
+- **dnstap**: Unbound/BINDのクエリ・応答をバイナリ形式でリアルタイムに記録する仕組み。ログより詳細な調査に向く
+
+## シナリオ設定
+
+ログ分析で以下の {{ csv_rows | length }} 件を疑いドメインとして検出しました。
+
+| 疑いドメイン | 送信元ホスト | クエリ種別 | 頻度(件/時) | RPZ対応 | 引き継ぎ先 |
+| --- | --- | --- | --- | --- | --- |
+{% for r in csv_rows %}| {{ r["suspect_domain"] }} | {{ r["src_host"] }} | {{ r["query_type"] }} | {{ r["frequency"] }} | {{ r["rpz_action"] }} | {{ r["followup"] }} |
+{% endfor %}
+## 手順
+
+### 1. クエリログ/dnstapで異常な問い合わせを特定する
+
+```bash
+# クエリログから長いラベル・TXT/NULL問い合わせ・高頻度な宛先を洗い出す
+grep -E 'TXT|NULL' /var/log/unbound/query.log | awk '{print $NF, $(NF-1)}' | sort | uniq -c | sort -rn | head -n 20
+
+# dnstapを使う場合はdnstap-ldmoduleの出力をdnstap-readで確認する
+dnstap-read -y /var/log/unbound/dnstap.log | grep -E '(TXT|NULL)' | head -n 50
+```
+
+### 2. RPZゾーンをログ専用(ドライラン)で先に投入する
+
+いきなり本番遮断せず、まず `log-only` で新しいRPZポリシーが期待どおりに疑いドメインへマッチするかを確認します。
+
+```bash
+mkdir -p /etc/unbound/rpz
+cat > /etc/unbound/rpz/tunneling.rpz <<'EOF'
+$TTL 60
+@ IN SOA localhost. admin.localhost. ( 2026071701 3600 900 604800 60 )
+@ IN NS localhost.
+{% for r in csv_rows %}{{ r["suspect_domain"] }} IN CNAME rpz-drop.
+{% endfor %}EOF
+
+cat > /etc/unbound/unbound.conf.d/rpz-dryrun.conf <<'EOF'
+rpz:
+    name: "tunneling.rpz"
+    zonefile: "/etc/unbound/rpz/tunneling.rpz"
+    rpz-log: yes
+    rpz-log-name: "tunneling-dryrun"
+EOF
+
+unbound-checkconf
+systemctl reload unbound
+```
+
+```bash
+# ドライラン中は遮断せず、マッチしたことだけをログで確認する
+{% for r in csv_rows %}dig {{ r["suspect_domain"] }} A
+{% endfor %}grep "tunneling-dryrun" /var/log/unbound/unbound.log | tail -n 20
+```
+
+### 3. 想定どおりマッチしたら本番遮断(NXDOMAIN化)へ切り替える
+
+```bash
+sed -i 's/rpz-log: yes/rpz-log: yes\n    rpz-action-override: nxdomain/' /etc/unbound/unbound.conf.d/rpz-dryrun.conf
+mv /etc/unbound/unbound.conf.d/rpz-dryrun.conf /etc/unbound/unbound.conf.d/rpz-enforce.conf
+unbound-checkconf
+systemctl reload unbound
+```
+
+### 4. 送信元ホストをログで特定し記録する
+
+```bash
+{% for r in csv_rows %}grep "{{ r["suspect_domain"] }}" /var/log/unbound/query.log | awk '{print $1}' | sort -u
+# 期待される送信元: {{ r["src_host"] }}
+{% endfor %}
+mkdir -p /var/log/incident-response
+date -u +%Y-%m-%dT%H:%M:%SZ >> /var/log/incident-response/rpz-block-record.log
+echo "blocked domains: {% for r in csv_rows %}{{ r["suspect_domain"] }}{% if not loop.last %}, {% endif %}{% endfor %}" >> /var/log/incident-response/rpz-block-record.log
+```
+
+### 5. 送信元ホストのフォレンジック調査へ引き継ぐ
+
+```bash
+{% for r in csv_rows %}{% if r["followup"] == "osquery" %}# {{ r["src_host"] }} には osquery で常駐プロセス・スケジュールタスクを確認する
+osqueryi --line "SELECT name, path, cmdline FROM processes WHERE cmdline LIKE '%{{ r["suspect_domain"] }}%';"
+{% else %}# {{ r["src_host"] }} には Velociraptor でアーティファクト収集を実施する
+velociraptor artifacts collect Windows.Network.DNSTunneling --client_id={{ r["src_host"] }}
+{% endif %}{% endfor %}```
+
+## 動作確認
+
+- ドライラン(手順2)のログで、対象疑いドメインへのクエリが `tunneling-dryrun` としてマッチ記録されていること
+- 本番遮断(手順3)後、`{% for r in csv_rows %}{{ r["suspect_domain"] }}{% if not loop.last %}, {% endif %}{% endfor %}` への `dig` がいずれも NXDOMAIN を返すこと
+- 遮断後もクエリログ上で送信元ホスト({{ csv_rows[0]["src_host"] }} など)からの当該ドメインへの問い合わせ自体は継続して記録され、ブロックが機能していることが確認できること
+- `/var/log/incident-response/rpz-block-record.log` に遮断日時と対象ドメインが記録されていること
+
+## 注意事項
+
+- RPZはDNS応答という「解決の既定経路」そのものを書き換える設定であるため、手順2のドライラン(ログ専用)で疑いドメインへのマッチと除外漏れを確認してから、手順3で初めてNXDOMAIN化に切り替えること。ドライランを飛ばして即座に本番遮断すると、DNSSEC検証や一部SaaSが用いる正当な長いTXTクエリまで誤って遮断し、業務影響が出る恐れがある。
+- 正規の長いクエリ(DNSSECの署名関連レコード、Microsoft 365やGoogle Workspaceなどが使う長いSPF/DKIM関連TXTレコード等)を誤検知しないよう、RPZ投入前に既知の正規ドメインを除外リストで確認すること。
+- 送信元ホストのフォレンジックはosquery/Velociraptorなど既存のEDR/資産調査基盤と連携し、単なるDNS遮断で終わらせず永続化機構やC2通信の有無まで調査すること。
+- 遮断の実施記録(日時・対象ドメイン・実施者)は`/var/log/incident-response/rpz-block-record.log`のような形で必ず残し、事後のインシデント報告・解除判断に使えるようにすること。
+- 本手順のRPZ遮断はDNSレイヤーでの初動対応であり、Suricata等のDNS検知ルール(TXT/NULLの異常検知、長いラベルの検知)と併用し、ネットワークレイヤーでも同種の通信を検知できる体制にしておくこと。unbound-cache-resolver(既存)はキャッシュDNSの構築・性能検証が主眼であり、本手順はDNSトンネリング疑いへのインシデント初動対応に焦点を絞る。

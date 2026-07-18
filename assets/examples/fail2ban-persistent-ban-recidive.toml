@@ -1,0 +1,37 @@
+[jail]
+name = "sshd"
+bantime = "1h"
+findtime = "10m"
+maxretry = 5
+port = "ssh"
+logpath = "/var/log/auth.log"
+
+[recidive]
+jail_name = "recidive"
+logpath = "/var/log/fail2ban.log"
+findtime = "1d"
+maxretry = 3
+recidive_bantime = "1w"
+recidive_findtime = "1d"
+bantime_increment = true
+bantime_factor = 2
+bantime_maxtime = "4w"
+
+[persistent]
+persistent = true
+nftables_table = "inet"
+nftables_chain = "f2b-recidive-permanent"
+nftables_set = "recidive_permanent_ban"
+reload_unit = "fail2ban-nft-restore.service"
+ruleset_file = "/etc/nftables.d/recidive-permanent.nft"
+
+[[ignoreip]]
+address = "192.168.10.5"
+label = "管理端末A"
+
+[[ignoreip]]
+address = "192.168.10.6"
+label = "管理端末B"
+
+[test]
+attacker_ip = "203.0.113.50"

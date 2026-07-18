@@ -1,0 +1,103 @@
+# osquery高負荷・クエリ遅延の調査
+
+osqueryd のCPU/メモリ高騰や応答遅延が疑われる際に、`osquery_schedule` テーブルの自己観測結果とwatchdogのkillログを突き合わせて、重いクエリを特定し間隔調整・最適化するまでの調査手順です。
+
+## 目的
+
+osqueryd自身が公開する `osquery_schedule` の実行統計から重いクエリを特定し、watchdogによる強制終了(kill)の記録と関連付けたうえで、スケジュール間隔の調整・クエリ最適化によって負荷を低減できるようになることを目指します。
+
+## 用語解説
+
+- **osquery_schedule**: osqueryd自身が実行中の各定期クエリについて `average`(平均実行時間ms)・`executions`(実行回数)・`wall_time`(累積実行時間秒)・`memory`(使用メモリKB)などを自己観測して公開する仮想テーブル
+- **watchdog**: osqueryd本体プロセスを監視し、CPU/メモリが閾値(`--watchdog_level`/`--watchdog_memory_limit_mb`)を超えたクエリ(extension含む)を強制終了(kill)して本体をクラッシュから守るプロセス保護機構
+- **watchdog_level**: watchdogの監視の厳しさ(0-3など)を指定するレベル。値が大きいほど早くkillする
+- **フルテーブルスキャン**: `WHERE` 句で絞り込まずにテーブル全体を走査すること。`yara`や`hash`のようなオンデマンド計算テーブルで特にコストが高い
+- **schedule_interval**: 各クエリをスケジューラが実行する間隔(秒)。短すぎると累積負荷が増える
+
+## シナリオ設定
+
+- 遅延判定の閾値(`slow_query_threshold_ms`): {{ slow_query_threshold_ms }} ms
+- watchdogメモリ上限(`watchdog_memory_mb`): {{ watchdog_memory_mb }} MB
+
+| クエリ名 | 対象テーブル | 平均実行時間(ms) | 実行回数 | 累積時間(s) | メモリ(MB) | 現在の間隔(s) | 疑わしい理由 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+{% for q in suspect_queries %}| {{ q.name }} | {{ q.query_table }} | {{ q.average_ms }} | {{ q.executions }} | {{ q.wall_time_s }} | {{ q.memory_mb }} | {{ q.schedule_interval_s }} | {{ q.reason }} |
+{% endfor %}
+
+## 1. osquery_scheduleで重いクエリを特定する
+
+`osqueryi`(対話シェル)から自己観測テーブルを直接クエリし、平均実行時間の降順で並べます。
+
+```bash
+sudo osqueryi --json "SELECT name, average, executions, wall_time, memory FROM osquery_schedule ORDER BY average DESC;"
+```
+
+得られた `average`(ms)が閾値 {{ slow_query_threshold_ms }} ms を超えるクエリを重いクエリの候補とします。
+
+```bash
+sudo osqueryi --json "SELECT name, average, executions, wall_time, memory FROM osquery_schedule WHERE average > {{ slow_query_threshold_ms }} ORDER BY average DESC;"
+```
+
+今回の調査対象として、以下が候補に挙がりました。
+
+{% for q in suspect_queries %}- `{{ q.name }}`({{ q.query_table }}テーブル): 平均{{ q.average_ms }}ms、累積{{ q.wall_time_s }}秒、メモリ{{ q.memory_mb }}MB
+{% endfor %}
+
+## 2. watchdogによるkill記録を確認する
+
+osqueryd起動時のwatchdog設定フラグを確認します。
+
+```bash
+ps -eo pid,args | grep osqueryd | grep -- '--watchdog'
+```
+
+現在のwatchdog設定は `{{ watchdog_kill.observed_level }}` と `{{ watchdog_kill.memory_limit_flag }}` でした。watchdogがクエリ(extensionプロセス)を強制終了した記録は、osqueryd自身のログ(`osqueryd.INFO`/`osqueryd.WARNING`)から確認します。
+
+```bash
+sudo grep -i "watchdog" /var/log/osquery/osqueryd.INFO /var/log/osquery/osqueryd.WARNING
+```
+
+以下のkillが記録されていました。
+
+- killされたクエリ: `{{ watchdog_kill.killed_query_name }}`
+- kill発生時刻: {{ watchdog_kill.killed_at }}
+- kill前後のosqueryd PID: {{ watchdog_kill.osqueryd_pid_before }} → {{ watchdog_kill.osqueryd_pid_after }}(watchdogがextensionをkillした場合、本体PIDは変わらないが、本体ごとクラッシュ・再起動した場合はPIDが変わる。今回はPIDが変わっており、watchdogによるosqueryd本体の再起動が発生していたことを示す)
+
+watchdogがクエリをkillした場合、そのクエリの当該実行分の収集結果は失われている点に注意してください(詳細は注意事項を参照)。
+
+## 3. スケジュール間隔を調整する
+
+重いクエリのうち、フルテーブルスキャンや高コストテーブル(`yara`/`hash`)を使っているものは、まず `WHERE` 句での絞り込みを検討し、それでも重い場合はスケジュール間隔を延ばして単位時間あたりの負荷を下げます。設定ファイル `/etc/osquery/osquery.conf` の該当クエリの `interval` を、以下の値に変更します。
+
+```bash
+sudo cp /etc/osquery/osquery.conf /etc/osquery/osquery.conf.bak
+```
+
+{% for q in suspect_queries %}- `{{ q.name }}`: {{ q.schedule_interval_s }}秒 → {{ interval_adjust[q.name] }}秒 に変更
+{% endfor %}
+
+`osquery.conf` の `schedule` セクションで対象クエリの `"interval"` の値を上記の新しい間隔に書き換えたら、設定の構文を検証します。
+
+```bash
+sudo osqueryd --config_check --config_path /etc/osquery/osquery.conf
+```
+
+構文エラーがなければosquerydを再起動して反映します。
+
+```bash
+sudo systemctl restart osqueryd
+```
+
+## 動作確認
+
+1. Step 1のクエリを再度実行し、`osquery_schedule` の `average` が調整前より低下していること、および反映直後は `executions` が0または少数にリセットされていること(再起動でカウンタがリセットされるため)を確認する
+2. 数分〜1間隔サイクル待ったのち、再度Step 1のクエリを実行し、`{{ suspect_queries[0].name }}` を含む調整対象クエリの `wall_time` の増加ペースが調整前より緩やかになっていることを確認する
+3. `sudo grep -i "watchdog" /var/log/osquery/osqueryd.INFO /var/log/osquery/osqueryd.WARNING` で調整後に新たなkill記録が発生していないことを確認する
+
+## 注意事項
+
+- `WHERE` 句を伴わないフルテーブルスキャンは、特に `yara`・`hash` のようなオンデマンド計算テーブルでコストが高いため、間隔調整より先に `WHERE` での絞り込みを優先して検討すること。
+- 高頻度実行(短い `schedule_interval`)のクエリは、1回あたりが軽くても累積負荷が大きくなるため、必要な監視頻度を業務要件から見直すこと。
+- watchdogによるkillが発生した実行分のデータは収集されず欠落する。kill記録がある期間はログ解析上の欠測として扱い、恒久対策(間隔調整・クエリ最適化)が完了するまでは監視継続で代替すること。
+- `osquery.conf` を変更する際は必ず事前にバックアップ(`.bak`)を取得し、`--config_check` で構文検証してから再起動する。検証に失敗した場合はバックアップへ戻すこと。
+- 間隔調整・再起動後は、監視対象イベントの取りこぼしが増えていないか(セキュリティ検知の遅延が許容範囲か)を運用担当と確認したうえで恒久適用すること。

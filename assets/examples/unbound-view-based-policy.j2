@@ -1,0 +1,109 @@
+# Unbound viewによるクライアント別解決ビュー
+
+CSV で棚卸しした {{ csv_rows | length }} 件のクライアント網について、Unbound の `view` 機能でクライアント群ごとに完全に独立した解決ビュー(ローカルデータ・転送設定)を構成し、動作を検証します。
+
+## 目的
+
+Unbound の `view` stanza でクライアント網ごとに異なる名前解決結果を返す構成を作り、`access-control-view` によるクライアント割当と `view-first` によるフォールバック挙動を理解したうえで、各クライアント網からの問い合わせが期待通りのビューに割り当てられていることを検証できるようになることを目指します。
+
+## 用語解説
+
+- **view stanza**: クライアント群ごとに独立した `local-zone` / `local-data` の集合を定義できるUnboundの機能。tagベースの出し分け(重み付けラベル)より強力で、クライアントごとに完全に別の名前空間を持たせられる
+- **access-control-view**: `<クライアントネットワーク> <view名>` の形式で、どのクライアントをどの view に割り当てるかを定義する設定項目
+- **view-first**: `yes` にすると、問い合わせをまず割り当てられた view の `local-zone`/`local-data` で解決を試み、一致しない場合にグローバル設定(サーバ全体の `local-zone`/`forward-zone` など)へフォールバックする。`no`(既定)では view とグローバル設定のローカルデータがマージされて扱われる
+- **forward-zone**: 特定ドメイン以下の問い合わせを上位フォワーダへ転送する設定。view stanza 自体には転送設定を持てないため、ドメイン単位のグローバル設定として定義し、view の `local-data` で解決できなかった場合の転送先として機能させる
+- **unbound-checkconf**: 設定ファイルの構文を反映前に検証するコマンド
+
+## シナリオ設定
+
+| view名 | クライアント網 | local-data | 転送先(該当ドメイン) | 備考 |
+| --- | --- | --- | --- | --- |
+{% for r in csv_rows %}| {{ r["view_name"] }} | {{ r["client_net"] }} | {{ r["local_data"] }} | {{ r["forward_target"] }} | {{ r["note"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 現行設定をバックアップする
+
+```bash
+cp /etc/unbound/unbound.conf.d/local.conf /etc/unbound/unbound.conf.d/local.conf.bak-$(date +%Y%m%d)
+```
+
+### 2. view stanza とクライアント割当を設定する
+
+```bash
+cat > /etc/unbound/unbound.conf.d/views.conf <<'EOF'
+server:
+    view-first: yes
+{% for r in csv_rows %}    access-control-view: {{ r["client_net"] }} {{ r["view_name"] }}
+{% endfor %}
+{% for r in csv_rows %}view:
+    name: "{{ r["view_name"] }}"
+    view-first: yes
+{% if r["local_data"] != "-" %}    local-zone: "internal.example.com." transparent
+    local-data: "{{ r["local_data"] }}"
+{% endif %}
+{% endfor %}
+EOF
+```
+
+### 3. ドメイン単位の転送先(グローバル設定)を追加する
+
+view stanza 自体は転送設定を持てないため、view の `local-data` で解決できなかった問い合わせの転送先は、ドメイン単位のグローバル `forward-zone` として定義します。これは全 view に共通で適用される点に注意してください。
+
+```bash
+cat > /etc/unbound/unbound.conf.d/forwarders.conf <<'EOF'
+{% for r in csv_rows %}{% if r["forward_target"] != "-" %}forward-zone:
+    name: "."
+    forward-addr: {{ r["forward_target"] }}
+{% endif %}{% endfor %}EOF
+```
+
+### 4. 構文を検証してから反映する
+
+```bash
+unbound-checkconf
+```
+
+### 5. 別セッションを維持したまま反映し、旧設定へ切り戻せる状態を確保する
+
+```bash
+# 別セッションで現行の unbound を稼働させたまま、新設定を reload で反映する
+unbound-control reload
+# 反映直後にこのセッションから各view宛の問い合わせを検証し、
+# 期待通りでない場合は手順1のバックアップへ即座に切り戻す
+```
+
+## 動作確認
+
+1. {{ csv_rows[0]["view_name"] }} view のクライアント網({{ csv_rows[0]["client_net"] }})から問い合わせ、local-data のホストが解決されることを確認する
+
+```bash
+dig @127.0.0.1 -b {{ csv_rows[0]["client_net"] }} app.internal.example.com A +short
+```
+
+2. {{ csv_rows[2]["view_name"] }} view のクライアント網({{ csv_rows[2]["client_net"] }})から問い合わせ、local-data のホストが解決されることを確認する
+
+```bash
+dig @127.0.0.1 -b {{ csv_rows[2]["client_net"] }} partner.internal.example.com A +short
+```
+
+3. {{ csv_rows[1]["view_name"] }} view のクライアント網({{ csv_rows[1]["client_net"] }}、local-data なし)から internal.example.com. 配下を問い合わせ、view 内に一致がなくグローバル設定へフォールバックして応答が返る(view-first のフォールバック挙動)ことを確認する
+
+```bash
+dig @127.0.0.1 -b {{ csv_rows[1]["client_net"] }} example.com A +short
+```
+
+4. `access-control-view` に含まれないクライアント網から問い合わせ、意図しない view へ割り当てられていないこと(既定のアクセス拒否またはデフォルトviewの応答であること)を確認する
+
+```bash
+dig @127.0.0.1 -b 192.0.2.1 app.internal.example.com A +short
+```
+
+## 注意事項
+
+- view の数が増えるほど `local-zone`/`local-data` の組み合わせが複雑化し保守性が低下する。クライアント網とviewの対応表(本シナリオ設定のCSV相当)を必ず設定と併せて管理すること。
+- `access-control-view` にクライアント網を追加し忘れると、そのクライアントは既定の(意図しない)viewやグローバル設定にフォールバックし、想定外の応答を返す。view追加時は必ず全クライアント網の割当漏れがないか棚卸しすること。
+- `forward-zone` は view stanza 内に持てずグローバル設定として全viewに共通適用されるため、「view専用の転送先」だと誤認しないこと。view固有の完全に独立した転送が必要な場合はview単位でのUnboundインスタンス分離を検討する。
+- `view-first: yes` と `no` でグローバル設定とviewのマージ挙動が変わる。`no`(既定)ではviewのlocal-dataとグローバルのlocal-dataがマージされ、意図せず両方が有効になる場合があるため、view間の分離を明確にしたい場合は必ず `view-first: yes` を明示すること。
+- 設定反映は `unbound-control reload` を用い、旧設定(手順1のバックアップ)をすぐ復元できる状態を保ったまま各viewからのdigで新しい解決結果を検証してから、旧来の共通アクセス制御設定の削除など不可逆な後片付けを行うこと。検証前に旧設定を削除しない。

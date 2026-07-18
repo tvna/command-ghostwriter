@@ -1,0 +1,7 @@
+metric,artifact_set,measured_value,target,tested_at
+collection_duration_sec,Windows.Triage.Full,-,1800,2026-07-17
+collected_size_mb,Windows.Triage.Full,-,500,2026-07-17
+artifact_missing_count,Windows.Triage.Full,-,0,2026-07-17
+client_online_rate_pct,Windows.Triage.Full,-,95,2026-07-17
+collection_duration_sec,Windows.EventLogs.Triage,-,600,2026-07-17
+artifact_missing_count,Windows.EventLogs.Triage,-,0,2026-07-17

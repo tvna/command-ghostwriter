@@ -1,0 +1,116 @@
+# Unboundキャッシュ操作の運用手順
+
+unbound-control を使ってUnboundのキャッシュ状態を確認し、必要な範囲だけを安全にフラッシュ(削除)する運用手順です。
+
+## 目的
+
+レコード更新後に古いキャッシュが参照され続ける事象を防ぐため、unbound-control による現在のキャッシュ確認と、影響範囲を最小化した部分フラッシュ(または全フラッシュ)を安全に実施できるようになることを目指します。
+
+## 用語解説
+
+- **unbound-control**: Unboundの制御チャネル(TLSで保護されたリモート制御ソケット)経由でキャッシュ操作や統計取得を行うコマンド
+- **flush <name>**: 指定した名前(FQDN)のキャッシュエントリのみを削除する部分フラッシュ
+- **flush_zone <zone>**: 指定したゾーン配下すべてのキャッシュエントリを削除する部分フラッシュ。ルート(`.`)を指定すると事実上の全フラッシュになる
+- **flush_type <name> <type>**: 指定した名前・レコードタイプの組み合わせのみを削除するフラッシュ
+- **lookup <name>**: 指定した名前がどのゾーン・委任経路で解決されるかをキャッシュから確認するコマンド
+- **dump_cache**: キャッシュ全体をテキスト形式で標準出力に書き出すコマンド。フラッシュ前の記録・切り戻し確認に使う
+- **全フラッシュ**: キャッシュ全体を削除する操作。直後は未キャッシュ状態に戻るため、全問い合わせが上位への再帰解決を必要とし応答遅延と負荷増大を招く。影響が全クライアントに及ぶため、可能な限り `flush`/`flush_zone`/`flush_type` による部分フラッシュを優先する
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 制御ソケット | `{{ control_socket }}` |
+| 証明書ディレクトリ | `{{ control_cert_dir }}` |
+| フラッシュ範囲(flush_scope) | `{{ flush_scope }}` |
+| 対象(target) | `{{ target }}` |
+| レコードタイプ(record_type) | `{{ record_type }}` |
+| dig検証対象(verify_dig) | `{{ verify_dig }}` |
+| reload要否(reload_needed) | {{ reload_needed }} |
+
+## 手順
+
+### 1. unbound-control の制御チャネル設定を確認する
+
+```bash
+# unbound.conf 側で remote-control が有効になっていること、
+# 証明書が control_cert_dir に存在することを事前に確認する
+grep -A3 "remote-control:" /etc/unbound/unbound.conf
+ls -l {{ control_cert_dir }}
+```
+
+### 2. 現在のキャッシュ状態を確認・記録する
+
+```bash
+# 対象名の解決経路(委任・キャッシュ有無)を確認する
+unbound-control -c {{ control_socket }} lookup {{ target }}
+
+# フラッシュ前のキャッシュ全体をバックアップとして記録しておく(切り戻し確認用)
+unbound-control -c {{ control_socket }} dump_cache > /var/backups/unbound_cache_before.txt
+```
+
+{% if flush_scope == "name" %}
+### 3. 対象名のみを部分フラッシュする(flush_scope = name)
+
+```bash
+# {{ target }} のキャッシュエントリのみを削除する。他の名前への影響はない
+unbound-control -c {{ control_socket }} flush {{ target }}
+```
+{% elif flush_scope == "zone" %}
+### 3. 対象ゾーン配下を部分フラッシュする(flush_scope = zone)
+
+```bash
+# {{ target }} ゾーン配下のキャッシュエントリをまとめて削除する
+unbound-control -c {{ control_socket }} flush_zone {{ target }}
+```
+{% elif flush_scope == "all" %}
+### 3. キャッシュ全体をフラッシュする(flush_scope = all)
+
+```bash
+# ルートゾーンを指定して全キャッシュを削除する。全クライアントの応答遅延に直結するため、
+# 部分フラッシュで解決できない場合の最終手段としてのみ実施する
+unbound-control -c {{ control_socket }} flush_zone .
+```
+{% endif %}
+
+### 4. 特定レコードタイプのみをフラッシュする場合
+
+```bash
+# {{ target }} の {{ record_type }} レコードのみを削除したい場合はこちらを使う
+unbound-control -c {{ control_socket }} flush_type {{ target }} {{ record_type }}
+```
+
+{% if reload_needed %}
+### 5. 設定変更を反映するため reload する
+
+```bash
+# unbound.conf を変更した場合はreloadで設定を再読込する。reloadはキャッシュも破棄するため、
+# フラッシュ操作単体で十分な場合はreloadを実施しない
+unbound-control -c {{ control_socket }} reload
+```
+{% endif %}
+
+### 6. digで再解決を検証する
+
+```bash
+# 新しいレコードが反映されているかを、Unbound自身に問い合わせて確認する
+dig @127.0.0.1 {{ verify_dig }} {{ record_type }} +short
+
+# 2回目を実行し、再構築されたキャッシュから短いRTTで応答されることも確認する
+dig @127.0.0.1 {{ verify_dig }} {{ record_type }} +short
+```
+
+## 動作確認
+
+- 手順2の `dump_cache` によるバックアップファイルが作成されていること
+- 手順3のフラッシュコマンドがエラーなく完了すること(戻り値 `ok`)
+- 手順6の1回目の `dig` で新しいレコード値が返ること(未反映の場合は上位権威側のTTL経過を待つ)
+- 手順6の2回目の `dig` で応答時間が短縮し、キャッシュが正しく再構築されていること
+
+## 注意事項
+
+- 全フラッシュ(`flush_zone .`)は対象範囲がキャッシュ全体に及び、直後は全クライアントの問い合わせが上位への再帰解決を要するため一時的な解決遅延を招く。原因となったレコードが特定できている場合は必ず `flush`(名前単位)または `flush_zone`(ゾーン単位)による部分フラッシュを優先すること。
+- フラッシュは古いキャッシュを即座に削除する操作であり、権威側のTTL設定そのものを変更するものではない。今後同様の切替を予定している場合は、切替前にTTLを短縮しておくことで次回以降のフラッシュ依存を減らせる。
+- レコード変更の反映タイミングは「権威側の更新完了」→「(必要なら)フラッシュ実施」→「digでの再解決確認」の順を守ること。フラッシュを先に行うと、権威側が未反映のまま古い値が再キャッシュされる場合がある。
+- unbound-control を使うには `unbound.conf` の `remote-control: control-enable: yes` と、コントロール用証明書(`unbound-control-setup` で生成)が必要。証明書が存在しない、または期限切れの場合は接続が拒否されるため、事前に手順1で確認すること。
+- 本手順は稼働中のキャッシュを操作対象とする。verify_dig で指定した対象への新しい経路(更新後のレコード)が正しく解決できることを手順6で確認したうえで、旧経路への依存(古いレコードを前提にしたクライアント側キャッシュや設定)を外すこと。検証前に旧経路を無効化しないこと。

@@ -1,0 +1,140 @@
+# Zeekログによる内部横展開ハンティング手順書
+
+## 目的
+
+Zeek の `conn.log` / `smb_files.log` / `smb_mapping.log` / `kerberos.log` /
+`ntlm.log` を相関させ、内部ホスト間（東西トラフィック）で発生する異常な
+SMB / RDP / WinRM アクセスと認証イベントから、侵入後の横展開（Lateral
+Movement）の痕跡を探索できるようになることを目指します。
+
+## 用語解説
+
+- **横展開（Lateral Movement）**: 侵入した攻撃者が最初の足がかりから他の内部ホストへ移動を試みる行為
+- **東西トラフィック（East-West Traffic）**: データセンター/社内ネットワーク内部のホスト間通信（南北＝内外通信と対比）
+- **conn.log**: Zeek が記録する全コネクションのサマリログ（送受信ホスト・ポート・duration等）
+- **smb_mapping.log**: SMB の共有（管理共有 C$/ADMIN$ 等）へのマッピング（マウント）を記録するログ
+- **smb_files.log**: SMB 経由で読み書き・実行されたファイル操作を記録するログ
+- **kerberos.log / ntlm.log**: Windows 認証（Kerberos チケット要求 / NTLM 認証）のイベントログ
+- **扇状パターン（Fan-out）**: 1台のホストが短時間に多数のホストへ同種の接続を行うパターン。横展開の代表的な兆候
+- **管理共有**: `C$` `ADMIN$` `IPC$` など、Windows が既定で公開する管理者用の隠し共有
+
+## シナリオ設定
+
+| 項目 | 値 |
+|------|----|
+| 監視対象ネットワーク | {{ local_networks | join(", ") }} |
+| 疑わしいピボットホスト | {{ pivot_host }} |
+| 調査対象時間帯 | {{ timeframe }} |
+
+### 監視対象ポート
+
+| ポート | プロトコル | サービス |
+|--------|-----------|----------|
+{% for p in watch_ports %}| {{ p.port }} | {{ p.proto }} | {{ p.service }} |
+{% endfor %}
+
+## 1. conn.logで内部→内部の管理ポート通信を集計する
+
+まず `id.resp_p` が監視対象ポートのいずれかに一致する接続を抽出します。
+
+```bash
+zeek-cut -d ts id.orig_h id.resp_h id.resp_p proto service duration < conn.log \
+  | awk '{% for p in watch_ports %}$3 == {{ p.port }}{{ " || " if not loop.last }}{% endfor %}' \
+  > /tmp/conn_admin_ports.tsv
+```
+
+次に `id.orig_h` / `id.resp_h` の両方が監視対象ネットワーク（内部）に
+属する行のみに絞り込みます（南北トラフィックを除外し東西トラフィックだけを残す）。
+
+```bash
+NET_REGEX="$(printf '%s\n' {{ local_networks | join(" ") }} | sed -E 's#/.*##; s/\./\\./g' | paste -sd '|')"
+grep -E "($NET_REGEX).*\s($NET_REGEX)" /tmp/conn_admin_ports.tsv \
+  > /tmp/conn_internal_admin_ports.tsv
+
+wc -l /tmp/conn_internal_admin_ports.tsv
+```
+
+送信元ホストごとの接続先ユニークホスト数を集計し、扇状パターン（1ホストが
+短時間で多数のホストの管理ポートへ接続）を検出します。
+
+```bash
+awk '{ print $2 }' /tmp/conn_internal_admin_ports.tsv | sort | uniq -c | sort -rn | head -20
+```
+
+`{{ pivot_host }}` が接続先ホスト数の上位に現れる場合、横展開の兆候として
+次のステップで裏付けを取ります。
+
+```bash
+grep "{{ pivot_host }}" /tmp/conn_internal_admin_ports.tsv | sort -k1,1
+```
+
+## 2. smb_mapping.log / smb_files.logで管理共有アクセスを確認する
+
+`{{ pivot_host }}` から他ホストへの管理共有（`C$` `ADMIN$` `IPC$`）マウントを
+確認します。
+
+```bash
+zeek-cut -d ts id.orig_h id.resp_h path share_type < smb_mapping.log \
+  | grep "^.*\s{{ pivot_host }}\s" \
+  | grep -E 'C\$|ADMIN\$|IPC\$'
+```
+
+管理共有経由で実行・転送されたファイル（例: 実行ファイルの配置、リモート
+実行に使われる名前付きパイプ）を確認します。
+
+```bash
+zeek-cut -d ts id.orig_h id.resp_h name action size < smb_files.log \
+  | grep "^.*\s{{ pivot_host }}\s"
+```
+
+## 3. kerberos.log / ntlm.logで認証イベントを相関させる
+
+同じ時間帯（{{ timeframe }}）に `{{ pivot_host }}` が関与する認証イベントを
+突き合わせ、複数ホストへの連続したチケット要求・認証成功があるかを確認します。
+
+```bash
+zeek-cut -d ts client service success < kerberos.log \
+  | grep "{{ pivot_host }}"
+
+zeek-cut -d ts id.orig_h id.resp_h username hostname success < ntlm.log \
+  | grep "{{ pivot_host }}"
+```
+
+## 4. 相関結果から横展開の兆候を判定する
+
+以下の条件をすべて満たす場合、横展開の疑いが強いと判断します。
+
+1. `{{ pivot_host }}` が短時間（目安: 数分〜十数分）に複数の内部ホストへ
+   監視対象ポート（{% for p in watch_ports %}{{ p.port }}/{{ p.proto }}{{ ", " if not loop.last }}{% endfor %}）で接続している（扇状パターン）
+2. その接続先ホストで管理共有（`C$` / `ADMIN$` / `IPC$`）へのマッピングが
+   `smb_mapping.log` に記録されている
+3. 同一時間帯・同一ホスト間で Kerberos/NTLM の認証イベントが
+   `kerberos.log` / `ntlm.log` に対応している
+
+いずれかが欠けている場合は、正規の運用（後述のベースライン除外対象）による
+通信でないかを先に確認してください。
+
+## 動作確認
+
+- 調査対象時間帯（{{ timeframe }}）に模擬的な管理共有アクセス（例: 検証用
+  ホストから `net use \\<接続先>\C$` を実行）を行い、その通信が
+  `conn.log` と `smb_mapping.log` の双方に記録されることを確認する
+- 上記手順1〜3のコマンドで、模擬アクセスした送信元ホスト・接続先ホストが
+  それぞれの出力に出現することを確認する
+- 集計結果（uniq -c の件数）が実際に発生させた接続数と一致することを確認する
+
+## 注意事項
+
+- 本手順は探索的なハンティングであり、単発の検知では誤検知を確定できない。
+  必ず既知の正規運用（監視ツール、バックアップジョブ、構成管理ツール等が
+  行う定常的な東西通信）を洗い出したベースラインと突き合わせたうえで判断する。
+- バックアップサーバや監視サーバ、パッチ配布サーバなど、日常的に多数ホストの
+  管理ポートへ接続する正規ホストは事前に許可リスト化し、扇状パターンの
+  判定から除外すること。除外リストが無い状態での通報はノイズの原因となる。
+- 本手順はログの読み取りのみで対象ホストへの変更を行わないが、疑わしいピボット
+  ホストが実在の脅威と判断された場合は、いきなり当該ホストのネットワークを
+  遮断せず、監視強化（該当セグメントのミラーポート追加等）や隔離VLANへの
+  切り替えを先に準備し、正規業務への影響有無を確認したうえで遮断すること。
+- 遮断や認証情報の無効化など是正措置を行う際は、影響を受ける正規利用者の
+  代替アクセス経路（別ホストからの一時的な管理アクセス等）が機能することを
+  先に確認してから、疑わしいホストの既存アクセス経路を無効化する。

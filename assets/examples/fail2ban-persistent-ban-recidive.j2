@@ -1,0 +1,146 @@
+# fail2ban累犯の長期遮断とban永続化
+
+recidive jail（fail2banログ自体を監視し累犯ホストを再banする「二段構え」の仕組み）と、bantime.increment（累進延長）、nftables setによる persistent ban（再起動後もban状態を維持する仕組み）を構成します。**累進延長は正規ユーザーを巻き込んだ場合の影響が大きいため、`ignoreip` を整備し `bantime.maxtime` で上限を設けたうえで有効化します。**
+
+## 目的
+
+繰り返し攻撃してくるホストをrecidive jailで検知し、bantime.incrementによる累進的な長期遮断と、nftables setによるban状態の永続化（サーバ再起動後の維持）を構成できるようになることを目指します。
+
+## 用語解説
+
+- **recidive jail**: fail2ban自身のログ（`{{ recidive.logpath }}`）を監視し、通常jailで何度もbanされたホストをさらに長期間banする「二段構え」の仕組み（通常jailのban → recidiveでの累積長期ban）
+- **bantime.increment**: 同一ホストが繰り返しbanされるたびに`bantime`を`bantime.factor`倍ずつ累進的に延長する設定。無制限に伸び続けないよう`bantime.maxtime`で上限を設ける
+- **persistent ban**: fail2banのban状態をnftables setに書き出して永続化し、サーバ再起動後に`fail2ban`本体の起動を待たずsetを再適用することでban状態を維持する仕組み
+- **ignoreip(除外リスト)**: 遮断・累進延長の対象から常に除外するIPアドレスの一覧
+- **誤banの長期化リスク**: 累進延長やpersistent banにより、誤検知でbanされた正規ユーザーの遮断が数週間単位で継続してしまうリスク
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| 通常jail | {{ jail.name }} (bantime={{ jail.bantime }}, findtime={{ jail.findtime }}, maxretry={{ jail.maxretry }}) |
+| recidive findtime | {{ recidive.findtime }} |
+| recidive maxretry | {{ recidive.maxretry }} |
+| recidive bantime | {{ recidive.recidive_bantime }} |
+| bantime.increment | {{ recidive.bantime_increment | lower }} (factor={{ recidive.bantime_factor }}) |
+| bantime.maxtime(上限) | {{ recidive.bantime_maxtime }} |
+| persistent ban | {{ persistent.persistent | lower }} (nftables set: {{ persistent.nftables_set }}) |
+| ignoreip | {% for ip in ignoreip %}{{ ip.address }} ({{ ip.label }}){% if not loop.last %}, {% endif %}{% endfor %} |
+
+## 1. 通常jailの状態を確認する
+
+recidive jailは通常jailのban実績を前提とするため、まず`{{ jail.name }}`が稼働していることを確認します。
+
+```bash
+sudo fail2ban-client status {{ jail.name }}
+```
+
+## 2. ignoreipを整備してからrecidive jailを構成する
+
+`jail.conf`は直接編集せず、`jail.local`に`[recidive]`セクションを追記します。**`ignoreip`への管理端末登録を必ず先に行います。**
+
+```bash
+sudo tee -a /etc/fail2ban/jail.local <<'EOF'
+
+[DEFAULT]
+ignoreip = 127.0.0.1/8{% for ip in ignoreip %} {{ ip.address }}{% endfor %}
+
+[{{ recidive.jail_name }}]
+enabled = true
+filter = recidive
+logpath = {{ recidive.logpath }}
+banaction = %(banaction_allports)s
+bantime.increment = {{ recidive.bantime_increment | lower }}
+bantime.factor = {{ recidive.bantime_factor }}
+bantime.maxtime = {{ recidive.bantime_maxtime }}
+bantime = {{ recidive.recidive_bantime }}
+findtime = {{ recidive.findtime }}
+maxretry = {{ recidive.maxretry }}
+EOF
+```
+
+`filter = recidive`は同梱の`/etc/fail2ban/filter.d/recidive.conf`を使い、fail2ban自身のban記録（`{{ recidive.logpath }}`）を監視対象とします。`banaction_allports`により、累犯ホストは特定ポートに限らず全ポートを遮断します。
+
+## 3. persistent banをnftables setで構成する
+
+fail2banのban動作を、timeout付きのnftables setへの追加として実装し、`{{ persistent.nftables_table }} {{ persistent.nftables_chain }}`チェーンで参照します。これにより`fail2ban-client`の再起動を経ずともset自体がban状態を保持します。
+
+```bash
+sudo tee {{ persistent.ruleset_file }} <<'EOF'
+table {{ persistent.nftables_table }} {{ persistent.nftables_chain }} {
+    set {{ persistent.nftables_set }} {
+        type ipv4_addr
+        flags interval
+        timeout {{ recidive.bantime_maxtime }}
+    }
+    chain input {
+        type filter hook input priority 0;
+        ip saddr @{{ persistent.nftables_set }} drop
+    }
+}
+EOF
+sudo nft -f {{ persistent.ruleset_file }}
+```
+
+続けて、`{{ recidive.jail_name }}`のactionを、上記setへの追加/削除で置き換えます。
+
+```bash
+sudo tee /etc/fail2ban/action.d/nftables-recidive-persistent.conf <<'EOF'
+[Definition]
+actionban = nft add element {{ persistent.nftables_table }} {{ persistent.nftables_set }} { %(ip)s timeout {{ recidive.bantime_maxtime }} }
+actionunban = nft delete element {{ persistent.nftables_table }} {{ persistent.nftables_set }} { %(ip)s }
+EOF
+sudo sed -i '/\[{{ recidive.jail_name }}\]/a banaction = nftables-recidive-persistent' /etc/fail2ban/jail.local
+```
+
+## 4. 再起動後にsetを復元するsystemdユニットを配置する
+
+サーバ再起動時、`fail2ban`本体の起動を待たず`{{ persistent.ruleset_file }}`からsetを即座に再適用し、ban状態の空白時間を作らないようにします。
+
+```bash
+sudo tee /etc/systemd/system/{{ persistent.reload_unit }} <<'EOF'
+[Unit]
+Description=Restore persistent fail2ban recidive nftables set
+Before=network-pre.target fail2ban.service
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/nft -f {{ persistent.ruleset_file }}
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now {{ persistent.reload_unit }}
+```
+
+## 5. 新しい遮断経路を検証してからfail2banを再起動する
+
+`jail.local`更新とban経路の変更後、いきなり`fail2ban`を再起動すると設定ミスで管理端末まで遮断される恐れがあります。**別セッションでSSH接続を維持したまま**、まず設定の構文チェックを行います。
+
+```bash
+# 別ターミナルで既存のSSHセッションを維持したまま実行する
+sudo fail2ban-client -t
+sudo systemctl restart fail2ban
+sudo fail2ban-client status {{ recidive.jail_name }}
+```
+
+`fail2ban-client -t`（dry-run構文チェック）が成功したことを確認してから再起動します。再起動後、維持しておいた別セッションから`{% for ip in ignoreip %}{{ ip.address }}{% if not loop.last %}, {% endif %}{% endfor %}`が引き続き接続できることを確認し、問題があれば`sudo systemctl stop fail2ban`で即座に旧経路（setによる遮断のみ）に切り戻します。
+
+## 動作確認
+
+- `sudo fail2ban-client status {{ recidive.jail_name }}`にrecidive jailが表示され、`{{ recidive.logpath }}`を監視していること
+- 通常jail`{{ jail.name }}`で同一IPが`{{ recidive.maxretry }}`回以上banされた記録があると、recidiveがそのIPを検知し`{{ recidive.recidive_bantime }}`以上の長期banを課すこと（`sudo fail2ban-client set {{ recidive.jail_name }} banip {{ test.attacker_ip }}`で手動登録し確認）
+- `sudo nft list set {{ persistent.nftables_table }} {{ persistent.nftables_set }}`に`{{ test.attacker_ip }}`がtimeout付きで登録されていること
+- `sudo systemctl restart {{ persistent.reload_unit }}`相当のサーバ再起動を模擬した後も、`sudo nft list set {{ persistent.nftables_table }} {{ persistent.nftables_set }}`にban状態が残っていること（再起動後もban維持）
+- Step 5で維持した別セッションから、管理端末（{% for ip in ignoreip %}{{ ip.address }}{% if not loop.last %}, {% endif %}{% endfor %}）が引き続きSSH接続できること
+
+## 注意事項
+
+- `bantime.increment`による累進延長は正規ユーザーを誤banした場合の影響が大きいため、`ignoreip`の整備を先に行い、`bantime.maxtime = {{ recidive.bantime_maxtime }}`で上限を必ず設定する（上限なしの無期限延長は運用事故につながる）。
+- persistent banはnftables setに永続化されるため、`fail2ban-client unban`だけでは解除されない場合がある。誤banを解除する際は`sudo nft delete element {{ persistent.nftables_table }} {{ persistent.nftables_set }} { <ip> }`もあわせて実行する。
+- `jail.local`変更・banaction変更を反映する`fail2ban`再起動は、既存のSSHセッションを維持したまま行い（Step 5）、`fail2ban-client -t`の構文チェック成功を確認してから実施する。管理端末が遮断された場合は速やかに`systemctl stop fail2ban`で切り戻す。
+- 恒久遮断（persistent ban）は定期的に棚卸しし、`{{ recidive.bantime_maxtime }}`を超えて残存しているエントリや、攻撃元IPの再割当てにより無関係な利用者を遮断し続けていないかを確認する。
+- `jail.conf`は直接編集せず`jail.local`への追記で運用し、パッケージ更新時に設定が失われないようにする。

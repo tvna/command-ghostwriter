@@ -1,0 +1,4 @@
+view_name,client_net,local_data,forward_target,note
+internal,10.0.10.0/24,app.internal.example.com. 300 IN A 10.0.10.50,-,社内区画は内部Aレコードを直接応答する
+guest,10.0.30.0/24,-,203.0.113.53,ゲスト網はlocal-dataを持たず外部フォワーダのみへ転送する
+partner,10.0.40.0/24,partner.internal.example.com. 300 IN A 10.0.40.60,198.51.100.53,取引先網は専用ホストのみ公開し他は指定フォワーダへ転送する

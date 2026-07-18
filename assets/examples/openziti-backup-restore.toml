@@ -1,0 +1,13 @@
+controller_name = "ziti-ctrl01"
+controller_service = "ziti-controller"
+db_path = "/opt/openziti/ctrl/db/ctrl.db"
+pki_path = "/opt/openziti/pki"
+backup_dir = "/backup/openziti"
+retention_generations = 7
+encrypt = true
+gpg_recipient = "ziti-backup-admin@example.internal"
+edge_api_url = "https://ziti-ctrl01.example.internal:1280"
+admin_identity = "admin"
+verify_identity_name = "verify-restore-identity"
+verify_service_name = "verify-restore-service"
+edge_router_name = "er-tokyo-01"

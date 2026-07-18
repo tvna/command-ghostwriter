@@ -1,0 +1,127 @@
+# WireGuardネットワーク名前空間による分離
+
+WireGuardインターフェースを専用のネットワーク名前空間(netns)に隔離し、特定プロセスのみをトンネル経由に強制する手順です。
+
+## 目的
+
+WireGuardの`{{ interface }}`を専用netns `{{ netns_name }}` の内部だけに存在させ、その名前空間でexecしたプロセスのみがトンネルを出口として使う状態を作ります。ホストのデフォルトルートやその他プロセスの通信には一切影響を与えないことを確認しながら進めます。
+
+## 用語解説
+
+- **ネットワーク名前空間(netns)**: カーネルが提供する独立したネットワークスタック(ルーティングテーブル・インターフェース・iptables等)の分離単位。`ip netns`で作成・操作する
+- **`ip netns exec`**: 指定したnetns内でプロセスを起動するコマンド。起動したプロセスから見えるネットワークインターフェースやルーティングテーブルはそのnetns専用のものになる
+- **プロセス単位のトンネル強制**: ホスト全体にVPNルーティングを適用するのではなく、netnsに閉じ込めた特定プロセスだけを強制的にトンネル経由にする方式。ホストの他通信(業務アプリ、監視エージェント等)は非トンネルのまま継続でき、影響範囲を最小化できる
+- **`/etc/netns/<name>/resolv.conf`**: `ip netns exec`で起動したプロセスがそのnetns専用のDNS設定を参照するための仕組み。bind mountでnetns内の`/etc/resolv.conf`として扱われる
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| netns名 | `{{ netns_name }}` |
+| WireGuardインターフェース | `{{ interface }}` |
+| トンネル内アドレス | `{{ tunnel_address }}` |
+| netns内DNSサーバ | `{{ dns_server }}` |
+| netns内で実行するコマンド | `{{ confined_command }}` |
+
+## 手順
+
+### 1. netnsを作成する
+
+```bash
+sudo ip netns add {{ netns_name }}
+```
+
+作成直後のnetnsにはループバックインターフェースしか存在しません。ホストの既存インターフェースやルーティングテーブルは一切引き継がれません。
+
+### 2. WireGuardインターフェースを作成しnetnsへ移動する
+
+ホスト側のデフォルトnetnsで`{{ interface }}`を作成し、そのまま`{{ netns_name }}`へ移動します。
+
+```bash
+sudo ip link add {{ interface }} type wireguard
+sudo ip link set {{ interface }} netns {{ netns_name }}
+```
+
+移動後は`{{ interface }}`はホスト側の`ip link show`には表示されなくなり、`{{ netns_name }}`内からのみ操作可能になります。
+
+### 3. netns内でWireGuardを設定する
+
+`wg-quick`はnetns移動後のインターフェースをそのまま扱えないため、`wg setconf`と`ip`コマンドを`ip netns exec`経由で個別に実行します。
+
+```bash
+sudo ip netns exec {{ netns_name }} wg setconf {{ interface }} /etc/wireguard/{{ interface }}.conf
+sudo ip netns exec {{ netns_name }} ip addr add {{ tunnel_address }} dev {{ interface }}
+sudo ip netns exec {{ netns_name }} ip link set {{ interface }} up
+sudo ip netns exec {{ netns_name }} ip link set lo up
+```
+
+`/etc/wireguard/{{ interface }}.conf`にはピアの公開鍵・エンドポイント・`AllowedIPs`をあらかじめ記述しておきます(秘密鍵はこのファイルにのみ配置し、パーミッションは600に維持します)。
+
+### 4. netns内のデフォルトルートをトンネル経由にする
+
+```bash
+sudo ip netns exec {{ netns_name }} ip route add default dev {{ interface }}
+```
+
+このルートは`{{ netns_name }}`内にしか存在しないため、ホストの通常のデフォルトルートには一切影響しません。
+
+### 5. netns専用のDNS設定を用意する
+
+```bash
+sudo mkdir -p /etc/netns/{{ netns_name }}
+echo "nameserver {{ dns_server }}" | sudo tee /etc/netns/{{ netns_name }}/resolv.conf
+```
+
+`ip netns exec {{ netns_name }}`で起動したプロセスは、このファイルをbind mountされた`/etc/resolv.conf`として参照します。ホスト側の`/etc/resolv.conf`は変更しません。
+
+### 6. 新しい経路が機能することを検証してから対象プロセスを本番投入する
+
+既存の通信経路(ホスト側の通常経路)を止める前に、まずnetns経由の出口が意図通りであることを確認します。
+
+```bash
+sudo ip netns exec {{ netns_name }} {{ confined_command }}
+```
+
+出力されたIPアドレスがWireGuardトンネルの出口(サーバ側グローバルIP)と一致することを確認できた後にのみ、対象プロセスを本番の起動手順(手順7)へ切り替えます。
+
+### 7. 対象プロセスをnetns内で起動する
+
+```bash
+sudo ip netns exec {{ netns_name }} sudo -u appuser {{ confined_command }}
+```
+
+このプロセスの通信はすべて`{{ interface }}`を経由します。ホスト上の他プロセスはこの変更の影響を受けません。
+
+## 動作確認
+
+1. netns内の出口IPを確認します。
+
+   ```bash
+   sudo ip netns exec {{ netns_name }} curl --silent https://ifconfig.co
+   ```
+
+   表示されるIPアドレスがWireGuardサーバ側のグローバルIPと一致することを確認します。
+
+2. ホスト側(デフォルトnetns)の通信が非トンネルのままであることを確認します。
+
+   ```bash
+   curl --silent https://ifconfig.co
+   ```
+
+   手順1と異なるIPアドレス(ホストの通常の出口IP)が表示されることを確認します。異なっていれば、ホストの他通信には影響していないと判断できます。
+
+3. netns内のルーティングテーブルにデフォルトnetnsの経路が混入していないことを確認します。
+
+   ```bash
+   sudo ip netns exec {{ netns_name }} ip route show
+   ```
+
+   `{{ interface }}`経由のデフォルトルートのみが存在することを確認します。
+
+## 注意事項
+
+- 手順6で新しい経路(netns経由のトンネル出口)が意図通りであることを確認できるまでは、対象プロセスの本番起動(手順7)やホスト側の既存経路の変更・停止を行わないでください。検証前の切り替えは、意図しない通信経路や到達不能を招きます。
+- `/etc/netns/{{ netns_name }}/resolv.conf`はそのnetns専用であり、`ip netns exec`以外の方法(例: 通常の`ssh`ログインシェル内から`ip netns identify`せずに操作する場合など)で起動したプロセスには適用されません。DNS解決が想定通りか、必ず手順6で確認してください。
+- `{{ interface }}`を含むnetnsをsystemdサービスとして常駐させる場合は、unitに`NetworkNamespacePath=/var/run/netns/{{ netns_name }}`を指定し、`ip netns add`で作成したnetnsのパスと一致させてください。パスが一致しないとサービスは意図しないnetns(通常はデフォルトnetns)で起動し、トンネル強制が無効化されます。
+- 秘密鍵を含む`/etc/wireguard/{{ interface }}.conf`はパーミッション600・root所有を維持し、Gitやバックアップに平文で含めないでください。
+- 作業を切り戻す場合は`sudo ip netns delete {{ netns_name }}`でnetnsごと`{{ interface }}`を破棄できます。ホスト側の設定には手を加えていないため、切り戻しによる副作用はありません。

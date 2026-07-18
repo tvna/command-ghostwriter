@@ -1,0 +1,132 @@
+# Squid 踏み台化・不正利用検知時の初動対応手順
+
+access.log で検知した {{ rows | length }} 件の異常送信元について、Squid の
+ACL で遮断し、オープンプロキシ化の原因となった設定ミスを是正します。root 権限
+で `/etc/squid/squid.conf` を編集し、上から順に実施してください。
+
+## 目的
+
+Squid プロキシが踏み台にされた（不正中継・大量アクセス・CONNECT 乱用の中継元にされた）事象を検知した際に、送信元を ACL で遮断し、オープンプロキシ化の根本原因（http_access の過剰許可・intercept 設定ミス）を是正できるようになることを目指します。
+
+## 用語解説
+
+- **踏み台化（オープンプロキシ化）**: 本来アクセスを許可すべきでない外部の送信元がプロキシを自由に中継できてしまう状態。スパムメール送信や他システムへの攻撃の中継元として悪用されるリスクがある。
+- **access.log**: Squid がリクエストごとに送信元・宛先・処理結果を記録するログファイル（デフォルト `/var/log/squid/access.log`）
+- **CONNECT メソッド**: HTTPS 通信をトンネリングするための HTTP メソッド。宛先ポートを制限しないと任意のポートへのトンネルに悪用される
+- **ACL（Access Control List）**: `acl` ディレクティブで定義する送信元・宛先・メソッドなどの条件
+- **http_access**: 定義した ACL に基づき許可(allow)・拒否(deny)を上から順に評価するディレクティブ。最後に `http_access deny all` が無いと意図せず全許可になる
+- **localnet**: 社内・信頼済みネットワークを表す ACL 定義。範囲を広く取りすぎると外部送信元まで許可対象に含まれてしまう
+- **TCP_DENIED**: access.log 上でリクエストが Squid によって拒否されたことを示す結果コード
+- **SSL_ports**: CONNECT メソッドで接続を許可するポート番号を制限する ACL（通常 443 のみに限定する）
+
+## シナリオ設定
+
+| 送信元IP | リクエスト数 | 検知パターン | 対応 | 根本原因 | フォローアップ |
+|----------|-------------|--------------|------|----------|----------------|
+{% for r in rows %}| {{ r["source_ip"] }} | {{ r["request_count"] }} | {{ r["pattern"] }} | {{ r["action"] }} | {{ r["root_cause"] }} | {{ r["followup"] }} |
+{% endfor %}
+
+## 1. access.log で異常アクセスを集計する
+
+送信元ごとのリクエスト数と CONNECT の割合を集計し、閾値超過や不審な宛先ポートが
+無いか確認します。
+
+```bash
+# 送信元別リクエスト数の上位を確認
+awk '{print $3}' /var/log/squid/access.log | sort | uniq -c | sort -rn | head -20
+
+# CONNECT メソッドの乱用（宛先ポート・宛先ホストの偏り）を確認
+grep ' CONNECT ' /var/log/squid/access.log | awk '{print $3, $7}' | sort | uniq -c | sort -rn | head -20
+```
+
+## 2. 該当送信元を ACL で遮断する
+
+シナリオ設定の各行の送信元 IP を `blocked_abusers` ACL に追加し、他のルールより
+前で deny します。`/etc/squid/squid.conf` に以下を追記してください。
+
+```
+acl blocked_abusers src {% for r in rows %}{{ r["source_ip"] }}/32 {% endfor %}
+
+http_access deny blocked_abusers
+```
+
+## 3. CONNECT の許可先ポートを SSL_ports に限定する
+
+CONNECT 乱用を防ぐため、CONNECT で接続できるポートを 443 のみに制限します。
+`acl SSL_ports` の定義に漏れがないか確認し、なければ以下を追加します。
+
+```
+acl SSL_ports port 443
+acl CONNECT method CONNECT
+
+http_access deny CONNECT !SSL_ports
+```
+
+## 4. localnet の定義とhttp_access の許可範囲を是正する
+
+過大な `localnet` 定義や `http_access allow` の並びが外部送信元まで許可して
+いないか確認します。
+
+```bash
+grep -n '^acl localnet' /etc/squid/squid.conf
+grep -n '^http_access' /etc/squid/squid.conf
+```
+
+`localnet` が社内セグメント以外を含んでいる場合は範囲を絞り込み、
+`http_access allow localnet` より前に `http_access deny blocked_abusers` が
+来るよう順序を調整します。最終行が `http_access deny all` になっていることを
+必ず確認してください。
+
+```
+acl localnet src 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
+
+http_access deny blocked_abusers
+http_access deny CONNECT !SSL_ports
+http_access allow localnet
+http_access deny all
+```
+
+## 5. 設定を検証し反映する
+
+新しい遮断ルールが構文エラーなく読み込めることを、既存セッションを維持したまま
+別セッションで確認してから本反映します。
+
+```bash
+# 構文チェック(新しい設定が壊れていないかを、旧設定を維持したまま確認)
+squid -k parse -f /etc/squid/squid.conf
+
+# 別セッション/別端末で現行プロキシへの疎通が生きていることを確認してから反映
+squid -k reconfigure
+```
+
+## 動作確認
+
+- 遮断した送信元からのアクセスが access.log 上で `TCP_DENIED` として記録されること
+
+```bash
+tail -f /var/log/squid/access.log | grep 'TCP_DENIED'
+```
+
+- `http_access` の最終行が `deny all` になっていること
+
+```bash
+grep -n '^http_access' /etc/squid/squid.conf | tail -1
+```
+
+- 正当な社内利用者からのアクセスが引き続き許可されていること（誤遮断がないこと）
+
+## 注意事項
+
+- `http_access deny all` を最終行に置かないまま設定を反映すると、意図せず
+  全世界からのアクセスを許可した状態（オープンプロキシ）が継続するため、
+  必ずルール順序と最終行を確認してから `squid -k reconfigure` を実行する。
+- CONNECT の許可先ポートは `SSL_ports`（通常 443 のみ）に限定し、任意ポートへの
+  トンネリングを許可しない。制限を緩めると再び踏み台化のリスクが生じる。
+- `localnet` の範囲は実際の社内セグメントに厳密に一致させ、外部セグメントや
+  0.0.0.0/0 相当の広すぎる定義を含めない。
+- ACL 変更や `reconfigure` の前に、必ず別セッション・別端末から現行プロキシ
+  への疎通を確認し、新しい遮断ルールが正当な利用者を巻き込んでいないことを
+  検証してから本反映する。誤って自分自身の経路を遮断すると復旧に管理コンソール
+  等の代替アクセス手段が必要になる。
+- 遮断した送信元・日時・根本原因・対応者は証跡として保管し、インシデント記録
+  や再発防止レビューに利用できるようにする。

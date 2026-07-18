@@ -1,0 +1,110 @@
+# Wazuh CDBリストによる脅威IoC照合
+
+CDBリスト（key:value形式の高速lookupテーブル）に既知の悪性IoC（IP・ドメイン・ハッシュ）を登録し、ルールの `lookup="match_key"` でログ中の値と照合して検知する手順です。
+
+## 目的
+
+Wazuhの `<list>` 機能を使い、IoC（Indicator of Compromise）の一覧をCDBリストとして管理し、ルール1本で大量のIoCと照合できる仕組みを構築できるようになることを目指します。IoCの登録から `ossec.conf` への組み込み、ルール作成、`wazuh-logtest` による検知確認までを一巡します。
+
+## 用語解説
+
+- **CDBリスト**: Wazuhが `/var/ossec/etc/lists/` 配下で管理する `key:value` 形式のテキストファイル。内部的にハッシュ化されるため、数千〜数万件のIoCを登録してもO(1)に近い速度でlookupでき、IoCの数だけルールを書く「ルール爆発」を避けられる。
+- **lookup="match_key"**: ルール内の `<list>` タグで、ログから抽出したフィールド値がCDBリストの key と一致するかを照合する属性。value側の情報（例: ioc_type）は使わず、キーの存在有無だけを見る。
+- **ossec.confの`<ruleset><list>`**: CDBリストファイルを読み込み対象として登録するディレクティブ。ここに列挙されたリストだけがルールから参照可能になる。
+- **wazuh-logtest**: ルール・デコーダーの動作をログを流し込みながらオフラインで検証できる対話ツール。本番のログ経路を汚さずにマッチを確認できる。
+- **TLP (Traffic Light Protocol)**: 情報共有の機密区分（RED/AMBER/GREEN/CLEAR）。共有範囲を超えた転記・公開を防ぐための取り扱いルール。
+- **IoC鮮度管理**: `expire_at` を過ぎたIoCは誤検知や陳腐化の原因になるため、定期的に棚卸しして除外する運用。
+
+## シナリオ設定
+
+| ioc_value | ioc_type | source | tlp | added_at | expire_at |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["ioc_value"] }} | {{ r["ioc_type"] }} | {{ r["source"] }} | {{ r["tlp"] }} | {{ r["added_at"] }} | {{ r["expire_at"] }} |
+{% endfor %}
+
+## 1. CDBリストファイルを作成する
+
+`/var/ossec/etc/lists/` 配下に `key:value` 形式でIoCを登録します。value列には `ioc_type` を入れ、後で監査時に何のIoCかを識別できるようにします（lookupではkeyの一致のみが使われます）。
+
+```bash
+sudo tee /var/ossec/etc/lists/threat-intel-iocs > /dev/null <<'EOF'
+{% for r in csv_rows %}{{ r["ioc_value"] }}:{{ r["ioc_type"] }}
+{% endfor %}EOF
+sudo chown wazuh:wazuh /var/ossec/etc/lists/threat-intel-iocs
+```
+
+登録前に、フィード由来のIoCは非信頼データとして扱い、フォーマット破損や誤った値が混入していないか目視確認してから反映します。
+
+```bash
+grep -vE '^[^:]+:[^:]+$' /var/ossec/etc/lists/threat-intel-iocs || echo "形式チェックOK: 不正な行なし"
+```
+
+## 2. CDBリストをコンパイルする
+
+CDBリストはバイナリ形式（`.cdb`）に変換されてから参照されます。`wazuh-control` 経由のリロードでも自動コンパイルされますが、明示的に再コンパイルして内容を確認できます。
+
+```bash
+sudo /var/ossec/bin/cdb -c /var/ossec/etc/lists/threat-intel-iocs.cdb /var/ossec/etc/lists/threat-intel-iocs
+sudo /var/ossec/bin/cdb -d /var/ossec/etc/lists/threat-intel-iocs.cdb | head -n 5
+```
+
+## 3. ossec.confでCDBリストを参照登録する
+
+`ossec_config` の `<ruleset>` セクションに `<list>` タグを追加し、Manager起動時にリストを読み込ませます。
+
+```xml
+<ossec_config>
+  <ruleset>
+    <list>etc/lists/threat-intel-iocs</list>
+  </ruleset>
+</ossec_config>
+```
+
+## 4. lookupルールを作成する
+
+`/var/ossec/etc/rules/local_rules.xml` に、送信元IPがCDBリストのkeyと一致した場合に発火するルールを追加します。
+
+```xml
+<group name="threat_intel,">
+  <rule id="100200" level="12">
+    <if_sid>530</if_sid>
+    <list field="srcip" lookup="match_key">etc/lists/threat-intel-iocs</list>
+    <description>既知の悪性IoCと一致するアクセスを検知</description>
+    <mitre>
+      <id>T1071</id>
+    </mitre>
+  </rule>
+</group>
+```
+
+## 5. リストとルールを再読み込みする
+
+CDBリストやルールを追加・変更した際は、Managerを再起動してリストの再コンパイルとルールセットの再読込を行います。
+
+```bash
+sudo /var/ossec/bin/wazuh-control status
+sudo systemctl restart wazuh-manager
+sudo /var/ossec/bin/wazuh-control status
+```
+
+## 動作確認
+
+1. `wazuh-logtest` にIoCを含む模擬ログを流し込み、ルール100200が発火することを確認します。
+
+```bash
+sudo /var/ossec/bin/wazuh-logtest <<'EOF'
+Jul 17 10:00:00 host sshd[1]: Failed password for invalid user admin from {{ csv_rows[0]["ioc_value"] }} port 22 ssh2
+EOF
+```
+
+出力に `id: '100200'` と `Description: 既知の悪性IoCと一致するアクセスを検知` が含まれれば、CDBリストとルールが正しく紐づいています。
+
+2. IoCに含まれない正常なIPで同じログを流し、ルール100200が発火しないことも合わせて確認し、誤検知がないことを裏付けます。
+
+## 注意事項
+
+- OSINTフィードから取得したIoCは非信頼データとして扱い、Step 1のフォーマットチェックと目視確認を経てから本番リストに反映する。出典不明な値をそのまま登録しない。
+- 本番の検知経路（既存ルールセット）を止める前に、`wazuh-logtest`（Step「動作確認」）でlookupルールが期待通り発火することを別セッションで検証してから、Manager再起動（Step 5）を行う。
+- `expire_at` を過ぎたIoCは定期的に棚卸しして `threat-intel-iocs` から除外する。陳腐化したIoCの放置は誤検知や監査ノイズの原因になる。
+- `tlp` が `TLP:AMBER` 以上のIoCは、共有範囲を超えてチャットやチケットに転記しない。ログ・レポートへの記載時も値そのものではなく検知有無に留める。
+- CDBリストファイルの所有者・パーミッションを `wazuh:wazuh` に保つ。パーミッションが緩いと第三者による改ざんでlookup対象を書き換えられるリスクがある。

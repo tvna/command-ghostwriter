@@ -1,0 +1,161 @@
+# Keycloak Authorization Servicesによる細粒度認可
+
+Keycloak Authorization Services を用いて、クライアント単位ではなく **リソース単位** で
+resource / policy / permission を組み合わせた細粒度認可（ABAC寄りの認可モデル）を構成します。
+
+## 目的
+
+RBAC（ロールに紐づく粗い権限）を超えて、個々のリソース・スコープ単位でアクセス可否を判定する
+ABAC的な認可基盤を、Keycloak を PDP（Policy Decision Point）として構成できるようになることを
+目指します。resource / scope の定義、role・group・js・time の各種 policy の作成、
+resource-based / scope-based permission の組み立て、UMA/RPT トークンによる認可判定までを
+一連の手順として実施します。
+
+## 用語解説
+
+- **Authorization Services**: Keycloak のクライアントに組み込める認可エンジン。resource / scope /
+  policy / permission の4層でアクセス制御を表現する
+- **PDP（Policy Decision Point）**: 認可判定を下す主体。ここでは Keycloak 自身が PDP となり、
+  実際のアクセス制御の実施（PEP: Policy Enforcement Point）はアプリケーション側が担う
+- **RBAC と ABAC**: RBAC はロールに紐づく粗粒度の権限、ABAC は属性（ロール・グループ・時間・
+  カスタム条件など）を組み合わせた細粒度の権限。Authorization Services は両方を policy として表現できる
+- **resource / scope**: resource は保護対象（例: `invoices` という帳票リソース）、scope は
+  そのリソースに対する操作単位（例: `view` `edit` `delete`）
+- **policy**: 「誰が」「どんな条件で」許可されるかを定義する規則。role / group / js（カスタムロジック）/
+  time（有効期間）などの種類がある
+- **permission**: resource または scope と policy を結びつけ、実際の許可判定ルールとして束ねたもの
+- **decisionStrategy（AFFIRMATIVE / UNANIMOUS）**: 複数 policy が紐づく permission で、
+  AFFIRMATIVE は1つでも許可されれば許可、UNANIMOUS は全 policy が許可して初めて許可となる
+- **UMA/RPT（Requesting Party Token）**: クライアントがアクセス許可を要求し、Keycloak が発行する
+  「許可されたリソース/スコープの一覧」を含むトークン。RPT を検証すればアクセス可否が分かる
+- **token-introspection**: 発行済みトークン（RPT を含む）が有効か、どの権限を含むかをKeycloak側に
+  問い合わせて検証するエンドポイント
+
+## シナリオ設定
+
+| resource | scopes | policy_type | policy_logic | permission |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["resource"] }} | {{ r["scopes"] }} | {{ r["policy_type"] }} | {{ r["policy_logic"] }} | {{ r["permission"] }} |
+{% endfor %}
+
+`scopes` 列の `#` はスコープの区切りを表す表記です（実際の kcadm.sh 呼び出しでは個別の JSON 要素にします）。
+
+## 1. クライアントで Authorization Services を有効化する
+
+対象クライアント（confidential client、`myrealm` レルム）で `authorizationServicesEnabled` を
+有効化します。
+
+```bash
+export KC_REALM=myrealm
+export CLIENT_ID=$(kcadm.sh get clients -r $KC_REALM -q clientId=backend-api --fields id --format csv --noquotes)
+
+kcadm.sh config credentials --server http://localhost:8080 --realm master --user admin --password admin
+
+kcadm.sh update clients/$CLIENT_ID -r $KC_REALM \
+  -s authorizationServicesEnabled=true \
+  -s serviceAccountsEnabled=true \
+  -s publicClient=false
+```
+
+## 2. resourceとscopeを定義する
+
+シナリオ設定の各行について、resource を作成します（scope は `#` 区切りで分解して個別に登録）。
+
+```bash
+{% for r in csv_rows %}kcadm.sh create clients/$CLIENT_ID/authz/resource-server/resource -r $KC_REALM \
+  -b '{"name":"{{ r["resource"] }}","displayName":"{{ r["resource"] }}","uris":["/api/{{ r["resource"] }}/*"]}'
+{% endfor %}```
+
+## 3. policyを種別ごとに作成する（role / group / js / time）
+
+`policy_type` に応じて対応する policy を作成します。role policy はロールに、group policy は
+グループに、js policy はカスタムロジックに、time policy は有効期間に基づいて判定します。
+
+```bash
+{% for r in csv_rows %}{% if r["policy_type"] == "role" %}kcadm.sh create clients/$CLIENT_ID/authz/resource-server/policy/role -r $KC_REALM \
+  -b '{"name":"{{ r["resource"] }}-role-policy","logic":"POSITIVE","roles":[{"id":"finance-viewer"}]}'
+{% elif r["policy_type"] == "group" %}kcadm.sh create clients/$CLIENT_ID/authz/resource-server/policy/group -r $KC_REALM \
+  -b '{"name":"{{ r["resource"] }}-group-policy","logic":"POSITIVE","groups":[{"path":"/report-viewers"}]}'
+{% elif r["policy_type"] == "js" %}kcadm.sh create clients/$CLIENT_ID/authz/resource-server/policy/js -r $KC_REALM \
+  -b '{"name":"{{ r["resource"] }}-js-policy","logic":"POSITIVE","code":"$evaluation.grant();"}'
+{% elif r["policy_type"] == "time" %}kcadm.sh create clients/$CLIENT_ID/authz/resource-server/policy/time -r $KC_REALM \
+  -b '{"name":"{{ r["resource"] }}-time-policy","logic":"POSITIVE","dayMonthEnd":"","notOnOrAfter":"","dayMonth":"","hourEnd":"18","hour":"9"}'
+{% endif %}{% endfor %}```
+
+js policy はサンプルとして固定許可ロジックを記載しています。実運用ではリクエストの属性
+（`$evaluation.getContext()` 経由）を参照する具体的な条件式に置き換えてください。
+
+## 4. permissionでresourceとpolicyを結びつける
+
+`policy_logic` の値をそのまま `decisionStrategy` に反映し、resource-based permission として
+束ねます。
+
+```bash
+{% for r in csv_rows %}kcadm.sh create clients/$CLIENT_ID/authz/resource-server/permission/resource -r $KC_REALM \
+  -b '{"name":"{{ r["permission"] }}","resources":["{{ r["resource"] }}"],"policies":["{{ r["resource"] }}-{{ r["policy_type"] }}-policy"],"decisionStrategy":"{{ r["policy_logic"] }}"}'
+{% endfor %}```
+
+`policy_logic` が `UNANIMOUS` の行（`admin-panel`）は、紐づく全 policy が許可判定を返さない限り
+アクセスが拒否されます。単一 policy しか紐づけていない場合は `AFFIRMATIVE` と実質的に同じ挙動に
+なるため、複数 policy を束ねる際に意図した組み合わせになっているかを必ず確認してください。
+
+## 5. UMA/RPTトークンで認可判定を取得する
+
+サービスアカウントのアクセストークンを使って UMA ワンショット認可（RPT取得）を要求します。
+
+```bash
+export ACCESS_TOKEN=$(curl -s -X POST \
+  http://localhost:8080/realms/$KC_REALM/protocol/openid-connect/token \
+  -d "grant_type=client_credentials" \
+  -d "client_id=$CLIENT_ID" \
+  -d "client_secret=$CLIENT_SECRET" \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
+
+curl -s -X POST \
+  http://localhost:8080/realms/$KC_REALM/protocol/openid-connect/token \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -d "grant_type=urn:ietf:params:oauth:grant-type:uma-ticket" \
+  -d "audience=$CLIENT_ID" \
+  -d "permission=invoices#view"
+```
+
+許可されていれば RPT（`access_token` フィールド）が返り、拒否されれば
+`access_denied` エラーが返ります。
+
+## 動作確認
+
+1. Step 5 のRPT取得を、許可されるべき組み合わせ（例: `invoices#view` を持つロールのユーザー）と
+   拒否されるべき組み合わせ（例: 対象ロールを持たないユーザー、または `admin-panel#edit` を
+   平日9-18時外に要求）の両方で実行し、許可/拒否がシナリオ設定どおりに分かれることを確認する。
+2. token-introspection エンドポイントでRPTを検証し、`active` フィールドと
+   `permissions` に含まれるresource/scopeがシナリオ設定と一致することを確認する。
+
+```bash
+curl -s -X POST \
+  http://localhost:8080/realms/$KC_REALM/protocol/openid-connect/token/introspect \
+  -u "$CLIENT_ID:$CLIENT_SECRET" \
+  -d "token=$RPT" \
+  -d "token_type_hint=requesting_party_token"
+```
+
+3. `admin-panel`（UNANIMOUS）については、紐づく複数 policy のうち1つだけをNGにした状態でも
+   RPT取得を試み、`AFFIRMATIVE` の場合と挙動が異なる（1つでも拒否されると全体が拒否される）ことを
+   実際に比較して確認する。
+
+## 注意事項
+
+- **既存の認可経路を無効化する前に新経路を検証する**: 既存クライアントで単純なロールベース権限が
+  稼働している場合、Authorization Services を有効化しても、動作確認（本手順の動作確認1・2）で
+  意図した許可/拒否が確認できるまでは既存のロールベース制御を無効化・撤去しないこと。新旧の認可
+  経路を並行稼働させ、新経路が期待どおりに機能すると確認できてから旧経路を撤去する。
+- **decisionStrategy の誤設定に注意する**: `UNANIMOUS` を意図せず設定すると、1つの policy が
+  拒否しただけで全体が拒否され、想定より厳しい（または逆に `AFFIRMATIVE` を誤設定すると想定より
+  緩い）認可になる。permission ごとに紐づく policy の組み合わせと `decisionStrategy` の対応を
+  必ず突き合わせる。
+- **jsポリシーは管理と監査を厳格に行う**: js policy は任意のロジックを実行できるため、
+  変更履歴の管理・レビュー体制がないまま本番反映しない。デフォルトで無効化されている場合は
+  レルムの `Enable JS policy` 設定を明示的に有効化してからのみ利用する。
+- **認可判定とアプリ側enforcementは組で機能する**: Keycloak はあくまでPDP（判定）であり、
+  実際にリクエストを拒否する PEP（enforcement）はアプリケーション側（例: Keycloak Gatekeeper /
+  Envoy 等のアダプタや自前のRPT検証コード）が担う。Keycloak側の許可/拒否だけでは、
+  アプリ側がRPTを検証せずに素通しする実装ミスを防げない点に注意する。

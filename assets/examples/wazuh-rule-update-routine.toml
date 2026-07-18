@@ -1,0 +1,21 @@
+backup_dir = "/opt/wazuh-backups/rules"
+update_schedule = "毎週月曜 03:00 (cron: 0 3 * * 1)"
+notify_channel = "#soc-ops (Slack Incoming Webhook)"
+
+[[regression_test_cases]]
+name = "SSH認証失敗の検知"
+log_sample = "Failed password for invalid user admin from 203.0.113.10 port 51515 ssh2"
+expected_rule_id = "5710"
+expected_level = "5"
+
+[[regression_test_cases]]
+name = "sudoコマンド実行の監査"
+log_sample = "user1 : TTY=pts/0 ; PWD=/home/user1 ; USER=root ; COMMAND=/bin/systemctl restart wazuh-manager"
+expected_rule_id = "5402"
+expected_level = "3"
+
+[[regression_test_cases]]
+name = "ローカル追加ルール(社内Webアプリ異常ログイン)"
+log_sample = "app=internal-portal event=login_failed user=svc-batch src_ip=192.168.10.44 reason=account_locked"
+expected_rule_id = "100210"
+expected_level = "10"

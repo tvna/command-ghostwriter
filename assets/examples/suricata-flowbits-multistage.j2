@@ -1,0 +1,132 @@
+# Suricata flowbits による多段検知ルールの構築
+
+CSV で定義した {{ csv_rows | length }} 件の多段ルール定義から、flowbits を使って
+「複数条件が揃った時だけ発報する」検知ルールを構築します。前段ルールは
+`flowbits:set` + `flowbits:noalert` で状態だけを記録し、後段ルールが
+`flowbits:isset` で前段成立を確認してから初めて発報します。
+
+## 目的
+
+認証失敗レスポンス検知(前段)→直後の管理パスアクセス検知(後段)という 2 段構成の
+ルールを、flowbits を用いて実装できるようになることを目指します。前段単体・
+後段単体では発報させず、両方の条件が同一フロー(または同一ホスト間)で成立した
+時だけアラートが上がる設計を理解します。
+
+## 用語解説
+
+- **flowbits**: 単一の TCP/UDP フロー(5-tuple)に紐づく状態フラグ。`set` で立て、
+  `isset` で確認し、`unset` で消す。フローが終了(タイムアウト・切断)すると
+  そのフローの flowbits も破棄される。
+- **flowbits:noalert**: フラグを立てるだけで、そのルール自体はアラートを
+  発報しない(前段を「静音化」する)よう指定するキーワード。前段ルールに
+  必ず付与し、状態記録専用のルールにする。
+- **local. プレフィックス**: 自作 flowbits/xbits 名の命名規約。Emerging Threats
+  等の公式ルールセットが使う名前空間と衝突しないよう、自作フラグには必ず
+  `local.` を先頭に付ける。
+- **xbits(track ip_pair)**: flowbits はフロー単位でしか状態を共有できないため、
+  同一フロー内で完結しない攻撃(別コネクションをまたぐスキャン→侵害など)を
+  追跡したい場合は、IP ペア単位で状態を共有できる xbits(`xbits:set,...,
+  track ip_pair`)を使う。用途に応じて flowbits と xbits を使い分ける。
+
+## シナリオ設定
+
+| sid | stage | flowbit_name | 条件概要 | action | msg |
+|-----|-------|--------------|----------|--------|-----|
+{% for r in csv_rows %}| {{ r["sid"] }} | {{ r["stage"] }} | {{ r["flowbit_name"] }} | {{ r["condition_summary"] }} | {{ r["action"] }} | {{ r["msg"] }} |
+{% endfor %}
+
+## 1. ローカルルールファイルを作成する
+
+Suricata の追加ルールは `local.rules` に集約し、`suricata.yaml` の
+`rule-files` に含めておきます。
+
+```bash
+sudo mkdir -p /var/lib/suricata/rules
+sudo touch /etc/suricata/rules/local.rules
+grep -q '^ *- local.rules' /etc/suricata/suricata.yaml || \
+  echo '  - local.rules' | sudo tee -a /etc/suricata/suricata.yaml
+```
+
+## 2. 前段ルール(flowbits:set + noalert)を書く
+
+sid {{ csv_rows[0]["sid"] }} は HTTP 応答が 401(認証失敗)であることを検知し、
+`{{ csv_rows[0]["flowbit_name"] }}` をセットしますが、`flowbits:noalert;` に
+より単体ではアラートを発報しません。
+
+```bash
+cat <<'EOF' | sudo tee -a /etc/suricata/rules/local.rules
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"{{ csv_rows[0]["msg"] }}"; \
+  flow:established,to_client; http.stat_code; content:"401"; \
+  flowbits:set,{{ csv_rows[0]["flowbit_name"] }}; flowbits:noalert; \
+  classtype:attempted-recon; sid:{{ csv_rows[0]["sid"] }}; rev:1;)
+EOF
+```
+
+## 3. 後段ルール(flowbits:isset)を書く
+
+sid {{ csv_rows[1]["sid"] }} は前段と同一フロー内で `/admin/` へのアクセスが
+発生した場合のみ、`flowbits:isset,{{ csv_rows[1]["flowbit_name"] }};` の条件が
+成立して初めて発報します。前段が成立していないフローでは `/admin/` への
+アクセスがあっても発報しません。
+
+```bash
+cat <<'EOF' | sudo tee -a /etc/suricata/rules/local.rules
+alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"{{ csv_rows[1]["msg"] }}"; \
+  flow:established,to_server; http.uri; content:"/admin/"; \
+  flowbits:isset,{{ csv_rows[1]["flowbit_name"] }}; \
+  classtype:attempted-admin; sid:{{ csv_rows[1]["sid"] }}; rev:1;)
+EOF
+```
+
+## 4. 構文チェックとリロード
+
+```bash
+sudo suricata -T -c /etc/suricata/suricata.yaml -v
+sudo suricatasc -c reload-rules
+```
+
+## 5. curl 連打による模擬シナリオで動作確認する
+
+まず後段のみ・前段のみを単体で試し、単体では発報しないことを確認したうえで、
+最後に前段→後段の順で連続アクセスして初めて発報することを確認します。
+
+```bash
+# (a) 後段パスのみ単体アクセス -> flowbit 未成立のため発報しないはず
+curl -s -o /dev/null http://TARGET_HOST/admin/
+
+# (b) 前段(401 応答)のみ単体で発生させる -> noalert のため画面上は静か
+curl -s -o /dev/null -u wronguser:wrongpass http://TARGET_HOST/login
+
+# (c) 同一クライアントから直後に後段パスへアクセス -> ここで初めて sid 9100602 が発報するはず
+curl -s -o /dev/null http://TARGET_HOST/admin/
+
+# eve.json でアラート発報を確認
+tail -n 5 /var/log/suricata/eve.json | grep -o '"signature_id":[0-9]*'
+```
+
+## 動作確認
+
+- ステップ 5 (a)(b) 単体では `eve.json` にアラートが記録されないこと
+- ステップ 5 (c) 実行直後にのみ sid {{ csv_rows[1]["sid"] }} のアラートが
+  `eve.json` に記録されること
+- `suricatasc -c reload-rules` がエラーなく完了し、`suricata -T` の構文チェックが
+  通過していること
+- 前段ルール(sid {{ csv_rows[0]["sid"] }})単体では `eve.json` に一切アラートが
+  出ないこと(noalert が効いていることの確認)
+
+## 注意事項
+
+- flowbits はフロー(5-tuple)単位でしか保持されない。フローがタイムアウトまたは
+  切断されると flowbits も消えるため、前段と後段の間隔が長すぎるシナリオには
+  向かない。フローをまたいで同一ホスト同士の状態を追跡したい場合は、
+  `xbits:set,...,track ip_pair` を使う設計に切り替えること。
+- 自作 flowbits/xbits 名には必ず `local.` プレフィックスを付け、公開ルール
+  セット(Emerging Threats 等)のフラグ名と衝突させないこと。
+- 前段ルールに `flowbits:noalert;` を付け忘れると、前段だけでもアラートが
+  発報してしまい、多段検知の意図(後段成立時のみ発報)が崩れる。ルール投入後は
+  必ず動作確認のステップ 5 (a)(b) で前段単体・後段単体が発報しないことを
+  確認してから、本番トラフィックへの適用に進むこと。
+- 既存の検知ルール(前段の代わりとなっていた単発ルール等)を無効化・削除する
+  場合は、新しい多段ルールが動作確認 5 の (a)(b)(c) をすべて満たすことを
+  確認したうえで行うこと。先に旧ルールを外すと、切り替え中に検知の空白期間が
+  生じる。

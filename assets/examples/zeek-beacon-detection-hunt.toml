@@ -1,0 +1,4 @@
+log_dir = "/opt/zeek/logs/current"
+suspect_pair_src = "10.20.3.45"
+suspect_pair_dst = "203.0.113.77"
+interval_regularity_note = "delta秒の変動係数(標準偏差/平均)が0.1未満なら高規則性、0.1から0.3ならjitter付きビーコンの疑い、0.3以上なら人手操作や不定期処理の可能性が高い"

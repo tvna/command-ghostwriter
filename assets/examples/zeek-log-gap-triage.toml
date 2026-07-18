@@ -1,0 +1,4 @@
+missing_log = "dns.log"
+monitor_interface = "eth1"
+expected_service = "DNS (UDP/TCP 53)"
+disk_check = true

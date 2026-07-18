@@ -1,0 +1,8 @@
+service_name: legacy-crm-api
+legacy_access: "OPNsenseのNATポートフォワード (WAN:8443 から 10.0.1.20:8443, ルールラベル crm-api-legacy) と WireGuard(wg0)ピアACLの AllowedIPs 10.0.1.20/32 経由の直接公開経路"
+pilot_identities:
+  - crm-pilot-tanaka
+  - crm-pilot-sato
+  - crm-pilot-yamamoto
+cutover_window: "2026-07-24 02:00-04:00 JST (計画メンテナンス枠)"
+rollback_step: "OPNsenseで無効化していたNATルール crm-api-legacy を再度Enabledに戻して Firewall - Rules - Apply Changes を実行し、WireGuardピアACLの AllowedIPs へ 10.0.1.20/32 を復元して wg-quick strip wg0 で反映する(ziti側のservice/policyは無効化・削除せず残したままにする)"

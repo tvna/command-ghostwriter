@@ -1,0 +1,107 @@
+# Zeekパケット取りこぼし監視の運用
+
+`capture_loss.log`の`percent_lost`と`stats.log`の`pkts_dropped`/`mem`/`pkts_proc`を定期集計し、キャプチャ性能の劣化を早期に検知します。Zeekマネージャ/ワーカーホストで実施してください。
+
+## 目的
+
+`misc/capture-loss`と`misc/stats`ポリシーを有効化した上で、取りこぼし率とメモリ使用量を定期的に数値で把握し、閾値超過時に性能チューニングへ橋渡しできるようになることを目指します。
+
+## 用語解説
+
+- **capture_loss.log**: Zeekが自身のパケット取得数とピア(監視対象リンク)からの到達数を突き合わせ、欠落(gaps)と取りこぼし率(percent_lost)を記録するログ。`misc/capture-loss`ポリシーの読み込みが前提
+- **stats.log**: ワーカーごとのメモリ使用量(mem)・処理パケット数(pkts_proc)・破棄パケット数(pkts_dropped)などを一定間隔で記録するログ。`misc/stats`ポリシーの読み込みが前提
+- **percent_lost**: `capture_loss.log`の列。到達したはずのパケットのうちZeekが処理できなかった割合(%)。値が大きいほど取りこぼしが深刻
+- **lb_procs**: Zeekクラスタでワーカープロセスを何個起動するかを決めるロードバランス設定。CPU飽和時の水平スケールの調整点
+- **zeek-cut**: Zeekログ(TSV形式)から指定列だけを取り出すCLIツール。ログファイルへのパイプ/リダイレクトで使う
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| ログディレクトリ | `{{ log_dir }}` |
+| 取りこぼし率の閾値 | {{ loss_percent_threshold }} % |
+| メモリ使用量の閾値 | {{ mem_mb_threshold }} MB |
+| 集計間隔 | {{ check_interval_minutes }} 分 |
+
+## 手順
+
+### 1. 必要なポリシーを有効化する
+
+`local.zeek`(または`site`ディレクトリ配下のローカル設定)に以下を追記し、ワーカーへ配布・再デプロイします。
+
+```zeek
+@load misc/capture-loss
+@load misc/stats
+```
+
+```bash
+zeekctl deploy
+zeekctl status
+```
+
+`zeekctl status`で全ノードが`running`になっていることを確認してから次へ進みます。
+
+### 2. capture_loss.logのgaps/percent_lostを集計する
+
+```bash
+zeek-cut ts gaps acks percent_lost < {{ log_dir }}/capture_loss.log | tail -n 20
+```
+
+`percent_lost`が`{{ loss_percent_threshold }}`%を継続して超えていないかを確認します。`gaps`はacksに対する欠落パケット数の実数、`percent_lost`はその割合です。
+
+### 3. stats.logのpkts_dropped/mem/pkts_procを集計する
+
+```bash
+zeek-cut ts peer mem pkts_proc pkts_dropped < {{ log_dir }}/stats.log | tail -n 20
+```
+
+`mem`が`{{ mem_mb_threshold }}`MBに近づいていないか、`pkts_dropped`が`pkts_proc`に対して増加傾向にないかを確認します。
+
+### 4. 定期実行として集計をスケジュールする
+
+`{{ check_interval_minutes }}`分間隔でcronから集計スクリプトを起動し、結果をローテーション付きファイルへ記録します。
+
+```bash
+cat <<'EOS' > /usr/local/bin/zeek-capture-loss-check.sh
+#!/usr/bin/env bash
+set -euo pipefail
+LOG_DIR="{{ log_dir }}"
+zeek-cut ts gaps acks percent_lost < "${LOG_DIR}/capture_loss.log" >> /var/log/zeek-capture-loss-check.log
+zeek-cut ts peer mem pkts_proc pkts_dropped < "${LOG_DIR}/stats.log" >> /var/log/zeek-capture-loss-check.log
+EOS
+chmod +x /usr/local/bin/zeek-capture-loss-check.sh
+```
+
+```cron
+*/{{ check_interval_minutes }} * * * * root /usr/local/bin/zeek-capture-loss-check.sh
+```
+
+### 5. 閾値超過時は性能チューニングへ橋渡しする
+
+`percent_lost`が`{{ loss_percent_threshold }}`%を超えた集計が複数回続く場合、以下の順でボトルネックを切り分けてからチューニングします。
+
+```bash
+# ワーカーのCPU使用率を確認(飽和していればワーカー増設・lb_procs調整を検討)
+top -bn1 | head -n 15
+
+# ディスクI/O待ちを確認(iowaitが高ければログ書き込み先の高速化を検討)
+iostat -x 1 3
+
+# 現在のクラスタ構成(worker数・lb_procs)を確認
+zeekctl config | grep -i -E 'worker|lb_procs'
+```
+
+CPUが飽和している場合は`node.cfg`の`lb_procs`を増やしてワーカープロセス数を増やし、`zeekctl deploy`で反映します。ディスクI/O待ちが支配的な場合はログ出力先ストレージの見直しを優先し、ワーカー増設だけで解決しないことに注意します。
+
+## 動作確認
+
+1. `zeek-cut ts gaps acks percent_lost < {{ log_dir }}/capture_loss.log`が数値付きの行を返すこと
+2. `zeek-cut ts peer mem pkts_proc pkts_dropped < {{ log_dir }}/stats.log`が数値付きの行を返すこと
+3. `/usr/local/bin/zeek-capture-loss-check.sh`を手動実行し、`/var/log/zeek-capture-loss-check.log`に追記されること
+
+## 注意事項
+
+- 取りこぼしの原因は主に3種類ある。ミラーポート/TAP側の過飽和(リンク帯域に対してキャプチャ側が受け切れない)、ワーカーのCPU飽和(パケット処理が追いつかない)、ディスクI/O待ち(ログ書き込みがボトルネック)。`top`/`iostat`/ミラー側のカウンタを併せて確認し、切り分けてからチューニングする。
+- `percent_lost`の一時的なスパイクと恒常的な超過を混同しない。単発の集計値だけで対処せず、`{{ check_interval_minutes }}`分間隔で複数回連続して`{{ loss_percent_threshold }}`%を超えているかを`capture_loss.log`の時系列で確認してから、ワーカー増設やlb_procs変更などの構成変更に着手する。
+- `zeekctl deploy`によるワーカー増設やlb_procs変更はキャプチャの一時的な中断を伴い得る。変更前に現行構成(`zeekctl config`の出力)を控えておき、変更後は本手順の集計コマンドで`percent_lost`が悪化していないことを確認してから旧構成の情報を破棄する。
+- `/usr/local/bin/zeek-capture-loss-check.sh`や`cron`エントリを追加する際は、既存の監視ジョブと重複起動しないか確認する。

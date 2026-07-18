@@ -1,0 +1,104 @@
+# CrowdSec LAPI集中構成による多サーバ連携
+
+複数サーバのCrowdSecエージェントを中央LAPI（Local API）へ集約し、いずれか1台が検知した攻撃を組織横断で全bouncerに遮断させる構成を構築します。**既存の単独稼働構成を残したまま中央LAPIへの登録を検証し、動作確認が完了してから単独構成を無効化します。**
+
+## 目的
+
+分散配置されたCrowdSecエージェントの検知結果を中央LAPIサーバに集約し、共有bouncerが組織横断で遮断を実行できる体制を構築できるようになることを目指します。集約点の可用性設計や認証情報の取り扱いについても理解します。
+
+## 用語解説
+
+- **LAPI(Local API)**: CrowdSecエージェント間で検知シグナル（decision）を共有する中央サーバコンポーネント
+- **エージェント(crowdsec)**: 各サーバでログを監視し攻撃シナリオを検知するプロセス
+- **machine**: LAPIに対して認証するエージェント側の登録単位（`cscli machines add`で作成）
+- **bouncer**: decisionを受け取り実際にnginx/iptables等で遮断を実行するコンポーネント
+- **decision**: 「どのIPをどれだけの期間遮断するか」を表すLAPI上のレコード
+- **協調モデル**: 分散エージェント検知 → 中央LAPI集約 → 全bouncer遮断、という一方向の情報集約フローのこと。1台の検知が組織内の全bouncerに伝播する
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| LAPIサーバ | {{ lapi_server.host }}:{{ lapi_server.port }} ({{ lapi_server.url }}) |
+| TLS証明書 | {{ lapi_server.tls_cert_path }} |
+| TLS秘密鍵 | {{ lapi_server.tls_key_path }} |
+| CA証明書 | {{ lapi_server.ca_cert_path }} |
+| 登録対象エージェント | {% for agent in agents %}{{ agent.name }} ({{ agent.ip }}){% if not loop.last %}, {% endif %}{% endfor %} |
+| 事前登録済みか | {{ machines_registered }} |
+| 共有bouncer | {% for bouncer in shared_bouncers %}{{ bouncer.name }} ({{ bouncer.type }}){% if not loop.last %}, {% endif %}{% endfor %} |
+| 検知テスト元IP | {{ test.attack_source_ip }} |
+| テスト対象エージェント | {{ test.test_agent }} |
+
+## 1. 中央LAPIサーバにapi.serverを構成する
+
+LAPIサーバとなるホスト（{{ lapi_server.host }}）で、`/etc/crowdsec/config.yaml`の`api.server`セクションをTLS付きで構成します。
+
+```bash
+sudo tee -a /etc/crowdsec/config.yaml <<'EOF'
+api:
+  server:
+    listen_uri: {{ lapi_server.host }}:{{ lapi_server.port }}
+    tls:
+      cert_file: {{ lapi_server.tls_cert_path }}
+      key_file: {{ lapi_server.tls_key_path }}
+    profiles_path: /etc/crowdsec/profiles.yaml
+EOF
+sudo systemctl restart crowdsec
+sudo cscli lapi status
+```
+
+## 2. 各エージェントをmachineとして中央LAPIに登録する
+
+各エージェントホストで、中央LAPI宛の`machine`を作成し、そのホスト自身の`local_api_credentials.yaml`を中央LAPIのURLに向けて書き換えます。**既存の単独（standalone）構成のcrowdsecサービスは、この時点ではまだ停止しません。**
+
+```bash
+{% for agent in agents %}# --- {{ agent.name }} ({{ agent.ip }}) ---
+sudo cscli machines add {{ agent.name }} --auto -f /tmp/{{ agent.name }}-credentials.yaml
+sudo scp /tmp/{{ agent.name }}-credentials.yaml root@{{ agent.ip }}:/etc/crowdsec/local_api_credentials.yaml
+ssh root@{{ agent.ip }} "sed -i 's#^url:.*#url: {{ lapi_server.url }}#' /etc/crowdsec/local_api_credentials.yaml"
+ssh root@{{ agent.ip }} "sudo systemctl restart crowdsec"
+{% endfor %}
+```
+
+## 3. 共有bouncerを中央LAPIに登録し、集中構成の登録状況を確認する
+
+```bash
+{% for bouncer in shared_bouncers %}sudo cscli bouncers add {{ bouncer.name }} --key-name {{ bouncer.name }}-key
+{% endfor %}
+sudo cscli machines list
+sudo cscli bouncers list
+```
+
+`machines list`に登録エージェント（{% for agent in agents %}{{ agent.name }}{% if not loop.last %}, {% endif %}{% endfor %}）が、`bouncers list`に共有bouncer（{% for bouncer in shared_bouncers %}{{ bouncer.name }}{% if not loop.last %}, {% endif %}{% endfor %}）が、それぞれ`VALIDATED`状態で表示されることを確認します。
+
+{% if not machines_registered %}
+本構成はまだ未登録の状態から開始するため、上記の登録作業を実施する必要があります。
+{% endif %}
+
+## 動作確認
+
+1台のエージェント（{{ test.test_agent }}）での検知が、中央LAPI経由で全bouncerに伝播することを、既存の単独構成を無効化する**前に**確認します。
+
+```bash
+# {{ test.test_agent }}上で疑似攻撃を発生させ、decisionが中央LAPIに登録されることを確認
+ssh root@{{ test.test_agent }} "sudo cscli decisions add --ip {{ test.attack_source_ip }} --reason manual-test --duration 4h"
+
+# 中央LAPI側でdecisionが集約されていることを確認
+sudo cscli decisions list --ip {{ test.attack_source_ip }}
+
+{% for agent in agents %}# {{ agent.name }} ({{ agent.ip }})上のbouncerにdecisionが伝播していることを確認
+ssh root@{{ agent.ip }} "sudo cscli decisions list --ip {{ test.attack_source_ip }}"
+{% endfor %}
+```
+
+- `cscli decisions list --ip {{ test.attack_source_ip }}`が中央LAPI・全エージェントの双方で同一decisionを返すこと
+- `cscli machines list`で全エージェントが`VALIDATED`、`cscli bouncers list`で全bouncerが`VALIDATED`であること
+- 上記が確認できて初めて、各エージェントの旧・単独（standalone）ローカルdecision運用を無効化すること（`cscli decisions delete --ip {{ test.attack_source_ip }}`でテスト用decisionを解除してから移行）
+
+## 注意事項
+
+- `local_api_credentials.yaml`（machine認証情報）と`cscli bouncers add`で発行されるAPIキー（bouncer認証情報）は機微情報であり、Git管理対象や平文ログに残さない。漏えい時は該当machine/bouncerを`cscli machines delete`・`cscli bouncers delete`で即座に無効化し再発行する。
+- LAPI経路（エージェント⇔中央LAPI、bouncer⇔中央LAPI）は必ずTLSで保護する（`tls_cert_file`/`tls_key_file`未設定のまま運用しない）。
+- 中央LAPIは単一障害点(SPOF)になる。LAPIサーバがダウンすると新規decisionの集約・配布が止まるため、可用性要件に応じてLAPIの冗長化やバックアップ復旧手順を別途用意する。
+- 各サーバの時刻同期(NTP等)がずれているとdecisionの有効期限判定や証明書検証がずれるため、事前にNTP同期を確認する。
+- 各エージェントの旧・単独構成は、Step「動作確認」で中央LAPIへの伝播が確認できるまで無効化・削除しない。

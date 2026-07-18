@@ -1,0 +1,3 @@
+sid,stage,flowbit_name,condition_summary,action,msg
+9100601,stage1,local.auth_fail_seen,HTTP応答401(認証失敗)を検知した時点では発報しない,set+noalert,Auth failure response observed (stage1 - silent)
+9100602,stage2,local.auth_fail_seen,stage1成立後に/admin/への直後アクセスを検知した時点で発報,isset+alert,Admin path access shortly after auth failure (stage2 - alert)

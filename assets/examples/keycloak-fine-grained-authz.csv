@@ -1,0 +1,5 @@
+resource,scopes,policy_type,policy_logic,permission
+invoices,view#edit#delete,role,AFFIRMATIVE,invoices-resource-permission
+reports,view#export,group,AFFIRMATIVE,reports-resource-permission
+admin-panel,view#edit,time,UNANIMOUS,admin-panel-scope-permission
+billing-api,view,js,AFFIRMATIVE,billing-api-scope-permission

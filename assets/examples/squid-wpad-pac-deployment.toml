@@ -1,0 +1,5 @@
+proxy_host = "proxy.internal.example.com"
+proxy_port = 3128
+direct_domains = ["intra.example.com", "localhost", "127.0.0.1"]
+wpad_host = "wpad.example.com"
+dhcp_option_enabled = true

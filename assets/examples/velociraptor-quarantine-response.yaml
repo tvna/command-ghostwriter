@@ -1,0 +1,10 @@
+target_host:
+  client_id: "C.a1b2c3d4e5f6a7b8"
+  hostname: "WORKSTATION-042"
+quarantine_artifact: "Windows.Remediation.Quarantine"
+preserve_server_comm: true
+investigation_artifacts:
+  - "Windows.System.PsList"
+  - "Windows.Network.Netstat"
+  - "Windows.Forensics.Prefetch"
+unquarantine_condition: "マルウェア除去とフルスキャン完了、および対応責任者の書面承認"

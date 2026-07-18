@@ -1,0 +1,72 @@
+# osqueryによるネットワーク露出面の棚卸し
+
+osqueryの `listening_ports` テーブルと `processes` テーブルを相関させ、意図しない公開ポート・プロセスを洗い出します。
+
+## 目的
+
+ホストが外部に公開しているポートと、それを保持しているプロセス/バイナリの対応関係を osquery のクエリで可視化し、想定ポート表との差分から「公開面（attack surface）」の意図しない拡大を検知できるようになることを目指します。
+
+## 用語解説
+
+- **公開面（attack surface）**: ネットワーク越しに到達可能な待受ポート・プロセスの集合。広いほど攻撃者の侵入経路が増える。
+- **listening_ports テーブル**: osqueryが提供する、ホストが待受中のポート・プロトコル・バインドアドレス・所有プロセスIDを保持するテーブル。
+- **processes テーブル**: PIDからプロセス名・実行バイナリのパス・親プロセスなどを引けるテーブル。
+- **プロセス相関**: `listening_ports.pid = processes.pid` で結合し、ポート番号だけでなく「誰が」そのポートを開いているかまで追跡すること。
+- **0.0.0.0 / :: バインド**: 特定のインターフェースに限定せず、ホストの全ネットワークインターフェースから到達可能にするバインド指定。意図せぬ外部公開の典型パターン。
+- **想定外リスニング**: 資産台帳（想定ポート表）に存在しない待受。デバッグ用に一時起動して消し忘れたプロセスやバックドアの兆候になり得る。
+
+## シナリオ設定
+
+想定ポート表（資産台帳）は以下の通りです。`expected` が `false` の行は、台帳上「想定外」として扱う対象です。
+
+| port | protocol | bind_address | process_name | expected | note |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["port"] }} | {{ r["protocol"] }} | {{ r["bind_address"] }} | {{ r["process_name"] }} | {{ r["expected"] }} | {{ r["note"] }} |
+{% endfor %}
+
+## 1. 現在の待受ポートとプロセスを相関させて取得する
+
+osqueryi を使い、`listening_ports` と `processes` をJOINして実際のホスト状態を取得します。
+
+```bash
+osqueryi --json "SELECT lp.port, lp.protocol, lp.address AS bind_address, p.pid, p.name AS process_name, p.path AS process_path FROM listening_ports lp JOIN processes p ON lp.pid = p.pid ORDER BY lp.port;"
+```
+
+## 2. 0.0.0.0 / :: にバインドされた外部公開ポートを抽出する
+
+台帳の各ポートについて、実際に外部公開（0.0.0.0または::へのバインド）されているかを確認します。
+
+```bash
+{% for r in csv_rows %}osqueryi --json "SELECT lp.port, lp.protocol, lp.address AS bind_address, p.name AS process_name FROM listening_ports lp JOIN processes p ON lp.pid = p.pid WHERE lp.port = {{ r["port"] }} AND (lp.address = '0.0.0.0' OR lp.address = '::');"
+{% endfor %}```
+
+## 3. 想定外リスニングを抽出する
+
+台帳の `expected` が `false` の行を、要調査対象として一覧化します。
+
+```bash
+{% for r in csv_rows %}{% if r["expected"] != "true" %}echo "要調査: port={{ r["port"] }}/{{ r["protocol"] }} process={{ r["process_name"] }} bind={{ r["bind_address"] }} note={{ r["note"] }}"
+{% endif %}{% endfor %}```
+
+## 4. 要調査プロセスの実体を確認する
+
+想定外と判定したプロセスについて、実行バイナリのパスと親プロセスを確認し、正規のサービスかデバッグ残置/バックドアかを切り分けます。
+
+```bash
+{% for r in csv_rows %}{% if r["expected"] != "true" %}osqueryi --json "SELECT p.pid, p.name, p.path, p.parent, p.cmdline FROM listening_ports lp JOIN processes p ON lp.pid = p.pid WHERE lp.port = {{ r["port"] }};"
+{% endif %}{% endfor %}```
+
+## 動作確認
+
+1. ステップ1のクエリ結果として、公開ポート一覧とその所有プロセスの対応が取得できること（ポート・プロトコル・バインドアドレス・プロセス名が揃って表示される）。
+2. シナリオ設定の想定ポート表と、ステップ1・2で得た実サーバの待受一覧を突合し、差分（想定にない待受、または想定にあるのに待受が消えている行）を洗い出せること。
+3. ステップ3で `expected` が `false` の行（3306/mysqld、9000/python3）が要調査として出力されること。
+4. ステップ4で要調査プロセスの実行パス・コマンドラインが確認でき、正規サービスかどうかの一次切り分けができること。
+
+## 注意事項
+
+- 本手順は状態を変更しない読み取り専用の棚卸しである。ポートやプロセスの停止・ファイアウォール変更は本手順の範囲外であり、別途変更管理のもとで実施すること。
+- 0.0.0.0 / :: への公開が「業務上必要か」は本手順単体では判定できない。要否確認は、当該サービスのアクセス制御（認証・IP制限）が別レイヤーで効いていることを確認したうえで、資産責任者に確認すること。
+- 想定外リスニング（デバッグ用途の消し忘れ、バックドアの疑い）を発見した場合は、直ちに停止する前に、実行バイナリのハッシュ・コマンドライン・接続元を保全してからインシデント対応手順に引き継ぐこと。停止を急ぐと証跡が失われる。
+- ファイアウォール（ufw/firewalld等）の許可ルールと、本手順で洗い出した実際の待受状況が整合しているかを必ず突き合わせる。ポートが開いていてもFWで遮断されていれば公開面としての緊急度は下がる。
+- 本棚卸しは一度実施して終わりにせず、定期的に同一クエリを再実行し、想定ポート表との差分（新規ポートの出現、プロセスの置き換わり）を継続的に検知する運用に組み込むこと。

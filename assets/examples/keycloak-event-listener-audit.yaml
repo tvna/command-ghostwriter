@@ -1,0 +1,13 @@
+realm: zero-trust
+kcadm_url: https://keycloak.example.internal:8443
+kcadm_admin_user: admin-cli-svc
+login_events: true
+admin_events: true
+events_expiration: 2592000
+listener: jboss-logging
+siem_endpoint: https://siem.example.internal:9000/services/collector/event
+log_path: /var/log/keycloak/keycloak.log
+promtail_config_path: /etc/promtail/config.yml
+promtail_job_name: keycloak-events
+test_user: alice
+test_client_id: admin-cli

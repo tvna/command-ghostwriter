@@ -103,7 +103,7 @@ tail -n 200 {{ eve_json_path }} | jq 'select(.event_type=="alert" and .alert.sig
 `alert.signature_id` が `{{ sid_admin_share }}` のアラートが記録されて
 いれば検知成功です。
 
-### 5. 正当なSMB通信を除外するチューニングを行う
+### 6. 正当なSMB通信を除外するチューニングを行う
 
 バックアップソフト（{{ backup_tool_ip }}）や資産管理ツール
 （{{ asset_mgmt_ip }}）による定期的な管理共有アクセスは、検知ルールを
@@ -131,13 +131,13 @@ tail -n 200 {{ eve_json_path }} | jq 'select(.event_type=="alert" and .alert.sig
 
 ## 動作確認
 
-- 手順4の模擬アクセスで `sid:{{ sid_admin_share }}` のアラートがeve.jsonに
+- 手順5の模擬アクセスで `sid:{{ sid_admin_share }}` のアラートがeve.jsonに
   記録されること
 - exe転送検知（{{ alert_on_exe_transfer }}）が有効な場合、テスト用exeを
   SMB経由で転送し `sid:{{ sid_exe_transfer }}` のアラートが記録されること
-- 手順5のsuppress設定後、{{ backup_tool_ip }} と {{ asset_mgmt_ip }} からの
+- 手順6のsuppress設定後、{{ backup_tool_ip }} と {{ asset_mgmt_ip }} からの
   通常アクセスでアラートが発生しないこと
-- suppressルール適用後も、手順4の模擬アクセス（{{ test_target_host }}宛て）
+- suppressルール適用後も、手順5の模擬アクセス（{{ test_target_host }}宛て）
   では引き続きアラートが発生し、検知そのものが無効化されていないこと
 
 ## 注意事項
@@ -149,7 +149,7 @@ tail -n 200 {{ eve_json_path }} | jq 'select(.event_type=="alert" and .alert.sig
   してください。
 - suppress/passルールによるチューニングは、対象を送信元IP単位など
   必要最小限のスコープに限定し、共有名や検知シグネチャ全体を無条件に
-  除外しないこと。チューニング後は手順5・動作確認の通り、正当な通信の
+  除外しないこと。チューニング後は手順6・動作確認の通り、正当な通信の
   誤検知が消えたことと、模擬アクセスによる検知が引き続き機能している
   ことの両方を確認してから運用に反映してください。
 - ルール追加やsuppress設定の反映前には必ず `suricata -T` で文法検証を
