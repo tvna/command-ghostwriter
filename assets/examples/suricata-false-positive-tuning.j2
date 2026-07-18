@@ -1,0 +1,199 @@
+# Suricata誤検知アラートの調査とチューニング手順
+
+CSV で棚卸しした {{ csv_rows | length }} 件の多発アラート（sid）について、
+ペイロードとフロー情報から誤検知(fp)か実害(tp)かを判定し、判定結果に応じた
+適切なチューニング手法を選ぶ調査手順です。
+
+## 目的
+
+多発しているアラートを機械的に抑制するのではなく、eve.json のペイロードと
+フロー情報、通信当事者の正当性を根拠に fp/tp/unknown を判定し、判定結果に
+見合った最小限のチューニング（suppress / threshold / disable.conf / ルール
+rev 改修）を選択できるようになることを目指します。
+
+## 用語解説
+
+- **eve.json**: Suricata が alert / flow 等のイベントを JSON Lines 形式で
+  出力するログファイル（`outputs:` の `eve-log` で有効化）
+- **payload_printable**: アラートに紐づくペイロードを印字可能文字列として
+  含めるフィールド。`suricata.yaml` の `outputs.eve-log.types.alert` 配下で
+  `payload: yes` を有効化しないと出力されない
+- **flow**: 同一 5-tuple（送信元/宛先 IP・ポート、プロトコル）の通信をまとめた
+  eve.json のイベント種別。`app_proto`・`bytes_toserver`・`bytes_toclient` 等
+  から通信の実態（応答があったか、データ量は妥当か）を確認できる
+- **fp (false positive) / tp (true positive)**: fp はシグネチャの意図に反して
+  正当な通信を誤って検知した状態、tp は意図通り悪性の通信を検知できた状態
+- **suppress**: 指定した sid（かつ条件）のアラート出力を非表示にする
+  threshold.config のエントリ。ルール自体は有効なまま検知は継続する
+- **threshold (type limit)**: 指定した sid のアラート出力を、一定時間あたりの
+  件数に間引く threshold.config のエントリ
+- **disable.conf**: 指定した sid のルールをロード時点で完全に無効化する設定
+  ファイル（`suricata-update` 実行時に反映）。ルールごと検知機能を失う
+- **rev / content / classtype**: `.rules` ファイル内でルールの改訂番号
+  （`rev:`）、パターンマッチ条件（`content:`）、攻撃分類（`classtype:`）を
+  表すキーワード
+
+## シナリオ設定
+
+| sid | signature | src_ip | dest_ip | count | 判定 | チューニング対処 | reference |
+|-----|-----------|--------|---------|-------|------|-------------------|-----------|
+{% for r in csv_rows %}| {{ r["sid"] }} | {{ r["signature"] }} | {{ r["src_ip"] }} | {{ r["dest_ip"] }} | {{ r["count"] }} | {{ r["verdict"] }} | {{ r["tuning_action"] }} | {{ r["reference"] }} |
+{% endfor %}
+
+## 1. 対象sidのアラートをeve.jsonから抽出する
+
+事前に `suricata.yaml` の `outputs.eve-log.types` 内、alert セクションで
+ペイロードを出力するよう有効化しておきます（未反映の場合は反映後に
+`suricatasc -c "reload-rules"` で再読込してください）。
+
+```yaml
+outputs:
+  - eve-log:
+      types:
+        - alert:
+            payload: yes
+            payload-printable: yes
+            metadata: yes
+```
+
+対象 sid ごとに、直近アラートを抽出して payload_printable と flow_id を
+確認します。
+
+```bash
+{% for r in csv_rows %}jq -c 'select(.event_type=="alert" and .alert.signature_id=={{ r["sid"] }}) | {timestamp, src_ip, dest_ip, flow_id, payload_printable: .payload_printable}' \
+  /var/log/suricata/eve.json > /tmp/sid_{{ r["sid"] }}_alerts.jsonl
+{% endfor %}```
+
+## 2. ペイロードと通信当事者の正当性を確認する
+
+抽出した payload_printable を目視し、シグネチャの意図（`msg`）と実際の内容が
+一致しているかを確認します。あわせて src_ip / dest_ip が、社内資産台帳や
+既知の正当なサービス（社内プロキシ、監視ノード、パブリック DNS 等）に
+該当するかを突き合わせます。
+
+```bash
+{% for r in csv_rows %}echo "=== sid {{ r["sid"] }} ({{ r["signature"] }}) ==="
+jq -r '.payload_printable' /tmp/sid_{{ r["sid"] }}_alerts.jsonl | head -n 5
+{% endfor %}```
+
+## 3. flowイベントで通信の実態を確認する
+
+同じ flow_id で flow イベントを引き当て、`app_proto` や送受信バイト数、
+TCP の場合は `tcp.state` から、想定どおりの応答が返っているか（＝双方向で
+成立した正当な通信か、一方的なスキャンか）を確認します。
+
+```bash
+{% for r in csv_rows %}jq -c 'select(.event_type=="flow" and .src_ip=="{{ r["src_ip"] }}" and .dest_ip=="{{ r["dest_ip"] }}") | {app_proto, bytes_toserver, bytes_toclient, tcp}' \
+  /var/log/suricata/eve.json | tail -n 5
+{% endfor %}```
+
+ET open ルールについては、シグネチャに付与されている reference URL から
+ルールの意図（何を検知しようとしているか）を必ず確認してください。
+
+```bash
+{% for r in csv_rows %}echo "sid {{ r["sid"] }}: {{ r["reference"] }}"
+{% endfor %}```
+
+## 4. 判定結果からチューニング対処を選ぶ
+
+ペイロード・flow・当事者の正当性を総合して fp/tp/unknown を判定したら、
+以下の判断表に沿って対処を選びます。安易に sid 全体を無効化すると、
+同一シグネチャによる同種攻撃全体の検知を失うため、条件を絞れる suppress
+（track by_src）を最優先の選択肢としてください。
+
+| 判定 | 状況 | 推奨する対処 | 理由 |
+|------|------|--------------|------|
+| fp（特定送信元のみ誤検知） | 社内資産・正当なサービスからの通信をシグネチャが誤って拾っている | suppress（track by_src） | sid は有効なまま、当該送信元のみ検知対象から除外できる。他の送信元からの同種攻撃は引き続き検知できる |
+| fp（正当な通信だが頻度が高いだけ） | 誤検知ではあるが完全に消すより件数の把握は残したい | threshold（type limit） | アラート自体は残しつつ、単位時間あたりの件数を間引ける |
+| fp（シグネチャの検知条件が広すぎ、環境内で恒常的に無害と判断できる） | track by_src での限定が現実的でない（送信元が多数・不特定） | disable.conf | 恒久的に無効化する強い対処のため、他の判定を優先的に検討したうえでの最終手段とする |
+| tp（実害または実際の攻撃） | シグネチャの意図通り悪性の通信を検知できている | 対処なし（none） | チューニング対象ではない。インシデント対応フローに引き継ぐ |
+| unknown（判定保留） | ペイロード・flow だけでは fp/tp を断定できない | ルール rev 改修（content 追加で絞る） | sid を止めずに、`content` 追加等でシグネチャの検知条件を絞り込み、追加のログで再判定する |
+
+## 5. 判定に応じたチューニングを適用する
+
+各 sid の tuning_action に沿って、以下のとおり適用します。
+
+```
+{% for r in csv_rows %}{% if r["tuning_action"] == "suppress" %}# sid {{ r["sid"] }}: 送信元限定で抑制（/etc/suricata/threshold.config）
+suppress gen_id 1, sig_id {{ r["sid"] }}, track by_src, ip {{ r["src_ip"] }}
+{% elif r["tuning_action"] == "threshold" %}# sid {{ r["sid"] }}: 頻度を間引く（/etc/suricata/threshold.config）
+threshold gen_id 1, sig_id {{ r["sid"] }}, type limit, track by_src, count 1, seconds 3600
+{% elif r["tuning_action"] == "disable.conf" %}# sid {{ r["sid"] }}: 恒久的に無効化（/etc/suricata/disable.conf）
+{{ r["sid"] }} # {{ r["signature"] }} - 環境内で恒常的に無害と判定済み
+{% elif r["tuning_action"] == "rule-rev" %}# sid {{ r["sid"] }}: content追加でrev改修し検知条件を絞る（ローカルルールファイル）
+alert http any any -> any any (msg:"{{ r["signature"] }} - narrowed"; content:"User-Agent|3a| "; content:"suspicious-marker"; distance:0; classtype:policy-violation; sid:{{ r["sid"] }}; rev:2;)
+{% else %}# sid {{ r["sid"] }}: tp と判定、チューニング対象外（インシデント対応へ引き継ぎ）
+{% endif %}{% endfor %}```
+
+`suppress` / `threshold` を追記した場合は、必ず構文検証してから再読込します。
+
+```bash
+suricata -T -c /etc/suricata/suricata.yaml -v
+suricatasc -c "reload-rules"
+```
+
+`disable.conf` を編集した場合や、ルールファイルを `rev` 改修した場合は
+`suricata-update` を再実行してルールセットを再生成してから反映します。
+
+```bash
+suricata-update
+suricata -T -c /etc/suricata/suricata.yaml -v
+suricatasc -c "reload-rules"
+```
+
+## 動作確認
+
+1. 適用前のベースラインとして、対象 sid のアラート件数を集計しておきます。
+
+   ```bash
+   jq -r 'select(.event_type=="alert") | .alert.signature_id' \
+     /var/log/suricata/eve.json | sort | uniq -c | sort -rn > /tmp/sid_before.txt
+   ```
+
+2. `suricatasc -c "ruleset-reload-time"` で再読込時刻が更新されていることを
+   確認します。
+
+   ```bash
+   suricatasc -c "ruleset-reload-time"
+   ```
+
+3. 一定時間経過後、同じ集計を再取得して比較します。
+
+   ```bash
+   jq -r 'select(.event_type=="alert") | .alert.signature_id' \
+     /var/log/suricata/eve.json | sort | uniq -c | sort -rn > /tmp/sid_after.txt
+   diff /tmp/sid_before.txt /tmp/sid_after.txt
+   ```
+
+4. suppress / threshold を適用した sid は、対象送信元からのアラートが
+   条件どおり消える・間引かれることを確認します。rule-rev で改修した sid は、
+   新しい rev のルールが `suricata -T` の出力や `eve.json` 内の
+   `alert.rev` フィールドに反映されていることを確認し、絞り込んだ条件で
+   引き続き想定ケースを検知できるかを一定期間監視してから、旧ルールの扱いを
+   最終決定します。tp と判定した sid は、抑制せずインシデント対応フローに
+   引き継いだことを確認します。
+
+## 注意事項
+
+- 安易に sid 全体を disable.conf で無効化すると、その sid が担っていた
+  同種攻撃の検知能力を全体で失います。特定の送信元だけが誤検知の原因で
+  あれば、必ず track by_src の suppress を優先し、disable.conf は
+  「送信元を絞り込めない・恒常的に無害と確認できた」場合の最終手段として
+  ください。
+- suppress は検知そのものを非表示にする設定です。恒久的に放置すると条件が
+  変化しても気づけなくなるため、定期的に条件（sid/ip）の妥当性を棚卸しして
+  ください。
+- ET open ルールは reference の URL からシグネチャの意図を確認してから
+  判定してください。意図を確認せずに tp/fp を推測すると、誤って実害のある
+  シグネチャを抑制するおそれがあります。
+- rule-rev 改修は、新しい rev のルールが意図した通信のみを検知できることを
+  一定期間の並行監視で確認したうえで、旧 rev のルールを無効化してください。
+  検証なしに旧ルールを即時無効化すると、絞り込みが不十分だった場合に検知が
+  失われたまま気づけません。
+- disable.conf・ルールファイルを変更した場合は `suricata-update` の再実行が
+  必要です。threshold.config のみの変更であれば `suricata -T` による構文
+  検証後の `suricatasc -c "reload-rules"` で反映できます。適用対象を誤らない
+  よう、変更したファイルに応じた反映手順を使い分けてください。
+- 本手順は誤検知の疑いがあるアラートを対象とした調査・チューニングです。
+  tp と判定した sid はチューニング対象にせず、必ずインシデント対応フローへ
+  引き継いでください。

@@ -28,7 +28,7 @@ recording rulesの`record`/`expr`定義、remote_writeによるPrometheusへの�
 
 | record | expr |
 | --- | --- |
-{% for rule in recording_rules %}| `{{ rule.record }}` | `{{ rule.expr }}` |
+{% for rule in recording_rules %}| `{{ rule.record }}` | `{{ rule.expr | safe }}` |
 {% endfor %}
 
 ## 手順
@@ -44,7 +44,7 @@ groups:
     rules:
 {% for rule in recording_rules %}      - record: {{ rule.record }}
         expr: |
-          {{ rule.expr }}
+          {{ rule.expr | safe }}
 {% endfor %}```
 
 このファイルをrulerのrule storage(例: `/etc/loki/rules/tenant-default/log-derived-metrics.yaml`)に配置します。

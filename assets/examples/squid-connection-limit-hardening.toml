@@ -1,0 +1,5 @@
+[squid]
+max_connections_per_client = 20
+request_buffer_kb = 64
+target_scope = "0.0.0.0/0"
+apply_change_id = "CHG-2026-0417"

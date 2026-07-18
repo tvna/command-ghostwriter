@@ -99,7 +99,7 @@ sudo grep "{{ whitelist.ignoreip_cidr }}" {{ jail.logpath }} | tail -n 20
 ```bash
 sudo tee -a /etc/fail2ban/jail.local <<'EOF'
 [{{ jail.name }}]
-failregex = {{ strict_failregex.after }}
+failregex = ^%(__prefix_line)sFailed password for (?!invalid user )\S+ from <HOST> port \d+ ssh2$
 ignoreip = 127.0.0.1/8 {{ whitelist.ignoreip_cidr }}
 EOF
 sudo fail2ban-client reload {{ jail.name }}

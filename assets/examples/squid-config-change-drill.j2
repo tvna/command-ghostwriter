@@ -88,8 +88,11 @@ curl -x http://127.0.0.1:3128 -o /dev/null -s -w "{{ u }} => %{http_code}\n" "{{
 
 手順4で意図しない挙動（許可すべき通信が拒否される、拒否すべき通信が許可されるなど）が確認された場合、以下でバックアップに戻します。
 
+切り戻し方針: {{ rollback_step }}
+
 ```
-{{ rollback_step }}
+sudo cp {{ backup_path }} /etc/squid/squid.conf
+sudo squid -k reconfigure
 ```
 
 切り戻し後、手順4の疎通確認を再実施し、変更前の挙動に戻っていることを確認します。
