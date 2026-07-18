@@ -1,0 +1,113 @@
+# Wazuhプラットフォーム日次ヘルスチェック
+
+Wazuhマネージャ・インデクサの主要指標（エージェント接続数、analysisd/remotedのキュー溢れ、インデクサのクラスタ状態、EPS、ディスク使用率）を日次で取得し、CSVで定義した閾値と突き合わせて記録します。
+
+## 目的
+
+Wazuhプラットフォームの日次点検を通じて、エージェント接続の異常・イベント処理の遅延（キュー溢れ）・インデクサの劣化・ディスク枯渇を早期に検知し、証跡として記録できるようになることを目指します。
+
+## 用語解説
+
+- **agent_control**: Wazuhマネージャ上でエージェントの接続状態（Active/Disconnected/Never connected）を確認するCLIツール
+- **analysisd / remoted**: analysisdはイベントの解析・ルール照合、remotedはエージェントからのイベント受信を担当するWazuhマネージャの構成プロセス
+- **キュー溢れ（events_dropped）**: analysisd/remotedの内部キューが飽和し、処理しきれなかったイベントを破棄すること。EPS（1秒あたりのイベント処理数）がマネージャの処理能力上限を超えると発生し、破棄された分のログ・アラートは欠落するため検知の抜け穴になる
+- **EPS（Events Per Second）**: マネージャが1秒間に処理するイベント数。EPSがマネージャのサイジング上限に近づくほどキュー溢れのリスクが高まる
+- **_cluster/health**: Wazuhインデクサ（OpenSearchベース）のクラスタ状態をgreen/yellow/redで返すAPI。yellow/redはシャード（インデックスの分割単位）の未割り当てを示す
+- **証跡保管**: 日次点検の取得値・判定結果をCSV等の台帳に追記し、後から改ざんなく参照できる状態で保存すること
+
+## シナリオ設定
+
+| metric | command | threshold | today_value(前回) | status(前回) |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["metric"] }} | {{ r["command"] }} | {{ r["threshold"] }} | {{ r["today_value"] }} | {{ r["status"] }} |
+{% endfor %}
+
+## 1. エージェント接続数を確認する
+
+```bash
+sudo /var/ossec/bin/agent_control -lc
+sudo /var/ossec/bin/agent_control -l | grep -c Active
+```
+
+`-lc` は登録済みエージェントの状態別件数（Active/Disconnected/Never connected）を集計表示します。`agent_connection_rate` は「Active件数 / 登録済み総数」で算出し、閾値（`95%以上`）を下回る場合はDisconnected/Never connectedの内訳を確認します。
+
+## 2. analysisd/remotedのイベント処理とキュー溢れを確認する
+
+```bash
+sudo cat /var/ossec/var/run/wazuh-analysisd.state
+sudo cat /var/ossec/var/run/wazuh-remoted.state
+sudo grep -E "events_dropped|queue_size|total_queue_size" /var/ossec/var/run/wazuh-analysisd.state /var/ossec/var/run/wazuh-remoted.state
+```
+
+`wazuh-analysisd.state` の `events_dropped` は解析キュー溢れで破棄されたイベント数、`wazuh-remoted.state` の `queue_size` / `total_queue_size` は受信キューの使用量と上限です。`events_dropped` が0より大きい場合はイベント欠落が発生しているため、閾値（`0`）を割った時点で即座に対処します。
+
+## 3. インデクサのクラスタ状態を確認する
+
+```bash
+curl -s -u admin:$WAZUH_INDEXER_PASSWORD -k https://localhost:9200/_cluster/health?pretty
+curl -s -u admin:$WAZUH_INDEXER_PASSWORD -k https://localhost:9200/_cat/shards?v
+```
+
+1つ目のコマンドで `status` フィールド（green/yellow/red）と `unassigned_shards` の件数を確認します。`status` が `green` 以外の場合は2つ目のコマンドで未割り当て・再配置中のシャードを特定します。
+
+## 4. EPSとディスク使用率を確認する
+
+```bash
+sudo grep events_per_sec /var/ossec/var/run/wazuh-analysisd.state
+df -h /var/ossec
+```
+
+`events_per_sec` が閾値（`500以下`）を超え続ける場合、キュー溢れの予兆であるため Step 2 の `events_dropped` と併せて監視します。`df -h /var/ossec` の使用率が閾値（`80%未満`）を超えるとインデクサの書き込みが停止するリスクが高まるため優先的に確認します。
+
+## 5. 閾値判定を行い日次記録として保存する
+
+取得した値を `today_value` / `status` としてCSV台帳に追記し、証跡として保管します。
+
+```bash
+sudo tee -a /var/log/wazuh-health-daily.csv <<'EOF'
+$(date +%Y-%m-%d),agent_connection_rate,<取得値>,<ok または warn>
+$(date +%Y-%m-%d),analysisd_dropped_events,<取得値>,<ok または warn>
+$(date +%Y-%m-%d),remoted_queue_usage,<取得値>,<ok または warn>
+$(date +%Y-%m-%d),indexer_cluster_health,<取得値>,<ok または warn>
+$(date +%Y-%m-%d),events_per_second,<取得値>,<ok または warn>
+$(date +%Y-%m-%d),disk_usage_var_ossec,<取得値>,<ok または warn>
+EOF
+```
+
+`<取得値>` と `<ok または warn>` は Step 1〜4 で実際に取得した値・判定結果に置き換えてから実行します。台帳ファイルは追記専用で保管し、過去分を上書きしないようにします。
+
+## 6. キュー溢れ検出時の優先対応
+
+Step 2 で `events_dropped` が0より大きい、または `queue_size` が閾値を超えている場合に実施します。イベント欠落は検知の抜け穴に直結するため他の指標より優先して対処します。
+
+```bash
+sudo systemctl status wazuh-manager
+sudo grep -c ERROR /var/ossec/logs/ossec.log
+```
+
+原因がEPS超過によるキュー飽和であれば、送信元エージェント数やルール数の見直し、マネージャのスケールアップを検討します。応急対応としてキューサイズの拡張設定（`ossec.conf` の `<queue_size>`）を変更する場合は、変更前に必ず現在の設定値を控え、反映後に Step 2 のコマンドで `queue_size` の変化と `events_dropped` の増加が止まったことを確認してから完了とします。
+
+## 7. インデクサyellow/red時のシャード原因を確認する
+
+Step 3 で `status` が `yellow` または `red` の場合に実施します。
+
+```bash
+curl -s -u admin:$WAZUH_INDEXER_PASSWORD -k "https://localhost:9200/_cluster/allocation/explain?pretty"
+```
+
+`_cluster/allocation/explain` は未割り当てシャードが発生している理由（ディスク容量不足、レプリカ数がノード数を超過、など）を返します。`yellow` はレプリカシャード未割り当て（データ自体は失われていない）、`red` はプライマリシャード未割り当て（該当インデックスへの読み書きが不能）を意味するため、`red` を検知した場合は最優先で対処します。
+
+## 動作確認
+
+- Step 1〜4 の各コマンドを実行し、`agent_connection_rate` / `analysisd_dropped_events` / `remoted_queue_usage` / `indexer_cluster_health` / `events_per_second` / `disk_usage_var_ossec` の当日値をすべて取得できていること
+- 取得した当日値をシナリオ設定の `threshold` 列と突き合わせ、各指標の判定（ok/warn）を確定できていること
+- Step 5 で当日値・判定結果を台帳ファイルに追記できていること（`tail -6 /var/log/wazuh-health-daily.csv` で当日分が確認できる）
+- `events_dropped` が0より大きい、または `_cluster/health` が `green` でない場合、Step 6/7 の追加確認を実施していること
+
+## 注意事項
+
+- キュー溢れ（`events_dropped` > 0）はイベント欠落を意味し、他の指標より優先して対処する。放置するとその間のログ・アラートが永久に失われる。
+- インデクサの `yellow` はレプリカ未割り当て、`red` はプライマリ未割り当てを意味し、`red` は該当インデックスへの読み書きが止まっている状態のため最優先で対処する。原因はシャード数過多・ディスク容量不足・ノード離脱が多い。
+- `disk_usage_var_ossec` が閾値を超えてディスクが枯渇すると、インデクサはディスク使用率の高さを理由に自動でインデックスへの書き込みを停止する（read-only化）。書き込み停止後はディスク容量を確保したうえでインデックスのread-onlyブロックを解除する追加作業が必要になるため、閾値超過時は即座にディスク拡張・不要データ削除を行う。
+- Step 6 でキューサイズ設定を変更する場合は、変更前の設定値を控えたうえで反映し、Step 2 のコマンドで `events_dropped` の増加が収まったことを確認してから変更完了とする。設定を戻す必要が生じた場合に備え、変更前の値を必ず記録しておく。
+- 日次の取得値・判定結果は `/var/log/wazuh-health-daily.csv` に追記専用で保管し、過去分を上書きしない。証跡として後から参照できる状態を維持する。
