@@ -1,0 +1,16 @@
+gpu_cluster_name: "prod-a100-cluster"
+gpu_node_hosts:
+  - "10.0.1.11"
+  - "10.0.1.12"
+  - "10.0.1.13"
+exporter_image: "nvcr.io/nvidia/k8s/dcgm-exporter:3.3.9-3.6.1-ubuntu22.04"
+exporter_port: 9400
+prometheus_config_path: "/etc/prometheus/prometheus.yml"
+prometheus_url: "http://10.0.1.5:9090"
+scrape_interval: "15s"
+grafana_url: "http://10.0.1.5:3000"
+grafana_dashboard_id: 12239
+alert_rules_path: "/etc/prometheus/rules/dcgm-gpu-alerts.yml"
+gpu_temp_warn_celsius: 85
+gpu_temp_crit_celsius: 92
+gpu_util_alert_threshold_pct: 95

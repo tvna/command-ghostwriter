@@ -1,0 +1,91 @@
+# 機械学習実験の再現性確保と環境固定
+
+乱数シードの固定・依存パッケージの凍結・コードとデータの版数記録を行い、学習結果を後から再現可能な状態にします。
+
+## 目的
+
+「同じコード・同じデータ・同じ環境であれば同じ結果が得られる」状態を作り、実験結果の信頼性を担保できるようになることを目指します。
+
+## 用語解説
+
+- **乱数シード固定**: `PYTHONHASHSEED` や各ライブラリの `seed` 引数を固定値にそろえ、乱数に依存する処理(初期化・シャッフル・ドロップアウト等)の出力を再現可能にすること
+- **依存パッケージの凍結**: `pip freeze` 等でインストール済みパッケージとその厳密なバージョンを記録し、環境差による結果の揺れを防ぐこと
+- **コードの版数記録**: 学習に使用したコードの状態を `git rev-parse HEAD` 等でコミットハッシュとして記録すること
+- **データの版数記録**: 学習データファイルのチェックサムを記録し、データ内容が変わっていないことを後から検証できるようにすること
+- **結果一致の検証**: 再実行して得られた指標を、記録済みの基準値と突き合わせ、許容誤差内で一致するかを確認すること
+
+## シナリオ設定
+
+プロジェクト `{{ project_dir }}` の実験 `{{ experiment_run_id }}` について、Python {{ python_version }}(conda環境 `{{ conda_env_name }}`)上でシード値 `{{ seed_value }}` を固定し、依存パッケージと学習データ `{{ dataset_path }}` の版数を記録したうえで学習を再実行し、結果が一致することを確認します。
+
+## 手順
+
+### 1. 乱数シードを固定する
+
+```bash
+export PYTHONHASHSEED={{ seed_value }}
+cd {{ project_dir }}
+sed -i "s/^seed:.*/seed: {{ seed_value }}/" {{ config_file }}
+grep "^seed:" {{ config_file }}
+```
+
+`{{ config_file }}` 内の `seed` 項目をシード値 `{{ seed_value }}` に書き換え、意図した値になっているかを確認します。
+
+### 2. 依存パッケージを凍結する
+
+```bash
+cd {{ project_dir }}
+source activate {{ conda_env_name }}
+python --version
+pip freeze > {{ requirements_lock_file }}
+sha256sum {{ requirements_lock_file }}
+```
+
+インストール済みパッケージとバージョンを `{{ requirements_lock_file }}` に固定し、チェックサムを記録します。Python本体のバージョンが `{{ python_version }}` と一致しているかも合わせて確認します。
+
+### 3. コードとデータの版数を記録する
+
+```bash
+cd {{ project_dir }}
+mkdir -p {{ log_dir }}
+git rev-parse HEAD > {{ log_dir }}/code_commit.txt
+git status --short
+sha256sum {{ dataset_path }} > {{ log_dir }}/data_checksum.txt
+```
+
+`git status --short` の出力が空であること(未コミットの変更がないこと)を確認したうえで、コードのコミットハッシュとデータのチェックサムを `{{ log_dir }}` に記録します。
+
+### 4. 学習を再実行する
+
+```bash
+cd {{ project_dir }}
+export PYTHONHASHSEED={{ seed_value }}
+python {{ training_script }} --seed {{ seed_value }} --config {{ config_file }} --output {{ rerun_metrics_file }}
+```
+
+シード値 `{{ seed_value }}` を明示的に渡し、手順1で固定した設定ファイル `{{ config_file }}` を使って `{{ training_script }}` を再実行し、指標を `{{ rerun_metrics_file }}` に出力します。
+
+### 5. 結果一致を検証する
+
+```bash
+cd {{ project_dir }}
+python -m json.tool {{ baseline_metrics_file }}
+python -m json.tool {{ rerun_metrics_file }}
+diff <(python -m json.tool {{ baseline_metrics_file }}) <(python -m json.tool {{ rerun_metrics_file }})
+```
+
+基準値 `{{ baseline_metrics_file }}` と再実行結果 `{{ rerun_metrics_file }}` を整形して比較します。判定方針は「{{ metric_tolerance_note }}」とし、この方針を外れる差分が出た場合は手順1から見直します。
+
+## 動作確認
+
+- `{{ config_file }}` の `seed` 項目が `{{ seed_value }}` になっていること
+- `{{ requirements_lock_file }}` が生成され、`{{ conda_env_name }}` 環境のPythonバージョンが `{{ python_version }}` と一致していること
+- `{{ log_dir }}/code_commit.txt` にコミットハッシュが、`{{ log_dir }}/data_checksum.txt` に `{{ dataset_path }}` のチェックサムが記録されていること
+- `{{ rerun_metrics_file }}` が生成され、`{{ baseline_metrics_file }}` との差分が判定方針「{{ metric_tolerance_note }}」の範囲内であること
+
+## 注意事項
+
+- GPU上での学習はライブラリやCUDAカーネルの実装によりシード固定だけでは完全な再現に至らない場合がある。差分が判定方針を超える場合は、決定論的アルゴリズムの使用有無など環境固有の要因を切り分ける。
+- `{{ requirements_lock_file }}` はOSやCPUアーキテクチャが異なると同一バージョン指定でも解決結果が変わることがあるため、可能な限り記録時と同一の実行環境で再実行する。
+- `git status --short` に未コミットの変更が残っている状態でコミットハッシュだけを記録すると、実際に使われたコードを正確に特定できなくなるため、記録前に必ず出力が空であることを確認する。
+- `{{ dataset_path }}` のチェックサムが記録時と異なる場合、データが更新・破損している可能性があるため、学習を再実行する前に原因を確認する。

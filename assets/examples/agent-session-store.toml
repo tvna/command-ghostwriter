@@ -1,0 +1,8 @@
+key_prefix = "agent:session"
+sample_agent_id = "support-bot-01"
+sample_session_id = "sess-20260718-001"
+sample_last_turn = "ご注文番号を確認しました"
+session_ttl_seconds = 3600
+scan_count = 100
+persistence_note = "appendonly yes (AOF, appendfsync everysec)"
+memory_limit_note = "maxmemory 2gbの80%(1.6gb)を超えないこと"

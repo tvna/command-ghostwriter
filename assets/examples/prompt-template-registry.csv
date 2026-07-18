@@ -1,0 +1,5 @@
+template_id,category,filename,description,repo_url,local_repo_dir,release_tag,previous_tag
+summarize-ticket,support,summarize-ticket.md,サポートチケットの内容を要約するプロンプト,git@github.com:example-org/prompt-templates.git,~/prompt-templates,templates-2026.07.1,templates-2026.06.1
+code-review-comment,engineering,code-review-comment.md,コードレビューコメントの下書きを生成するプロンプト,git@github.com:example-org/prompt-templates.git,~/prompt-templates,templates-2026.07.1,templates-2026.06.1
+incident-report,sre,incident-report.md,障害報告書のドラフトを生成するプロンプト,git@github.com:example-org/prompt-templates.git,~/prompt-templates,templates-2026.07.1,templates-2026.06.1
+meeting-minutes,general,meeting-minutes.md,会議議事録を要約するプロンプト,git@github.com:example-org/prompt-templates.git,~/prompt-templates,templates-2026.07.1,templates-2026.06.1

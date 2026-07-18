@@ -1,0 +1,205 @@
+# PresidioによるPIIの検出とマスキング — {{ work_dir }}
+
+`presidio-analyzer` と `presidio-anonymizer` を使い、入出力テキスト中の個人情報(PII)を検出し、社内固有IDのカスタム認識器を加えたうえで匿名化ルールを検証します。誤検知(false positive)・見逃し(false negative)を評価し、信頼度閾値を調整するところまでを対象とします。
+
+## 目的
+
+`{{ spacy_model }}` を用いた解析エンジンで検出対象エンティティと信頼度閾値を明示的に設定し、サンプル入出力に対する検出結果を評価したうえで、閾値を調整できるようになることを目指します。
+
+## 用語解説
+
+- **presidio-analyzer**: テキスト中のPII候補を検出し、エンティティ種別・位置・信頼度スコアを返すMicrosoft製ライブラリ
+- **presidio-anonymizer**: `presidio-analyzer` の検出結果を受け取り、置換・マスク・ハッシュ化などの演算子で匿名化を行うライブラリ
+- **NlpEngine**: presidio-analyzerが内部で使うNLPエンジンの抽象。`NlpEngineProvider` に言語コードとspaCyモデル名を渡して構築する
+- **score_threshold**: 検出結果を採用する最低信頼度スコア。`{{ score_threshold }}` 未満の候補は除外される
+- **PatternRecognizer**: 正規表現(`Pattern`)や単語リストでエンティティを検出する認識器クラス。社内ID等、組み込み認識器がカバーしない対象を追加する際に使う
+- **operator**: `presidio-anonymizer` が匿名化に使う処理方式の指定。`replace`(置換)・`mask`(マスク)・`hash`(ハッシュ化)などがある
+
+## シナリオ設定
+
+作業ディレクトリ `{{ work_dir }}` に仮想環境 `{{ venv_dir }}` を構築し、spaCyモデル `{{ spacy_model }}`(言語コード: `{{ spacy_lang_code }}`)で解析エンジンを構成します。検出対象エンティティは次の通りです。
+
+{% for e in entities %}- `{{ e }}`
+{% endfor %}
+信頼度閾値は `{{ score_threshold }}` とし、これに加えて社内認識器 `{{ custom_recognizer.entity_name }}`(正規表現 `{{ custom_recognizer.pattern }}`)を登録します。サンプル入力 `{{ sample.input_file }}` に対して検出・匿名化(演算子: `{{ anonymize_operator }}`)を実行し、結果を `{{ sample.output_file }}` に保存したうえで、検出ログ `{{ evaluation.log_path }}` を用いて誤検知・見逃しを評価します。
+
+## 手順
+
+### 1. presidio-analyzer/anonymizerとspaCyモデルを導入する
+
+```bash
+mkdir -p {{ work_dir }}
+cd {{ work_dir }}
+python3 -m venv {{ venv_dir }}
+source {{ venv_dir }}/bin/activate
+pip install presidio-analyzer presidio-anonymizer spacy
+python3 -m spacy download {{ spacy_model }}
+```
+
+### 2. 検出対象エンティティと信頼度閾値を設定する
+
+```bash
+cd {{ work_dir }}
+source {{ venv_dir }}/bin/activate
+cat > analyzer_config.py <<'EOF'
+from presidio_analyzer import AnalyzerEngine
+from presidio_analyzer.nlp_engine import NlpEngineProvider
+
+NLP_CONFIGURATION = {
+    "nlp_engine_name": "spacy",
+    "models": [{"lang_code": "{{ spacy_lang_code }}", "model_name": "{{ spacy_model }}"}],
+}
+
+TARGET_ENTITIES = [
+{% for e in entities %}    "{{ e }}",
+{% endfor %}]
+
+SCORE_THRESHOLD = {{ score_threshold }}
+
+
+def build_analyzer():
+    provider = NlpEngineProvider(nlp_configuration=NLP_CONFIGURATION)
+    nlp_engine = provider.create_engine()
+    return AnalyzerEngine(nlp_engine=nlp_engine, supported_languages=["{{ spacy_lang_code }}"])
+EOF
+python3 -c "
+from analyzer_config import build_analyzer, TARGET_ENTITIES, SCORE_THRESHOLD
+
+analyzer = build_analyzer()
+print('loaded recognizers:', len(analyzer.get_recognizers(language='{{ spacy_lang_code }}')))
+print('target entities:', TARGET_ENTITIES)
+print('score threshold:', SCORE_THRESHOLD)
+"
+```
+
+### 3. 社内ID等のカスタム認識器を追加する
+
+```bash
+cd {{ work_dir }}
+source {{ venv_dir }}/bin/activate
+cat > custom_recognizer.py <<'EOF'
+from presidio_analyzer import Pattern, PatternRecognizer
+
+{{ custom_recognizer.entity_name }}_RECOGNIZER = PatternRecognizer(
+    supported_entity="{{ custom_recognizer.entity_name }}",
+    supported_language="{{ spacy_lang_code }}",
+    patterns=[
+        Pattern(
+            name="{{ custom_recognizer.entity_name }}_pattern",
+            regex=r"{{ custom_recognizer.pattern }}",
+            score={{ custom_recognizer.score }},
+        )
+    ],
+    context=[
+{% for w in custom_recognizer.context_words %}        "{{ w }}",
+{% endfor %}    ],
+)
+EOF
+python3 -c "
+from analyzer_config import build_analyzer
+from custom_recognizer import {{ custom_recognizer.entity_name }}_RECOGNIZER
+
+analyzer = build_analyzer()
+analyzer.registry.add_recognizer({{ custom_recognizer.entity_name }}_RECOGNIZER)
+print('registered:', {{ custom_recognizer.entity_name }}_RECOGNIZER.supported_entity)
+"
+```
+
+### 4. サンプル入出力で検出と匿名化を実行する
+
+```bash
+mkdir -p {{ sample.dir }}
+cat > {{ sample.input_file }} <<'EOF'
+田中太郎です。連絡先は 090-1234-5678、メールは tanaka@example.co.jp です。
+社員番号は EMP-048213 です。
+EOF
+
+cd {{ work_dir }}
+source {{ venv_dir }}/bin/activate
+python3 -c "
+from presidio_anonymizer import AnonymizerEngine
+from presidio_anonymizer.entities import OperatorConfig
+from analyzer_config import build_analyzer, TARGET_ENTITIES, SCORE_THRESHOLD
+from custom_recognizer import {{ custom_recognizer.entity_name }}_RECOGNIZER
+
+analyzer = build_analyzer()
+analyzer.registry.add_recognizer({{ custom_recognizer.entity_name }}_RECOGNIZER)
+
+with open('{{ sample.input_file }}', encoding='utf-8') as f:
+    text = f.read()
+
+results = analyzer.analyze(
+    text=text,
+    language='{{ spacy_lang_code }}',
+    entities=TARGET_ENTITIES + ['{{ custom_recognizer.entity_name }}'],
+    score_threshold=SCORE_THRESHOLD,
+)
+for r in results:
+    print(r.entity_type, r.start, r.end, r.score)
+
+anonymizer = AnonymizerEngine()
+anonymized = anonymizer.anonymize(
+    text=text,
+    analyzer_results=results,
+    operators={'DEFAULT': OperatorConfig('{{ anonymize_operator }}', {'new_value': '<REDACTED>'})},
+)
+
+with open('{{ sample.output_file }}', 'w', encoding='utf-8') as f:
+    f.write(anonymized.text)
+
+print(anonymized.text)
+"
+cat {{ sample.output_file }}
+```
+
+### 5. 誤検知・見逃しを評価し閾値を調整する
+
+```bash
+mkdir -p {{ evaluation.dir }}
+cd {{ work_dir }}
+source {{ venv_dir }}/bin/activate
+python3 -c "
+import csv
+
+from analyzer_config import build_analyzer, TARGET_ENTITIES, SCORE_THRESHOLD
+from custom_recognizer import {{ custom_recognizer.entity_name }}_RECOGNIZER
+
+analyzer = build_analyzer()
+analyzer.registry.add_recognizer({{ custom_recognizer.entity_name }}_RECOGNIZER)
+
+with open('{{ sample.input_file }}', encoding='utf-8') as f:
+    text = f.read()
+
+results = analyzer.analyze(
+    text=text,
+    language='{{ spacy_lang_code }}',
+    entities=TARGET_ENTITIES + ['{{ custom_recognizer.entity_name }}'],
+    score_threshold=SCORE_THRESHOLD,
+)
+
+with open('{{ evaluation.log_path }}', 'w', newline='', encoding='utf-8') as f:
+    writer = csv.writer(f)
+    writer.writerow(['entity_type', 'start', 'end', 'score', 'matched_text'])
+    for r in results:
+        writer.writerow([r.entity_type, r.start, r.end, r.score, text[r.start:r.end]])
+
+print('detections:', len(results))
+"
+cat {{ evaluation.log_path }}
+```
+
+検出ログを目視で確認し、本来検出すべきPIIが漏れている(見逃し)場合や、PIIでない箇所を誤って検出している(誤検知)場合は、手順2の `SCORE_THRESHOLD` またはエンティティ一覧、手順3の正規表現・`context` を調整して手順4・5を再実行します。見逃し件数が `{{ evaluation.fn_threshold }}` 件を超える、または誤検知件数が `{{ evaluation.fp_threshold }}` 件を超える場合は閾値・認識器の見直しが必要と判断します。
+
+## 動作確認
+
+- `{{ sample.output_file }}` に `<REDACTED>` への置換結果が出力されており、電話番号・メールアドレス・氏名・社員番号(`{{ custom_recognizer.entity_name }}`)が元のテキストに残っていないこと
+- `{{ evaluation.log_path }}` に検出したエンティティごとの `entity_type` / `score` / `matched_text` が記録されていること
+- `{{ custom_recognizer.entity_name }}` の検出結果に、サンプル中の `EMP-048213` が含まれていること
+- 見逃し件数が `{{ evaluation.fn_threshold }}` 件以内、誤検知件数が `{{ evaluation.fp_threshold }}` 件以内に収まっていること
+
+## 注意事項
+
+- サンプル入力 `{{ sample.input_file }}` や検出ログ `{{ evaluation.log_path }}` には実際のPIIそのもの、または実PIIに酷似したテキストが含まれるため、共有・コミット対象から除外し、検証完了後は削除する。
+- `score_threshold` を下げると見逃しは減るが誤検知が増え、上げると逆になる。運用データの分布を見ながら段階的に調整する。
+- カスタム認識器の正規表現(`{{ custom_recognizer.pattern }}`)は社内ID体系の変更に追従できていないと検出漏れの原因になるため、体系変更時は本手順を再実行して見直す。
+- `{{ spacy_model }}` のライセンス・利用条件を確認したうえで使用する。ライセンス確認自体は本手順の対象外とする。

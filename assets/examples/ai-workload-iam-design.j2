@@ -1,0 +1,115 @@
+# AIワークロード向けIAM最小権限設計
+
+BedrockやSageMakerに絞ったIAMポリシーを作成し、ロールへのアタッチと`simulate-principal-policy`による許可・拒否検証、過剰権限がないことの確認・文書化までを行う手順です。AWS CLIで実施します。
+
+## 目的
+
+BedrockやSageMakerのワークロードごとに必要な操作だけを許可する最小権限のIAMロールを設計し、ポリシー作成からアタッチ、シミュレーションによる検証、過剰権限の有無の確認・文書化までを一連の運用として実施できるようになることを目指します。
+
+## 用語解説
+
+- **最小権限**: ワークロードの実行に必要な操作(Action)とリソース(Resource)だけを許可し、それ以外は明示的に許可しない設計方針
+- **信頼ポリシー(Trust Policy)**: どのプリンシパル(サービスやユーザー)がそのIAMロールを引き受け(AssumeRole)られるかを定義するポリシー
+- **アクセス許可ポリシー(Permissions Policy)**: ロールが引き受けられたあとに実行できる操作を定義するポリシー。本手順では管理ポリシーとして作成しアタッチする
+- **simulate-principal-policy**: 実際に操作を実行せずに、指定したロール(プリンシパル)があるアクションを許可されるか拒否されるかを評価するIAM CLIコマンド
+- **過剰権限**: 業務上必要な範囲を超えてアタッチされている権限。`list-entities-for-policy`や`get-policy`のアタッチ状況の確認により見つける
+
+## シナリオ設定
+
+以下の {{ csv_rows | length }} 件のAIワークロードについて、専用IAMロールと最小権限ポリシーを設計します。
+
+| workload_name | ai_service | role_name | allowed_action | denied_action | owner |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["workload_name"] }} | {{ r["ai_service"] }} | {{ r["role_name"] }} | {{ r["allowed_action"] }} | {{ r["denied_action"] }} | {{ r["owner"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 対象ワークロードと必要アクションを整理する
+
+```bash
+aws bedrock list-foundation-models --query 'modelSummaries[].modelId' --output table
+aws sagemaker list-domains --query 'Domains[].DomainId' --output table
+{% for r in csv_rows %}echo "workload={{ r["workload_name"] }} service={{ r["ai_service"] }} role={{ r["role_name"] }} action={{ r["allowed_action"] }} resource={{ r["resource_arn"] }} owner={{ r["owner"] }}"
+{% endfor %}```
+
+各ワークロードについて、利用するAIサービス(`ai_service`)、必要な操作(`allowed_action`)、対象リソース(`resource_arn`)を洗い出し、次のステップのポリシー作成に用います。
+
+### 2. 最小権限のIAMポリシーを作成する
+
+```bash
+{% for r in csv_rows %}cat > {{ r["policy_name"] }}.json << 'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "{{ r["workload_name"] }}Allow",
+      "Effect": "Allow",
+      "Action": "{{ r["allowed_action"] }}",
+      "Resource": "{{ r["resource_arn"] }}"
+    }
+  ]
+}
+EOF
+aws iam create-policy --policy-name {{ r["policy_name"] }} --policy-document file://{{ r["policy_name"] }}.json
+{% endfor %}```
+
+ポリシーのActionは`allowed_action`(例: `{{ csv_rows[0]["allowed_action"] }}`)の1操作のみとし、ワイルドカード(`*`)による広範な許可は行いません。
+
+### 3. ロールを作成しポリシーをアタッチする
+
+```bash
+{% for r in csv_rows %}cat > {{ r["role_name"] }}-trust.json << 'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "{% if r["ai_service"] == "bedrock" %}bedrock.amazonaws.com{% else %}sagemaker.amazonaws.com{% endif %}"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+EOF
+aws iam create-role --role-name {{ r["role_name"] }} --assume-role-policy-document file://{{ r["role_name"] }}-trust.json
+aws iam attach-role-policy --role-name {{ r["role_name"] }} --policy-arn arn:aws:iam::123456789012:policy/{{ r["policy_name"] }}
+{% endfor %}```
+
+信頼ポリシーのPrincipalは、そのワークロードが利用するAWSサービス(`{{ csv_rows[0]["ai_service"] }}.amazonaws.com`など)のみを指定し、他サービスやユーザーからのAssumeRoleを許可しません。
+
+### 4. simulate-principal-policyで許可と拒否を検証する
+
+```bash
+{% for r in csv_rows %}aws iam simulate-principal-policy \
+  --policy-source-arn "arn:aws:iam::123456789012:role/{{ r["role_name"] }}" \
+  --action-names "{{ r["allowed_action"] }}" "{{ r["denied_action"] }}" \
+  --output text
+{% endfor %}```
+
+`allowed_action`(例: `{{ csv_rows[0]["allowed_action"] }}`)の評価結果が`allowed`、`denied_action`(例: `{{ csv_rows[0]["denied_action"] }}`)の評価結果が`implicitDeny`または`explicitDeny`であることを確認します。
+
+### 5. 過剰権限がないことを確認し文書化する
+
+```bash
+{% for r in csv_rows %}aws iam list-attached-role-policies --role-name {{ r["role_name"] }} --query 'AttachedPolicies[].PolicyName'
+aws iam list-entities-for-policy --policy-arn arn:aws:iam::123456789012:policy/{{ r["policy_name"] }} --entity-filter Role
+aws iam get-policy --policy-arn arn:aws:iam::123456789012:policy/{{ r["policy_name"] }} --query 'Policy.AttachmentCount'
+echo "{{ r["workload_name"] }} ({{ r["role_name"] }}): allowed={{ r["allowed_action"] }} denied={{ r["denied_action"] }} owner={{ r["owner"] }}" >> ai-workload-iam-review.md
+{% endfor %}cat ai-workload-iam-review.md
+```
+
+`list-attached-role-policies`の結果が手順2で作成したポリシー1件のみであること、`list-entities-for-policy`のアタッチ先ロールが想定どおり1件のみであることを確認したうえで、`ai-workload-iam-review.md`に結果を記録します。
+
+## 動作確認
+
+- 全 {{ csv_rows | length }} 件のロールで`aws iam list-attached-role-policies`の結果が手順2で作成したポリシー1件のみであること
+- `simulate-principal-policy`(手順4)で、各ロールの`allowed_action`が`allowed`、`denied_action`が`implicitDeny`または`explicitDeny`と評価されること
+- `ai-workload-iam-review.md`に、全 {{ csv_rows | length }} 件のワークロードの検証結果が記録されていること
+
+## 注意事項
+
+- ポリシーのActionはワイルドカード(`*`)を避け、`allowed_action`列で定めた個別の操作のみを許可する。範囲を広げる変更は本手順の再実施を伴う。
+- 信頼ポリシーのPrincipalは対象AIサービスのサービスプリンシパルのみとし、人間ユーザーやCI/CDロールなど他のプリンシパルからのAssumeRoleを許可しない。
+- `simulate-principal-policy`はポリシーの評価結果を返すのみで、実際にAPIを呼び出すわけではない。本番相当の検証には、権限を絞った状態での実操作テストも別途行う。

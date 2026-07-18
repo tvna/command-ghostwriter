@@ -1,0 +1,135 @@
+# Feastによるフィーチャーストアの構築運用 — {{ repo.project_name }}
+
+Feastを使い、特徴量リポジトリの初期化からエンティティ・FeatureViewの定義、`feast apply` によるレジストリ登録、`feast materialize` によるオンラインストアへの供給、オンラインストアからの特徴量取得確認までを一気通貫で行います。
+
+## 目的
+
+特徴量の定義(エンティティ・FeatureView・Feature Service)をコードとして管理し、オフラインストアからオンラインストアへ特徴量を供給したうえで、推論時に低レイテンシで取得できる状態を構築・確認できるようになることを目指します。
+
+## 用語解説
+
+- **フィーチャーストア(Feature Store)**: 特徴量の定義・生成・提供を一元管理する基盤。学習用のオフラインストアと推論用のオンラインストアを分離して持つ
+- **Entity**: 特徴量を関連付ける主キーとなる識別子の定義。`{{ entity.name }}`(join_key: `{{ entity.join_key }}`)のように定義する
+- **FeatureView**: データソースと特徴量(Field)の集合を対応付ける定義単位。TTLや取得元を持つ
+- **Feature Service**: 複数のFeatureViewをまとめ、推論アプリケーションが参照する単位としてグルーピングしたもの
+- **Registry**: エンティティ・FeatureView・Feature Serviceの定義(メタデータ)を保存する場所。`{{ registry_path }}` に配置する
+- **オフラインストア(Offline Store)**: 学習・バッチ用途の特徴量を保存する場所。`feast init` 直後はローカルのParquetファイルが対象になる
+- **オンラインストア(Online Store)**: 推論時に低レイテンシで参照するための特徴量ストア。本手順では `{{ online_store.type }}` を使用する
+- **materialize**: オフラインストアの特徴量をオンラインストアへコピーする処理。`feast materialize` は期間指定、`feast materialize-incremental` は前回実行以降の差分を対象にする
+
+## シナリオ設定
+
+プロジェクト `{{ repo.project_name }}` のフィーチャーストアを `{{ repo.dir }}` に構築します。エンティティ `{{ entity.name }}`(join_key: `{{ entity.join_key }}`)に対し、FeatureView `{{ feature_view.name }}`(TTL: {{ feature_view.ttl_seconds }}秒)で特徴量({% for f in feature_view.features %}`{{ f }}`{% if not loop.last %}, {% endif %}{% endfor %})を定義し、Feature Service `{{ feature_service.name }}` としてまとめます。`{{ materialize.start }}` から `{{ materialize.end }}` までの期間をオンラインストア(`{{ online_store.type }}`: `{{ online_store.path }}`)へ供給し、エンティティ値 `{{ verify.sample_entity_id }}` に対する取得確認まで行います。
+
+## 手順
+
+### 1. feast initによるリポジトリ作成
+
+```bash
+mkdir -p {{ repo.parent_dir }}
+cd {{ repo.parent_dir }}
+feast init {{ repo.project_name }}
+cd {{ repo.dir }}
+ls -la
+```
+
+`feast init` はサンプルのエンティティ定義・FeatureView定義・デモ用Parquetデータを含むリポジトリを `{{ repo.parent_dir }}/{{ repo.project_name }}/feature_repo` に生成します。以降の手順ではこの内容を業務用の定義で上書きします。
+
+### 2. 特徴量定義の記述
+
+```bash
+cd {{ repo.dir }}
+cat > feature_store.yaml <<'EOF'
+project: {{ repo.project_name }}
+registry: {{ registry_path }}
+provider: local
+online_store:
+    type: {{ online_store.type }}
+    path: {{ online_store.path }}
+entity_key_serialization_version: 2
+EOF
+
+cat > definitions.py <<'EOF'
+from datetime import timedelta
+from feast import Entity, FeatureView, Field, FeatureService, FileSource
+from feast.types import Float32
+
+{{ entity.name }} = Entity(name="{{ entity.name }}", join_keys=["{{ entity.join_key }}"])
+
+{{ entity.name }}_stats_source = FileSource(
+    path="{{ source.path }}",
+    timestamp_field="{{ source.timestamp_field }}",
+)
+
+{{ feature_view.name }}_fv = FeatureView(
+    name="{{ feature_view.name }}",
+    entities=[{{ entity.name }}],
+    ttl=timedelta(seconds={{ feature_view.ttl_seconds }}),
+    schema=[
+{% for f in feature_view.features %}        Field(name="{{ f }}", dtype=Float32),
+{% endfor %}    ],
+    source={{ entity.name }}_stats_source,
+)
+
+{{ feature_service.name }} = FeatureService(
+    name="{{ feature_service.name }}",
+    features=[{{ feature_view.name }}_fv],
+)
+EOF
+
+cat feature_store.yaml
+cat definitions.py
+```
+
+`example.py` など `feast init` が生成した既定のPythonファイルは、定義の重複登録を避けるため削除するか `definitions.py` の内容に統合してください。
+
+### 3. feast applyでの登録
+
+```bash
+cd {{ repo.dir }}
+feast apply
+feast entities list
+feast feature-views list
+feast feature-services list
+```
+
+`{{ feature_view.name }}` と `{{ feature_service.name }}` が一覧に表示されることを確認します。エラーが出た場合はPythonの構文エラーか、`{{ registry_path }}` の親ディレクトリが存在しないことが多い原因です。
+
+### 4. feast materializeによるオンラインストア供給
+
+```bash
+cd {{ repo.dir }}
+feast materialize {{ materialize.start }} {{ materialize.end }}
+feast materialize-incremental {{ materialize.end }}
+ls -lh {{ online_store.path }}
+```
+
+初回は `feast materialize` で対象期間を明示的に指定し、以降の定期実行では `feast materialize-incremental` を使って前回の実行時刻からの差分のみを供給します。
+
+### 5. 特徴量取得の確認
+
+```bash
+cd {{ repo.dir }}
+nohup feast serve --port {{ serve.port }} > feast_serve.log 2>&1 &
+sleep 5
+curl -s -X POST "http://localhost:{{ serve.port }}/get-online-features" \
+  -H "Content-Type: application/json" \
+  -d "{\"feature_service\": \"{{ feature_service.name }}\", \"entities\": {\"{{ entity.join_key }}\": [{{ verify.sample_entity_id }}]}}"
+kill %1
+```
+
+レスポンスに `{% for f in feature_view.features %}"{{ f }}"{% if not loop.last %}, {% endif %}{% endfor %}` の値が含まれていることを確認したら、確認用に起動したfeature serverを停止します。
+
+## 動作確認
+
+- `feast feature-views list` の出力に `{{ feature_view.name }}` が含まれること
+- `feast feature-services list` の出力に `{{ feature_service.name }}` が含まれること
+- `{{ online_store.path }}` が生成され、`feast materialize` 実行後にファイルサイズが0より大きいこと
+- `/get-online-features` のレスポンスに `{{ entity.join_key }}` が `{{ verify.sample_entity_id }}` として含まれ、{% for f in feature_view.features %}`{{ f }}`{% if not loop.last %}, {% endif %}{% endfor %} の各特徴量がnullでない値で返ること
+
+## 注意事項
+
+- `feast materialize` は同一期間を再実行すると値の上書きが発生する。期間を誤って重複指定しないよう、`materialize.start`(`{{ materialize.start }}`)と `materialize.end`(`{{ materialize.end }}`)の管理を台帳などで明示する。
+- オンラインストア種別 `{{ online_store.type }}` はローカル検証向けの構成であり、本番運用では複数プロセスからの同時書き込みに耐えるRedisやDynamoDBなどへの切り替えを検討する。
+- `feast serve` はバックグラウンド起動(`&`)のままだと確認後も稼働し続けるため、確認が終わったら必ず `kill` で停止する。
+- `{{ registry_path }}` は定義のメタデータを一元管理する単一障害点になるため、バックアップ対象に含める。

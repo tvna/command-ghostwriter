@@ -1,0 +1,31 @@
+repo:
+  parent_dir: /data/feast
+  project_name: driver_ranking
+  dir: /data/feast/driver_ranking/feature_repo
+registry_path: /data/feast/driver_ranking/feature_repo/data/registry.db
+entity:
+  name: driver
+  join_key: driver_id
+  value_type: INT64
+source:
+  path: /data/feast/driver_ranking/feature_repo/data/driver_stats.parquet
+  timestamp_field: event_timestamp
+feature_view:
+  name: driver_hourly_stats
+  ttl_seconds: 86400
+  features:
+    - conv_rate
+    - acc_rate
+    - avg_daily_trips
+online_store:
+  type: sqlite
+  path: /data/feast/driver_ranking/feature_repo/data/online_store.db
+feature_service:
+  name: driver_ranking_service
+materialize:
+  start: "2026-07-01T00:00:00"
+  end: "2026-07-18T00:00:00"
+serve:
+  port: 6566
+verify:
+  sample_entity_id: 1001

@@ -1,0 +1,9 @@
+run_name,checkpoint_path,step,created_at,size_gb,generation_rank,is_best,decision
+llm-sft-run7,/data/training/checkpoints/llm-sft-run7/step-100000,100000,2026-07-16,42.3,1,-,保持
+llm-sft-run7,/data/training/checkpoints/llm-sft-run7/step-95000,95000,2026-07-14,42.3,2,-,保持
+llm-sft-run7,/data/training/checkpoints/llm-sft-run7/step-90000,90000,2026-07-12,42.3,3,best,保持
+llm-sft-run7,/data/training/checkpoints/llm-sft-run7/step-85000,85000,2026-07-10,42.3,4,-,削除候補
+vit-cls-baseline,/data/training/checkpoints/vit-cls-baseline/step-40000,40000,2026-07-15,8.1,1,-,保持
+vit-cls-baseline,/data/training/checkpoints/vit-cls-baseline/step-38000,38000,2026-07-13,8.1,2,best,保持
+vit-cls-baseline,/data/training/checkpoints/vit-cls-baseline/step-36000,36000,2026-07-11,8.1,3,-,保持
+vit-cls-baseline,/data/training/checkpoints/vit-cls-baseline/step-34000,34000,2026-07-09,8.1,4,-,削除候補

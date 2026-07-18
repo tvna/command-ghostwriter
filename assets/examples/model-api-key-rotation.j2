@@ -1,0 +1,95 @@
+# モデルAPIキーの定期ローテーション
+
+Gemini API(`{{ api_target_service }}`)向けにサービス `{{ service_name }}` が使用するAPIキーを、新規発行・シークレットストアへの反映・旧キー失効の順で安全に定期ローテーションします。
+
+## 目的
+
+APIキーを長期間使い回すことによる漏洩リスクの拡大を理解し、`gcloud services api-keys` と `gcloud secrets` を組み合わせて、サービス断を起こさずに新旧キーを切り替えられるようになることを目指します。
+
+## 用語解説
+
+- **APIキー(API Key)**: `{{ api_target_service }}` を呼び出す際にリクエストを認可する秘匿文字列。GCPの「APIキー」機能で発行・管理する
+- **`gcloud services api-keys`**: GCP上のAPIキーの発行・一覧・詳細確認・削除を行うコマンドグループ
+- **APIキー制限(API restriction)**: キーが呼び出せるAPIサービスを限定する設定。`--api-target` で指定する
+- **Secret Manager**: キーなどの機密情報をバージョン管理して保管するGCPのサービス。`gcloud secrets versions add/access` で操作する
+- **ローテーション間隔**: 同一キーを使い続けてよい期間の上限。本手順では `{{ rotation_interval_days }}` 日とする
+
+## 背景
+
+サービス `{{ service_name }}`(プロジェクト `{{ project_id }}`)は、Secret Manager上のシークレット `{{ secret_id }}` からAPIキーを取得して `{{ api_target_service }}` を呼び出しています。現行キー(`{{ current_key_id }}`)は `{{ last_rotation_date }}` に発行されたもので、次回ローテーション予定日は `{{ next_rotation_date }}` です。
+
+## 手順
+
+### 1. 現行キーの棚卸しと有効期限を確認する
+
+```bash
+gcloud services api-keys list --project={{ project_id }} --format="table(name,displayName,createTime)"
+gcloud services api-keys describe {{ current_key_id }} --project={{ project_id }}
+tail -5 {{ rotation_log_path }} 2>/dev/null
+```
+
+現行キー `{{ current_key_id }}` の発行日(`{{ last_rotation_date }}`)から `{{ rotation_interval_days }}` 日を経過していないか、`{{ rotation_log_path }}` の記録と突き合わせて確認します。
+
+### 2. 新キーを発行しシークレットストアへ登録する
+
+```bash
+NEW_KEY_RESPONSE=$(gcloud services api-keys create \
+  --display-name="{{ new_key_display_name }}" \
+  --api-target=service={{ api_target_service }} \
+  --project={{ project_id }} \
+  --format="value(response.keyString,response.uid)")
+NEW_KEY_STRING=$(echo "$NEW_KEY_RESPONSE" | cut -f1)
+NEW_KEY_ID=$(echo "$NEW_KEY_RESPONSE" | cut -f2)
+echo -n "$NEW_KEY_STRING" | gcloud secrets versions add {{ secret_id }} \
+  --project={{ secret_project_id }} --data-file=-
+echo "issued new key id: $NEW_KEY_ID"
+```
+
+新キーは「{{ key_restriction_note }}」の方針で発行します。`NEW_KEY_STRING` はシェル変数に保持するのみで、ファイルやチャットへ平文コピーしないでください。
+
+### 3. サービスへ新キーを反映し再起動する
+
+```bash
+SECRET_VALUE=$(gcloud secrets versions access latest \
+  --secret={{ secret_id }} --project={{ secret_project_id }})
+echo "{{ env_var_name }}=$SECRET_VALUE" | sudo tee {{ service_config_path }} > /dev/null
+sudo chmod 600 {{ service_config_path }}
+sudo systemctl restart {{ service_name }}
+sudo systemctl status {{ service_name }} --no-pager
+```
+
+`{{ service_config_path }}` はサービス実行ユーザーのみ読める権限(600)にします。
+
+### 4. 疎通確認後に旧キーを失効する
+
+```bash
+NEW_KEY_STRING=$(gcloud secrets versions access latest \
+  --secret={{ secret_id }} --project={{ secret_project_id }})
+curl -s -o /dev/null -w "health check: %{http_code}\n" \
+  "{{ health_check_base_url }}/{{ health_check_model }}:generateContent?key=$NEW_KEY_STRING" \
+  -H "Content-Type: application/json" \
+  -d '{"contents":[{"parts":[{"text":"ping"}]}]}'
+gcloud services api-keys delete {{ current_key_id }} --project={{ project_id }}
+```
+
+上記curlのHTTPステータスが200であることを確認してから旧キー `{{ current_key_id }}` を失効させます。200以外の場合は失効させず、手順3の反映内容を見直してください。
+
+### 5. ローテーション日時と次回予定を記録する
+
+```bash
+echo "$(date -I) rotated {{ service_name }}: revoked={{ current_key_id }} interval_days={{ rotation_interval_days }} next_due={{ next_rotation_date }}" \
+  | sudo tee -a {{ rotation_log_path }}
+```
+
+## 動作確認
+
+- 手順4のcurlがHTTPステータス200を返すこと
+- `gcloud services api-keys list --project={{ project_id }}` の一覧に旧キー `{{ current_key_id }}` が表示されない(失効済み)こと
+- `{{ rotation_log_path }}` に本日日付のローテーション記録が追記されていること
+- `{{ service_config_path }}` の権限が600であること
+
+## 注意事項
+
+- 手順4の疎通確認がHTTP 200以外の場合、旧キーを失効させない。先に旧キーを失効すると新キーの反映失敗時に即座にサービス断となる。
+- 新キーの文字列(`NEW_KEY_STRING` / `SECRET_VALUE`)はシェル履歴・ログ・チャットに残さず、Secret Manager経由でのみ受け渡す。
+- `{{ rotation_interval_days }}` 日を超えて同一キーを使い続けないよう、`{{ rotation_log_path }}` の記録を基に次回予定日(`{{ next_rotation_date }}`)をカレンダー等へ登録しておく。

@@ -1,0 +1,135 @@
+# DCGM ExporterによるGPUクラスタのGrafana監視
+
+DCGM Exporterで各GPUノードのメトリクスをPrometheusに集約し、公式Grafanaダッシュボードのインポートとアラート閾値の設定までを行います。
+
+## 目的
+
+`dcgm-exporter` → Prometheusスクレイプ → Grafanaダッシュボードというメトリクス収集パイプラインの構成要素を理解し、複数GPUノードを横断した使用率・温度の可視化と、閾値超過を検知するアラートルールを設定できるようになることを目指します。
+
+## 用語解説
+
+- **dcgm-exporter**: NVIDIA DCGMが収集したGPUメトリクスをPrometheus形式のHTTPエンドポイント(`/metrics`)として公開するエクスポーター
+- **スクレイプ設定(scrape config)**: Prometheusがどのエンドポイントを、どの間隔でポーリングするかを `prometheus.yml` の `scrape_configs` に定義する設定
+- **Grafanaダッシュボード**: Prometheus等のデータソースに対するクエリ結果をパネルとして可視化する画面定義。JSON形式でエクスポート・インポートできる
+- **アラートルール**: PromQLの式が一定時間条件を満たし続けた場合に発報する、Prometheus側の閾値定義
+- **rule_files**: Prometheusがアラートルールを読み込む対象ファイル(群)を指定する `prometheus.yml` 内の設定項目
+
+## シナリオ設定
+
+GPUクラスタ `{{ gpu_cluster_name }}` に属するノード {{ gpu_node_hosts | length }} 台({% for host in gpu_node_hosts %}`{{ host }}`{% if not loop.last %}, {% endif %}{% endfor %})に `dcgm-exporter`(`{{ exporter_image }}`)をポート{{ exporter_port }}で起動し、Prometheus(`{{ prometheus_url }}`)へ{{ scrape_interval }}間隔でスクレイプ登録します。Grafana(`{{ grafana_url }}`)には公式ダッシュボード(ID: {{ grafana_dashboard_id }})をインポートし、GPU温度が{{ gpu_temp_warn_celsius }}度(警告)・{{ gpu_temp_crit_celsius }}度(重大)、GPU使用率が{{ gpu_util_alert_threshold_pct }}%を超えた場合にアラートします。
+
+## 手順
+
+### 1. 各GPUノードでdcgm-exporterをコンテナ起動する
+
+```bash
+{% for host in gpu_node_hosts %}ssh {{ host }} "sudo docker run -d --gpus all --restart unless-stopped -p {{ exporter_port }}:{{ exporter_port }} --name dcgm-exporter {{ exporter_image }}"
+{% endfor %}
+```
+
+ノードごとに `docker ps` でコンテナが `Up` 状態であることを確認してから次の手順に進みます。
+
+### 2. Prometheusにスクレイプ設定を追加する
+
+```bash
+sudo tee -a {{ prometheus_config_path }} <<'EOF'
+  - job_name: 'dcgm-exporter'
+    scrape_interval: {{ scrape_interval }}
+    static_configs:
+      - targets:
+{% for host in gpu_node_hosts %}          - '{{ host }}:{{ exporter_port }}'
+{% endfor %}EOF
+```
+
+既存の `scrape_configs:` セクション配下に追記される想定です。トップレベルに `scrape_configs:` が存在しない場合は、追記前に手動でキーを作成します。
+
+### 3. 設定を検証し反映する
+
+```bash
+promtool check config {{ prometheus_config_path }}
+curl -X POST {{ prometheus_url }}/-/reload
+```
+
+`/-/reload` エンドポイントの利用には、Prometheus起動時に `--web.enable-lifecycle` フラグが必要です。
+
+### 4. スクレイプ対象の状態を確認する
+
+```bash
+curl -s "{{ prometheus_url }}/api/v1/targets" | jq '.data.activeTargets[] | select(.labels.job=="dcgm-exporter") | {instance: .scrapeUrl, health: .health}'
+```
+
+{{ gpu_node_hosts | length }} 件すべてで `health` が `up` になっていることを確認します。
+
+### 5. 公式ダッシュボードをGrafanaにインポートする
+
+```bash
+curl -s -o /tmp/dcgm-dashboard.json \
+  https://grafana.com/api/dashboards/{{ grafana_dashboard_id }}/revisions/latest/download
+jq '{dashboard: ., overwrite: true}' /tmp/dcgm-dashboard.json > /tmp/dcgm-dashboard-import.json
+curl -s -X POST {{ grafana_url }}/api/dashboards/db \
+  -H "Authorization: Bearer $GRAFANA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d @/tmp/dcgm-dashboard-import.json
+```
+
+`$GRAFANA_API_TOKEN` はEditor以上の権限を持つGrafana APIトークンを環境変数経由で渡します。トークン値はコマンド履歴やコミットに残しません。
+
+### 6. ノード横断のGPU使用率・温度を確認する
+
+```bash
+curl -s "{{ prometheus_url }}/api/v1/query?query=DCGM_FI_DEV_GPU_UTIL" | jq '.data.result[] | {instance: .metric.instance, value: .value[1]}'
+curl -s "{{ prometheus_url }}/api/v1/query?query=DCGM_FI_DEV_GPU_TEMP" | jq '.data.result[] | {instance: .metric.instance, value: .value[1]}'
+```
+
+{{ gpu_node_hosts | length }} 台すべてのノードからGPU使用率・温度の値が返ることを確認します。
+
+### 7. アラート閾値を設定する
+
+```bash
+sudo mkdir -p $(dirname {{ alert_rules_path }})
+sudo tee {{ alert_rules_path }} <<'EOF'
+groups:
+  - name: dcgm-gpu-alerts
+    rules:
+      - alert: GPUTemperatureWarning
+        expr: DCGM_FI_DEV_GPU_TEMP > {{ gpu_temp_warn_celsius }}
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "GPU temperature exceeds {{ gpu_temp_warn_celsius }}C"
+      - alert: GPUTemperatureCritical
+        expr: DCGM_FI_DEV_GPU_TEMP > {{ gpu_temp_crit_celsius }}
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "GPU temperature exceeds {{ gpu_temp_crit_celsius }}C"
+      - alert: GPUUtilizationSustainedHigh
+        expr: DCGM_FI_DEV_GPU_UTIL > {{ gpu_util_alert_threshold_pct }}
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "GPU utilization exceeds {{ gpu_util_alert_threshold_pct }} percent for 15m"
+EOF
+promtool check rules {{ alert_rules_path }}
+curl -X POST {{ prometheus_url }}/-/reload
+```
+
+`{{ alert_rules_path }}` を `rule_files:` に登録済みであることが前提です。未登録の場合は手順2と同様に `prometheus.yml` へ追記してからリロードします。
+
+## 動作確認
+
+- {{ gpu_node_hosts | length }} 台すべてのノードで `docker ps` に `dcgm-exporter` コンテナが `Up` 状態で表示されること
+- `{{ prometheus_url }}/api/v1/targets` でジョブ `dcgm-exporter` の全ターゲットが `health: up` であること
+- Grafana(`{{ grafana_url }}`)にダッシュボードID `{{ grafana_dashboard_id }}` がインポートされ、パネルにデータが表示されること
+- `{{ prometheus_url }}/api/v1/query?query=DCGM_FI_DEV_GPU_UTIL` および `DCGM_FI_DEV_GPU_TEMP` が {{ gpu_node_hosts | length }} 台分の値を返すこと
+- `promtool check rules {{ alert_rules_path }}` がエラーなく完了し、Prometheusの `Alerts` 画面にルールが3件表示されること
+
+## 注意事項
+
+- `dcgm-exporter` のメトリクスエンドポイントは認証なしで公開される。手順1のポート{{ exporter_port }}を外部ネットワークに直接晒さず、Prometheusサーバからのみ到達可能なネットワーク構成にする。
+- 手順5で使用する `$GRAFANA_API_TOKEN` はダッシュボードの作成・上書きが可能な権限を持つため、シークレットストア経由で払い出し、シェル履歴やログに残さない。
+- アラート閾値(警告{{ gpu_temp_warn_celsius }}度・重大{{ gpu_temp_crit_celsius }}度・使用率{{ gpu_util_alert_threshold_pct }}%)はGPU機種や設置環境の冷却能力によって適正値が異なるため、導入先の実測値を確認したうえで見直す。
+- `dcgm-gpu-health-monitoring`(既存)は `dcgmi` によるGPUグループ単位のヘルスウォッチ・能動診断が焦点であり、本手順はPrometheus/Grafanaによるクラスタ横断の常時可視化とアラート設定が焦点である。両者は役割が異なるため併用を前提とする。

@@ -1,0 +1,151 @@
+# SageMaker推論エンドポイントの障害切り分け — {{ endpoint_name }}
+
+`aws sagemaker` と `aws cloudwatch` / `aws logs` を使い、SageMaker推論エンドポイントの障害をステータス・ログ・メトリクス・インスタンスリソースの4方向から切り分け、修正後の回復を確認するまでを一巡します。
+
+## 目的
+
+`describe-endpoint` のステータスとFailureReason、CloudWatchログのコンテナエラー、CloudWatchメトリクスのレイテンシ・エラー率・インスタンスリソースを順に確認し、障害の原因（設定・コンテナ・容量のいずれか）を切り分けて修正できるようになることを目指します。
+
+## 用語解説
+
+- **FailureReason**: `describe-endpoint` が返すフィールドの一つ。エンドポイントが`Failed`や`UpdateRollbackFailed`になった際の理由が記載される
+- **ProductionVariant**: エンドポイント設定内の配信単位。`{{ variant_name }}` のようにVariantNameで識別され、インスタンスタイプ・台数を持つ
+- **ModelLatency**: 名前空間`AWS/SageMaker`のメトリクス。コンテナ内でのモデル推論処理にかかった時間(マイクロ秒)
+- **Invocation5XXErrors / Invocation4XXErrors**: 名前空間`AWS/SageMaker`のメトリクス。エンドポイントが返した5xx/4xxエラーの件数
+- **インスタンスメトリクス(CPUUtilization等)**: 名前空間`/aws/sagemaker/Endpoints`で公開される、ホスティングインスタンスのCPU・メモリ使用率などのメトリクス
+
+## シナリオ設定
+
+エンドポイント `{{ endpoint_name }}`(バリアント: `{{ variant_name }}`、インスタンス `{{ instance_type }}` × `{{ instance_count }}` 台)で、{{ first_observed }} 頃から「{{ symptom }}」という事象が報告されています。エラー率が `{{ error_rate_threshold_percent }}` %、レイテンシが `{{ latency_threshold_ms }}` msを超えていないかを基準に、原因を切り分けてください。プロファイル `{{ profile }}`・リージョン `{{ region }}` で操作します。
+
+## 手順
+
+### 1. describe-endpointでステータスと失敗理由を確認する
+
+```bash
+aws sagemaker describe-endpoint \
+  --profile {{ profile }} --region {{ region }} \
+  --endpoint-name {{ endpoint_name }} \
+  --query '{Status:EndpointStatus,FailureReason:FailureReason,LastModified:LastModifiedTime}' --output json
+
+aws sagemaker describe-endpoint \
+  --profile {{ profile }} --region {{ region }} \
+  --endpoint-name {{ endpoint_name }} \
+  --query 'ProductionVariants' --output table
+```
+
+`EndpointStatus`が`Failed`や`UpdateRollbackFailed`の場合は`FailureReason`の内容を、`InService`の場合は`ProductionVariants`の`CurrentInstanceCount`が意図した `{{ instance_count }}` 台になっているかを確認します。
+
+### 2. CloudWatchログでコンテナのエラーを調査する
+
+```bash
+aws logs filter-log-events \
+  --profile {{ profile }} --region {{ region }} \
+  --log-group-name /aws/sagemaker/Endpoints/{{ endpoint_name }} \
+  --log-stream-name-prefix {{ variant_name }} \
+  --filter-pattern "{{ log_error_pattern }}" \
+  --start-time {{ log_start_time_epoch_ms }} \
+  --limit {{ log_fetch_limit }} \
+  --query 'events[].message' --output text
+```
+
+コンテナ側の例外・タイムアウト・OOM(メモリ不足)killなどのエラーメッセージが出ていないかを確認します。
+
+### 3. メトリクスでレイテンシとエラー率を確認する
+
+```bash
+aws cloudwatch get-metric-statistics \
+  --profile {{ profile }} --region {{ region }} \
+  --namespace AWS/SageMaker \
+  --metric-name ModelLatency \
+  --dimensions Name=EndpointName,Value={{ endpoint_name }} Name=VariantName,Value={{ variant_name }} \
+  --start-time {{ metrics_start_time }} --end-time {{ metrics_end_time }} \
+  --period {{ metrics_period_seconds }} \
+  --statistics Average Maximum --output table
+
+aws cloudwatch get-metric-statistics \
+  --profile {{ profile }} --region {{ region }} \
+  --namespace AWS/SageMaker \
+  --metric-name Invocation5XXErrors \
+  --dimensions Name=EndpointName,Value={{ endpoint_name }} Name=VariantName,Value={{ variant_name }} \
+  --start-time {{ metrics_start_time }} --end-time {{ metrics_end_time }} \
+  --period {{ metrics_period_seconds }} \
+  --statistics Sum --output table
+
+aws cloudwatch get-metric-statistics \
+  --profile {{ profile }} --region {{ region }} \
+  --namespace AWS/SageMaker \
+  --metric-name Invocations \
+  --dimensions Name=EndpointName,Value={{ endpoint_name }} Name=VariantName,Value={{ variant_name }} \
+  --start-time {{ metrics_start_time }} --end-time {{ metrics_end_time }} \
+  --period {{ metrics_period_seconds }} \
+  --statistics Sum --output table
+```
+
+`ModelLatency`の`Average`/`Maximum`が `{{ latency_threshold_ms }}` msを超えていないか、`Invocation5XXErrors`の合計を`Invocations`の合計で割ったエラー率が `{{ error_rate_threshold_percent }}` %を超えていないかを確認します。
+
+### 4. インスタンスリソースの逼迫有無を切り分ける
+
+```bash
+aws cloudwatch get-metric-statistics \
+  --profile {{ profile }} --region {{ region }} \
+  --namespace /aws/sagemaker/Endpoints \
+  --metric-name CPUUtilization \
+  --dimensions Name=EndpointName,Value={{ endpoint_name }} Name=VariantName,Value={{ variant_name }} \
+  --start-time {{ metrics_start_time }} --end-time {{ metrics_end_time }} \
+  --period {{ metrics_period_seconds }} \
+  --statistics Average Maximum --output table
+
+aws cloudwatch get-metric-statistics \
+  --profile {{ profile }} --region {{ region }} \
+  --namespace /aws/sagemaker/Endpoints \
+  --metric-name MemoryUtilization \
+  --dimensions Name=EndpointName,Value={{ endpoint_name }} Name=VariantName,Value={{ variant_name }} \
+  --start-time {{ metrics_start_time }} --end-time {{ metrics_end_time }} \
+  --period {{ metrics_period_seconds }} \
+  --statistics Average Maximum --output table
+```
+
+`CPUUtilization`または`MemoryUtilization`が高止まりしている場合は、手順2のOOM関連ログと突き合わせ、インスタンスタイプ `{{ instance_type }}` の容量不足が原因かどうかを判断します。逼迫していなければコンテナ側の設定やコードの問題を疑います。
+
+### 5. 修正後の再デプロイと回復を確認する
+
+```bash
+aws sagemaker update-endpoint \
+  --profile {{ profile }} --region {{ region }} \
+  --endpoint-name {{ endpoint_name }} \
+  --endpoint-config-name {{ new_endpoint_config_name }}
+
+aws sagemaker wait endpoint-in-service \
+  --profile {{ profile }} --region {{ region }} \
+  --endpoint-name {{ endpoint_name }}
+
+aws sagemaker describe-endpoint \
+  --profile {{ profile }} --region {{ region }} \
+  --endpoint-name {{ endpoint_name }} \
+  --query '{Status:EndpointStatus,FailureReason:FailureReason}' --output json
+
+aws sagemaker-runtime invoke-endpoint \
+  --profile {{ profile }} --region {{ region }} \
+  --endpoint-name {{ endpoint_name }} \
+  --content-type {{ invoke_content_type }} \
+  --body fileb://{{ invoke_payload_path }} \
+  {{ invoke_output_path }}
+
+cat {{ invoke_output_path }}
+```
+
+`{{ new_endpoint_config_name }}` は手順3・4で切り分けた原因（インスタンスタイプ変更、台数増強、コンテナイメージ修正など）を反映した新しいエンドポイント設定です。`update-endpoint`はブルーグリーン的に新旧バリアントを切り替えるため、切替中もサービスは継続されます。
+
+## 動作確認
+
+- 手順1・5の`describe-endpoint`で`EndpointStatus`が`InService`、`FailureReason`が空になっていること
+- 手順5の`invoke-endpoint`がエラーなく完了し、`{{ invoke_output_path }}`に推論結果が出力されること
+- 手順3のメトリクスを再取得し、`ModelLatency`が`{{ latency_threshold_ms }}` ms以下、エラー率が`{{ error_rate_threshold_percent }}` %以下に収まっていること
+
+## 注意事項
+
+- `update-endpoint`によるブルーグリーン切替中は新旧インスタンスが同時に起動し課金対象となるため、切替完了後に不要な旧リソースが残っていないか確認する。
+- `filter-log-events`の`--start-time`はミリ秒単位のUNIXエポックで指定する。誤って秒単位で指定すると想定と異なる期間のログが取得される。
+- 障害が長期化し切り分けに時間がかかる場合は、原因確定を待たずに `{{ escalation_contact }}` へ早めにエスカレーションする。
+- 本番トラフィックが流入中のエンドポイントに対する`update-endpoint`は、`{{ new_endpoint_config_name }}`の内容を事前にステージング環境などで検証したうえで実施する。

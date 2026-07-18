@@ -1,0 +1,139 @@
+# RAG検索品質低下の切り分けとチューニング
+
+検索結果が期待したドキュメントと異なる、または上位に出てこないという申告があった際に、埋め込み(embedding)・インデックス・スコア閾値・チャンク分割の順に原因を切り分け、それぞれに応じた対処を行う手順です。
+
+## 目的
+
+再現クエリごとの症状を台帳で管理しながらベクトルDBの状態を確認し、埋め込みドリフト・インデックス未更新・閾値設定・チャンク粒度のいずれが原因かを切り分けたうえで、安全に対処できるようになることを目指します。
+
+## 用語解説
+
+- **RAG(Retrieval-Augmented Generation)**: LLMが応答を生成する前にベクトル検索で関連文書を取得し、その内容を根拠として利用する構成
+- **埋め込み(embedding)**: テキストを固定長の数値ベクトルに変換したもの。意味が近い文章同士は、ベクトル空間上でも近い距離になるよう学習される
+- **コレクション(collection)**: ベクトルDB上でベクトルとpayload(メタデータ)をまとめて管理する単位。`doc_id`のようなメタデータをpayloadに持たせ、1文書を複数チャンク(ポイント)に分割して格納する
+- **indexed_vectors_count / optimizer_status**: HNSWインデックスへの組み込みが完了しているベクトル数と、インデックス構築処理の状態。棚卸し時にインデックスの鮮度を確認する指標
+- **スコア閾値(score_threshold)**: 検索結果を採用する下限の類似度スコア。この値未満の結果は「見つからなかった」扱いとして除外される
+- **チャンク分割(chunking)**: 文書を検索・埋め込みの単位に分割する処理。粒度が粗いと1チャンクに複数トピックが混在し、クエリとの関連度スコアが薄まる
+
+## シナリオ設定
+
+検索品質の低下が申告された再現クエリは{{ csv_rows | length }}件です。対象コレクションは`{{ csv_rows[0]["collection_name"] }}`(エンドポイント: `{{ csv_rows[0]["vector_db_endpoint"] }}`)、埋め込みモデルは`{{ csv_rows[0]["embedding_model"] }}`、スコア閾値は`{{ csv_rows[0]["score_threshold"] }}`です。
+
+| query_id | query_text | expected_doc_id | top1_doc_id | top1_score | diagnosis |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["query_id"] }} | {{ r["query_text"] }} | {{ r["expected_doc_id"] }} | {{ r["top1_doc_id"] }} | {{ r["top1_score"] }} | {{ r["diagnosis"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 症状と再現クエリを整理する
+
+```bash
+mkdir -p /data/rag-triage
+cat <<'EOF' > /data/rag-triage/reproduced_queries.csv
+query_id,query_text,expected_doc_id,top1_doc_id,top1_score,diagnosis
+{% for r in csv_rows %}{{ r["query_id"] }},{{ r["query_text"] }},{{ r["expected_doc_id"] }},{{ r["top1_doc_id"] }},{{ r["top1_score"] }},{{ r["diagnosis"] }}
+{% endfor %}EOF
+wc -l /data/rag-triage/reproduced_queries.csv
+cut -d, -f1 /data/rag-triage/reproduced_queries.csv | tail -n +2 | sort | uniq -d
+```
+
+`uniq -d`の出力が空であれば`query_id`に重複がなく、{{ csv_rows | length }}件の症状がそれぞれ個別に再現できていることを意味します。
+
+### 2. ベクトルDBの件数と状態を確認する
+
+```bash
+curl -s "{{ csv_rows[0]["vector_db_endpoint"] }}/collections/{{ csv_rows[0]["collection_name"] }}" | jq '{status: .result.status, points_count: .result.points_count, indexed_vectors_count: .result.indexed_vectors_count, optimizer_status: .result.optimizer_status}'
+```
+
+`diagnosis`が`index_stale`の行について、期待する文書がpayload上に実際に存在するかを確認します。
+
+```bash
+{% for r in csv_rows %}{% if r["diagnosis"] == "index_stale" %}curl -s -X POST "{{ r["vector_db_endpoint"] }}/collections/{{ r["collection_name"] }}/points/scroll" \
+  -H "Content-Type: application/json" \
+  --data-raw '{"filter": {"must": [{"key": "doc_id", "match": {"value": "{{ r["expected_doc_id"] }}"}}]}, "limit": 1, "with_payload": true}' | jq --arg q "{{ r["query_id"] }}" '{query_id: $q, found: (.result.points | length)}'
+{% endif %}{% endfor %}```
+
+`found`が0の場合、期待する文書(`expected_doc_id`)がまだインデックスに反映されていない、インデックス未更新が原因と確定します。反映されるまで再インデックス(コレクションの定期メンテナンス手順を参照)を行い、`points_count`と`indexed_vectors_count`が一致するまで待ちます。
+
+### 3. 埋め込みモデルの一貫性を確認する
+
+```bash
+curl -s "{{ csv_rows[0]["vector_db_endpoint"] }}/collections/{{ csv_rows[0]["collection_name"] }}" | jq '.result.config.params.vectors'
+python3 -c "from sentence_transformers import SentenceTransformer; m = SentenceTransformer('{{ csv_rows[0]["embedding_model"] }}'); print(m.get_sentence_embedding_dimension())"
+```
+
+jqで取得した`size`とPythonが出力した次元数が一致しない場合、インデックス構築時と異なる埋め込みモデルが使われている、つまり埋め込みドリフトの証拠です。`diagnosis`が`embedding_drift`の行について、宣言済みのモデルでクエリを再埋め込みし、検索結果を比較します。
+
+```bash
+{% for r in csv_rows %}{% if r["diagnosis"] == "embedding_drift" %}python3 <<'EOF'
+from sentence_transformers import SentenceTransformer
+import json
+import urllib.request
+
+model = SentenceTransformer("{{ r["embedding_model"] }}")
+vector = model.encode("{{ r["query_text"] }}", normalize_embeddings=True).tolist()
+
+payload = json.dumps({"vector": vector, "limit": 5, "with_payload": True}).encode("utf-8")
+req = urllib.request.Request(
+    "{{ r["vector_db_endpoint"] }}/collections/{{ r["collection_name"] }}/points/search",
+    data=payload,
+    headers={"Content-Type": "application/json"},
+    method="POST",
+)
+with urllib.request.urlopen(req) as resp:
+    result = json.load(resp)
+
+top = result["result"][0]
+print("{{ r["query_id"] }} re-embed top1:", top["payload"]["doc_id"], top["score"])
+EOF
+{% endif %}{% endfor %}```
+
+再埋め込み後のtop1が`expected_doc_id`と一致すれば、原因は埋め込みモデルの不一致で確定です。その場合はインデックス済みの全ポイントを同じモデルで再生成する計画に進みます(クエリ側だけを直しても解決しません)。
+
+### 4. 検索スコアと閾値を検証する
+
+```bash
+{% for r in csv_rows %}awk -v s="{{ r["top1_score"] }}" -v t="{{ r["score_threshold"] }}" -v q="{{ r["query_id"] }}" 'BEGIN { if (s < t) print q ": below threshold (score=" s ", threshold=" t ")"; else print q ": at or above threshold (score=" s ", threshold=" t ")" }'
+{% endfor %}```
+
+`diagnosis`が`threshold_too_high`の行は、`expected_doc_id`がtop1として正しく取得できているにもかかわらず、スコアが`score_threshold`未満のため結果から除外されているケースです。
+
+```bash
+{% for r in csv_rows %}{% if r["diagnosis"] == "threshold_too_high" %}python3 -c "print('{{ r["query_id"] }} 推奨score_threshold:', round({{ r["top1_score"] }} - 0.05, 2))"
+{% endif %}{% endfor %}```
+
+閾値を下げすぎると無関係な文書まで根拠として採用してしまう誤検知リスクが増えるため、他クエリのスコア分布も確認したうえで最終値を決めます。
+
+### 5. チャンク分割を見直す
+
+```bash
+{% for r in csv_rows %}{% if r["diagnosis"] == "chunking_too_coarse" %}curl -s -X POST "{{ r["vector_db_endpoint"] }}/collections/{{ r["collection_name"] }}/points/scroll" \
+  -H "Content-Type: application/json" \
+  --data-raw '{"filter": {"must": [{"key": "doc_id", "match": {"value": "{{ r["top1_doc_id"] }}"}}]}, "limit": 1, "with_payload": true}' | jq -r '.result.points[0].payload.text' | wc -m
+{% endif %}{% endfor %}```
+
+文字数が大きく(目安として1チャンクあたり2000文字を超える場合)、内容を確認して複数トピックが混在していれば、粒度が粗いことがスコア低下の原因です。該当ドキュメントのみチャンクサイズと重複幅(overlap)を小さくして再分割し、再埋め込み・再インデックスします。
+
+### 6. 改善結果を記録する
+
+```bash
+{% for r in csv_rows %}echo "{{ r["query_id"] }}: diagnosis={{ r["diagnosis"] }} action={{ r["action"] }}"
+{% endfor %}date -Iseconds >> /var/log/rag-retrieval-triage-history.log
+```
+
+対処後は手順2〜4を再実行し、`top1_doc_id`が`expected_doc_id`と一致し、かつ`top1_score`が`score_threshold`以上になったことを確認してから記録します。
+
+## 動作確認
+
+- {{ csv_rows | length }}件全てについて、対処後の再検索で`top1_doc_id`が`expected_doc_id`と一致していること
+- `diagnosis`が`embedding_drift`の{{ csv_rows | selectattr("diagnosis", "equalto", "embedding_drift") | list | length }}件について、jqで取得した`vectors.size`とPythonの`get_sentence_embedding_dimension()`の出力が一致していること
+- `diagnosis`が`index_stale`の行について、`points/scroll`の`found`が1以上になっていること
+- 適用した`score_threshold`とチャンク再分割の内容が`/var/log/rag-retrieval-triage-history.log`に記録されていること
+
+## 注意事項
+
+- 埋め込みモデルを変更する場合、クエリ側だけでなくインデックス済みの全ポイントを同じモデルで再生成しないとベクトル空間がずれ、検索結果自体が意味をなさなくなる。
+- `score_threshold`を下げると再現率(recall)は上がるが、無関係な文書を根拠として提示する誤検知リスクも増える。手順4の推奨値は目安であり、他クエリへの影響を確認してから確定する。
+- チャンクの再分割は該当ドキュメントの再埋め込み・再インデックスを伴う。対象範囲を確認せずに全コレクションを再分割すると、無関係な検索結果まで一時的に変動する。
+- 本手順は対象コレクションが単一の`{{ csv_rows[0]["collection_name"] }}`であることを前提とする。複数コレクションを横断する場合は、コレクションごとに手順2〜5を繰り返す。

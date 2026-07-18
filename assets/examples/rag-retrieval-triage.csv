@@ -1,0 +1,6 @@
+query_id,query_text,collection_name,vector_db_endpoint,embedding_model,expected_doc_id,top1_doc_id,top1_score,score_threshold,diagnosis,action
+q001,ロールバック手順の最新版はどこにあるか,rag_kb_chunks,http://localhost:6333,intfloat/multilingual-e5-large,doc-runbook-042-v2,doc-runbook-042-v1,0.58,0.70,index_stale,再インデックス
+q002,APIレート制限のエラーコード一覧を知りたい,rag_kb_chunks,http://localhost:6333,intfloat/multilingual-e5-large,doc-api-errors-017,doc-onboarding-003,0.39,0.70,embedding_drift,埋め込み再計算
+q003,決済APIの認証トークン有効期限,rag_kb_chunks,http://localhost:6333,intfloat/multilingual-e5-large,doc-payments-auth-008,doc-payments-webhook-012,0.41,0.70,embedding_drift,埋め込み再計算
+q004,支払い失敗時のリトライ仕様,rag_kb_chunks,http://localhost:6333,intfloat/multilingual-e5-large,doc-billing-retry-009,doc-billing-retry-009,0.66,0.70,threshold_too_high,閾値見直し
+q005,監視アラートのエスカレーション先,rag_kb_chunks,http://localhost:6333,intfloat/multilingual-e5-large,doc-oncall-escalation-005,doc-oncall-escalation-005,0.59,0.70,chunking_too_coarse,チャンク再分割

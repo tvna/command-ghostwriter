@@ -1,0 +1,11 @@
+project_dir: "/opt/langgraph-agent-server"
+python_version: "3.11"
+graph_id: "agent"
+graph_entrypoint: "./agent.py:graph"
+env_file: ".env"
+dev_host: "127.0.0.1"
+dev_port: 2024
+image_name: "langgraph-agent-server"
+image_tag: "0.1.0"
+build_platform: "linux/amd64"
+up_port: 8123

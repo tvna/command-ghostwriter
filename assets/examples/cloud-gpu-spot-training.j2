@@ -1,0 +1,117 @@
+# スポットGPUインスタンスによるAI学習環境の構築
+
+スポット価格の調査からGPUインスタンス起動、中断通知への対応、学習チェックポイントのS3保全までを一連の手順として実行します。
+
+## 目的
+
+スポットインスタンスの価格変動と中断リスクを踏まえたうえで、GPU学習環境を安全に起動・運用し、中断が発生してもチェックポイントから再開できる状態を維持できるようになることを目指します。
+
+## 用語解説
+
+- **スポットインスタンス**: 未使用のEC2キャパシティを割引価格で利用できるインスタンス。需給により中断(reclaim)される可能性がある
+- **スポット価格履歴**: `describe-spot-price-history` で取得できる、インスタンスタイプ・アベイラビリティゾーンごとの過去の約定価格の推移
+- **instance-market-options**: `run-instances` でスポット購入方式を指定するオプション。上限価格(MaxPrice)や中断時の挙動を指定する
+- **IMDS(Instance Metadata Service)**: インスタンス内部から `169.254.169.254` 経由で参照できるメタデータ。スポット中断が決定すると `spot/instance-action` に中断予定時刻が公開される
+- **中断通知(interruption notice)**: スポットインスタンスの回収が決定した際にIMDS経由で送られる通知。実際の中断までに猶予時間が与えられる
+- **チェックポイント**: 学習途中のモデル状態を保存したファイル。中断や再起動後に学習を再開するための基点となる
+
+## シナリオ設定
+
+リージョン `{{ aws_region }}` のアベイラビリティゾーン `{{ availability_zone }}` で、インスタンスタイプ `{{ instance_type }}`(AMI: `{{ ami_id }}`)のスポットインスタンスを起動します。上限価格は `{{ max_spot_price }}` USD/時間とし、学習スクリプト `{{ training_script }}` を `{{ training_workdir }}` で実行、チェックポイントは `{{ checkpoint_interval_min }}` 分間隔で `s3://{{ checkpoint_bucket }}/{{ checkpoint_prefix }}` へ同期します。手順3以降はインスタンスへのログイン後、インスタンス上で実行するものとします。
+
+## 手順
+
+### 1. describe-spot-price-historyで価格動向を調査する
+
+```bash
+aws ec2 describe-spot-price-history \
+  --region {{ aws_region }} \
+  --instance-types {{ instance_type }} \
+  --availability-zone {{ availability_zone }} \
+  --product-descriptions "Linux/UNIX" \
+  --start-time $(date -u -d "-{{ lookback_days }} days" +%Y-%m-%dT%H:%M:%SZ) \
+  --query "SpotPriceHistory[*].[Timestamp,SpotPrice]" \
+  --output table
+```
+
+直近の約定価格が上限価格 `{{ max_spot_price }}` USD/時間を継続的に上回っていないかを確認します。上回っている場合は、上限価格の見直しか別アベイラビリティゾーンの検討を行います。
+
+### 2. run-instancesのinstance-market-optionsでスポット起動する
+
+```bash
+aws ec2 run-instances \
+  --region {{ aws_region }} \
+  --image-id {{ ami_id }} \
+  --instance-type {{ instance_type }} \
+  --key-name {{ key_name }} \
+  --security-group-ids {{ security_group_id }} \
+  --subnet-id {{ subnet_id }} \
+  --placement AvailabilityZone={{ availability_zone }} \
+  --iam-instance-profile Name={{ iam_instance_profile }} \
+  --instance-market-options '{"MarketType":"spot","SpotOptions":{"MaxPrice":"{{ max_spot_price }}","SpotInstanceType":"one-time","InstanceInterruptionBehavior":"terminate"}}' \
+  --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=gpu-spot-training}]" \
+  --query "Instances[0].InstanceId" \
+  --output text
+```
+
+払い出されたインスタンスIDを控え、`aws ec2 describe-instances --instance-ids <instance-id>` で状態が `running` になるまで待ちます。
+
+### 3. nvidia-smiでGPUを確認し学習ジョブを開始する
+
+```bash
+nvidia-smi --query-gpu=name,memory.total,memory.used,utilization.gpu --format=csv
+mkdir -p {{ training_workdir }}
+cd {{ training_workdir }}
+nohup python3 {{ training_script }} --checkpoint-dir {{ checkpoint_prefix }} > {{ log_file }} 2>&1 &
+echo $! > {{ training_workdir }}/train.pid
+```
+
+GPUがドライバから正しく認識されていることを確認したうえで学習ジョブを起動し、プロセスIDを記録します。
+
+### 4. IMDSの中断通知を監視する仕組みを整える
+
+```bash
+cat <<'EOS' > /usr/local/bin/spot-interruption-watch.sh
+#!/bin/bash
+while true; do
+  STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://169.254.169.254/latest/meta-data/spot/instance-action)
+  if [ "$STATUS" = "200" ]; then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) spot interruption notice received" >> {{ log_file }}
+    kill -TERM "$(cat {{ training_workdir }}/train.pid)"
+    aws s3 sync {{ training_workdir }}/checkpoints s3://{{ checkpoint_bucket }}/{{ checkpoint_prefix }} --region {{ aws_region }}
+    break
+  fi
+  sleep {{ interruption_poll_sec }}
+done
+EOS
+chmod +x /usr/local/bin/spot-interruption-watch.sh
+nohup /usr/local/bin/spot-interruption-watch.sh > /var/log/gpu-training/interruption-watch.log 2>&1 &
+```
+
+中断通知はインスタンス終了の一定時間前にIMDS経由で公開されます。監視スクリプトが通知を検知したら学習プロセスへ `SIGTERM` を送り、直近のチェックポイントをS3へ同期してから終了します。
+
+### 5. チェックポイントをS3へ定期保存する
+
+```bash
+crontab -l 2>/dev/null > /tmp/current-cron
+echo "*/{{ checkpoint_interval_min }} * * * * aws s3 sync {{ training_workdir }}/checkpoints s3://{{ checkpoint_bucket }}/{{ checkpoint_prefix }} --region {{ aws_region }} >> {{ log_file }} 2>&1" >> /tmp/current-cron
+crontab /tmp/current-cron
+crontab -l
+```
+
+中断通知による退避同期とは別に、`{{ checkpoint_interval_min }}` 分間隔の定期同期をcronに登録し、通知が間に合わないケースでの損失を最小化します。
+
+## 動作確認
+
+- `describe-spot-price-history` の直近価格が上限価格 `{{ max_spot_price }}` USD/時間を超えていないこと
+- `aws ec2 describe-instances` でインスタンスの状態が `running` になっていること
+- `nvidia-smi` でGPUが認識され、`{{ training_workdir }}/train.pid` に学習プロセスのPIDが記録されていること
+- `spot-interruption-watch.sh` がバックグラウンドで稼働し、IMDSの `spot/instance-action` を監視していること
+- `crontab -l` に `{{ checkpoint_interval_min }}` 分間隔のS3同期ジョブが登録され、`s3://{{ checkpoint_bucket }}/{{ checkpoint_prefix }}` 配下にチェックポイントが定期的に更新されること
+
+## 注意事項
+
+- スポットインスタンスは需給状況により予告なく中断されうる前提で設計し、学習ジョブは必ず定期チェックポイントから再開できる構成にする。
+- 上限価格 `{{ max_spot_price }}` USD/時間は市場価格の変動を踏まえて定期的に見直し、極端に低い設定で起動失敗が続く場合は上限の引き上げを検討する。
+- 中断通知の猶予時間は短いため、監視ループの `sleep {{ interruption_poll_sec }}` 秒は退避処理(プロセス停止とS3同期)が確実に完了できる範囲に設定する。
+- IAMロール `{{ iam_instance_profile }}` には `s3:PutObject` など、チェックポイント保存に必要な最小権限のみを付与し、不要な権限を持たせない。

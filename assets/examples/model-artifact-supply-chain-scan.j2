@@ -1,0 +1,107 @@
+# モデル成果物のサプライチェーン検証
+
+取得元・ハッシュ・署名を記録したうえで `sha256sum` と `cosign` による完全性検証、`modelscan` による悪性コード混入スキャンを行い、検証済みのモデルのみを `safetensors` 形式でレジストリへ登録します。
+
+## 目的
+
+モデル成果物を「取得元の記録」「ハッシュ・署名検証」「静的スキャン」「安全な形式への変換」「検証済みのみのレジストリ登録」という一連のゲートに通し、出所不明・改ざん済み・悪性コード混入のモデルが本番環境に流入しないようにできることを目指します。
+
+## 用語解説
+
+- **サプライチェーン検証**: 外部から取得したモデル成果物について、取得元・完全性・安全性を多層的に確認してから利用を許可する一連の手順
+- **pickle形式のリスク**: `pytorch_model.bin` など`pickle`でシリアライズされた重みファイルは、`torch.load`でのデシリアライズ時に埋め込まれた任意コードが実行されうる
+- **modelscan**: モデルファイル内のpickle等に埋め込まれた悪性コード(任意コード実行を狙うオペコード等)を静的に検出するスキャンツール
+- **cosign verify-blob**: Sigstoreプロジェクトの`cosign`が提供する、任意のファイル(blob)に対する署名検証サブコマンド
+- **provenanceマニフェスト**: 取得元URL・期待ハッシュ値・署名ファイルの場所・取得日時などを記録した台帳。検証の根拠として監査時に参照する
+- **safetensors形式**: ヘッダにテンソルのメタデータのみを持ち実行コードを含まないため、デシリアライズが安全な重み保存フォーマット
+- **検証済みレジストリ**: ハッシュ検証・署名検証・静的スキャン・安全形式への変換をすべて通過したモデルのみを配置する登録先ディレクトリ
+
+## シナリオ設定
+
+モデル `{{ model_name }}`(version: `{{ model_version }}`)を `{{ artifact_source_url }}` から取得し、`{{ artifact_local_path }}` にステージングします。期待するハッシュ値は `{{ expected_sha256 }}`、署名ファイルは `{{ cosign_signature_path }}`、検証用の公開鍵は `{{ cosign_public_key_path }}` です。すべての検証を通過したモデルのみを `{{ safetensors_output_path }}` に変換したうえで `{{ verified_registry_path }}` へ登録します。
+
+## 手順
+
+### 1. 取得元・ハッシュ・署名を記録する
+
+provenanceマニフェストに取得元URL・期待ハッシュ値・署名ファイルと公開鍵の場所・取得日時を記録します。
+
+```bash
+mkdir -p $(dirname {{ artifact_local_path }})
+cat <<EOF > {{ provenance_manifest_path }}
+model_name={{ model_name }}
+model_version={{ model_version }}
+source_url={{ artifact_source_url }}
+local_path={{ artifact_local_path }}
+expected_sha256={{ expected_sha256 }}
+signature_path={{ cosign_signature_path }}
+public_key_path={{ cosign_public_key_path }}
+retrieved_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+cat {{ provenance_manifest_path }}
+```
+
+この時点でモデル本体・署名ファイル(`{{ cosign_signature_path }}`)は取得元からすでに `{{ artifact_local_path }}` の配置先ディレクトリへダウンロード済みであることを前提とします。
+
+### 2. sha256sumとcosignで完全性と署名を検証する
+
+期待ハッシュ値との一致を`sha256sum -c`で確認したうえで、`cosign verify-blob`で署名を検証します。
+
+```bash
+echo "{{ expected_sha256 }}  {{ artifact_local_path }}" > {{ artifact_local_path }}.sha256
+sha256sum -c {{ artifact_local_path }}.sha256
+cosign verify-blob --key {{ cosign_public_key_path }} --signature {{ cosign_signature_path }} {{ artifact_local_path }}
+```
+
+`sha256sum -c`が`OK`以外を返す場合、または`cosign verify-blob`が`Verified OK`を出力しない場合は、後続手順に進まずファイルを破棄し取得元から再取得します。
+
+### 3. modelscanでpickleへの悪性コード混入を走査する
+
+```bash
+mkdir -p $(dirname {{ modelscan_report_path }})
+modelscan scan -p {{ artifact_local_path }} -r json -o {{ modelscan_report_path }}
+cat {{ modelscan_report_path }}
+```
+
+レポートの`summary`に検出された問題が含まれる場合は、severityの内容を人手で確認し、CRITICAL/HIGHに該当する検出があれば後続手順に進まずモデルを却下します。
+
+### 4. safetensorsへ変換し安全性を担保する
+
+手順3を通過したモデルのみを対象に、`weights_only=True`を付けたうえで一度だけ`torch.load`し、safetensors形式へ変換します。
+
+```bash
+python3 <<'PYEOF'
+import torch
+from safetensors.torch import save_file
+
+state_dict = torch.load("{{ artifact_local_path }}", map_location="cpu", weights_only=True)
+save_file(state_dict, "{{ safetensors_output_path }}", metadata={"format": "pt"})
+print(f"converted: {{ artifact_local_path }} -> {{ safetensors_output_path }}")
+PYEOF
+```
+
+### 5. 検証済みモデルのみレジストリへ登録する
+
+手順2〜4をすべて通過したモデルのみ、変換後のsafetensorsファイルとprovenanceマニフェスト、modelscanレポートを検証済みレジストリへ配置します。
+
+```bash
+mkdir -p {{ verified_registry_path }}
+cp {{ safetensors_output_path }} {{ verified_registry_path }}/
+cp {{ provenance_manifest_path }} {{ verified_registry_path }}/
+cp {{ modelscan_report_path }} {{ verified_registry_path }}/
+sha256sum {{ verified_registry_path }}/$(basename {{ safetensors_output_path }}) > {{ verified_registry_path }}/$(basename {{ safetensors_output_path }}).sha256
+```
+
+## 動作確認
+
+- 手順2で`sha256sum -c`が`OK`、`cosign verify-blob`が`Verified OK`を出力していること
+- 手順3の`{{ modelscan_report_path }}`にCRITICAL/HIGH相当の検出がないことを人手で確認済みであること
+- `{{ verified_registry_path }}`配下に`model.safetensors`・provenanceマニフェスト・modelscanレポート・ハッシュファイルの4点が揃っていること
+- `python3 -c "from safetensors.torch import load_file; print(len(load_file('{{ safetensors_output_path }}')))"`が例外なくテンソル数を返すこと
+
+## 注意事項
+
+- 手順2〜4のいずれか一つでも不合格になった場合は後続手順へ進まず、モデルを`{{ verified_registry_path }}`へ登録しない。一部の検証だけを通過したモデルを「暫定登録」する運用は行わない。
+- `cosign_public_key_path`(`{{ cosign_public_key_path }}`)はモデル本体と同じ取得元から入手しない。鍵の入手経路が本体と同一だと、改ざんされた本体と対になる偽の鍵をまとめて配布された場合に検知できない。
+- `modelscan`は既知の悪性パターンに基づく静的スキャンであり、未知の手法による悪性コード混入を保証して排除するものではない。スキャン通過後も出所の信頼性(手順1の記録)を判断材料として残す。
+- `torch.load`によるデシリアライズは`weights_only=True`を付けても完全に安全とは言い切れないため、手順4は手順2・3を通過したファイルに対してのみ実行し、未検証のファイルには適用しない。

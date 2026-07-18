@@ -1,0 +1,142 @@
+# LLMプロンプト監査ログの収集と改ざん防止
+
+アプリ `{{ app.name }}` のプロンプト監査ログをJSON構造化出力させ、`rsyslog` で集約ログサーバへ転送し、`logrotate` で保持期間を管理したうえで、`sha256sum` による日次ハッシュ封緘で改ざんを検知できるようにします。
+
+## 目的
+
+監査対象フィールドを明確化したJSON構造化ログを出力させ、集約・保持・改ざん検知までを一気通貫で構成できるようになることを目指します。
+
+## 用語解説
+
+- **構造化ログ(JSON Lines)**: 1行1JSONオブジェクトの形式でログを出力する方式。`jq` 等での機械的な集計・検索がしやすい
+- **監査対象フィールド**: 誰が・どのモデルに・どんな内容を・どう判定されたかを追跡するために記録する項目群
+- **facility/severity**: rsyslogがログの発生源種別(facility)と重要度(severity)でログを選別する仕組み
+- **転送キュー(action queue)**: 集約サーバへ送れない間、rsyslogが送信側でログを一時保持する仕組み
+- **保持期間(retention)**: logrotateでローテート済みログを何日分残すかの設定
+- **ハッシュ封緘**: ローテート済みログのハッシュ値を台帳に記録し、後から内容が変わっていないかを検証できるようにすること
+
+## シナリオ設定
+
+アプリ `{{ app.name }}`(サービスユニット: `{{ app.service_unit }}`)は監査ログを `{{ app.log_path }}` へ `{{ app.log_format }}` 形式・ログレベル `{{ app.log_level }}` で出力します。ログは集約サーバ `{{ rsyslog.central_server }}`({{ rsyslog.protocol }}, ポート {{ rsyslog.port }})へ転送し、保持期間は {{ logrotate.retain_days }} 日、ハッシュ台帳は `{{ hash.ledger_dir }}` に `{{ hash.algorithm }}` で作成します。
+
+## 手順
+
+### 1. 監査対象フィールドを定義する
+
+まず記録するフィールドをスキーマとして明文化し、開発チームと合意します。プロンプト本文そのものではなく要約(`prompt_summary`)のみを記録する点に注意します。
+
+```bash
+sudo mkdir -p /etc/{{ app.name }}
+sudo tee /etc/{{ app.name }}/audit-fields.schema.json <<'EOF'
+{
+{% for f in audit_fields %}  "{{ f.key }}": { "desc": "{{ f.desc }}", "example": "{{ f.example }}" }{% if not loop.last %},{% endif %}
+{% endfor %}}
+EOF
+jq empty /etc/{{ app.name }}/audit-fields.schema.json && echo "schema OK"
+```
+
+### 2. アプリからJSON構造化ログを出力する設定を行う
+
+```bash
+sudo mkdir -p $(dirname {{ app.log_path }})
+sudo tee /etc/{{ app.name }}/audit-logging.env <<'EOF'
+AUDIT_LOG_FORMAT={{ app.log_format }}
+AUDIT_LOG_PATH={{ app.log_path }}
+AUDIT_LOG_LEVEL={{ app.log_level }}
+EOF
+sudo systemctl restart {{ app.service_unit }}
+sudo systemctl status {{ app.service_unit }} --no-pager
+```
+
+出力される1行1レコードのJSONが、手順1で定義したフィールドを満たしているかを確認します。
+
+```bash
+tail -n 5 {{ app.log_path }} | jq .
+```
+
+### 3. rsyslogで集約ログサーバへ転送する
+
+送信側で監査ログファイルを読み込み、`facility local5` としてタグ付けしたうえで集約サーバへ転送します。
+
+```bash
+sudo tee /etc/rsyslog.d/00-{{ app.name }}-audit.conf <<'EOF'
+module(load="imfile")
+input(type="imfile" file="{{ app.log_path }}" tag="{{ app.name }}-audit" facility="local5" severity="info")
+
+local5.* action(type="omfwd" target="{{ rsyslog.central_server }}" port="{{ rsyslog.port }}" protocol="{{ rsyslog.protocol }}"
+  queue.type="LinkedList" queue.filename="{{ app.name }}_audit_fwd" queue.maxdiskspace="1g" queue.size="{{ rsyslog.queue_size }}"
+  queue.saveonshutdown="on" action.resumeRetryCount="-1")
+EOF
+sudo systemctl restart rsyslog
+```
+
+集約サーバ側は受信テンプレート `{{ rsyslog.receiver_template }}` でホスト別に振り分ける設定が済んでいる前提とし、到達を確認します。
+
+```bash
+sudo grep "{{ app.name }}-audit" /var/log/remote/$(hostname)/llm-audit.jsonl
+```
+
+### 4. logrotateで保持期間を設定する
+
+```bash
+sudo tee /etc/logrotate.d/{{ app.name }}-audit <<'EOF'
+{{ app.log_path }} {
+    {{ logrotate.rotate_interval }}
+    rotate {{ logrotate.retain_days }}
+    compress
+    delaycompress
+    create 0640 root adm
+    missingok
+    notifempty
+    postrotate
+        systemctl reload {{ app.service_unit }} > /dev/null 2>&1 || true
+    endscript
+}
+EOF
+sudo logrotate -d /etc/logrotate.d/{{ app.name }}-audit
+```
+
+dry-runの出力に問題がなければ、実際にローテートして世代が作られることを確認します。
+
+```bash
+sudo logrotate -f /etc/logrotate.d/{{ app.name }}-audit
+ls -lh {{ app.log_path }}*
+```
+
+### 5. sha256による日次ハッシュ封緘で改ざんを検知する
+
+ハッシュ台帳は監査ログと同じディレクトリには置かず、`{{ hash.ledger_dir }}` へ分離します。
+
+```bash
+sudo mkdir -p {{ hash.ledger_dir }}
+sudo bash -c '{{ hash.algorithm }}sum {{ app.log_path }}.1 >> {{ hash.ledger_dir }}/$(date +%Y%m%d).{{ hash.algorithm }}'
+```
+
+日次で自動実行するcronジョブを登録します。`%` はcron内で改行として解釈されるため `\%` でエスケープします。
+
+```bash
+echo "{{ hash.cron_schedule }} {{ hash.cron_user }} {{ hash.algorithm }}sum {{ app.log_path }}.1 >> {{ hash.ledger_dir }}/\$(date +\%Y\%m\%d).{{ hash.algorithm }}" | sudo tee /etc/cron.d/{{ app.name }}-hash-seal
+```
+
+台帳と照合し、改ざんがないことを検証します。
+
+```bash
+cd / && sudo {{ hash.algorithm }}sum -c {{ hash.ledger_dir }}/$(date +%Y%m%d).{{ hash.algorithm }}
+```
+
+## 動作確認
+
+- `jq empty /etc/{{ app.name }}/audit-fields.schema.json` がエラーなく終了すること(スキーマの構文が正しいこと)
+- `{{ app.log_path }}` の各行が `jq .` でパースでき、手順1のフィールドを含んでいること
+- 集約サーバの受信テンプレート `{{ rsyslog.receiver_template }}` に沿ったパスへ `{{ app.name }}-audit` タグ付きのログが到達していること
+- `logrotate -f` 実行後、`{{ app.log_path }}.1` などローテート済みファイルが生成されていること
+- `sudo {{ hash.algorithm }}sum -c` が台帳の全件について `OK` を報告すること
+- `/etc/cron.d/{{ app.name }}-hash-seal` が `{{ hash.cron_schedule }}` の内容で登録されていること
+
+## 注意事項
+
+- `prompt_summary` にはプロンプト本文の全文ではなく要約のみを記録し、個人情報や機密情報をログへそのまま残さないようにする。
+- ハッシュ台帳(`{{ hash.ledger_dir }}`)は監査ログと同じ場所に置かない。同じ場所に置くと、改ざん時に台帳も一緒に書き換えられ検知できなくなる。
+- rsyslogの転送キュー上限({{ rsyslog.queue_size }} 件)を超えると古いログから破棄される可能性があるため、集約サーバの想定停止時間に応じて調整する。
+- `logrotate -f` を本番ログに対して実行する前に、必ず `-d`(dry-run)で挙動を確認する。
+- ハッシュ封緘は改ざんを「検知」する仕組みであり「防止」はしない。書き込み権限自体の制限(例: 追記専用属性)は別途組み合わせる必要がある。

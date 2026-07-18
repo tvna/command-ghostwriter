@@ -61,7 +61,7 @@ done < {{ r["backup_dir"] }}/file_list_before.txt
 xargs cat < {{ r["backup_dir"] }}/file_list_before.txt | wc -l
 {% endfor %}```
 
-各ファイルは `{{ r["backup_dir"] }}` に `.bak` 拡張子でコピーしてから上書きします。`sort` は行順序を変更するため、行順序に意味を持たせているパイプラインでは事前に影響範囲を確認してください。
+各ファイルは各データセットの `backup_dir` に `.bak` 拡張子でコピーしてから上書きします。`sort` は行順序を変更するため、行順序に意味を持たせているパイプラインでは事前に影響範囲を確認してください。
 
 ### 4. jdupesによるディレクトリ横断の検査
 

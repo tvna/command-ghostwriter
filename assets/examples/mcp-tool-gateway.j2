@@ -1,0 +1,92 @@
+# mcpoによるMCPツールのAPIゲートウェイ公開
+
+`mcpo` を使い、複数のMCPサーバをOpenAPI互換のHTTPエンドポイントとしてまとめて公開し、APIキーで保護する手順を示します。公開後は各MCPサーバのツールを通常のREST API・Swagger UIから利用できるようになります。
+
+## 目的
+
+`uv` で `mcpo` を導入し、対象の{{ csv_rows | length }}件のMCPサーバを1つの設定ファイルにまとめて起動、APIキーによる保護とOpenAPIドキュメントでの疎通確認までを安全に行えるようになることを目指します。
+
+## 用語解説
+
+- **mcpo**: MCP(Model Context Protocol)サーバの標準入出力(stdio)通信を、OpenAPI互換のHTTP/RESTエンドポイントに変換して公開するプロキシツール
+- **MCPサーバ**: ツール呼び出しをMCPプロトコルで提供するプロセス。`command` と `args` の組み合わせで起動される
+- **設定ファイル(config.json)**: Claude Desktopの設定形式を踏襲した `mcpServers` オブジェクトで、複数のMCPサーバをまとめて定義するJSONファイル
+- **APIキー保護**: `mcpo` 起動時に `--api-key` を指定し、`Authorization: Bearer` ヘッダーを持たないリクエストを拒否する仕組み
+- **サーバ別ドキュメントパス**: `mcpo` は各MCPサーバを `/<server_name>/` 配下にマウントし、`/<server_name>/docs`(Swagger UI)と `/<server_name>/openapi.json`(スキーマ)を個別に公開する
+
+## シナリオ設定
+
+公開対象のMCPサーバは{{ csv_rows | length }}件です。
+
+| server_name | base_command | description |
+|---|---|---|
+{% for r in csv_rows %}| {{ r["server_name"] }} | {{ r["base_command"] }} | {{ r["description"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. uvでmcpoを導入する
+
+```bash
+uv tool install mcpo
+mcpo --help
+```
+
+`uv tool install` により `mcpo` コマンドがユーザー環境に常駐します。`--help` が正常に表示されればインストール完了です。
+
+### 2. 公開対象のMCPサーバを一覧化する
+
+```bash
+{% for r in csv_rows %}echo "{{ r["server_name"] }}: {{ r["base_command"] }} {{ r["arg1"] }}{% if r["arg2"] != "-" %} {{ r["arg2"] }}{% endif %} - {{ r["description"] }}"
+{% endfor %}```
+
+一覧化した{{ csv_rows | length }}件について、それぞれが信頼できる配布元(公式npm/PyPIパッケージ)から取得されることを事前に確認します。
+
+### 3. 設定ファイルを作成する
+
+```bash
+sudo mkdir -p /etc/mcpo
+sudo tee /etc/mcpo/config.json > /dev/null <<'EOF'
+{
+  "mcpServers": {
+{% for r in csv_rows %}    "{{ r["server_name"] }}": {
+      "command": "{{ r["base_command"] }}",
+      "args": ["{{ r["arg1"] }}"{% if r["arg2"] != "-" %}, "{{ r["arg2"] }}"{% endif %}]
+    }{% if not loop.last %},{% endif %}
+{% endfor %}  }
+}
+EOF
+sudo chmod 640 /etc/mcpo/config.json
+```
+
+### 4. APIキー付きでmcpoを起動する
+
+```bash
+export MCPO_API_KEY="change-me-to-a-strong-random-key"
+mcpo --port 8000 --api-key "$MCPO_API_KEY" --config /etc/mcpo/config.json --hot-reload
+```
+
+`MCPO_API_KEY` はシェル履歴やコミットに残さず、環境変数またはシークレットストア経由で渡します。`--hot-reload` により `config.json` の変更を再起動なしで反映できます。
+
+### 5. OpenAPIドキュメントと疎通を確認する
+
+```bash
+{% for r in csv_rows %}curl -s -o /dev/null -w '{{ r["server_name"] }}: %{http_code}\n' -H "Authorization: Bearer $MCPO_API_KEY" http://localhost:8000/{{ r["server_name"] }}/openapi.json
+{% endfor %}curl -s -o /dev/null -w 'no-auth: %{http_code}\n' http://localhost:8000/{{ (csv_rows | first)["server_name"] }}/openapi.json
+```
+
+各サーバの `openapi.json` がHTTP 200を返すこと、APIキーなしのリクエストが200以外(401/403)で拒否されることを確認します。
+
+## 動作確認
+
+- 全{{ csv_rows | length }}件のMCPサーバについて `http://localhost:8000/<server_name>/openapi.json` がHTTP 200で返ること
+- `http://localhost:8000/<server_name>/docs`(Swagger UI)がブラウザまたは `curl` で表示できること
+- APIキーを付与しないリクエストが拒否され、`Authorization: Bearer` ヘッダー必須になっていること
+- `mcpo` の起動ログに各MCPサーバの起動失敗やクラッシュが記録されていないこと
+
+## 注意事項
+
+- `MCPO_API_KEY` は平文でリポジトリやログに残さず、シークレットストアで管理しローテーションする。漏洩時は即座に再発行しゲートウェイを再起動する。
+- `mcpo` はプロセス内で各MCPサーバコマンドをそのまま実行するため、`config.json` に登録するパッケージは公式配布元のものに限定し、任意の第三者パッケージを安易に追加しない。
+- インターネットに直接晒さず、リバースプロキシ(TLS終端)やファイアウォールの背後に配置したうえで、必要な送信元IPのみを許可する。
+- `--hot-reload` は設定ファイルの変更が無条件に反映されるため、`/etc/mcpo/config.json` への書き込み権限は最小限のユーザーに限定する。

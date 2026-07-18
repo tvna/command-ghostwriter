@@ -1,0 +1,147 @@
+# マルチクラウド推論エンドポイントの切替訓練 — {{ record_name }}
+
+{{ primary_cloud }}上のプライマリ推論エンドポイントに障害が発生したと想定し、Route 53のDNS切替で{{ secondary_cloud }}上のセカンダリ推論エンドポイントへ切り替える復旧訓練を、擬似障害の発生から検証・切り戻し・記録までの一連の流れで実施します。
+
+## 目的
+
+{{ record_name }} を提供するマルチクラウド構成において、プライマリ（{{ primary_cloud }}）障害時にRoute 53のchange-resource-record-setsでセカンダリ（{{ secondary_cloud }}）へ復旧できることを検証し、切り戻しと訓練結果の記録までを一連の手順として実行できるようになることを目指します。
+
+## 用語解説
+
+- **マルチクラウド構成**: 同一サービスを複数のクラウド事業者にまたがって稼働させ、単一プロバイダの障害による影響範囲を限定する構成
+- **ホストゾーン(Hosted Zone)**: Route 53上でドメインのDNSレコードを管理する単位。`{{ hosted_zone_id }}` のようなIDで識別される
+- **change-resource-record-sets**: Route 53のDNSレコードを追加・変更・削除するAPI操作。change-batchで変更内容をJSON形式で指定する
+- **TTL**: DNSレコードのキャッシュ有効期間（秒）。切替後もこの秒数が経過するまでは旧レコードを参照するクライアントが残り得る
+- **切り戻し(ロールバック)**: 訓練や障害対応で切り替えた状態を元(プライマリ)に戻すこと
+- **レイテンシ**: リクエストの送信からレスポンス受信までに要する時間
+
+## シナリオ設定
+
+{{ primary_cloud }}(`{{ primary_region }}`)上のプライマリ推論エンドポイント `{{ primary_target_hostname }}` に障害が発生したと仮定します。公開名 `{{ record_name }}` を、Route 53のホストゾーン `{{ hosted_zone_id }}` で管理するDNSレコード経由で、{{ secondary_cloud }}(`{{ secondary_region }}`)上のセカンダリ推論エンドポイント `{{ secondary_target_hostname }}` へ切り替える復旧訓練を実施します。現在のTTLは `{{ ttl_seconds }}` 秒、切替後の許容レイテンシは `{{ latency_threshold_ms }}` ミリ秒とします。
+
+## 手順
+
+### 1. プライマリ・セカンダリ両系の正常性を確認する
+
+```bash
+curl -sS -o /dev/null -w "primary status=%{http_code}\n" https://{{ primary_target_hostname }}/v1/predict
+curl -sS -o /dev/null -w "secondary status=%{http_code}\n" https://{{ secondary_target_hostname }}/v1/predict
+dig +short {{ record_name }}
+```
+
+両系とも200を返すこと、また現時点で `{{ record_name }}` の名前解決結果がプライマリ(`{{ primary_target_hostname }}`)を指していることを確認します。
+
+### 2. プライマリ障害を擬似的に発生させる
+
+```bash
+aws autoscaling update-auto-scaling-group \
+  --region {{ primary_region }} \
+  --auto-scaling-group-name {{ primary_asg_name }} \
+  --min-size 0 \
+  --desired-capacity 0
+```
+
+```bash
+curl -sS -o /dev/null -w "primary status=%{http_code}\n" --max-time 5 https://{{ primary_target_hostname }}/v1/predict
+```
+
+プライマリのAuto Scaling Groupの希望容量を0へ変更し、`{{ primary_target_hostname }}` への応答が得られなくなることを確認して障害発生を模擬します。
+
+### 3. change-resource-record-setsでDNSを切り替える
+
+```bash
+cat > change-batch.json <<JSON
+{
+  "Comment": "Failover drill: switch {{ record_name }} to secondary",
+  "Changes": [
+    {
+      "Action": "UPSERT",
+      "ResourceRecordSet": {
+        "Name": "{{ record_name }}",
+        "Type": "CNAME",
+        "TTL": {{ ttl_seconds }},
+        "ResourceRecords": [
+          { "Value": "{{ secondary_target_hostname }}" }
+        ]
+      }
+    }
+  ]
+}
+JSON
+
+aws route53 change-resource-record-sets \
+  --hosted-zone-id {{ hosted_zone_id }} \
+  --change-batch file://change-batch.json
+```
+
+実行結果に含まれる変更IDを控え、`aws route53 get-change --id <変更ID>` で反映状況(PENDING→INSYNC)を追跡できるようにします。
+
+### 4. 切替後の推論応答とレイテンシを検証する
+
+```bash
+dig +short {{ record_name }}
+for i in 1 2 3 4 5; do
+  curl -sS -o /dev/null -w "status=%{http_code} time_total=%{time_total}s\n" https://{{ record_name }}/v1/predict
+done
+```
+
+`{{ record_name }}` の名前解決結果が `{{ secondary_target_hostname }}` になっていることを確認します。`time_total` は秒単位のため1000倍してミリ秒に換算し、許容レイテンシ `{{ latency_threshold_ms }}` ミリ秒以内に収まっているかを判定します。TTL(`{{ ttl_seconds }}` 秒)の伝搬を考慮し、時間を置いて複数回確認します。
+
+### 5. 切り戻しと訓練結果の記録を行う
+
+```bash
+aws autoscaling update-auto-scaling-group \
+  --region {{ primary_region }} \
+  --auto-scaling-group-name {{ primary_asg_name }} \
+  --min-size 1 \
+  --desired-capacity 1
+```
+
+```bash
+cat > change-batch-rollback.json <<JSON
+{
+  "Comment": "Failover drill rollback: restore {{ record_name }} to primary",
+  "Changes": [
+    {
+      "Action": "UPSERT",
+      "ResourceRecordSet": {
+        "Name": "{{ record_name }}",
+        "Type": "CNAME",
+        "TTL": {{ ttl_seconds }},
+        "ResourceRecords": [
+          { "Value": "{{ primary_target_hostname }}" }
+        ]
+      }
+    }
+  ]
+}
+JSON
+
+aws route53 change-resource-record-sets \
+  --hosted-zone-id {{ hosted_zone_id }} \
+  --change-batch file://change-batch-rollback.json
+```
+
+```bash
+cat >> inference-failover-drill.log <<LOG
+$(date -u +%Y-%m-%dT%H:%M:%SZ) record={{ record_name }} contact={{ drill_contact }}
+LOG
+```
+
+プライマリのAuto Scaling Groupの希望容量を復旧させ、DNSレコードを `{{ primary_target_hostname }}` へ戻したうえで、訓練結果（切替所要時間・レイテンシ・気付いた問題点）を記録し {{ drill_contact }} へ共有します。
+
+## 動作確認
+
+- 手順1で両系とも200を返し、切替前の名前解決結果がプライマリ(`{{ primary_target_hostname }}`)であったこと
+- 手順3のchange-resource-record-sets実行後、`{{ record_name }}` の名前解決結果が `{{ secondary_target_hostname }}` になっていること
+- 手順4で切替後のレイテンシが `{{ latency_threshold_ms }}` ミリ秒以内に収まっていること
+- 手順5でDNSレコードが `{{ primary_target_hostname }}` へ切り戻り、プライマリのAuto Scaling Groupが元の容量(desired-capacity 1)に復旧していること
+- 訓練結果が記録され {{ drill_contact }} へ共有されていること
+
+## 注意事項
+
+- 本手順は復旧訓練であり実際の障害対応ではないことを、実施前に関係者へ周知する。
+- change-resource-record-setsの実行前に `{{ hosted_zone_id }}` が対象のホストゾーンであることを必ず確認する。誤ったゾーンへの変更は無関係のサービスに影響する。
+- TTL(`{{ ttl_seconds }}` 秒)が経過するまでは旧レコードを参照するクライアントが残り得るため、手順4の検証は時間を置いて複数回行う。
+- 手順5の切り戻しを怠るとセカンダリに向いたままになるため、訓練終了時には必ずプライマリへの復旧を確認してからクローズする。
+- 本番のAuto Scaling Groupを操作する訓練のため、メンテナンスウィンドウ内で実施し、実施前に関係者の承認を得る。

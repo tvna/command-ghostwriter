@@ -1,0 +1,99 @@
+# Playwrightによるヘッドレスブラウザ自動化基盤
+
+`npx playwright` を使い、Node.js環境にブラウザ本体と依存パッケージを導入し、サーバ上でヘッドレススクリーンショットを取得できる自動化基盤を構築します。
+
+## 目的
+
+サーバ上に専用の実行ユーザーと権限設計を伴うPlaywright実行環境を整備し、ヘッドレスブラウザによる画面取得を再現性高く運用できるようになることを目指します。
+
+## 用語解説
+
+- **Playwright**: Chromium/Firefox/WebKitをコード操作するブラウザ自動化ライブラリ。`npx playwright install` でブラウザ本体を取得する
+- **ヘッドレスモード**: 画面表示を伴わずにブラウザを実行するモード。サーバ上でのスクリーンショット取得やスクレイピングに用いる
+- **install-deps**: ブラウザ本体の実行に必要なOSレベルの共有ライブラリ群(フォント、GTK等)を導入するPlaywrightのサブコマンド
+- **実行ユーザー**: ブラウザプロセスを動かす専用の非rootユーザー。権限を最小化し、他プロセスへの影響を遮断する
+- **一時ファイル**: スクリーンショットの中間生成物やブラウザプロファイルなど、`{{ tmp_dir }}` に溜まる揮発性データ
+
+## シナリオ設定
+
+Node.js `{{ node_major_version }}` 系の上に Playwright `{{ playwright_version }}` を導入し、`{{ install_dir }}` を作業ディレクトリとします。取得対象ブラウザは `{{ target_browser }}`、実行ユーザーは `{{ run_user }}` とし、`{{ screenshot_url }}` のスクリーンショットを `{{ screenshot_output_path }}` に保存します。一時ファイルは `{{ tmp_dir }}` に集約し、`{{ tmp_retention_days }}` 日を超えたものを削除します。
+
+## 手順
+
+### 1. Node.jsとPlaywrightを導入する
+
+```bash
+sudo mkdir -p {{ install_dir }}
+cd {{ install_dir }}
+node --version
+npm init -y
+npm install --save-exact playwright@{{ playwright_version }}
+```
+
+Node.js本体は事前にNode.js {{ node_major_version }} 系がインストール済みであることを前提とします。バージョン確認で系統が一致しない場合はこの先に進まず、まずNode.jsの導入をやり直します。
+
+### 2. ブラウザと依存パッケージをインストールする
+
+```bash
+cd {{ install_dir }}
+npx playwright install {{ target_browser }}
+sudo npx playwright install-deps {{ target_browser }}
+```
+
+`install` はブラウザ本体を、`install-deps` はOSレベルの共有ライブラリを導入します。共有サーバでは `install-deps` にsudo権限が必要になる点に注意します。
+
+### 3. ヘッドレスでスクリーンショットを取得する
+
+```bash
+cd {{ install_dir }}
+mkdir -p {{ tmp_dir }}
+cat <<'SCRIPT' > screenshot.js
+const { chromium } = require("playwright");
+
+(async () => {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  await page.goto(process.env.TARGET_URL, { waitUntil: "networkidle" });
+  await page.screenshot({ path: process.env.OUTPUT_PATH });
+  await browser.close();
+})();
+SCRIPT
+TARGET_URL="{{ screenshot_url }}" OUTPUT_PATH="{{ screenshot_output_path }}" node screenshot.js
+```
+
+`{{ target_browser }}` 以外のブラウザを使う場合は `chromium` の部分をPlaywrightの対応モジュール名に置き換えます。
+
+### 4. 実行ユーザーと権限を設計する
+
+```bash
+sudo useradd --system --home-dir {{ install_dir }} --shell /usr/sbin/nologin {{ run_user }}
+sudo chown -R {{ run_user }}:{{ run_user }} {{ install_dir }}
+sudo chmod -R 750 {{ install_dir }}
+sudo -u {{ run_user }} node --version
+```
+
+ブラウザプロセスはroot権限を持たない `{{ run_user }}` で実行し、他ユーザーの資産に書き込めないよう `{{ install_dir }}` 配下の権限を絞ります。
+
+### 5. 一時ファイルの後始末を設定する
+
+```bash
+sudo tee /etc/cron.d/playwright-tmp-cleanup <<'CRON'
+0 3 * * * {{ run_user }} find {{ tmp_dir }} -type f -mtime +{{ tmp_retention_days }} -delete
+CRON
+find {{ tmp_dir }} -type f -mtime +{{ tmp_retention_days }} -print
+```
+
+`find ... -print` でまず削除対象を確認してから、cronによる定期削除に切り替えます。ブラウザプロファイルの一時コピーが `{{ tmp_dir }}` に残り続けるとディスク圧迫の原因になります。
+
+## 動作確認
+
+- `npx playwright install {{ target_browser }}` が完了し、`{{ install_dir }}` にブラウザバイナリが配置されていること
+- `sudo -u {{ run_user }} node screenshot.js` 相当の実行で `{{ screenshot_output_path }}` に画像ファイルが生成されること
+- `ls -l {{ install_dir }}` の所有者が `{{ run_user }}` になっており、他ユーザーの書き込み権限がないこと
+- `find {{ tmp_dir }} -type f -mtime +{{ tmp_retention_days }}` が空になる状態を維持できること
+
+## 注意事項
+
+- `install-deps` はディストリビューションのパッケージマネージャを操作するため、実行前に対象OSでの動作検証を行う。
+- スクレイピング対象サイト(`{{ screenshot_url }}`)の利用規約・robots.txtを確認したうえで実行する。規約確認自体は本手順の対象外とする。
+- 実行ユーザー `{{ run_user }}` にはログインシェルを与えず、ブラウザプロセスの権限を最小限に保つ。

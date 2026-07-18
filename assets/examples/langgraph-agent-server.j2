@@ -1,0 +1,100 @@
+# LangGraphエージェントサーバの構築とデプロイ
+
+`langgraph-cli` を使い、エージェントアプリを `langgraph dev` でローカル起動し、Dockerイメージ化した上で `langgraph up` によりAPIサーバとして公開します。
+
+## 目的
+
+`langgraph.json` によるグラフ定義とビルド設定の役割を理解し、ローカル開発サーバ(`langgraph dev`)とDockerベースの本番相当サーバ(`langgraph up`)の違いを踏まえて、エージェントAPIサーバを安全に構築・検証できるようになることを目指します。
+
+## 用語解説
+
+- **langgraph-cli**: LangGraphアプリの作成・ローカル起動・イメージビルド・サーバ起動を行うコマンドラインツール。`inmem` extraを付けて導入するとローカル開発用の依存関係も揃う
+- **langgraph.json**: グラフ定義(`graphs`)・依存関係(`dependencies`)・環境変数ファイル(`env`)・Pythonバージョンなどをまとめる設定ファイル。`langgraph dev` / `build` / `up` はすべてこのファイルを参照する
+- **langgraph dev**: Dockerを使わずローカルプロセスとしてAPIサーバを起動する開発用コマンド。ホットリロードに対応し、状態はローカルディレクトリに保存される
+- **langgraph build**: `langgraph.json` の定義をもとにDockerイメージをビルドするコマンド
+- **langgraph up**: ビルド済みの構成からDockerでAPIサーバ(Postgres/Redisを含む)を起動するコマンド。Dockerデーモンが必要
+- **グラフID**: `langgraph.json` の `graphs` に登録する識別子。APIから該当グラフを呼び出す際のアシスタント名の元になる
+
+## シナリオ設定
+
+プロジェクトディレクトリ `{{ project_dir }}`(Python {{ python_version }})にエージェントアプリを配置します。グラフIDは `{{ graph_id }}`、エントリポイントは `{{ graph_entrypoint }}` です。環境変数は `{{ env_file }}` で管理し、ローカル開発は `{{ dev_host }}:{{ dev_port }}`、Docker公開は `{{ up_port }}` 番ポートを使用します。イメージ名は `{{ image_name }}:{{ image_tag }}`(対象プラットフォーム: `{{ build_platform }}`)とします。
+
+## 手順
+
+### 1. langgraph-cliを導入する
+
+```bash
+python3 -m venv {{ project_dir }}/.venv
+source {{ project_dir }}/.venv/bin/activate
+pip install -U "langgraph-cli[inmem]"
+langgraph --version
+```
+
+### 2. langgraph.jsonを作成する
+
+```bash
+cd {{ project_dir }}
+cat > langgraph.json <<'EOF'
+{
+  "dependencies": ["."],
+  "graphs": {
+    "{{ graph_id }}": "{{ graph_entrypoint }}"
+  },
+  "env": "{{ env_file }}",
+  "python_version": "{{ python_version }}"
+}
+EOF
+```
+
+`{{ env_file }}` にはAPIキー等の秘密情報を書き、バージョン管理には含めません。
+
+### 3. langgraph devでローカル起動する
+
+```bash
+cd {{ project_dir }}
+source .venv/bin/activate
+langgraph dev --host {{ dev_host }} --port {{ dev_port }} --no-browser
+```
+
+ホットリロード付きのローカルサーバが起動し、状態はローカルディレクトリに保存されます。動作確認後は Ctrl+C で停止します。
+
+### 4. langgraph buildでイメージ化する
+
+```bash
+cd {{ project_dir }}
+langgraph build -t {{ image_name }}:{{ image_tag }} --platform {{ build_platform }}
+docker images {{ image_name }}
+```
+
+### 5. langgraph upでサーバを起動する
+
+```bash
+cd {{ project_dir }}
+langgraph up --port {{ up_port }} --wait
+docker ps --filter "ancestor={{ image_name }}:{{ image_tag }}"
+```
+
+`--wait` により、依存コンテナ(Postgres/Redis含む)がヘルシーになるまで起動コマンドが待機します。
+
+### 6. APIエンドポイントを確認する
+
+```bash
+curl -s http://{{ dev_host }}:{{ up_port }}/ok
+curl -s -o /dev/null -w "%{http_code}\n" http://{{ dev_host }}:{{ up_port }}/docs
+curl -s -X POST http://{{ dev_host }}:{{ up_port }}/assistants/search -H "Content-Type: application/json" -d "{}"
+```
+
+## 動作確認
+
+- `langgraph dev` 起動時に `{{ dev_host }}:{{ dev_port }}` へのアクセスでAPIサーバが応答すること
+- `docker images {{ image_name }}` に `{{ image_name }}:{{ image_tag }}` が表示されること
+- `langgraph up` 実行後、`curl http://{{ dev_host }}:{{ up_port }}/ok` が正常応答を返すこと
+- `http://{{ dev_host }}:{{ up_port }}/docs` がHTTP 200を返し、OpenAPIドキュメントが閲覧できること
+- `/assistants/search` の呼び出し結果に、グラフID `{{ graph_id }}` に対応するアシスタントが含まれること
+
+## 注意事項
+
+- `{{ env_file }}` に記載するAPIキー等はシェル履歴やコミットに残さず、環境変数またはシークレットストア経由で渡す。
+- `langgraph up` はDockerデーモンおよびDocker Composeが必要。未導入の環境では事前にインストールする。
+- `langgraph dev` と `langgraph up` は永続化方式が異なるため、`langgraph dev` で確認した状態が `langgraph up` 環境にそのまま引き継がれるとは限らない。
+- 本番相当での継続運用にあたっては、LangSmithプラットフォームとの認証・ライセンス要件が変更される場合があるため、公開前に公式ドキュメントで最新の要件を確認する。

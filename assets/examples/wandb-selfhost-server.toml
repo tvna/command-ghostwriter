@@ -1,0 +1,11 @@
+wandb_image = "wandb/local"
+container_name = "wandb-local"
+http_port = 8080
+data_volume_path = "/data/wandb"
+wandb_host_url = "http://wandb.internal.example.com:8080"
+admin_email = "admin@example.com"
+license_note = "Team向けトライアルライセンスキーをwandb.ai/authorizeで取得し管理コンソールで登録"
+default_project = "sample-project"
+api_key_note = "APIキーはWeb UIのUser SettingsページからPersonal API Keyとして発行し、環境変数WANDB_API_KEY経由でのみ渡す"
+backup_dest_path = "/backup/wandb"
+backup_schedule_note = "毎日03:00にcronでコンテナ停止後の全量バックアップを取得する"

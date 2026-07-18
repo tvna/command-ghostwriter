@@ -1,0 +1,27 @@
+work_dir: /opt/presidio/pii-redaction
+venv_dir: /opt/presidio/pii-redaction/.venv
+spacy_model: ja_core_news_lg
+spacy_lang_code: ja
+entities:
+  - PERSON
+  - PHONE_NUMBER
+  - EMAIL_ADDRESS
+  - CREDIT_CARD
+score_threshold: 0.6
+custom_recognizer:
+  entity_name: EMPLOYEE_ID
+  pattern: "EMP-[0-9]{6}"
+  score: 0.85
+  context_words:
+    - 社員番号
+    - employee id
+sample:
+  dir: /opt/presidio/pii-redaction/samples
+  input_file: /opt/presidio/pii-redaction/samples/input.txt
+  output_file: /opt/presidio/pii-redaction/samples/output.txt
+anonymize_operator: replace
+evaluation:
+  dir: /opt/presidio/pii-redaction/eval
+  log_path: /opt/presidio/pii-redaction/eval/results.csv
+  fp_threshold: 5
+  fn_threshold: 0

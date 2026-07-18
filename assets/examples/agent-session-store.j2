@@ -1,0 +1,81 @@
+# Redisによるエージェント会話セッションの永続化
+
+`redis-cli` を使い、エージェントの会話セッションをTTL付きで書き込み、キーの残存状況とメモリ使用量を運用として監視します。
+
+## 目的
+
+セッションキーの命名規則とTTL設計を理解し、エージェントの会話状態をRedisに安全に保全しつつ、`SCAN`・`TTL`・`INFO`で残存状況とメモリ使用量を継続的に監視できるようになることを目指します。
+
+## 用語解説
+
+- **TTL（Time To Live）**: キーが自動的に削除されるまでの残り秒数。`EXPIRE`で設定し、`TTL`コマンドで残り秒数を確認できる
+- **SCAN**: キー空間を少しずつ走査するコマンド。`KEYS`と異なりRedisをブロックしないため、本番環境での棚卸しに適する
+- **HSET（ハッシュ）**: 1つのキーに複数フィールドを持たせるRedisのデータ構造。セッションの状態や直近の発話などをフィールド単位で保持できる
+- **AOF（Append Only File）**: 書き込みコマンドを追記ログとして記録する永続化方式。Redis再起動後もセッションデータを復元できる
+- **maxmemory**: Redisが使用できるメモリの上限設定。上限に近づくと追い出しポリシーに応じてキーが削除される場合がある
+
+## シナリオ設定
+
+永続化設定「{{ persistence_note }}」を前提に、キー命名規則 `{{ key_prefix }}:<agent_id>:<session_id>` で、エージェント `{{ sample_agent_id }}` のセッション `{{ sample_session_id }}` をTTL `{{ session_ttl_seconds }}` 秒で書き込みます。メモリ運用方針は「{{ memory_limit_note }}」です。
+
+## 手順
+
+### 1. Redisの永続化設定を確認する
+
+```bash
+redis-cli CONFIG GET appendonly
+redis-cli CONFIG GET appendfsync
+redis-cli CONFIG GET dir
+```
+
+想定する永続化設定は「{{ persistence_note }}」です。セッションデータはRedis再起動時に消えると困るため、書き込み前に永続化が有効なことを確認します。
+
+### 2. セッションキーの命名規則を設計する
+
+```bash
+echo "命名規則: {{ key_prefix }}:<agent_id>:<session_id>"
+redis-cli --scan --pattern '{{ key_prefix }}:*' --count {{ scan_count }}
+```
+
+命名規則は `{{ key_prefix }}:<agent_id>:<session_id>` とし、`agent_id`ごとに走査・削除を絞り込めるようにします。既存キーとの衝突がないことを`--scan`で確認します。
+
+### 3. TTL付きでセッションを書き込む
+
+```bash
+redis-cli HSET {{ key_prefix }}:{{ sample_agent_id }}:{{ sample_session_id }} state active last_turn "{{ sample_last_turn }}"
+redis-cli EXPIRE {{ key_prefix }}:{{ sample_agent_id }}:{{ sample_session_id }} {{ session_ttl_seconds }}
+redis-cli TTL {{ key_prefix }}:{{ sample_agent_id }}:{{ sample_session_id }}
+```
+
+`HSET`で会話状態を保存したのち、`EXPIRE`でTTL `{{ session_ttl_seconds }}` 秒を設定します。TTLを設定し忘れると、終了したセッションがメモリに残り続けます。
+
+### 4. SCANとTTLで残存状況を確認する
+
+```bash
+redis-cli --scan --pattern '{{ key_prefix }}:*' --count {{ scan_count }}
+redis-cli TTL {{ key_prefix }}:{{ sample_agent_id }}:{{ sample_session_id }}
+redis-cli DBSIZE
+```
+
+`--scan`はRedisをブロックしないため、`KEYS *`の代わりに定期棚卸しで使用します。TTLが負の値(`-1`: 無期限、`-2`: 存在しない)になっていないかを確認します。
+
+### 5. INFOでメモリ使用量を監視する
+
+```bash
+redis-cli INFO memory | grep -E 'used_memory_human|maxmemory_human'
+redis-cli MEMORY USAGE {{ key_prefix }}:{{ sample_agent_id }}:{{ sample_session_id }}
+```
+
+メモリ運用方針「{{ memory_limit_note }}」に沿って、`used_memory_human`が上限に近づいていないかを確認します。
+
+## 動作確認
+
+- `redis-cli TTL {{ key_prefix }}:{{ sample_agent_id }}:{{ sample_session_id }}`が`0`より大きく`{{ session_ttl_seconds }}`以下の値を返すこと
+- `redis-cli --scan --pattern '{{ key_prefix }}:*'`に書き込んだセッションキーが表示されること
+- `redis-cli INFO memory`の`used_memory_human`が「{{ memory_limit_note }}」の範囲内であること
+
+## 注意事項
+
+- TTLが切れるとセッションは自動削除される。会話継続中は各ターンで`EXPIRE`を再実行し、TTLを延長すること。
+- `KEYS *`は全キーを一括走査しRedisをブロックするため、本番環境では使用せず`--scan`を使う。
+- メモリ運用方針「{{ memory_limit_note }}」を超過すると、`maxmemory-policy`次第では想定外のセッションが追い出される。閾値超過時は手順4の`DBSIZE`と手順5の`used_memory_human`を併せて確認し、TTLの短縮や不要セッションの削除を検討する。

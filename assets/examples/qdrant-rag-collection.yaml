@@ -1,0 +1,17 @@
+qdrant_image: "qdrant/qdrant:v1.9.0"
+container_name: "qdrant-rag"
+rest_port: 6333
+grpc_port: 6334
+storage_host_path: "/data/qdrant-rag/storage"
+storage_container_path: "/qdrant/storage"
+snapshot_host_path: "/data/qdrant-rag/snapshots"
+snapshot_container_path: "/qdrant/snapshots"
+collection_name: "rag_docs"
+vector_size: 1536
+distance_metric: "Cosine"
+embedding_model_note: "OpenAI text-embedding-3-small(1536次元)"
+doc_source_note: "社内ナレッジベース(Markdown文書)をチャンク分割したもの"
+points_file_path: "/data/qdrant-rag/points.json"
+rag_app_note: "社内ナレッジベース検索チャットボット"
+search_top_k: 5
+score_threshold: "0.70"

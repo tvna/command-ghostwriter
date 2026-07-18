@@ -1,0 +1,87 @@
+# Airflowによる機械学習パイプラインの定期実行 — {{ dag_id }}
+
+モデル `{{ model_name }}` の学習・評価・成果物登録を行うDAG `{{ dag_id }}` を Airflow に配置し、単体確認からスケジュール運用・失敗時通知までを設定する手順です。
+
+## 目的
+
+学習・評価・成果物登録の3タスクからなるDAGを安全にAirflow環境へ投入し、`airflow` CLIによる単体確認、スケジュール実行への移行、手動トリガでの動作確認、そして失敗時のリトライ・通知設定までを一貫して行えるようになることを目指します。
+
+## 用語解説
+
+- **DAG(Directed Acyclic Graph)**: Airflowにおけるパイプライン定義の単位。タスクの依存関係を非巡回有向グラフとして表現する
+- **タスク(Task)**: DAGを構成する個々の処理単位。本パイプラインでは学習・評価・成果物登録の3タスクを持つ
+- **`airflow tasks test`**: DAGRunを作成せず、指定タスクを単発実行して動作確認するCLIコマンド。スケジューラの状態やXComの永続化に影響しない
+- **DAG Run**: DAGが1回実行された記録。スケジュール実行または手動トリガのいずれかで生成される
+- **pause/unpause**: DAGのスケジューラによる自動実行を一時停止・再開する状態。新規配置直後のDAGは既定でpause状態になる
+- **`email_on_failure`**: タスク失敗時にSMTP経由でメール通知するDAG/タスクのパラメータ
+
+## シナリオ設定
+
+DAGファイル `{{ dag_source_path }}` を Airflow ホーム `{{ airflow_home }}` に配置し、DAG `{{ dag_id }}` として登録します。タスク構成は学習(`{{ train_task_id }}`) → 評価(`{{ evaluate_task_id }}`) → 成果物登録(`{{ register_task_id }}`)の順で依存し、成果物は `{{ artifact_registry_uri }}` に登録します。評価タスクは指標がしきい値 `{{ eval_metric_threshold }}` を満たすことを確認します。スケジュールは `{{ schedule_cron }}`(cron形式)とし、失敗時は `{{ retries }}` 回・`{{ retry_delay_minutes }}` 分間隔でリトライしたうえで `{{ notify_email }}` に通知します。
+
+## 手順
+
+### 1. DAGファイルの配置
+
+```bash
+sudo -u airflow cp {{ dag_source_path }} {{ airflow_home }}/dags/{{ dag_id }}.py
+sudo -u airflow python3 -m py_compile {{ airflow_home }}/dags/{{ dag_id }}.py
+airflow dags list | grep {{ dag_id }}
+```
+
+配置前にコンパイルチェックで構文エラーを検出し、`airflow dags list` に `{{ dag_id }}` が表示されることでスケジューラがDAGを認識したことを確認します。
+
+### 2. airflow tasks testによる単体確認
+
+```bash
+airflow tasks test {{ dag_id }} {{ train_task_id }} {{ test_execution_date }}
+airflow tasks test {{ dag_id }} {{ evaluate_task_id }} {{ test_execution_date }}
+airflow tasks test {{ dag_id }} {{ register_task_id }} {{ test_execution_date }}
+```
+
+3タスクを実行日 `{{ test_execution_date }}` で単発実行し、DAG Runを作らずにタスク個別の動作を確認します。評価タスクの出力でしきい値 `{{ eval_metric_threshold }}` の判定ロジックが正しく動くことも合わせて確認します。
+
+### 3. DAGの有効化とスケジュール設定
+
+```bash
+grep -n "schedule" {{ airflow_home }}/dags/{{ dag_id }}.py
+airflow dags unpause {{ dag_id }}
+airflow dags list --dag-id {{ dag_id }}
+```
+
+DAG定義内のスケジュール設定が `{{ schedule_cron }}` になっていることを確認したうえで `unpause` し、以降はスケジューラによる定期実行が有効になります。
+
+### 4. 手動トリガと実行監視
+
+```bash
+airflow dags trigger {{ dag_id }} --exec-date {{ manual_trigger_exec_date }}
+airflow dags list-runs -d {{ dag_id }} --state running
+airflow tasks states-for-dag-run {{ dag_id }} {{ manual_trigger_exec_date }}
+```
+
+スケジュール開始前に手動トリガで1回分のDAG Runを実行し、`states-for-dag-run` で3タスクがすべて `success` になるまで状態を監視します。
+
+### 5. 失敗時リトライと通知の設定
+
+```bash
+grep -nE "retries|retry_delay|email_on_failure|email" {{ airflow_home }}/dags/{{ dag_id }}.py
+airflow config get-value smtp smtp_host
+airflow config get-value smtp smtp_mail_from
+```
+
+DAG定義側で `retries={{ retries }}`・`retry_delay`(分換算で {{ retry_delay_minutes }} 分)・`email_on_failure` 宛先 `{{ notify_email }}` が設定されていることと、`airflow.cfg` のSMTP設定が有効になっていることを確認します。
+
+## 動作確認
+
+- Step 2 の3タスクすべてが `airflow tasks test` でエラーなく完了すること
+- `airflow dags list --dag-id {{ dag_id }}` で `paused` が `False` になっていること
+- Step 4 の手動トリガによるDAG Runで `{{ train_task_id }}` → `{{ evaluate_task_id }}` → `{{ register_task_id }}` の順に全タスクが `success` になること
+- `{{ artifact_registry_uri }}` に学習成果物が登録されていること
+- 失敗を意図的に発生させた場合に `{{ retries }}` 回のリトライ後、`{{ notify_email }}` へ通知メールが届くこと(本手順の範囲では設定確認までとし、実際の通知試験は別途実施する)
+
+## 注意事項
+
+- 新規配置したDAGは既定でpause状態のため、Step 3の `unpause` を忘れるとスケジュール実行されない。
+- `airflow tasks test` はDAG Runを作成せずXComも永続化しないため、タスク間データ引き継ぎを含めた結合確認にはStep 4の手動トリガ実行が必要。
+- 本番のスケジュール(`{{ schedule_cron }}`)を有効化する前に、必ずStep 2・Step 4で正常終了を確認する。評価しきい値 `{{ eval_metric_threshold }}` 未達のまま成果物登録に進まないよう、評価タスクの合否判定を先に確認する。
+- SMTP設定(`smtp_host` 等)が未設定の環境では `email_on_failure` を有効にしても通知が届かないため、Step 5で必ず設定値を確認する。

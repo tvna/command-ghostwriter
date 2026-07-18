@@ -1,0 +1,97 @@
+# AWS CLIでSageMakerリアルタイム推論エンドポイントを構築する — {{ endpoint_name }}
+
+`aws sagemaker` コマンドを使い、モデルアーティファクトのS3配置からモデル登録・エンドポイント構成定義・エンドポイント作成、そして `invoke-endpoint` による推論呼び出し検証までを一巡します。
+
+## 目的
+
+SageMakerのリアルタイム推論エンドポイントを構成する3つのリソース（モデル・エンドポイント設定・エンドポイント）の関係を理解し、CLIだけでモデルのデプロイから推論検証までを一人で完結できるようになることを目指します。
+
+## 用語解説
+
+- **モデル(Model)**: 推論コンテナイメージ(`Image`)と学習済みモデルアーティファクトの格納先(`ModelDataUrl`)、実行ロール(`execution-role-arn`)を紐づけたSageMaker上のリソース
+- **エンドポイント設定(EndpointConfig)**: どのモデルを、どのインスタンスタイプで、何台使って配信するか（プロダクションバリアント）を定義する設定
+- **プロダクションバリアント(ProductionVariant)**: エンドポイント設定内の配信単位。`VariantName` でトラフィック振り分け先を識別する
+- **エンドポイント(Endpoint)**: エンドポイント設定を実際に起動し、推論リクエストを受け付ける常時稼働のホスティングリソース。起動中は継続課金される
+- **ModelDataUrl**: モデルアーティファクト(`model.tar.gz`)を格納するS3 URI
+- **invoke-endpoint**: エンドポイントに対して1回の推論リクエストを送るAPI呼び出し。`aws sagemaker-runtime` サブコマンド配下にある
+
+## シナリオ設定
+
+学習済みモデルアーティファクト `{{ model_artifact_local_path }}` を、S3バケット `{{ s3_bucket }}` の `{{ s3_key_prefix }}` 配下に配置します。推論コンテナイメージ `{{ container_image_uri }}` と実行ロール `{{ execution_role_arn }}` を使ってモデル `{{ model_name }}` を登録し、インスタンスタイプ `{{ instance_type }}`・台数 `{{ initial_instance_count }}` のエンドポイント設定 `{{ endpoint_config_name }}` を経てエンドポイント `{{ endpoint_name }}` を作成します。プロファイル `{{ profile }}`・リージョン `{{ region }}` で操作し、最後に `{{ invoke_payload_path }}` を入力として推論を検証します。
+
+## 手順
+
+### 1. モデルアーティファクトをS3に配置する
+
+```bash
+aws s3 cp {{ model_artifact_local_path }} s3://{{ s3_bucket }}/{{ s3_key_prefix }}/model.tar.gz \
+  --profile {{ profile }} --region {{ region }}
+
+aws s3 ls s3://{{ s3_bucket }}/{{ s3_key_prefix }}/ \
+  --profile {{ profile }} --region {{ region }}
+```
+
+### 2. create-modelでモデルを登録する
+
+```bash
+aws sagemaker create-model \
+  --profile {{ profile }} --region {{ region }} \
+  --model-name {{ model_name }} \
+  --primary-container Image={{ container_image_uri }},ModelDataUrl=s3://{{ s3_bucket }}/{{ s3_key_prefix }}/model.tar.gz \
+  --execution-role-arn {{ execution_role_arn }}
+```
+
+### 3. create-endpoint-configで構成を定義する
+
+```bash
+aws sagemaker create-endpoint-config \
+  --profile {{ profile }} --region {{ region }} \
+  --endpoint-config-name {{ endpoint_config_name }} \
+  --production-variants VariantName={{ variant_name }},ModelName={{ model_name }},InitialInstanceCount={{ initial_instance_count }},InstanceType={{ instance_type }}
+```
+
+### 4. create-endpointでエンドポイントを作成する
+
+エンドポイントの起動には数分かかるため、`wait` サブコマンドで `InService` になるまで待機してから状態を確認します。
+
+```bash
+aws sagemaker create-endpoint \
+  --profile {{ profile }} --region {{ region }} \
+  --endpoint-name {{ endpoint_name }} \
+  --endpoint-config-name {{ endpoint_config_name }}
+
+aws sagemaker wait endpoint-in-service \
+  --profile {{ profile }} --region {{ region }} \
+  --endpoint-name {{ endpoint_name }}
+
+aws sagemaker describe-endpoint \
+  --profile {{ profile }} --region {{ region }} \
+  --endpoint-name {{ endpoint_name }} \
+  --query 'EndpointStatus' --output text
+```
+
+### 5. invoke-endpointで推論を検証する
+
+```bash
+aws sagemaker-runtime invoke-endpoint \
+  --profile {{ profile }} --region {{ region }} \
+  --endpoint-name {{ endpoint_name }} \
+  --content-type {{ invoke_content_type }} \
+  --body fileb://{{ invoke_payload_path }} \
+  {{ invoke_output_path }}
+
+cat {{ invoke_output_path }}
+```
+
+## 動作確認
+
+- 手順4の `describe-endpoint` で `EndpointStatus` が `InService` になっていること
+- 手順5の `invoke-endpoint` がエラーなく完了し、`{{ invoke_output_path }}` に推論結果が出力されること
+- AWSマネジメントコンソールまたは `describe-endpoint` で、意図した `{{ instance_type }}` × `{{ initial_instance_count }}` 台構成になっていること
+
+## 注意事項
+
+- エンドポイント `{{ endpoint_name }}` は `InService` の間、インスタンス起動中として継続課金される。検証が終わったら `aws sagemaker delete-endpoint`・`delete-endpoint-config`・`delete-model` の順で不要なリソースを削除する。
+- `{{ execution_role_arn }}` にはモデルアーティファクトの読み取り(S3)・コンテナイメージの取得(ECR)・ログ出力(CloudWatch Logs)に必要な最小権限のみを付与し、不要な管理者権限を持たせない。
+- `{{ invoke_payload_path }}` に業務データを含む場合、シェル履歴やログ、CI出力に生データが残らないよう取り扱いに注意する。
+- 本番トラフィックを受けるエンドポイントを更新する場合は、`create-endpoint` の再実行ではなく `update-endpoint` でブルーグリーン的な切替を検討し、無停止更新の要否を事前に確認する。

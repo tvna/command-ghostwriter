@@ -1,0 +1,4 @@
+alert_id,detected_at,endpoint,backing_service,log_dir,technique_category,severity,guardrail_triggered
+ALERT-2026071801,2026-07-18T09:12:00+09:00,/api/v1/chat/completions,llm-gateway.service,/var/log/llm-gateway,system_prompt_override,Critical,false
+ALERT-2026071802,2026-07-18T09:15:00+09:00,/api/v1/agent/tool-call,agent-orchestrator.service,/var/log/agent-orchestrator,tool_invocation_injection,High,true
+ALERT-2026071803,2026-07-18T10:03:00+09:00,/api/v1/rag/query,rag-query.service,/var/log/rag-query,data_exfiltration_attempt,Medium,true

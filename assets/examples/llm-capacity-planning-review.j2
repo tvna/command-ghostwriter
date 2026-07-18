@@ -1,0 +1,109 @@
+# 推論基盤キャパシティの定期棚卸しと増設計画
+
+PromQLとDCGMメトリクスを使い、トークンスループットとGPU使用率・メモリ使用率の推移から推論基盤の空き容量を定期的に棚卸しし、増設・縮退の判断材料を整えます。
+
+## 目的
+
+`vllm:generation_tokens_total` によるスループット推移と `DCGM_FI_DEV_GPU_UTIL` 等によるGPU飽和度を集計し、ピーク時の余裕率を算出したうえで増設・縮退の判断基準と照合し、棚卸し結果を次回レビューへ引き継げるようになることを目指します。
+
+## 用語解説
+
+- **PromQL**: Prometheusのクエリ言語。`rate()`は単位時間あたりの増加量、`avg_over_time()` / `max_over_time()`は指定期間内の平均・最大値を算出する関数
+- **DCGM(Data Center GPU Manager)**: NVIDIAが提供するGPU監視基盤。`DCGM_FI_DEV_GPU_UTIL`(GPU使用率)や`DCGM_FI_DEV_FB_USED` / `DCGM_FI_DEV_FB_FREE`(GPUメモリの使用量・空き容量)などのfield IDでメトリクスを公開する
+- **スループット**: 単位時間あたりに処理されるトークン数。ここでは`vllm:generation_tokens_total`(生成トークンの累積カウンタ)から算出する
+- **飽和度**: GPU使用率やメモリ使用率が上限にどれだけ近づいているかを示す割合
+- **余裕率(headroom)**: ピーク使用率に対して残っている処理能力の割合。本手順では `100 - ピークGPU使用率` で概算する
+- **棚卸し**: 定期的に現状のリソース状況を洗い出し、判断基準と照合したうえで記録・引き継ぎを行う業務プロセス
+
+## シナリオ設定
+
+対象は{{ csv_rows | length }}台のGPUノードです。直近{{ csv_rows[0]["review_period_days"] }}日間のデータをPrometheus(`{{ csv_rows[0]["prometheus_url"] }}`)から取得し、余裕率の目標は{{ csv_rows[0]["headroom_target_percent"] }}%以上、ピークGPU使用率が{{ csv_rows[0]["expansion_threshold_percent"] }}%以上で増設検討、平均GPU使用率が{{ csv_rows[0]["reduction_threshold_percent"] }}%以下で縮退候補と判断します。
+
+| node_name | model_name | avg/peak util | mem used | action |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["node_name"] }} | {{ r["model_name"] }} | {{ r["gpu_util_avg_percent"] }}% / {{ r["gpu_util_peak_percent"] }}% | {{ r["gpu_mem_used_percent"] }}% | {{ r["action"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. PromQLで期間中のスループット推移を取得する
+
+`query_range` APIで直近{{ csv_rows[0]["review_period_days"] }}日間の生成トークンスループット(tokens/sec)の推移を1時間刻みで取得します。
+
+```bash
+PROM_URL="{{ csv_rows[0]["prometheus_url"] }}"
+END=$(date +%s)
+START=$(( END - {{ csv_rows[0]["review_period_days"] }} * 86400 ))
+{% for r in csv_rows %}echo "=== {{ r["node_name"] }}({{ r["model_name"] }})のスループット推移 ==="
+curl -s --data-urlencode "query=sum(rate(vllm:generation_tokens_total{model_name=\"{{ r["model_name"] }}\"}[1h]))" --data-urlencode "start=$START" --data-urlencode "end=$END" --data-urlencode "step=3600" "$PROM_URL/api/v1/query_range" | jq -r '.data.result[0].values[-1][1] // "0"'
+{% endfor %}
+```
+
+### 2. GPU使用率・メモリの飽和度を集計する
+
+DCGMメトリクスから期間中のGPU使用率(平均・最大)とメモリ使用率(平均)を集計します。
+
+```bash
+PROM_URL="{{ csv_rows[0]["prometheus_url"] }}"
+{% for r in csv_rows %}echo "=== {{ r["node_name"] }}: GPU使用率・メモリ飽和度({{ csv_rows[0]["review_period_days"] }}日間) ==="
+curl -s --data-urlencode "query=avg_over_time(DCGM_FI_DEV_GPU_UTIL{Hostname=\"{{ r["node_name"] }}\"}[{{ csv_rows[0]["review_period_days"] }}d:1h])" "$PROM_URL/api/v1/query" | jq -r '"avg_util=" + (.data.result[0].value[1] // "0")'
+curl -s --data-urlencode "query=max_over_time(DCGM_FI_DEV_GPU_UTIL{Hostname=\"{{ r["node_name"] }}\"}[{{ csv_rows[0]["review_period_days"] }}d:1h])" "$PROM_URL/api/v1/query" | jq -r '"peak_util=" + (.data.result[0].value[1] // "0")'
+curl -s --data-urlencode "query=avg_over_time((DCGM_FI_DEV_FB_USED{Hostname=\"{{ r["node_name"] }}\"} / (DCGM_FI_DEV_FB_USED{Hostname=\"{{ r["node_name"] }}\"} + DCGM_FI_DEV_FB_FREE{Hostname=\"{{ r["node_name"] }}\"}) * 100)[{{ csv_rows[0]["review_period_days"] }}d:1h])" "$PROM_URL/api/v1/query" | jq -r '"mem_used_percent=" + (.data.result[0].value[1] // "0")'
+{% endfor %}
+```
+
+出力値は台帳の `gpu_util_avg_percent` / `gpu_util_peak_percent` / `gpu_mem_used_percent` 列に反映します(現在の台帳値は前回棚卸し時点のものです)。
+
+### 3. ピーク時の余裕率を算出する
+
+```bash
+{% for r in csv_rows %}headroom=$(( 100 - {{ r["gpu_util_peak_percent"] }} ))
+echo "{{ r["node_name"] }}: ピークGPU使用率 {{ r["gpu_util_peak_percent"] }}% / メモリ使用率 {{ r["gpu_mem_used_percent"] }}% -> 余裕率 ${headroom}%(目標 {{ r["headroom_target_percent"] }}%以上)"
+{% endfor %}
+```
+
+### 4. 増設・縮退の判断基準と照合する
+
+ピークGPU使用率が閾値以上なら増設検討、平均GPU使用率が閾値以下なら縮退候補、それ以外は監視継続と判定します。
+
+```bash
+{% for r in csv_rows %}if [ {{ r["gpu_util_peak_percent"] }} -ge {{ r["expansion_threshold_percent"] }} ]; then
+    verdict="増設検討"
+elif [ {{ r["gpu_util_avg_percent"] }} -le {{ r["reduction_threshold_percent"] }} ]; then
+    verdict="縮退候補"
+else
+    verdict="監視継続"
+fi
+echo "{{ r["node_name"] }}: 判定=${verdict}(台帳のaction列: {{ r["action"] }})"
+{% endfor %}
+```
+
+判定結果(`${verdict}`)が台帳の `action` 列と一致しない場合は、台帳側を最新の判定結果に更新します。
+
+### 5. 棚卸し結果を記録し、次回への引き継ぎ事項をまとめる
+
+```bash
+cat <<'EOF' > /tmp/llm-capacity-review-$(date '+%Y%m%d').md
+# 推論基盤キャパシティ棚卸し結果
+対象ノード数: {{ csv_rows | length }}
+増設候補・縮退候補を手順4の判定結果から転記し、次回棚卸しまでの対応期限を記載する。
+EOF
+{% for r in csv_rows %}echo "- {{ r["node_name"] }}({{ r["model_name"] }}): action={{ r["action"] }}" >> /tmp/llm-capacity-review-$(date '+%Y%m%d').md
+{% endfor %}
+cat /tmp/llm-capacity-review-$(date '+%Y%m%d').md
+```
+
+## 動作確認
+
+- 手順1の`query_range`が各ノードについて空でない時系列データ(`values`配列)を返すこと
+- 手順2で各ノードの`avg_util` / `peak_util` / `mem_used_percent`が数値として取得できること
+- 手順3で算出した余裕率が、目標値{{ csv_rows[0]["headroom_target_percent"] }}%と比較可能な数値として出力されること
+- 手順4の判定結果(`${verdict}`)が、台帳の`action`列({{ csv_rows | map(attribute="action") | join(" / ") }})と一致していること
+- 手順5で棚卸し結果ファイルが作成され、全{{ csv_rows | length }}件分の`action`が記録されていること
+
+## 注意事項
+
+- DCGMメトリクスの`Hostname`ラベルは環境のリレーベル設定によって異なる場合があるため、実際のラベル名を事前に`{{ csv_rows[0]["prometheus_url"] }}/api/v1/labels`等で確認してからクエリを流用する。
+- Prometheusの保持期間(retention)が{{ csv_rows[0]["review_period_days"] }}日未満の場合、過去分のデータが欠落し、手順1・2の推移や集計が正しく取得できない。
+- 余裕率のしきい値({{ csv_rows[0]["headroom_target_percent"] }}%)や増設・縮退の閾値は用途やSLAにより調整が必要であり、固定値のまま鵜呑みにしない。
+- 増設(発注・搬入)や縮退(スケールイン)の実施そのものは本手順の対象外であり、判断材料の整備と記録までをゴールとする。

@@ -1,0 +1,17 @@
+subscription_name = "Contoso-AI-Platform"
+subscription_id = "12345678-1234-1234-1234-123456789012"
+resource_group = "rg-openai-prod"
+location = "japaneast"
+account_name = "aoai-prod-jpe"
+sku_name = "S0"
+deployment_name = "gpt-4o-prod"
+model_name = "gpt-4o"
+model_version = "2024-08-06"
+capacity = 10
+api_version = "2024-10-21"
+principal_object_id = "11111111-2222-3333-4444-555555555555"
+access_role_name = "Cognitive Services OpenAI User"
+test_prompt_text = "Azure OpenAIの疎通確認用テストプロンプトです。1文で自己紹介してください"
+max_tokens = 100
+key_rotation_policy_note = "90日ごとにkey1とkey2を交互に再生成し、旧キーは切り替え後のロールアウト完了を確認してから失効させる"
+access_control_note = "Cognitive Services OpenAI Userロールのみを付与し、Contributor以上のロールはリソース管理者に限定する"

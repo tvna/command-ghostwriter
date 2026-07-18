@@ -1,0 +1,131 @@
+# OPAによるモデルアクセス制御ポリシーの整備 — {{ system_name }}
+
+{{ system_name }}向けに、Open Policy Agent (OPA) のRegoでモデル別アクセス方針を定義し、`opa eval` と `opa test` で許可・拒否の判定を検証するまでの手順です。
+
+## 目的
+
+利用者ロール・モデル・操作の組み合わせで許可/拒否を判定するregoポリシーを作成し、`opa eval` による個別検証と `opa test` による自動テストの両方で意図どおりに動くことを確認できるようになることを目指します。
+
+## 用語解説
+
+- **OPA (Open Policy Agent)**: ポリシーをコードとして記述・評価する汎用の認可エンジン
+- **Rego**: OPAのポリシー記述言語。`allow` のような真偽値ルールを宣言的に書く
+- **input document**: 評価対象のリクエスト情報(利用者ロール・モデル・操作)をJSONで渡すもの
+- **decision log**: OPAが下した許可/拒否の判定結果を記録するログ
+- **allow / deny**: ポリシー評価結果。`allow` が `false` の場合はdenyとして扱う
+
+## シナリオ設定
+
+{{ system_name }} に対し、`{{ rego_package }}` パッケージのregoポリシーで役割別アクセスを制御します。OPAのバージョン方針は「{{ opa_version_note }}」です。許可するロール・モデル・操作の組み合わせは次のとおりです。
+
+{% for r in access_rules %}
+- {{ r.role }} は {{ r.model }} に対して {{ r.action }} を実行できる
+{% endfor %}
+
+## 手順
+
+### 1. モデル別のアクセス方針を整理する
+
+```bash
+mkdir -p {{ policy_dir }}
+echo "対象システム: {{ system_name }}"
+```
+
+上記のロール・モデル・操作の一覧を関係者と合意し、規定外の組み合わせはすべて拒否する前提でポリシーに落とし込みます。
+
+### 2. OPAを導入する
+
+```bash
+curl -L -o opa https://openpolicyagent.org/downloads/latest/opa_linux_amd64_static
+chmod 755 opa
+sudo mv opa /usr/local/bin/opa
+opa version
+```
+
+`opa version` の出力で導入バージョンを確認し、{{ opa_version_note }} という方針に沿っているかを確認します。
+
+### 3. regoポリシーを作成する
+
+```bash
+cat > {{ policy_dir }}/policy.rego <<'EOF'
+package {{ rego_package }}
+
+access_rules := [
+{% for r in access_rules %}
+	{"role": "{{ r.role }}", "model": "{{ r.model }}", "action": "{{ r.action }}"},
+{% endfor %}
+]
+
+default allow := false
+
+allow if {
+	some rule in access_rules
+	rule.role == input.user_role
+	rule.model == input.model
+	rule.action == input.action
+}
+EOF
+opa fmt {{ policy_dir }}/policy.rego
+```
+
+`access_rules` に手順1で合意した組み合わせだけを列挙し、`allow` はそのいずれかに一致した場合のみ真になります。
+
+### 4. 入力データとテストケースを定義する
+
+```bash
+cat > {{ policy_dir }}/input_allow.json <<'EOF'
+{"user_role": "{{ sample_allow_role }}", "model": "{{ sample_allow_model }}", "action": "{{ sample_allow_action }}"}
+EOF
+cat > {{ policy_dir }}/input_deny.json <<'EOF'
+{"user_role": "{{ sample_deny_role }}", "model": "{{ sample_deny_model }}", "action": "{{ sample_deny_action }}"}
+EOF
+cat > {{ policy_dir }}/policy_test.rego <<'EOF'
+package model_access_test
+
+import data.{{ rego_package }}
+
+test_allow_for_permitted_combination if {
+	{{ rego_package }}.allow with input as {"user_role": "{{ sample_allow_role }}", "model": "{{ sample_allow_model }}", "action": "{{ sample_allow_action }}"}
+}
+
+test_deny_for_unlisted_combination if {
+	not {{ rego_package }}.allow with input as {"user_role": "{{ sample_deny_role }}", "model": "{{ sample_deny_model }}", "action": "{{ sample_deny_action }}"}
+}
+EOF
+```
+
+許可される組み合わせ(`{{ sample_allow_role }}` / `{{ sample_allow_model }}` / `{{ sample_allow_action }}`)と、方針にない組み合わせ(`{{ sample_deny_role }}` / `{{ sample_deny_model }}` / `{{ sample_deny_action }}`)の両方を入力データとテストケースに用意します。
+
+### 5. opa evalとopa testで許可・拒否を検証する
+
+```bash
+opa eval -d {{ policy_dir }}/policy.rego -i {{ policy_dir }}/input_allow.json --format pretty 'data.{{ rego_package }}.allow'
+opa eval -d {{ policy_dir }}/policy.rego -i {{ policy_dir }}/input_deny.json --format pretty 'data.{{ rego_package }}.allow'
+opa test {{ policy_dir }} -v
+```
+
+1つ目の `opa eval` は `true`、2つ目は `false` を返すことを確認し、`opa test -v` の出力で `test_allow_for_permitted_combination` と `test_deny_for_unlisted_combination` の両方がPASSしていることを確認します。
+
+### 6. 拒否ログの出力と定期見直しを設定する
+
+```bash
+mkdir -p $(dirname {{ deny_log_path }})
+nohup opa run --server --addr localhost:8181 --set decision_logs.console=true --log-level info {{ policy_dir }} > {{ deny_log_path }} 2>&1 &
+sleep 1
+grep result {{ deny_log_path }} | tail -20
+```
+
+`decision_logs.console=true` により、OPAサーバが下した全判定結果が {{ deny_log_path }} にJSON形式で追記されます。`{{ review_cycle }}`ごとに{{ review_owner }}が {{ deny_log_path }} の拒否記録と `access_rules` を突き合わせ、不要な許可の棚卸しを行います。
+
+## 動作確認
+
+- `opa eval` で `{{ sample_allow_role }}` / `{{ sample_allow_model }}` / `{{ sample_allow_action }}` の組み合わせが `true` になること
+- `opa eval` で `{{ sample_deny_role }}` / `{{ sample_deny_model }}` / `{{ sample_deny_action }}` の組み合わせが `false` になること
+- `opa test {{ policy_dir }} -v` で定義した全テストがPASSと表示されること
+- {{ deny_log_path }} に判定結果が記録されていること
+
+## 注意事項
+
+- `opa run --server` をlocalhost以外へ公開する場合はTLSと認証を別途設計する必要があります(本手順の対象外)。
+- `access_rules` の変更は{{ review_owner }}によるレビューを経てから {{ policy_dir }}/policy.rego に反映します。
+- サンプルのモデル名・ロール名は例示であり、実際の運用では自組織のロール体系とモデル台帳に置き換えてください。

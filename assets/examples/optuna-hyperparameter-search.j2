@@ -1,0 +1,91 @@
+# Optunaによるハイパーパラメータ探索の運用
+
+`optuna` CLIとRDBストレージを使い、スタディの作成から探索スクリプトの実行、`optuna-dashboard` による監視、ベストトライアルの集計までを行います。
+
+## 目的
+
+RDBストレージを介してスタディの状態を永続化し、複数プロセス・複数マシンから同一スタディへ安全に並列探索を追加できる運用を理解することを目指します。
+
+## 用語解説
+
+- **スタディ (study)**: 一連のハイパーパラメータ探索全体を表す単位。`{{ study_name }}` のように名前で識別する
+- **トライアル (trial)**: 1回のハイパーパラメータの組み合わせによる試行。スタディに紐づけて記録される
+- **RDBストレージ**: スタディとトライアルの状態を永続化するデータベース。プロセスやマシンをまたいで探索を再開・並列化できるようにする
+- **サンプラー**: 次に試すハイパーパラメータの値を提案するアルゴリズム。既定では過去のトライアル結果を活かすTPESamplerが使われる
+- **optuna-dashboard**: 探索の進捗状況やパラメータ重要度をWebブラウザ上で可視化するツール
+
+## シナリオ設定
+
+スタディ `{{ study_name }}` を、`{{ storage_db_host }}:{{ storage_db_port }}` の `{{ storage_db_name }}` データベース(RDBストレージ)上に作成します。目的変数は `{{ objective_metric }}` とし、`{{ direction }}` 方向に最適化します。探索スクリプト `{{ search_script_path }}` を `{{ parallel_worker_count }}` 並列のワーカーから起動し、合計 `{{ n_trials }}` トライアルを実行したのち、ベストトライアルを `{{ best_trial_output_path }}` に集計します。
+
+## 手順
+
+### 1. RDBストレージの準備
+
+```bash
+export OPTUNA_DB_PASSWORD="<接続パスワード>"
+psql -h {{ storage_db_host }} -p {{ storage_db_port }} -U {{ storage_db_user }} -d postgres -c "CREATE DATABASE {{ storage_db_name }};"
+```
+
+`{{ credential_note }}`。
+
+### 2. optuna create-studyによるスタディ作成
+
+```bash
+export OPTUNA_STORAGE="postgresql://{{ storage_db_user }}:${OPTUNA_DB_PASSWORD}@{{ storage_db_host }}:{{ storage_db_port }}/{{ storage_db_name }}"
+optuna create-study --study-name {{ study_name }} --storage "$OPTUNA_STORAGE" --direction {{ direction }} --skip-if-exists
+```
+
+`--skip-if-exists` を付けることで、同名スタディが既に存在する場合でもエラーにせず既存スタディを再利用します。
+
+### 3. 探索スクリプトの実行
+
+```bash
+export OPTUNA_STORAGE="postgresql://{{ storage_db_user }}:${OPTUNA_DB_PASSWORD}@{{ storage_db_host }}:{{ storage_db_port }}/{{ storage_db_name }}"
+python3 {{ search_script_path }} --study-name {{ study_name }} --storage "$OPTUNA_STORAGE" --n-trials {{ n_trials }}
+```
+
+`{{ search_script_path }}` の内部では `optuna.load_study(study_name="{{ study_name }}", storage=os.environ["OPTUNA_STORAGE"])` でスタディを読み込み、`study.optimize()` でトライアルを実行する構成にします。同じコマンドを `{{ parallel_worker_count }}` 台のワーカー(別プロセスまたは別マシン)から同時に起動すると、RDBストレージ経由でトライアルの割り当てが調停され、並列探索になります。
+
+### 4. optuna-dashboardによる監視
+
+```bash
+export OPTUNA_STORAGE="postgresql://{{ storage_db_user }}:${OPTUNA_DB_PASSWORD}@{{ storage_db_host }}:{{ storage_db_port }}/{{ storage_db_name }}"
+optuna-dashboard "$OPTUNA_STORAGE" --host {{ dashboard_host }} --port {{ dashboard_port }}
+```
+
+ブラウザで `http://{{ dashboard_host }}:{{ dashboard_port }}/` を開き、`{{ study_name }}` の進捗・パラメータ重要度・履歴グラフを確認します。
+
+### 5. ベストトライアルの集計
+
+```bash
+export OPTUNA_STORAGE="postgresql://{{ storage_db_user }}:${OPTUNA_DB_PASSWORD}@{{ storage_db_host }}:{{ storage_db_port }}/{{ storage_db_name }}"
+mkdir -p $(dirname {{ best_trial_output_path }})
+python3 -c "
+import json
+import optuna
+
+study = optuna.load_study(study_name='{{ study_name }}', storage='$OPTUNA_STORAGE')
+best = {
+    'number': study.best_trial.number,
+    'value': study.best_trial.value,
+    'params': study.best_trial.params,
+}
+with open('{{ best_trial_output_path }}', 'w') as f:
+    json.dump(best, f, indent=2)
+print(best)
+"
+```
+
+## 動作確認
+
+- `optuna studies --storage "$OPTUNA_STORAGE"` の一覧に `{{ study_name }}` が表示され、完了トライアル数が `{{ n_trials }}` に達していること
+- `http://{{ dashboard_host }}:{{ dashboard_port }}/` にアクセスでき、`{{ study_name }}` の履歴グラフが描画されること
+- `{{ best_trial_output_path }}` にベストトライアルの `number` / `value` / `params` を含むJSONが出力されていること
+
+## 注意事項
+
+- `{{ credential_note }}`。
+- 複数ワーカーを並列実行する際は、必ず同一の `{{ study_name }}` と同一のRDBストレージ(`{{ storage_db_host }}:{{ storage_db_port }}/{{ storage_db_name }}`)を指定する。スタディ名やストレージが1文字でも異なると、別スタディとして扱われトライアルが分散しない。
+- `optuna create-study` を `--skip-if-exists` なしで再実行すると、同名スタディが既に存在する場合にエラーになる。意図せぬ新規作成を避けるため、既存スタディの継続時は `--skip-if-exists` を付ける。
+- `{{ objective_metric }}` の集計・ロギングは探索スクリプト側の責務であり、本手順はスタディ・トライアルの管理と監視のみを対象とする。

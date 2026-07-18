@@ -1,0 +1,100 @@
+# vLLMのCUDA OOMクラッシュ切り分け — {{ service_name }}
+
+`{{ service_name }}`(モデル: `{{ model_id }}`)が `{{ oom_error_pattern }}` で停止しました。ログとGPUメモリ状況から原因を切り分け、起動パラメータを調整して復旧します。
+
+## 目的
+
+vLLMがCUDA OOMで停止した際に、ログと `nvidia-smi` から発生箇所を切り分け、`gpu-memory-utilization` と `max-model-len` の調整によって安全に復旧し、恒久対策を記録できるようになることを目指します。
+
+## 用語解説
+
+- **CUDA out of memory**: GPUのVRAM割り当てに失敗した際にPyTorch/CUDAが送出するエラー。KVキャッシュの増大や同時実行リクエスト数の増加で発生しやすい
+- **gpu-memory-utilization**: vLLMがKVキャッシュ用に確保するGPUメモリの割合(0〜1)を指定する起動オプション。高いほどスループットは上がるが余裕が減りOOMしやすくなる
+- **max-model-len**: 1リクエストあたりの最大トークン長(コンテキスト長)を指定する起動オプション。大きいほどKVキャッシュ消費が増える
+- **tensor-parallel-size**: モデルの重みを複数GPUに分割して保持する並列度。GPU1台あたりのメモリ消費を減らせるが、GPU間通信のオーバーヘッドが増える
+- **恒久対策**: 暫定的なパラメータ引き下げとは別に、モデルサイズや並列度の見直しなど根本原因に対処する対応
+
+## シナリオ設定
+
+推論サーバ `{{ service_name }}`(モデル: `{{ model_id }}`、GPU番号: `{{ gpu_device_id }}`、GPU台数: `{{ gpu_count }}`、tensor-parallel-size: `{{ tensor_parallel_size }}`)が `{{ oom_error_pattern }}` で停止しています。現在の起動設定は `gpu-memory-utilization={{ current_gpu_memory_utilization }}`、`max-model-len={{ current_max_model_len }}` です。
+
+## 手順
+
+### 1. journalctlでOOM発生時のログを確認する
+
+```bash
+sudo systemctl status {{ service_name }} --no-pager
+sudo journalctl -u {{ service_name }} --since "{{ log_since }}" | grep -i "{{ oom_error_pattern }}"
+sudo journalctl -u {{ service_name }} --since "{{ log_since }}" -n 200 --no-pager
+```
+
+→ `{{ service_name }}` が `failed` または `inactive` になっていること、および `{{ oom_error_pattern }}` の発生時刻とその直前の処理内容(プリフィル/デコード/バッチ生成)を確認します。
+
+### 2. nvidia-smiでGPUメモリ状況を確認する
+
+```bash
+nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=csv -i {{ gpu_device_id }}
+nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv
+```
+
+→ プロセス自体は停止済みのはずなので、GPU `{{ gpu_device_id }}` のメモリが解放されているか、`{{ service_name }}` 以外のプロセスがVRAMを占有していないかを確認します。占有プロセスが残っている場合は先にそちらを解消します。
+
+### 3. gpu-memory-utilizationとmax-model-lenを見直す
+
+```bash
+systemctl cat {{ service_name }} | grep -E "gpu-memory-utilization|max-model-len|tensor-parallel-size"
+sudo mkdir -p /etc/systemd/system/{{ service_name }}.service.d
+sudo tee /etc/systemd/system/{{ service_name }}.service.d/oom-mitigation.conf <<EOF
+[Service]
+ExecStart=
+ExecStart={{ vllm_venv_path }}/bin/python3 -m vllm.entrypoints.openai.api_server \
+  --model {{ model_id }} \
+  --tensor-parallel-size {{ tensor_parallel_size }} \
+  --gpu-memory-utilization {{ reduced_gpu_memory_utilization }} \
+  --max-model-len {{ reduced_max_model_len }} \
+  --port {{ api_port }}
+EOF
+```
+
+→ 現在値(`gpu-memory-utilization={{ current_gpu_memory_utilization }}`、`max-model-len={{ current_max_model_len }}`)を、見直し後の値(`gpu-memory-utilization={{ reduced_gpu_memory_utilization }}`、`max-model-len={{ reduced_max_model_len }}`)に置き換えます。空の `ExecStart=` を挟むのは、ドロップイン設定が元の `ExecStart` に追記されるのを防ぎ、新しい起動オプションで完全に置き換えるためです。
+
+### 4. 調整後に再起動して安定性を確認する
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart {{ service_name }}
+sleep {{ restart_wait_seconds }}
+sudo systemctl status {{ service_name }} --no-pager
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:{{ api_port }}/health
+```
+
+```bash
+timeout {{ stability_watch_minutes }}m journalctl -u {{ service_name }} -f | grep -i "{{ oom_error_pattern }}"
+```
+
+→ 1つ目のコマンドで再起動直後の起動成功とヘルスチェック応答(`200`)を確認します。2つ目のコマンドは `{{ stability_watch_minutes }}` 分間ログを監視し、`{{ oom_error_pattern }}` が出力されなければ何も表示されずタイムアウトで終了します。再発した場合は手順3の値をさらに引き下げます。
+
+### 5. 恒久対策(モデル・並列度の見直し)を記録する
+
+```bash
+sudo tee -a {{ permanent_fix_log_path }} <<EOF
+$(date '+%Y-%m-%d %H:%M:%S') {{ service_name }}: {{ oom_error_pattern }} により停止。暫定対応としてgpu-memory-utilizationを{{ reduced_gpu_memory_utilization }}、max-model-lenを{{ reduced_max_model_len }}に変更(tensor-parallel-size={{ tensor_parallel_size }}、GPU{{ gpu_count }}台構成)。
+恒久対策メモ: {{ permanent_fix_note }}
+EOF
+```
+
+→ 暫定対応の内容と恒久対策の検討事項を `{{ permanent_fix_log_path }}` に記録し、次回メンテナンス窓での対応判断に引き継ぎます。
+
+## 動作確認
+
+- `sudo systemctl status {{ service_name }} --no-pager` が `active (running)` であること
+- `curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:{{ api_port }}/health` が `200` を返すこと
+- 手順4の監視で `{{ stability_watch_minutes }}` 分間 `{{ oom_error_pattern }}` が再出現しないこと
+- `nvidia-smi --query-gpu=memory.used,memory.total --format=csv -i {{ gpu_device_id }}` の使用量が、見直し前より低下していること
+- `{{ permanent_fix_log_path }}` に今回の対応内容と恒久対策メモが記録されていること
+
+## 注意事項
+
+- `max-model-len={{ reduced_max_model_len }}` まで下げると長文コンテキストのリクエストが拒否されるようになるため、暫定対応後は業務要件に見合う値かを別途確認する。
+- `gpu-memory-utilization={{ reduced_gpu_memory_utilization }}` を下げすぎるとスループットが低下するため、手順2の `nvidia-smi` 結果を見ながら必要最小限の引き下げにとどめる。
+- 本手順はパラメータ引き下げによる暫定復旧であり、モデルサイズや `tensor-parallel-size={{ tensor_parallel_size }}` の見直しといった恒久対策は別途計画・実施する。

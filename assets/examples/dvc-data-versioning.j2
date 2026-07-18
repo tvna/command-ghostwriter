@@ -1,0 +1,92 @@
+# DVCによるデータセットのバージョン管理
+
+DVC(Data Version Control)を使い、`{{ project_dir }}` のデータセット `{{ dataset_path }}` をGitと連携させてバージョン管理し、リモートストレージ `{{ dvc_remote_url }}` へ同期します。初期化・リモート登録・登録・pushでの同期に加え、別環境での過去バージョンの復元までを扱います。
+
+## 目的
+
+`dvc add` / `dvc push` / `dvc pull` の役割分担を理解し、データセットをGitのコミット・タグと紐づけて管理しながら、リモートストレージ経由でチーム内の別環境にも同じバージョンを再現できるようになることを目指します。
+
+## 用語解説
+
+- **DVC(Data Version Control)**: Gitと組み合わせて使う、データセットや機械学習モデルなど大容量ファイルのバージョン管理ツール
+- **`.dvc`ファイル**: `dvc add` で生成される、追跡対象ファイル/ディレクトリのハッシュ値・サイズを記録した小さなテキストファイル。Gitにはこのファイルだけをコミットする
+- **DVCリモート**: `dvc push`/`dvc pull` の転送先となるストレージ。Git remoteとは別物で、`.dvc/config` に登録する
+- **`dvc push` / `dvc pull`**: ローカルの `.dvc/cache` とDVCリモートの間でデータ実体をアップロード/ダウンロードする操作。Gitの `git push`/`git pull` に相当する
+- **ローカルキャッシュ未保持の状態**: リポジトリを新規クローンした直後は `.dvc/cache` が空のため、`git checkout` でタグを切り替えてもデータ実体は復元されない。実体を得るには `dvc pull` の実行が必須になる
+
+## シナリオ設定
+
+Gitリポジトリ `{{ git_repo_url }}`(既定ブランチ: `{{ git_default_branch }}`)を作業ディレクトリ `{{ project_dir }}` に用意し、データセット `{{ dataset_path }}` をDVCで追跡します。DVCリモートには `{{ dvc_remote_url }}`(リモート名: `{{ dvc_remote_name }}`)を使います。登録後のバージョンには `{{ version_tag_current }}` を付与し、後日、別の作業ディレクトリ `{{ restore_dir }}` から過去バージョン `{{ version_tag_restore }}` を復元します。
+
+## 手順
+
+### 1. dvc initとリポジトリ初期化
+
+```bash
+git clone {{ git_repo_url }} {{ project_dir }}
+cd {{ project_dir }}
+dvc init
+git add .dvc .dvcignore
+git commit -m "Initialize DVC in {{ project_dir }}"
+```
+
+`dvc init` は `.dvc/` ディレクトリと `.dvcignore` を作成します。データの実体ではなくDVCの設定・キャッシュ管理用ファイルなので、そのままGitにコミットします。
+
+### 2. リモートストレージの登録
+
+```bash
+cd {{ project_dir }}
+dvc remote add -d {{ dvc_remote_name }} {{ dvc_remote_url }}
+git add .dvc/config
+git commit -m "Register DVC remote {{ dvc_remote_name }}"
+```
+
+`-d` オプションで指定したリモートが既定リモートとなり、以降の `dvc push`/`dvc pull` で `-r` を省略しても `{{ dvc_remote_name }}` が使われます。
+
+### 3. dvc addによるデータ登録
+
+```bash
+cd {{ project_dir }}
+dvc add {{ dataset_path }}
+git add {{ dataset_path }}.dvc .gitignore
+git commit -m "{{ dataset_commit_message }}"
+git tag {{ version_tag_current }}
+```
+
+`dvc add` はデータの実体を `.dvc/cache` に移し、ハッシュ値を記録した `{{ dataset_path }}.dvc` を生成して、`{{ dataset_path }}` 自体を `.gitignore` に自動追記します。Gitにコミットするのは `.dvc` ファイルと `.gitignore` の更新分だけです。
+
+### 4. dvc pushでの同期
+
+```bash
+cd {{ project_dir }}
+dvc push -r {{ dvc_remote_name }}
+git push origin {{ git_default_branch }}
+git push origin {{ version_tag_current }}
+```
+
+`dvc push` はキャッシュ上のデータ実体をDVCリモート `{{ dvc_remote_name }}` へアップロードします。Gitのコミット・タグの `git push` とDVCリモートへの `dvc push` は別操作なので、両方を実行して初めて他メンバーが同じバージョンのデータセットを再現できます。
+
+### 5. 過去バージョンの復元
+
+```bash
+git clone {{ git_repo_url }} {{ restore_dir }}
+cd {{ restore_dir }}
+git checkout {{ version_tag_restore }}
+dvc pull -r {{ dvc_remote_name }}
+```
+
+新規クローンした `{{ restore_dir }}` には `.dvc/cache` が存在しないため、`git checkout {{ version_tag_restore }}` で `.dvc` ファイルのメタデータを過去バージョンに戻しただけでは、`{{ dataset_path }}` の実体はまだ復元されていません。続けて `dvc pull -r {{ dvc_remote_name }}` を実行し、DVCリモートから該当バージョンのデータ実体を取得します。
+
+## 動作確認
+
+- `{{ restore_dir }}` で `dvc remote list` に `{{ dvc_remote_name }}` と `{{ dvc_remote_url }}` が表示されること
+- `{{ project_dir }}` で `git tag` の一覧に `{{ version_tag_current }}` と `{{ version_tag_restore }}` が含まれること
+- `{{ restore_dir }}` で手順5を実行後、`dvc status` の出力が `Data and pipelines are up to date.` となること
+- `{{ restore_dir }}/{{ dataset_path }}` の内容が `{{ version_tag_restore }}` 時点のものと一致すること(ファイル件数や `du -sh {{ restore_dir }}/{{ dataset_path }}` の容量を `{{ project_dir }}` 側の同時点の記録と突き合わせて確認する)
+
+## 注意事項
+
+- `{{ dataset_path }}` を直接 `git add` しない。`dvc add` が自動生成した `.gitignore` の記載を消してしまうと、大容量データを誤ってGitリポジトリへコミットする事故につながる。
+- 新規クローンやブランチ・タグの切り替え直後は、`git checkout` だけでなく必ず `dvc pull`(または既にキャッシュがある場合は `dvc checkout`)を実行し、実データをメタデータに合わせる。
+- `dvc push -r {{ dvc_remote_name }}` を忘れたままGitのコミット・タグだけをpushすると、他メンバーが `dvc pull` を実行してもデータ実体を取得できない。
+- DVCリモート `{{ dvc_remote_url }}` への接続に必要な認証情報(アクセスキー等)自体の管理方法や、リモート側の容量・保持ポリシーは対象外とする。

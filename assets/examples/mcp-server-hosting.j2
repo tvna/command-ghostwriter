@@ -1,0 +1,94 @@
+# MCPサーバのsystemd常駐ホスティング
+
+`npx` で起動するMCPサーバを単体起動で動作確認したうえで、専用ユーザーとsystemdユニットによる常駐化を行い、自動再起動設定とjournalctlでのログ確認までを一巡します。
+
+## 目的
+
+`npx` 経由で配布されるMCPサーバを、rootではなく専用ユーザーの権限で常駐運用できる状態にし、異常終了時に自動再起動する設定と、稼働状況をjournalctlで確認する手順を身につけることを目指します。
+
+## 用語解説
+
+- **MCP (Model Context Protocol)**: LLMクライアントが外部ツール・データソースに接続するための標準プロトコル。ここでは `{{ mcp_package }}` がそのサーバ実装にあたる
+- **npx**: npmに同梱されるパッケージ実行コマンド。ローカルへの恒久インストールなしにパッケージを取得・実行できる
+- **systemdユニット**: systemdが管理するサービス定義ファイル(`.service`)。ここでは `{{ systemd_unit_name }}` として登録する
+- **専用ユーザー(system user)**: サービス専用に作成する低権限ユーザー。ログインシェルを持たせないことで侵害時の被害範囲を縮小する
+- **Restart=on-failure**: プロセスが異常終了(非ゼロの終了コード)した場合にのみsystemdが自動再起動する設定
+- **journalctl**: systemdジャーナル(サービスの標準出力・標準エラー出力を含む)を閲覧するコマンド
+
+## シナリオ設定
+
+MCPサーバ `{{ mcp_package }}`(バージョン: `{{ mcp_package_version }}`)を、許可ディレクトリ `{{ mcp_allowed_dir }}` を対象に常駐運用します。専用ユーザー `{{ service_user }}` を作成し、作業ディレクトリ `{{ work_dir }}` でsystemdユニット `{{ systemd_unit_name }}` として登録し、異常終了時に自動再起動する状態を目指します。
+
+## 手順
+
+### 1. MCPサーバを単体起動で動作確認する
+
+```bash
+npx -y {{ mcp_package }}@{{ mcp_package_version }} {{ mcp_allowed_dir }}
+```
+
+標準エラー出力に `{{ startup_log_line }}` が表示されることを確認したら、Ctrl+Cで停止します。
+
+### 2. 専用ユーザーを作成する
+
+```bash
+sudo useradd --system --home-dir {{ work_dir }} --shell /usr/sbin/nologin {{ service_user }}
+sudo mkdir -p {{ work_dir }} {{ mcp_allowed_dir }}
+sudo chown -R {{ service_user }}:{{ service_group }} {{ work_dir }} {{ mcp_allowed_dir }}
+```
+
+### 3. systemdユニットを作成する
+
+```bash
+sudo tee /etc/systemd/system/{{ systemd_unit_name }} > /dev/null <<EOF
+[Unit]
+Description={{ service_description }}
+After=network.target
+
+[Service]
+Type=simple
+User={{ service_user }}
+Group={{ service_group }}
+WorkingDirectory={{ work_dir }}
+ExecStart={{ npx_bin_path }} -y {{ mcp_package }}@{{ mcp_package_version }} {{ mcp_allowed_dir }}
+Restart=on-failure
+RestartSec={{ restart_sec }}
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+```
+
+### 4. サービスを起動し自動起動を有効化する
+
+```bash
+sudo systemctl enable --now {{ systemd_unit_name }}
+sudo systemctl status {{ systemd_unit_name }} --no-pager
+sudo systemctl is-enabled {{ systemd_unit_name }}
+```
+
+### 5. journalctlでログを確認する
+
+```bash
+sudo journalctl -u {{ systemd_unit_name }} --since "10 min ago" --no-pager
+sudo journalctl -u {{ systemd_unit_name }} -f
+```
+
+## 動作確認
+
+- `sudo systemctl status {{ systemd_unit_name }} --no-pager` の出力が `active (running)` を示すこと
+- `sudo systemctl is-enabled {{ systemd_unit_name }}` が `enabled` を返すこと
+- `sudo journalctl -u {{ systemd_unit_name }} --since "10 min ago"` に `{{ startup_log_line }}` が出力されていること
+- `sudo kill -9 $(sudo systemctl show -p MainPID --value {{ systemd_unit_name }})` の実行後、数秒以内に自動再起動し `active (running)` に戻ること
+
+## 注意事項
+
+- `npx` はバージョン指定なしで実行すると起動のたびにレジストリへ問い合わせるため、ExecStartでは `{{ mcp_package }}@{{ mcp_package_version }}` のようにバージョンを固定し、意図しない自動アップグレードを避ける。
+- {{ credential_note }}。
+- `{{ mcp_allowed_dir }}` はMCPクライアントに公開される範囲そのものであるため、必要最小限のディレクトリのみを許可する。
+- 専用ユーザー `{{ service_user }}` はログインシェルを持たないため、直接ログインしての調査はできない。動作確認は `systemctl status` と `journalctl` で行う。
+- ユニットファイル変更後は必ず `sudo systemctl daemon-reload` を行ってから再起動する。反映確認を怠らない。

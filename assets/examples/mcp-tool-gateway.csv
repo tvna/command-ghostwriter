@@ -1,0 +1,4 @@
+server_name,base_command,arg1,arg2,description
+memory,npx,-y,@modelcontextprotocol/server-memory,会話コンテキストを保持するナレッジグラフ型メモリサーバ
+time,uvx,mcp-server-time,--local-timezone=Asia/Tokyo,現在時刻とタイムゾーン変換を提供するリファレンスサーバ
+fetch,uvx,mcp-server-fetch,-,指定URLを取得しMarkdownに変換するリファレンスサーバ

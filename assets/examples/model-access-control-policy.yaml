@@ -1,0 +1,26 @@
+system_name: 社内LLM推論基盤
+rego_package: model_access
+policy_dir: /etc/opa/model-access
+opa_version_note: "0.68.0系で固定し、マイナーアップデートも動作確認後に適用する"
+access_rules:
+  - role: ml-engineer
+    model: llama-3.1-70b
+    action: infer
+  - role: ml-engineer
+    model: llama-3.1-70b
+    action: fine-tune
+  - role: data-scientist
+    model: llama-3.1-8b
+    action: infer
+  - role: auditor
+    model: llama-3.1-70b
+    action: read-logs
+sample_allow_role: ml-engineer
+sample_allow_model: llama-3.1-70b
+sample_allow_action: infer
+sample_deny_role: data-scientist
+sample_deny_model: llama-3.1-70b
+sample_deny_action: fine-tune
+deny_log_path: /var/log/opa/decision.log
+review_cycle: 四半期
+review_owner: AIガバナンス委員会

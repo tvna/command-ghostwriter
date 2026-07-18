@@ -1,0 +1,4 @@
+model_name,vllm_host,vllm_port,job_name,scrape_interval_s,prometheus_config_path,grafana_url,grafana_api_token_env,token_alert_threshold_per_min
+llama-3.1-8b-instruct,vllm-node01.internal,8000,vllm-llama-3-1-8b,15s,/etc/prometheus/prometheus.yml,http://grafana.internal:3000,GRAFANA_API_TOKEN,500000
+qwen2.5-7b-instruct,vllm-node02.internal,8000,vllm-qwen2-5-7b,15s,/etc/prometheus/prometheus.yml,http://grafana.internal:3000,GRAFANA_API_TOKEN,300000
+mistral-7b-instruct-v0.3,vllm-node03.internal,8001,vllm-mistral-7b,15s,/etc/prometheus/prometheus.yml,http://grafana.internal:3000,-,300000

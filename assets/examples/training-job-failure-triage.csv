@@ -1,0 +1,6 @@
+job_name,node_rank,hostname,gpu_id,exit_code,gpu_mem_used_gb,gpu_mem_total_gb,storage_mount,checkpoint_dir,root_cause_category,recommended_action
+llm-sft-13b-job88,0,gpu-node01,0,1,79,80,/mnt/nfs/train-data,/data/checkpoints/llm-sft-13b,OOM,バッチサイズと勾配蓄積ステップ数を見直して再実行
+llm-sft-13b-job88,1,gpu-node02,2,134,41,80,/mnt/nfs/train-data,/data/checkpoints/llm-sft-13b,NCCL_TIMEOUT,NCCL_SOCKET_IFNAMEとNCCLタイムアウト値を見直して再実行
+llm-sft-13b-job88,2,gpu-node03,1,1,39,80,/mnt/nfs/train-data,/data/checkpoints/llm-sft-13b,GPU_ECC,対象GPUをドレインしXid記録を確認のうえ保守窓口へ連絡
+llm-sft-13b-job88,3,gpu-node04,3,137,12,80,/mnt/nfs/train-data,/data/checkpoints/llm-sft-13b,STORAGE_IO,NFSマウントとデータローダーのタイムアウト設定を見直して再実行
+llm-sft-13b-job88,4,gpu-node05,0,143,40,80,/mnt/nfs/train-data,/data/checkpoints/llm-sft-13b,HEALTHY,道連れ終了のため個別対処は不要rootの解消後にtorchrunで再実行

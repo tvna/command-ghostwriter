@@ -1,0 +1,105 @@
+# 推論APIエラー率急上昇の切り分け
+
+推論API `{{ service_name }}` の5xx/4xxエラー率急上昇を、Prometheusメトリクスとサービスログから切り分け、原因別の一次対処を行います。
+
+## 目的
+
+`{{ http_requests_metric_name }}` のステータスコード別内訳から急上昇の発生時刻と支配的な原因を特定し、レート制限超過・GPU OOM・上流タイムアウト・モデルロード失敗といった原因ごとに応じた一次対処を行って応答性を復旧できるようになることを目指します。
+
+## 用語解説
+
+- **5xxエラー**: サーバ側の処理失敗を示すHTTPステータスコード。推論エンジン内部での`{{ oom_error_pattern }}`や`{{ model_load_error_pattern }}`、`{{ upstream_timeout_pattern }}`が典型的な原因になる
+- **4xxエラー**: クライアント起因のHTTPステータスコード。本手順では特にレート制限超過を示す`{{ rate_limit_status_code }}`(Too Many Requests)を対象とする
+- **job_label**: Prometheusがスクレイプ対象を識別するためのラベル。`{{ job_label }}`はこのAPIのスクレイプジョブ名
+- **rate()**: PromQLの関数で、Counter型メトリクスの単位時間あたりの増加率を計算する。エラー率は「5xx方向のrate」を「全体のrate」で割って求める
+- **increase()**: PromQLの関数で、指定期間内のCounter型メトリクスの増加量(絶対値)を計算する。ステータスコード別の内訳集計に用いる
+
+## シナリオ設定
+
+サービス`{{ service_name }}`(Prometheusジョブ: `{{ job_label }}`)で、直近`{{ spike_window }}`の間に5xx/4xxエラー率が`{{ error_rate_threshold_percent }}%`を超える急上昇が発生しました。Prometheus(`{{ prometheus_url }}`)のメトリクス`{{ http_requests_metric_name }}`とサービスログから原因を切り分け、原因別の一次対処までを行います。
+
+## 手順
+
+### 1. メトリクスでエラー率の急上昇時刻を特定する
+
+```bash
+curl -s --data-urlencode 'query=sum(rate({{ http_requests_metric_name }}{job="{{ job_label }}",status_code=~"5.."}[{{ baseline_window }}])) / sum(rate({{ http_requests_metric_name }}{job="{{ job_label }}"}[{{ baseline_window }}])) * 100' "{{ prometheus_url }}/api/v1/query" | jq -r '.data.result[0].value[1] // "no_data"'
+curl -s --data-urlencode 'query=sum(rate({{ http_requests_metric_name }}{job="{{ job_label }}",status_code=~"5.."}[5m])) / sum(rate({{ http_requests_metric_name }}{job="{{ job_label }}"}[5m])) * 100' --data-urlencode "start=$(date -u -d '{{ spike_lookback }}' +%s)" --data-urlencode "end=$(date -u +%s)" --data-urlencode 'step=60' "{{ prometheus_url }}/api/v1/query_range" | jq -r '.data.result[0].values[] | select((.[1] | tonumber) > {{ error_rate_threshold_percent }}) | .[0]' | head -1
+```
+
+1つ目のクエリで直近`{{ baseline_window }}`の現在のエラー率を確認し、2つ目のクエリで過去`{{ spike_window }}`の時系列からエラー率が`{{ error_rate_threshold_percent }}%`を初めて超えたタイムスタンプ(急上昇の開始時刻)を取得します。
+
+### 2. ステータスコード別に内訳を集計する
+
+```bash
+curl -s --data-urlencode 'query=sum by (status_code) (increase({{ http_requests_metric_name }}{job="{{ job_label }}"}[{{ spike_window }}]))' "{{ prometheus_url }}/api/v1/query" | jq -r '.data.result[] | "\(.metric.status_code) \(.value[1])"' | sort -rn -k2
+```
+
+過去`{{ spike_window }}`のステータスコード別リクエスト数が件数の多い順に並びます。`{{ rate_limit_status_code }}`(レート制限)と5xx系のどちらが支配的かをここで判断します。
+
+### 3. サービスログから該当エラーを抽出する
+
+```bash
+SPIKE_SINCE=$(date -u -d "{{ spike_lookback }}" '+%Y-%m-%d %H:%M:%S')
+sudo journalctl -u {{ service_name }} --since "$SPIKE_SINCE" | grep -E "status_code=(5[0-9]{2}|{{ rate_limit_status_code }})" | tail -n 50
+sudo journalctl -u {{ service_name }} --since "$SPIKE_SINCE" | grep -iE "{{ oom_error_pattern }}|{{ model_load_error_pattern }}|{{ upstream_timeout_pattern }}"
+```
+
+1つ目のコマンドで急上昇開始以降のエラー応答行を抽出し、2つ目のコマンドで手順2の内訳が5xx優勢だった場合の代表的な原因文字列(`{{ oom_error_pattern }}`、`{{ model_load_error_pattern }}`、`{{ upstream_timeout_pattern }}`)の有無を確認します。
+
+### 4. 直近の変更・負荷との相関を確認する
+
+```bash
+tail -n 50 {{ recent_deploy_log_path }}
+sudo systemctl show {{ service_name }} --property=ActiveEnterTimestamp
+curl -s --data-urlencode 'query=sum(rate({{ http_requests_metric_name }}{job="{{ job_label }}"}[5m]))' --data-urlencode "start=$(date -u -d '{{ spike_lookback }}' +%s)" --data-urlencode "end=$(date -u +%s)" --data-urlencode 'step=60' "{{ prometheus_url }}/api/v1/query_range" | jq -r '.data.result[0].values[] | "\(.[0]) \(.[1])"'
+```
+
+`{{ recent_deploy_log_path }}`の直近デプロイ記録とサービスの起動時刻(`ActiveEnterTimestamp`)を、手順1で特定した急上昇開始時刻と突き合わせてデプロイ起因かを確認します。あわせて全体のリクエスト数(QPS)の推移を見て、負荷増加が同時に起きていないかも確認します。
+
+### 5. 原因別の一次対処を実施する
+
+手順2・3・4の結果から、支配的な原因に応じて次のいずれかを実施します。
+
+レート制限超過(`{{ rate_limit_status_code }}`)が支配的な場合、レート制限を一時的に緩和します。
+
+```bash
+sudo sed -i "s/^rate_limit_rps: {{ current_rate_limit_rps }}/rate_limit_rps: {{ increased_rate_limit_rps }}/" {{ rate_limit_config_path }}
+sudo systemctl restart {{ service_name }}
+sleep {{ restart_wait_seconds }}
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:{{ api_port }}/health
+echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') case=rate_limit action=increase_rps service={{ service_name }}" | sudo tee -a {{ incident_log_path }}
+```
+
+`{{ oom_error_pattern }}`または`{{ upstream_timeout_pattern }}`による5xxが支配的な場合、サービスを再起動して復旧を試みます。
+
+```bash
+sudo systemctl restart {{ service_name }}
+sleep {{ restart_wait_seconds }}
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:{{ api_port }}/health
+echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') case=upstream_5xx action=restart service={{ service_name }}" | sudo tee -a {{ incident_log_path }}
+```
+
+`{{ model_load_error_pattern }}`による5xxが支配的な場合、モデルキャッシュの状態を確認してから再起動します。
+
+```bash
+ls -la {{ model_cache_path }}
+sudo systemctl restart {{ service_name }}
+sleep {{ restart_wait_seconds }}
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:{{ api_port }}/health
+echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') case=model_load_failure action=restart service={{ service_name }}" | sudo tee -a {{ incident_log_path }}
+```
+
+## 動作確認
+
+- `sudo systemctl status {{ service_name }}` が `active (running)` であること
+- 手順5実行後の `curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:{{ api_port }}/health` が `200` を返すこと
+- 手順1のクエリを再実行し、直近`{{ baseline_window }}`のエラー率が`{{ error_rate_threshold_percent }}%`を下回っていること
+- `{{ incident_log_path }}` に実施した対処内容(case・action)が記録されていること
+
+## 注意事項
+
+- レート制限の緩和(`{{ current_rate_limit_rps }}` → `{{ increased_rate_limit_rps }}` rps)は暫定対応であり、根本原因(クライアント側のリトライ設計など)を別途調査したうえで恒久的な値を再検討する。
+- `{{ oom_error_pattern }}` が支配的な原因だった場合、本手順の再起動だけでは再発しうる。`max_model_len`や`gpu_memory_utilization`などの設定見直しが必要な場合は、GPUメモリ不足切り分け手順を別途参照する。
+- サービス再起動はリクエストを一時的に切断する。影響を抑えるため、可能であれば低負荷帯を選ぶか、複数インスタンス構成であればローリング再起動を検討する。
+- `{{ incident_log_path }}` への書き込みには`sudo`権限が必要。ログファイルのパーミッションを適切に設定し、関係者のみが参照・追記できるようにする。

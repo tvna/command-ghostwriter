@@ -1,0 +1,13 @@
+project_dir = "/opt/ml-experiments/churn-prediction"
+conda_env_name = "churn-repro-env"
+python_version = "3.11.9"
+seed_value = 42
+config_file = "configs/train_config.yaml"
+requirements_lock_file = "requirements.lock.txt"
+log_dir = "logs/reproducibility"
+dataset_path = "data/train.csv"
+training_script = "train.py"
+baseline_metrics_file = "results/baseline_metrics.json"
+rerun_metrics_file = "results/rerun_metrics.json"
+experiment_run_id = "exp-2026-07-18-001"
+metric_tolerance_note = "浮動小数点誤差を考慮し、主要指標(AUC)の差が1e-4未満であれば一致とみなす"

@@ -1,0 +1,140 @@
+# 推論APIレイテンシのSLO定義とアラート設定
+
+vLLM推論API `{{ service_name }}` のレイテンシ指標からSLI/SLOを定義し、Prometheusのアラートルールとして実装したうえで、`promtool`によるルール検証とAlertmanager経由の発報試験までを行います。
+
+## 目的
+
+vLLMが公開するHistogramメトリクス `{{ latency_metric_name }}` の実測分布からp95のSLO目標値を定め、Prometheusのrecording rule/alerting ruleとして表現し、`promtool`でルールの構文・挙動を検証したうえで、Alertmanager経由でSlackへ確実に通知が届く状態を作れるようになることを目指します。
+
+## 用語解説
+
+- **SLI (Service Level Indicator)**: サービス品質を定量的に表す指標。本手順では`{{ latency_metric_name }}`から算出するp95レイテンシを用いる
+- **SLO (Service Level Objective)**: SLIに対して設定する達成目標値。本手順ではp95レイテンシが`{{ slo_target_p95_seconds }}`秒以内であることを目標とする
+- **`{{ latency_metric_name }}`**: vLLMが公開するHistogram形式のメトリクス。リクエスト受付からレスポンス完了までのEnd-to-Endレイテンシを`job`ラベル付きで計測する
+- **`{{ ttft_metric_name }}`**: vLLMが公開するHistogram形式のメトリクス。最初のトークンが返るまでの時間(Time To First Token)を計測し、体感応答性の補助指標として参照する
+- **recording rule**: PromQLの計算結果をあらかじめ新しい時系列として保存しておくPrometheusの仕組み。アラート式を簡潔にし、評価負荷も分散できる
+- **promtool**: Prometheusのルールファイルの構文検証(`check rules`)とユニットテスト(`test rules`)を行うCLIツール
+- **amtool**: Alertmanagerに対してテストアラートの送信・設定検証・アラート照会を行うCLIツール
+
+## シナリオ設定
+
+サービス`{{ service_name }}`(namespace: `{{ namespace }}`)のvLLM推論APIを対象に、Prometheus(`{{ prometheus_url }}`)がジョブ`{{ job_label }}`としてスクレイプしている前提で、p95レイテンシが`{{ slo_target_p95_seconds }}`秒を`{{ alert_for_duration }}`以上超過した場合に重要度`{{ alert_severity }}`のアラート`{{ alert_name }}`を発報します。通知先はAlertmanager(`{{ alertmanager_url }}`)経由のSlackチャンネル`{{ slack_channel }}`です。
+
+## 手順
+
+### 1. 現状のレイテンシ分布を計測する
+
+```bash
+curl -s --data-urlencode 'query=histogram_quantile(0.50, sum(rate({{ latency_metric_name }}_bucket{job="{{ job_label }}"}[{{ baseline_window }}])) by (le))' "{{ prometheus_url }}/api/v1/query" | jq -r '.data.result[0].value[1] // "no_data"'
+curl -s --data-urlencode 'query=histogram_quantile(0.95, sum(rate({{ latency_metric_name }}_bucket{job="{{ job_label }}"}[{{ baseline_window }}])) by (le))' "{{ prometheus_url }}/api/v1/query" | jq -r '.data.result[0].value[1] // "no_data"'
+curl -s --data-urlencode 'query=histogram_quantile(0.99, sum(rate({{ latency_metric_name }}_bucket{job="{{ job_label }}"}[{{ baseline_window }}])) by (le))' "{{ prometheus_url }}/api/v1/query" | jq -r '.data.result[0].value[1] // "no_data"'
+```
+
+過去`{{ baseline_window }}`のp50/p95/p99を確認し、これから設定するSLO目標`{{ slo_target_p95_seconds }}`秒が実測分布から到達可能な水準かを判断します。
+
+### 2. SLI/SLO(p95目標)を定義する
+
+```bash
+sudo mkdir -p $(dirname {{ alert_rules_path }})
+sudo tee {{ alert_rules_path }} <<'EOF'
+groups:
+  - name: {{ alert_group_name }}
+    rules:
+      # SLI: {{ service_name }}のE2Eレイテンシ p95(5分間隔)
+      # SLO: p95が{{ slo_target_p95_seconds }}秒以内(評価対象期間 {{ slo_window }})
+      - record: {{ recording_rule_name }}
+        expr: histogram_quantile(0.95, sum(rate({{ latency_metric_name }}_bucket{job="{{ job_label }}"}[5m])) by (le))
+EOF
+cat {{ alert_rules_path }}
+```
+
+recording ruleとしてSLIを定義することで、後続のアラート式と`{{ prometheus_url }}/api/v1/query?query={{ recording_rule_name }}`での確認の両方から同じ計算式を参照できます。
+
+### 3. Prometheusアラートルールを記述する
+
+```bash
+sudo tee -a {{ alert_rules_path }} <<'EOF'
+      - alert: {{ alert_name }}
+        expr: {{ recording_rule_name }} > {{ slo_target_p95_seconds }}
+        for: {{ alert_for_duration }}
+        labels:
+          severity: {{ alert_severity }}
+          service: {{ service_name }}
+        annotations:
+          summary: "{{ service_name }} p95 latency exceeds SLO"
+          description: "{{ recording_rule_name }} has been above {{ slo_target_p95_seconds }}s for {{ alert_for_duration }}"
+EOF
+cat {{ alert_rules_path }}
+```
+
+`{{ alert_rules_path }}`が`{{ prometheus_config_path }}`の`rule_files:`に未登録の場合は、この時点で追記してからPrometheusをリロードします。
+
+### 4. promtoolでルールを検証する
+
+```bash
+promtool check rules {{ alert_rules_path }}
+sudo mkdir -p $(dirname {{ promtool_test_file_path }})
+sudo tee {{ promtool_test_file_path }} <<'EOF'
+rule_files:
+  - {{ alert_rules_path }}
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: '{{ latency_metric_name }}_bucket{job="{{ job_label }}",le="1"}'
+        values: '0+10x15'
+      - series: '{{ latency_metric_name }}_bucket{job="{{ job_label }}",le="+Inf"}'
+        values: '0+10x15'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: {{ alert_name }}
+        exp_alerts: []
+EOF
+promtool test rules {{ promtool_test_file_path }}
+curl -X POST {{ prometheus_url }}/-/reload
+```
+
+このユニットテストは「p95が常にSLO内(全リクエストが1秒以内)」の入力に対してアラートが発報しないことを確認する回帰テストです。`promtool check rules`が構文エラーを検出した場合、`promtool test rules`が失敗した場合ともに、リロードは行わず修正してから再実行します。
+
+### 5. 通知先を設定して発報試験を行う
+
+```bash
+sudo tee -a {{ alertmanager_config_path }} <<'EOF'
+receivers:
+  - name: {{ receiver_name }}
+    slack_configs:
+      - channel: '{{ slack_channel }}'
+        api_url_file: {{ slack_webhook_secret_file }}
+        send_resolved: true
+route:
+  routes:
+    - match:
+        service: {{ service_name }}
+      receiver: {{ receiver_name }}
+EOF
+amtool check-config {{ alertmanager_config_path }}
+curl -X POST {{ alertmanager_url }}/-/reload
+```
+
+```bash
+amtool alert add alertname={{ test_alert_name }} severity={{ alert_severity }} service={{ service_name }} --alertmanager.url={{ alertmanager_url }} --annotation=summary="manual notification test" --end="$(date -u -d '+10 minutes' +%Y-%m-%dT%H:%M:%SZ)"
+amtool alert query alertname={{ test_alert_name }} --alertmanager.url={{ alertmanager_url }}
+```
+
+Slackチャンネル`{{ slack_channel }}`に通知が届いたことを目視確認します。届かない場合は`{{ receiver_name }}`のルーティング一致条件(`service: {{ service_name }}`)と`{{ slack_webhook_secret_file }}`の中身を確認します。
+
+## 動作確認
+
+- `promtool check rules {{ alert_rules_path }}` と `promtool test rules {{ promtool_test_file_path }}` がいずれもエラーなく完了すること
+- `curl -s "{{ prometheus_url }}/api/v1/rules" | jq` の出力で、グループ`{{ alert_group_name }}`に`{{ alert_name }}`が登録されていること
+- `amtool alert query alertname={{ test_alert_name }} --alertmanager.url={{ alertmanager_url }}` にテストアラートが表示されること
+- Slackチャンネル`{{ slack_channel }}`にテスト通知が届くこと
+- 手順1で記録した過去`{{ baseline_window }}`の実測p95が、SLO目標`{{ slo_target_p95_seconds }}`秒に対してどの程度の余裕(またはすでに超過しているか)を残しているか記録されていること
+
+## 注意事項
+
+- SLO目標`{{ slo_target_p95_seconds }}`秒は本手順における暫定値であり、手順1の実測分布とビジネス要件を踏まえて関係者と合意のうえ見直す。
+- `{{ alert_rules_path }}`が`{{ prometheus_config_path }}`の`rule_files:`に登録済みであることが前提。未登録の場合は追記してからPrometheusをリロードする。
+- `{{ slack_webhook_secret_file }}`はAlertmanagerプロセスのみが読み取れる権限に制限し、Webhook URLをYAMLへ直書きしない。
+- `amtool alert add`で追加したテストアラートは`--end`で自動失効するようにし、手動テスト用のアラートをAlertmanager上に放置しない。
+- `/-/reload`エンドポイントの利用には、PrometheusおよびAlertmanagerの起動時に`--web.enable-lifecycle`フラグが必要。

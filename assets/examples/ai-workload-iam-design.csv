@@ -1,0 +1,5 @@
+workload_name,ai_service,role_name,policy_name,allowed_action,resource_arn,denied_action,owner
+bedrock-chat-inference,bedrock,bedrock-chat-inference-role,bedrock-chat-inference-policy,bedrock:InvokeModel,arn:aws:bedrock:ap-northeast-1::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0,bedrock:DeleteModel,ml-platform-team
+sagemaker-training-job,sagemaker,sagemaker-training-role,sagemaker-training-policy,sagemaker:CreateTrainingJob,arn:aws:sagemaker:ap-northeast-1:123456789012:training-job/*,sagemaker:DeleteDomain,ml-platform-team
+sagemaker-endpoint-serving,sagemaker,sagemaker-endpoint-role,sagemaker-endpoint-policy,sagemaker:InvokeEndpoint,arn:aws:sagemaker:ap-northeast-1:123456789012:endpoint/*,sagemaker:CreateNotebookInstance,app-backend-team
+bedrock-agent-orchestration,bedrock,bedrock-agent-role,bedrock-agent-policy,bedrock:InvokeAgent,arn:aws:bedrock:ap-northeast-1:123456789012:agent/*,bedrock:PutModelInvocationLoggingConfiguration,ml-platform-team

@@ -1,0 +1,15 @@
+dag_id: "ml_training_pipeline"
+model_name: "customer-churn-classifier"
+dag_source_path: "/home/mluser/repos/ml-pipelines/dags/ml_training_pipeline.py"
+airflow_home: "/opt/airflow"
+train_task_id: "train_model"
+evaluate_task_id: "evaluate_model"
+register_task_id: "register_artifact"
+schedule_cron: "0 3 * * *"
+test_execution_date: "2026-07-17"
+manual_trigger_exec_date: "2026-07-18"
+retries: 3
+retry_delay_minutes: 5
+notify_email: "ml-ops@example.com"
+artifact_registry_uri: "s3://ml-artifacts/models/ml_training_pipeline"
+eval_metric_threshold: "0.80"
