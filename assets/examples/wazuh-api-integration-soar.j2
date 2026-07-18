@@ -1,0 +1,114 @@
+# Wazuh API連携とインテグレーション構成 — {{ integration_name }}
+
+Wazuh API による照会と、`ossec.conf` の `<integration>` ブロックによる外部通知（Slack / PagerDuty / カスタムWebhook）連携を構成し、SOAR運用の土台を作ります。API認証トークンとWebhook URLはいずれも機微情報として扱ってください。
+
+## 目的
+
+Wazuh API の認証トークン取得と照会、および `<integration>` によるアラート駆動の外部通知（Slack/PagerDuty/カスタムWebhook）連携を、トークン漏えいや誤通知を防ぎながら構成できるようになることを目指します。
+
+## 用語解説
+
+- **Wazuh API**: manager が提供するREST API（既定ポート55000）。認証はJWT形式のトークン方式
+- **RBAC(Role-Based Access Control)**: Wazuh APIのユーザーに対し、閲覧・書込などの権限をロール単位で割り当てる仕組み。`integration-svc` のような連携専用ユーザーには必要最小限のロールのみ付与する
+- **トークン運用**: `/security/user/authenticate` で発行されるトークンには有効期限があり、期限切れ後は再発行が必要。長期保存せず都度取得・破棄する運用が望ましい
+- **integrator**: Wazuh manager内でアラートを監視し、条件に合致した場合に外部サービスへ通知するプロセス（`integrator.log` に動作記録が残る）
+- **integratorのフィルタ条件**: `<integration>` ブロックの `<rule_id>` (特定ルールIDのみ)・`<level>` (このレベル以上のみ、本シナリオでは`{{ trigger_level }}`)・`<group>` などで通知対象を絞り込む条件
+- **hook_url**: 通知先のWebhook URL（Slack Incoming Webhook、PagerDuty Events API等）。平文で漏えいするとなりすまし通知の踏み台になり得る
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| API エンドポイント | `{{ api_endpoint }}` |
+| API ユーザー | `{{ api_user }}` |
+| integration名 | `{{ integration_name }}` |
+| 通知対象レベル(trigger_level) | {{ trigger_level }} 以上 |
+| hook_url 設定済み | {{ hook_url_set }} |
+
+## 1. APIパスワードを安全に用意し、認証トークンを取得する
+
+APIパスワードは平文で端末履歴やログに残さないよう、環境変数経由で渡します。
+
+```bash
+read -r -s -p "Wazuh API password for {{ api_user }}: " WAZUH_API_PASSWORD
+export WAZUH_API_PASSWORD
+echo
+```
+
+```bash
+TOKEN=$(curl -s -u "{{ api_user }}:${WAZUH_API_PASSWORD}" -k -X POST \
+  "{{ api_endpoint }}/security/user/authenticate?raw=true")
+unset WAZUH_API_PASSWORD
+printf '%s' "$TOKEN" | wc -c
+```
+
+`-k`(検証環境で自己署名証明書の場合のみ)、`?raw=true` でトークン文字列のみを受け取ります。トークンは変数に保持するだけで、ファイルやログへは書き出さないでください。
+
+## 2. トークンでAPIを照会し、RBAC権限を確認する
+
+```bash
+curl -s -H "Authorization: Bearer ${TOKEN}" -k \
+  "{{ api_endpoint }}/security/users/me" | head -c 500
+echo
+curl -s -H "Authorization: Bearer ${TOKEN}" -k \
+  "{{ api_endpoint }}/agents?limit=5" | head -c 500
+echo
+```
+
+`{{ api_user }}` に付与されたロールが、agents照会など必要最小限の操作に限定されていることを確認します。書込・削除系エンドポイントが許可されていないことも合わせて確認してください。
+
+## 3. ossec.confにintegrationブロックを追加する
+
+`hook_url` はここでは値をそのまま埋め込まず、事前に環境変数として manager 側に配置したうえで、設定ファイルには機微値を書かない運用とします。
+
+```bash
+sudo tee -a /var/ossec/etc/ossec.conf.d/{{ integration_name }}.conf <<'EOF'
+<ossec_config>
+  <integration>
+    <name>{{ integration_name }}</name>
+    <hook_url>$HOOK_URL_{{ integration_name }}</hook_url>
+    <level>{{ trigger_level }}</level>
+    <alert_format>json</alert_format>
+  </integration>
+</ossec_config>
+EOF
+```
+
+hook_url を環境変数展開で読み込ませる場合は、manager起動スクリプト側で `HOOK_URL_{{ integration_name }}` をセットし、`600`権限のシークレットファイルから読み込む運用にしてください（設定ファイル自体に平文で残さない）。
+
+```bash
+sudo /var/ossec/bin/wazuh-control restart
+```
+
+## 4. 旧通知経路を残したまま新設定を並行稼働で検証する
+
+既存の通知手段（例: メール通知や別integration）を無効化する前に、新しいintegrationを並行稼働させ、テストアラートで到達を確認します。
+
+```bash
+sudo /var/ossec/bin/wazuh-logtest <<'EOF'
+type=ids
+srcip=203.0.113.10
+id=5710
+full log: sshd: Failed password for invalid user test from 203.0.113.10
+EOF
+```
+
+```bash
+sudo tail -n 20 /var/ossec/logs/integrations.log
+```
+
+`integrations.log` に `{{ integration_name }}` 宛の送信試行が記録され、Slack/PagerDuty側で実際に通知が届いたことを確認できてから、旧経路の無効化を検討してください。
+
+## 動作確認
+
+1. 手順1でトークンが取得でき、`printf '%s' "$TOKEN" | wc -c` が0より大きいこと
+2. 手順2で `{{ api_user }}` のロールが照会専用に限定されていること
+3. 手順4のテストアラートで `integrations.log` に送信記録が残り、`{{ integration_name }}`側（Slack/PagerDuty等）で実際に通知を受信できること
+
+## 注意事項
+
+- APIパスワードとトークン、`hook_url` はいずれも機微情報。設定ファイルやスクリプトに平文で書かず、環境変数経由または `600` 権限のシークレットファイルで扱い、シェル履歴・ログ・standard出力へ書き出さないこと
+- 外部通知にはアラート内容（送信元IP・ユーザー名などPIIを含み得る情報）がそのまま転送される。`hook_url` の送信先が正しいSlackチャンネル/PagerDutyサービスであることを事前に確認し、誤った宛先へ機微情報を送らないこと
+- APIトークンとAPIパスワードは定期的にローテーションし、退職・異動時や漏えい疑いが生じた際は即座に無効化・再発行すること
+- 新しいintegrationを有効化する際は、既存の通知経路（メール通知など）を並行稼働させたまま到達確認を行い、確実に新経路が機能してから旧経路を無効化すること
+- `wazuh-control restart` はmanager全体を再起動するため、既存の他integrationやエージェント通信が一時的に途切める可能性がある。メンテナンス時間帯での実施を推奨する
