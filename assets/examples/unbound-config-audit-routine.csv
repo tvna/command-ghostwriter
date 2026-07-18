@@ -1,9 +1,9 @@
 audit_item,current_config,expected,risk,disposition
 access-control 許可範囲,0.0.0.0/0 allow,10.0.20.0/24 allow と 127.0.0.0/8 allow のみ,高,是正
 interface 待受範囲,0.0.0.0,10.0.20.1 と 127.0.0.1 のみ,高,是正
-forward-zone 転送先,"forward-addr: 9.9.9.9 (TLS未検証)",forward-tls-upstream: yes かつ検証済み上位DoTリゾルバ,中,是正
-53/UDP,443,公開ポート,インターネット全体へ公開,内部セグメント(10.0.20.0/24)のみ,高,是正
-853/TCP(DoT)公開ポート,0.0.0.0:853 全世界公開,内部セグメント(10.0.20.0/24)のみ,高,是正
-RPZ/blocklist 鮮度,rpz.zone の最終更新が40日前,24時間以内の自動更新,中,是正
-harden-glue / harden-below-nxdomain,yes,yes(維持),低,維持
+forward-zone 転送先,forward-addr: 9.9.9.9 (TLS未検証),forward-tls-upstream: yes かつ検証済み上位DoTリゾルバ,中,是正
+53/UDPの公開範囲,インターネット全体へ公開,内部セグメント(10.0.20.0/24)のみ,高,是正
+853/TCP(DoT)の公開範囲,0.0.0.0:853 全世界公開,内部セグメント(10.0.20.0/24)のみ,高,是正
+RPZ/blocklist鮮度,rpz.zoneの最終更新が40日前,24時間以内の自動更新,中,是正
+harden-glue/harden-below-nxdomain,yes,yes(維持),低,維持
 DNSSECバリデーション(auto-trust-anchor-file),有効,有効を維持,低,維持

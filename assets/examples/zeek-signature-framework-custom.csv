@@ -1,0 +1,4 @@
+sig_id,proto,dst_port,payload_regex,event_msg,note
+sig-http-malicious-token,tcp,80,/.*malicious-token.*/,LOCAL match: malicious-token in HTTP payload,平文HTTPのみ検知可能(TLS化で不可視)
+sig-ftp-cleartext-cred,tcp,21,/USER[ ]+admin/,LOCAL match: FTP admin login attempt,平文FTP専用の可視性依存シグネチャ
+sig-smtp-suspicious-attach,tcp,25,/.*\.exe\r?\n/,LOCAL match: suspicious .exe attachment in SMTP,添付ファイル名のみを軽量マッチ

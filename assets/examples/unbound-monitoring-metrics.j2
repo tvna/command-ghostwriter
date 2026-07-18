@@ -1,0 +1,136 @@
+# Unboundメトリクス監視の構築
+
+unbound-control とPrometheus向けexporterを用いて、キャッシュヒット率・SERVFAIL率・応答時間などの統計を継続的に監視できるようにします。
+
+## 目的
+
+Unbound の内部統計を `unbound-control stats`/`stats_noreset` および exporter経由で定期的に収集し、キャッシュヒット率の低下やSERVFAIL率の急増を早期に検知できる監視体制を構築することを目指します。
+
+## 用語解説
+
+- **unbound-control**: Unboundデーモンに対して統計取得・キャッシュ操作などを行う制御コマンド。TLS証明書で認証される
+- **stats**: 統計を取得したうえでカウンタをリセットするコマンド。直近の区間の増分を見るのに使う
+- **stats_noreset**: 統計を取得してもカウンタをリセットしないコマンド。累積値を確認するのに使う
+- **total.num.queries**: サーバが受け付けた問い合わせの累積総数
+- **total.num.cachehit**: キャッシュから応答できた問い合わせ数。`cachehit / queries` がキャッシュヒット率になる
+- **answer.rcode.SERVFAIL**: 上流の障害やDNSSEC検証失敗などで SERVFAIL を返した応答数
+- **unbound_exporter**: unbound-control statsの出力をPrometheusのメトリクス形式に変換して公開するexporter
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| exporter有効化 | {{ exporter_enabled }} |
+| 監視対象メトリクス | {{ watch_metrics | join(", ") }} |
+| キャッシュヒット率しきい値 | {{ cache_hit_threshold }}% |
+| SERVFAIL率しきい値 | {{ servfail_threshold }}% |
+| アラート通知先 | {{ alert_channel }} |
+
+## 手順
+
+### 1. unbound-control用の証明書を確認する
+
+```bash
+unbound-control-setup
+ls -l /etc/unbound/unbound_control.pem /etc/unbound/unbound_control.key
+```
+
+### 2. unbound.confでcontrolとstatisticsを有効化する
+
+```bash
+cat > /etc/unbound/unbound.conf.d/control-stats.conf <<'EOF'
+remote-control:
+    control-enable: yes
+    control-use-cert: yes
+    control-interface: 127.0.0.1
+    control-port: 8953
+server:
+    statistics-interval: 0
+    statistics-cumulative: yes
+    extended-statistics: yes
+EOF
+unbound-checkconf
+systemctl restart unbound
+```
+
+### 3. unbound-controlで統計を取得する
+
+```bash
+# 直近区間の増分を見る(取得後にカウンタがリセットされる)
+unbound-control stats
+
+# 累積値を見る(カウンタはリセットされない)
+unbound-control stats_noreset
+```
+
+{% if exporter_enabled %}
+### 4. unbound_exporterを導入する
+
+```bash
+apt-get update
+apt-get install -y golang-go
+go install github.com/letsencrypt/unbound_exporter@latest
+unbound_exporter \
+  --unbound.host=tls://127.0.0.1:8953 \
+  --unbound.ca=/etc/unbound/unbound_server.pem \
+  --unbound.cert=/etc/unbound/unbound_control.pem \
+  --unbound.key=/etc/unbound/unbound_control.key \
+  --web.listen-address=:9167 &
+```
+
+### 5. exporterのメトリクスを取得する
+
+```bash
+curl -s http://127.0.0.1:9167/metrics | grep -E "unbound_(query_type_total|cache_hits_total|answer_rcodes_total)"
+```
+{% endif %}
+
+### {{ "6" if exporter_enabled else "4" }}. 監視すべき指標を確認する
+
+以下のメトリクスを定期的に記録します。
+
+{% for m in watch_metrics %}- `{{ m }}`
+{% endfor %}
+
+```bash
+# キャッシュヒット率を計算する
+Q=$(unbound-control stats_noreset | grep '^total.num.queries=' | cut -d= -f2)
+H=$(unbound-control stats_noreset | grep '^total.num.cachehit=' | cut -d= -f2)
+awk -v q="$Q" -v h="$H" 'BEGIN { printf "cache_hit_ratio=%.2f%%\n", (h/q)*100 }'
+
+# SERVFAIL率を計算する
+S=$(unbound-control stats_noreset | grep '^num.answer.rcode.SERVFAIL=' | cut -d= -f2)
+awk -v q="$Q" -v s="$S" 'BEGIN { printf "servfail_ratio=%.2f%%\n", (s/q)*100 }'
+```
+
+### {{ "7" if exporter_enabled else "5" }}. アラートしきい値を設定する
+
+キャッシュヒット率が {{ cache_hit_threshold }}% を下回った場合、またはSERVFAIL率が {{ servfail_threshold }}% を上回った場合に {{ alert_channel }} へ通知するルールを監視基盤(Prometheus Alertmanagerなど)に登録します。
+
+```yaml
+groups:
+  - name: unbound
+    rules:
+      - alert: UnboundCacheHitRatioLow
+        expr: (unbound_cache_hits_total / unbound_query_type_total) * 100 < {{ cache_hit_threshold }}
+        for: 10m
+      - alert: UnboundServfailRatioHigh
+        expr: (unbound_answer_rcodes_total{rcode="SERVFAIL"} / unbound_query_type_total) * 100 > {{ servfail_threshold }}
+        for: 5m
+```
+
+## 動作確認
+
+1. `unbound-control stats` と `unbound-control stats_noreset` の両方が値を返すこと
+{% if exporter_enabled %}2. exporterの `/metrics` エンドポイントから `unbound_cache_hits_total` などのメトリクスが取得できること
+{% endif %}3. `dig` で意図的に同一クエリを連続実行し負荷をかけた後、`total.num.cachehit` と算出したキャッシュヒット率が上昇していることを確認する
+4. 存在しないドメインへの問い合わせや上流障害を模した状況で `num.answer.rcode.SERVFAIL` が増加し、算出したSERVFAIL率がしきい値超過時にアラートが発報することを確認する
+
+## 注意事項
+
+- `stats` はカウンタをリセットするため、`cron`等で定期取得する運用と手動で状態確認したい場合とで `stats` と `stats_noreset` を使い分けること。両者を混在させると増分の計算を誤る。
+- SERVFAIL率の急増は上流DNSサーバの障害だけでなく、DNSSEC検証失敗(署名切れ・鍵ロールオーバーの不整合など)でも発生する。原因切り分けには `dig +dnssec` での個別確認を併用すること。
+- キャッシュヒット率の低下は、TTLの短いレコードへの問い合わせ増加やキャッシュサイズ不足、あるいはキャッシュポイズニング対策のための意図的なキャッシュクリアが原因のことがある。単純にアラートだけで判断せず要因を確認すること。
+- `unbound-control` はTLS証明書(`unbound_control.pem`/`unbound_control.key`)で認証される。証明書の有効期限切れは監視自体の停止につながるため、`unbound-control-setup` による再生成手順を運用ドキュメントに残しておくこと。
+- 統計値は日次でバックアップ・記録し、しきい値超過が単発の一時的な事象か傾向的な悪化かを後から判断できるようにすること。
+- exporterやcontrol-interfaceの追加はUnboundの制御ポート(8953)を新規に開くため、既存のリゾルバ運用に影響しないことを確認してから恒久設定として反映すること。

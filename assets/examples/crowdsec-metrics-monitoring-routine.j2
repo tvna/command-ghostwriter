@@ -1,0 +1,121 @@
+# CrowdSec検知・遮断メトリクスの定期監視
+
+CrowdSecの`cscli metrics`とPrometheusエンドポイントを用いて、検知量・遮断状況・パーサの健全性を定期的に監視する運用手順です。
+
+## 目的
+
+CrowdSecが持つacquisition/parser/scenario/bucket各段階の統計と、アクティブなdecision(遮断)数を日次で確認し、パースエラーの急増(検知漏れの兆候)やdecisionの急増(攻撃または誤検知の兆候)を早期に発見できるようになることを目指します。
+
+## 用語解説
+
+- **cscli metrics**: CrowdSecのローカルAPIから、acquisition(ログ取得元)・parser(パーサ)・scenario(シナリオ)・bucket(集計バケット)・decision(遮断)の各統計をテキスト表示するコマンド
+- **acquisition**: CrowdSecがログを取り込む入力元(ファイル、journald等)の単位。取り込み行数が止まると監視対象ログが届いていない疑いがある
+- **parser**: 取り込んだログ行を構造化データにパースする処理。`cs_parser_hits_ko_total`(パース失敗)が急増した場合、監視対象アプリのログフォーマットが変わった可能性が高く、それはシナリオが発火しなくなる=検知漏れに直結するため優先度が高い
+- **scenario / bucket**: パース済みログを条件判定し、閾値超過(bucket overflow)でアラートを生成する仕組み。`cs_bucket_overflowed_total`がシナリオの発火回数にあたる
+- **decision**: シナリオ発火の結果としてCrowdSecが下す遮断(ban)などの処置。`cs_active_decisions`は現在有効な遮断の総数
+- **prometheus.enabled**: CrowdSecの`config.yaml`でPrometheusメトリクスエンドポイント(既定で`http://127.0.0.1:6060/metrics`)を有効化する設定
+- **パースエラー急増と決定(decision)急増の違い**: パースエラー急増はログフォーマット変化によるパーサ側の不具合(検知能力そのものの低下)を示唆するのに対し、decision急増は攻撃の実増加とルール誤爆(誤検知)のどちらかを示唆し、両者は切り分けの観点が異なる
+
+## シナリオ設定
+
+| 設定項目 | 値 |
+| --- | --- |
+| Prometheusメトリクス有効化 | {{ prometheus_enabled }} |
+| スクレイプ間隔 | {{ scrape_interval }} |
+
+監視対象メトリクス:
+
+{% for m in watch_metrics %}
+- {{ m }}
+{% endfor %}
+
+アラートルール:
+
+{% for r in alert_rules %}
+- {{ r }}
+{% endfor %}
+
+## 手順
+
+### 1. Prometheusメトリクスエンドポイントを有効化する
+
+`/etc/crowdsec/config.yaml`の該当箇所を以下のように設定します(現在の有効化状態: `{{ prometheus_enabled }}`)。
+
+```yaml
+prometheus:
+  enabled: true
+  level: full
+  listen_addr: 127.0.0.1
+  listen_port: 6060
+```
+
+```bash
+sudo systemctl restart crowdsec
+sudo systemctl status crowdsec --no-pager
+```
+
+→ 設定変更後は必ずサービス再起動後の起動成功を確認します。既存の監視経路(cscli metricsによるCLI監視)は無効化せず併存させ、Prometheus経路が正常に取得できることを次の手順で確かめてから移行の判断をします。
+
+### 2. cscli metricsでローカル統計を確認する
+
+```bash
+sudo cscli metrics
+```
+
+→ `Acquisition Metrics`セクションでログ取り込み行数が増加し続けているか、`Parser Metrics`セクションで`Parsed`(成功)と`Unparsed`(失敗)の比率、`Bucket Metrics`セクションでシナリオごとの`Overflows`(発火数)、`Local API Decisions`セクションで`cs_active_decisions`相当のアクティブ遮断数を確認します。
+
+### 3. Prometheusエンドポイントから同じ指標を取得する
+
+```bash
+curl -s http://127.0.0.1:6060/metrics | grep -E 'cs_parser_hits_(ok|ko)_total|cs_bucket_overflowed_total|cs_active_decisions|cs_alerts_total'
+```
+
+→ スクレイプ間隔{{ scrape_interval }}でPrometheus本体からこのエンドポイントを取得する設定を`prometheus.yml`のscrape_configsに追加し、`cscli metrics`の値と一致することを確認します(新経路の動作確認)。
+
+```yaml
+scrape_configs:
+  - job_name: "crowdsec"
+    scrape_interval: "{{ scrape_interval }}"
+    static_configs:
+      - targets: ["127.0.0.1:6060"]
+```
+
+### 4. 監視対象メトリクスと閾値に沿って日次確認する
+
+{% for m in watch_metrics %}
+- {{ m }}
+{% endfor %}
+
+上記を確認し、以下のアラートルールに該当する状態がないか判定します。
+
+{% for r in alert_rules %}
+- {{ r }}
+{% endfor %}
+
+### 5. 意図的な負荷でメトリクス変化を検証する
+
+```bash
+for i in $(seq 1 20); do
+  ssh -o ConnectTimeout=1 invaliduser@127.0.0.1 2>/dev/null
+done
+sleep 5
+sudo cscli metrics | grep -A5 "Local API Decisions"
+curl -s http://127.0.0.1:6060/metrics | grep cs_active_decisions
+```
+
+→ 意図的な失敗ログイン負荷をかけた直後に、`cs_bucket_overflowed_total`と`cs_active_decisions`が想定どおり増加することを確認し、監視系がログ→パース→シナリオ→decisionの一連の経路を正しく反映していることを検証します。
+
+## 動作確認
+
+- `cscli metrics`でacquisition/parser/scenario/bucket/decisionの各値が取得できること
+- Prometheusの`/metrics`エンドポイントから同じ値がスクレイプ間隔{{ scrape_interval }}で取得できていること(手順3)
+- 意図的な負荷でシナリオ発火数とアクティブdecision数が想定どおり増加すること(手順5)
+- 監視対象メトリクスとアラートルールに沿った日次判定結果が記録されていること
+
+## 注意事項
+
+- パースエラー(`cs_parser_hits_ko_total`)の急増は検知漏れに直結するため最優先で対応する。監視対象アプリのログフォーマット変更やログローテーション設定の変化を疑い、該当パーサの`pattern`定義を見直す。
+- decisionの急増を検知した場合は、攻撃の実増加なのかルール誤爆(誤検知)なのかを`cscli decisions list`や`cscli alerts list`で発生源シナリオを確認して切り分ける。切り分け前に一律でdecisionを無効化しない。
+- Prometheusエンドポイント(手順1)を新たに有効化する際は、既存のcscli metricsによる監視を止めずに併存させ、Prometheus経路での取得が安定して確認できてから、旧来のCLI手動確認頻度を下げるなどの移行を行う。
+- メトリクスの保管期間と閾値は監視基盤(Prometheus/Grafana等)側で明示的に設定し、閾値の根拠と変更履歴を残す。
+- 日次確認の結果(取得値・判定・対応有無)は監査証跡として日報や監視ログに記録し、後から追跡できるようにする。

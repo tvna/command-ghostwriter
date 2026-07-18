@@ -1,0 +1,7 @@
+metric,command,threshold,today_value,status
+agent_connection_rate,agent_control -lc,95%以上,98%,ok
+analysisd_dropped_events,wazuh-analysisd.state (events_dropped),0,0,ok
+remoted_queue_usage,wazuh-remoted.state (queue_size),80%未満,42%,ok
+indexer_cluster_health,_cluster/health (status),green,green,ok
+events_per_second,wazuh-analysisd.state (events_per_sec),500以下,120,ok
+disk_usage_var_ossec,df -h /var/ossec,80%未満,55%,ok
