@@ -1,6 +1,5 @@
 install_dir: "/opt/langfuse"
 repo_url: "https://github.com/langfuse/langfuse.git"
-web_port: 3000
 web_url: "http://langfuse.internal.example.com:3000"
 org_name: "acme-ai-team"
 lf_project_name: "prod-llm-app"

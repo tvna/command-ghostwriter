@@ -6,7 +6,6 @@ registry_path: /data/feast/driver_ranking/feature_repo/data/registry.db
 entity:
   name: driver
   join_key: driver_id
-  value_type: INT64
 source:
   path: /data/feast/driver_ranking/feature_repo/data/driver_stats.parquet
   timestamp_field: event_timestamp

@@ -83,9 +83,8 @@ ssh {{ r["hostname"] }} iostat -x 1 3
 ### 5. 再実行と再発防止策の記録
 
 ```bash
-{% for r in csv_rows %}{% if r["root_cause_category"] != "HEALTHY" %}echo "{{ r["hostname"] }} rank{{ r["node_rank"] }} [{{ r["root_cause_category"] }}]: {{ r["recommended_action"] }}" >> /var/log/training-job-failure-triage.log
-{% else %}echo "{{ r["hostname"] }} rank{{ r["node_rank"] }} [{{ r["root_cause_category"] }}]: {{ r["recommended_action"] }}" >> /var/log/training-job-failure-triage.log
-{% endif %}{% endfor %}date -Iseconds >> /var/log/training-job-failure-triage.log
+{% for r in csv_rows %}echo "{{ r["hostname"] }} rank{{ r["node_rank"] }} [{{ r["root_cause_category"] }}]: {{ r["recommended_action"] }}" >> /var/log/training-job-failure-triage.log
+{% endfor %}date -Iseconds >> /var/log/training-job-failure-triage.log
 ```
 
 `root_cause_category`ごとの対処(手順2〜4で裏付けた原因への対応)がすべて完了したことを確認してから再実行します。
