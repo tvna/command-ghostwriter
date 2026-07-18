@@ -53,24 +53,17 @@ aws ce get-cost-and-usage \
 CUR_START=$(date +%Y-%m-01)
 CUR_END=$(date -d "$CUR_START +1 month" +%Y-%m-01)
 PREV_START=$(date -d "$CUR_START -1 month" +%Y-%m-01)
-CUR=$(aws ce get-cost-and-usage --time-period Start=$CUR_START,End=$CUR_END --granularity MONTHLY --metrics "UnblendedCost" --filter '{"Dimensions":{"Key":"SERVICE","Values":["{{ r["ce_service_name"] }}"]}}' --profile {{ r["aws_profile"] }} --query 'ResultsByTime[0].Total.UnblendedCost.Amount' --output text)
+CUR_JSON=$(aws ce get-cost-and-usage --time-period Start=$CUR_START,End=$CUR_END --granularity MONTHLY --metrics "UnblendedCost" --filter '{"Dimensions":{"Key":"SERVICE","Values":["{{ r["ce_service_name"] }}"]}}' --group-by Type=DIMENSION,Key=USAGE_TYPE --profile {{ r["aws_profile"] }} --output json)
+CUR=$(echo "$CUR_JSON" | jq -r '[.ResultsByTime[0].Groups[].Metrics.UnblendedCost.Amount | tonumber] | add // 0')
 PREV=$(aws ce get-cost-and-usage --time-period Start=$PREV_START,End=$CUR_START --granularity MONTHLY --metrics "UnblendedCost" --filter '{"Dimensions":{"Key":"SERVICE","Values":["{{ r["ce_service_name"] }}"]}}' --profile {{ r["aws_profile"] }} --query 'ResultsByTime[0].Total.UnblendedCost.Amount' --output text)
 echo "今月: $CUR USD / 前月: $PREV USD"
 awk -v cur="$CUR" -v prev="$PREV" 'BEGIN { if (prev > 0) { printf "増減率: %.1f%%\n", (cur - prev) / prev * 100 } else { print "増減率: 算出不可(前月実績なし)" } }'
 
 echo "=== {{ r["service_label"] }}: 使用タイプ別の内訳(今月) ==="
-aws ce get-cost-and-usage \
-  --time-period Start=$CUR_START,End=$CUR_END \
-  --granularity MONTHLY \
-  --metrics "UnblendedCost" \
-  --filter '{"Dimensions":{"Key":"SERVICE","Values":["{{ r["ce_service_name"] }}"]}}' \
-  --group-by Type=DIMENSION,Key=USAGE_TYPE \
-  --profile {{ r["aws_profile"] }} \
-  --query 'ResultsByTime[0].Groups[].{UsageType:Keys[0],Amount:Metrics.UnblendedCost.Amount}' \
-  --output table
+echo "$CUR_JSON" | jq -r '.ResultsByTime[0].Groups[] | [.Keys[0], .Metrics.UnblendedCost.Amount] | @tsv'
 {% endfor %}```
 
-増減率が`anomaly`と呼べるほど大きい(目安として50%を超える)場合は、使用タイプ別の内訳から要因(特定のAPI呼び出し種別の急増など)を確認してください。
+今月の合計(`CUR`)は、使用タイプ別の内訳を取得する1回の呼び出し(`CUR_JSON`)から`jq`で`Amount`を合算して算出しており、合計専用の別呼び出しは行いません。Cost Explorer APIはリクエスト1回ごとに課金されるため、同じ期間・同じフィルタに対する呼び出しを1回にまとめています。増減率が`anomaly`と呼べるほど大きい(目安として50%を超える)場合は、使用タイプ別の内訳から要因(特定のAPI呼び出し種別の急増など)を確認してください。
 
 ### 3. 未使用エンドポイントや遊休リソースを洗い出す
 
