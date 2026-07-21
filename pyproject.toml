@@ -24,7 +24,7 @@ dependencies = [
 [dependency-groups]
 dev = [
   "data-to-xml>=1.0.9,<2",
-  "gitpython>=3.1.52,<4",
+  "gitpython>=3.1.53,<4",
   "lizard>=1.17.31,<2",
   "mock>=5.2,<6",
   "mypy>=2.3.0,<3",
