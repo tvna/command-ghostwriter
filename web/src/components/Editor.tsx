@@ -615,6 +615,32 @@ function renderInline(text: string, keyBase: string): ReactNode[] {
   return nodes;
 }
 
+// A GFM table row: starts and ends with `|`. Cell splitting drops the empty
+// strings produced by the leading/trailing pipe.
+const TABLE_ROW_RE = /^\s*\|.*\|\s*$/;
+// A GFM separator row, e.g. `|---|---|` or `| :--- | ---: | :---: |`.
+const TABLE_SEPARATOR_RE = /^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?\s*$/;
+
+function parseTableRow(line: string): string[] {
+  let s = line.trim();
+  if (s.startsWith('|')) s = s.slice(1);
+  if (s.endsWith('|')) s = s.slice(0, -1);
+  return s.split('|').map((c) => c.trim());
+}
+
+type ColumnAlign = 'left' | 'center' | 'right' | undefined;
+
+function parseColumnAligns(separatorLine: string): ColumnAlign[] {
+  return parseTableRow(separatorLine).map((c) => {
+    const left = c.startsWith(':');
+    const right = c.endsWith(':');
+    if (left && right) return 'center';
+    if (right) return 'right';
+    if (left) return 'left';
+    return undefined;
+  });
+}
+
 function MarkdownView({ output }: { output: string }) {
   const lines = output.split('\n');
   const blocks: ReactNode[] = [];
@@ -678,6 +704,60 @@ function MarkdownView({ output }: { output: string }) {
             <li key={j}>{renderInline(it, 'o' + key + j)}</li>
           ))}
         </ol>,
+      );
+      continue;
+    }
+    if (TABLE_ROW_RE.test(line) && i + 1 < lines.length && TABLE_SEPARATOR_RE.test(lines[i + 1])) {
+      const headerCells = parseTableRow(line);
+      const aligns = parseColumnAligns(lines[i + 1]);
+      i += 2;
+      const rows: string[][] = [];
+      while (i < lines.length && TABLE_ROW_RE.test(lines[i])) {
+        rows.push(parseTableRow(lines[i]));
+        i++;
+      }
+      const tKey = key++;
+      blocks.push(
+        <div key={tKey} style={{ overflowX: 'auto', margin: '0 0 14px', border: '1px solid var(--cg-border)', borderRadius: 'var(--radius-md)' }}>
+          <table style={{ borderCollapse: 'collapse', fontSize: 'var(--text-sm)', color: 'var(--cg-text)', minWidth: '100%' }}>
+            <thead>
+              <tr>
+                {headerCells.map((c, j) => (
+                  <th
+                    key={j}
+                    style={{
+                      textAlign: aligns[j] ?? 'left',
+                      padding: '6px 12px',
+                      borderBottom: '2px solid var(--cg-border-strong)',
+                      borderRight: j < headerCells.length - 1 ? '1px solid var(--cg-border)' : undefined,
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {renderInline(c, 'th' + tKey + '-' + j)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, ri) => (
+                <tr key={ri} style={{ borderBottom: ri < rows.length - 1 ? '1px solid var(--cg-border)' : undefined }}>
+                  {r.map((c, ci) => (
+                    <td
+                      key={ci}
+                      style={{
+                        textAlign: aligns[ci] ?? 'left',
+                        padding: '6px 12px',
+                        borderRight: ci < r.length - 1 ? '1px solid var(--cg-border)' : undefined,
+                      }}
+                    >
+                      {renderInline(c, 'td' + tKey + '-' + ri + '-' + ci)}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>,
       );
       continue;
     }
