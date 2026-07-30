@@ -1,0 +1,9 @@
+device_name,circuit,rated_w,actual_w
+Server-DB,A系,600,520
+Server-App,A系,600,510
+Switch-Core,A系,200,150
+Server-Web1,B系,500,430
+Server-Web2,B系,500,430
+Storage,B系,700,600
+NAS,B系,300,260
+UPS-mgmt,B系,100,80

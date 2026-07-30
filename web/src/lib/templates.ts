@@ -688,6 +688,7 @@ const META: Meta[] = [
   { id: "opa-policy-governance-drill", name: "OPAポリシー統制の定期棚卸し訓練", desc: "稼働ポリシー・data・例外を定期棚卸しし逸脱や陳腐化を洗い出すOPAガバナンス訓練手順書を生成。", category: "ops", subCategory: "ポリシー統制", format: "csv", output: "markdown", activity: "drill", updated: "2026-07-17", live: true },
   { id: "opa-secrets-access-policy", name: "OPAによるシークレットアクセスポリシー統制", desc: "Vault等のシークレットアクセス要求をOPAで判定し最小権限をポリシーで一元化する構成手順書を生成。", category: "ops", subCategory: "ポリシー統制", format: "csv", output: "markdown", updated: "2026-07-17", live: true },
   { id: "opa-server-deployment-hardening", name: "OPAサーバの本番配備とハードニング", desc: "opa runサーバをTLS・認証・最小権限で本番配備しヘルスチェックまで構成するOPA手順書を生成。", category: "ops", subCategory: "ポリシー統制", format: "yaml", output: "markdown", updated: "2026-07-17", live: true },
+  { id: "rack-power-budget", name: "ラック電源容量設計（ブレーカーマージン計算）", desc: "電源系統ごとの消費電力を積算し、ブレーカー定格に対する80%ルールでマージンを検算する手順書を生成。", category: "facility", subCategory: "電源設計", format: "csv", output: "markdown", updated: "2026-07-30", live: true },
 ];
 
 export const CGTemplates: Template[] = META.map((m) => ({
