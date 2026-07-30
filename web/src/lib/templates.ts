@@ -691,6 +691,7 @@ const META: Meta[] = [
   { id: "cisco-ikev2-vpn", name: "Cisco IOS-XE(IKEv2 VTI)拠点間IPsec VPN構築", desc: "IOS-XEルータ2台でIKEv2 VTIによる拠点間IPsecトンネルを構成し、暗号設定と相互疎通を検証する手順書を生成。", category: "network", subCategory: "Cisco", format: "toml", output: "markdown", updated: "2026-07-30", live: true },
   { id: "juniper-ikev2-vpn", name: "Juniper SRXの拠点間IKEv2 IPsec VPN構築", desc: "SRX2台でIKEv2ルートベースVPNを構成し、暗号プロファイルと経路・ポリシーを検証する手順書を生成。", category: "network", subCategory: "Juniper", format: "toml", output: "markdown", updated: "2026-07-30", live: true },
   { id: "paloalto-ikev2-vpn", name: "Palo Alto Networks拠点間IKEv2 IPsec VPN構築", desc: "PAN-OSファイアウォール2拠点間でIKEv2 IPsecトンネルを構成し、SA確立と相互疎通を検証する手順書を生成。", category: "network", subCategory: "Palo Alto Networks", format: "toml", output: "markdown", updated: "2026-07-30", live: true },
+  { id: "sonicwall-ikev2-vpn", name: "SonicWallの拠点間IKEv2 IPsec VPN構築", desc: "SonicOS E-CLIでIKEv2 IPsecのVPNポリシーとプロポーザルを設定し、拠点間疎通を検証する手順書を生成。", category: "network", subCategory: "SonicWall", format: "toml", output: "markdown", updated: "2026-07-30", live: true },
 ];
 
 export const CGTemplates: Template[] = META.map((m) => ({

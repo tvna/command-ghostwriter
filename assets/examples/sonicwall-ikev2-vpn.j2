@@ -1,0 +1,113 @@
+# SonicWall(SonicOS)の拠点間IKEv2 IPsec VPN構築
+
+SonicWall次世代ファイアウォール(SonicOS/X 7)2台を使い、拠点間をIKEv2ベースのIPsec VPNで接続します。GUIだけでなくEnterprise Command Line Interface(E-CLI)からも同じVPNポリシーを投入できるため、本手順ではE-CLIでの構築を扱います。
+
+## 目的
+
+SonicOSにおけるVPNポリシー・アドレスオブジェクト・プロポーザル(Phase1/Phase2)の関係を理解した上で、拠点間IPsecトンネルをE-CLIで構築し、疎通と暗号パラメータの一致を検証できるようになることを目指します。
+
+## 用語解説
+
+- **VPN Policy(site-to-site)**: SonicOSでIKEとIPsecの設定をひとまとめに保持する論理オブジェクト。E-CLIでは`vpn policy site-to-site`配下にゲートウェイ・認証方式・プロポーザルを集約する
+- **Address Object**: LAN/VPN対象ネットワークをゾーンと結び付けて名前で参照するオブジェクト。VPNポリシーの`network local`/`network remote`はこのオブジェクト名を参照する
+- **E-CLI(Enterprise Command Line Interface)**: SonicOS 5.9以降で提供される階層型CLI。GUIのVPNポリシー設定の大半をコマンドで投入・`commit`で確定できる
+- **Proposal(IKE/IPsec)**: Phase1(IKE)とPhase2(IPsec)それぞれの暗号スイート(暗号化・認証・DHグループ・ライフタイム)を定義するサブツリー
+- **Perfect Forward Secrecy(PFS)**: IPsec SA更新のたびに新しい鍵交換を行い、鍵の使い回しによる漏洩リスクを下げる仕組み。DHグループを指定して有効化する
+- **IKE-DPD(Dead Peer Detection)**: 対向機器の生存確認を行う設定。`vpn`ツリー配下でグローバルに有効化し、確認間隔を指定する
+- **自動追加アクセスルール**: VPNポリシーをコミットすると、LAN⇔VPNゾーン間の通過を許可するアクセスルールがSonicOSにより自動生成される(`suppress-auto-add-rule`で抑止可能)
+
+## シナリオ設定
+
+自拠点WAN側アドレス `{{ local_wan_ip }}` と対向拠点WAN側アドレス `{{ remote_wan_ip }}` の間にIKEv2でIPsecトンネルを確立し、自拠点LAN `{{ local_lan }}` と対向拠点LAN `{{ remote_lan }}` を相互疎通させます。{{ pre_shared_key_note }}
+
+このテンプレートは、IKEv2マルチベンダー相互接続シリーズ(10ベンダー共通)の一つです。全テンプレートで暗号プロファイルを統一しており、このシリーズの他ベンダーのルータ/ファイアウォールとの間でも、以下の共通プロファイルに沿っていれば相互接続できます: IKEv2/IKE暗号AES-256(CBC)・ハッシュSHA-256・DHグループ14 / IPsec(ESP)暗号AES-256・認証SHA-256・PFSグループ14 / 認証方式PSK / IKE SAライフタイム28800秒・IPsec SAライフタイム3600秒 / NAT-T自動検出有効・DPD有効。
+
+## 手順
+
+### 1. 両拠点のパラメータを突き合わせる
+
+対向拠点の管理者と、WAN側アドレス・LANアドレス帯・事前共有鍵・暗号プロポーザル(AES-256/SHA-256/DHグループ14)が食い違っていないか確認します。既存のVPNポリシーやゾーン割り当ても事前に確認してください。
+
+```bash
+show interfaces
+show zone "WAN"
+show vpn policies
+```
+
+### 2. IKEv2/IPsecプロファイルとトンネルを設定する(自拠点側)
+
+configureモードでLAN側とVPN対向先のアドレスオブジェクトを作成した上で、`vpn policy site-to-site`にIKEv2のPhase1/Phase2プロポーザルを投入します。対向拠点側では`{{ local_wan_ip }}`と`{{ remote_wan_ip }}`、`{{ local_lan }}`と`{{ remote_lan }}`を入れ替えた設定を投入してもらいます。
+
+```bash
+configure
+address-object ipv4 "Local-LAN"
+  zone LAN
+  network {{ local_lan }}
+  exit
+address-object ipv4 "Remote-LAN"
+  zone VPN
+  network {{ remote_lan }}
+  exit
+vpn policy site-to-site "To-RemoteSite"
+  enable
+  gateway primary {{ remote_wan_ip }}
+  auth-method shared-secret
+  shared-secret ********
+  exit
+  network local name "Local-LAN"
+  network remote name "Remote-LAN"
+  proposal ike exchange ikev2
+  proposal ike encryption aes-256
+  proposal ike authentication sha-256
+  proposal ike dh-group 14
+  proposal ike lifetime 28800
+  proposal ipsec protocol esp
+  proposal ipsec encryption aes-256
+  proposal ipsec authentication sha-256
+  proposal ipsec perfect-forward-secrecy dh-group 14
+  proposal ipsec lifetime 3600
+  bound-to zone WAN
+  exit
+vpn nat-traversal
+vpn ike-dpd enable
+vpn ike-dpd interval 10
+commit
+```
+
+事前共有鍵の実際の値は、コンソール入力時のみ台帳(鍵管理システム)から参照し、設定表示や保存先には平文で残さないようにします。
+
+### 3. 経路とアクセスルールを確認する
+
+SonicOSのsite-to-site(ポリシーベース)VPNでは、`network local`/`network remote`に一致する通信は明示的な経路設定なしにトンネルへ振り分けられ、LAN⇔VPNゾーン間のアクセスルールも`commit`時に自動追加されます。YAMAHAのような`ip route`相当の手動設定は不要ですが、自動追加ルールが意図通りかを必ず確認してください。
+
+```bash
+show access-rules
+show address-object ipv4 all
+```
+
+自動追加ルールを許可しない運用の場合は、VPNポリシー内で`suppress-auto-add-rule`を有効にし、別途アクセスルールを明示的に作成してください。
+
+### 4. 動作確認コマンドを実行する
+
+```bash
+show vpn policy ipv4 site-to-site "To-RemoteSite"
+show vpn ike-dpd
+ping {{ remote_lan_test_host }}
+```
+
+`show vpn policy`の出力で、Phase1/Phase2の暗号アルゴリズムが意図通り(AES-256/SHA-256/DHグループ14)であること、SAが確立していることを確認したうえで、対向拠点LAN側の端末へpingを実行します。
+
+装置自身が発信する`ping`は自己トラフィックとして扱われ、ゾーン/アクセスルールを経由した検証にはならない場合があります。ルールの実効性まで確認するには、自拠点LAN `{{ local_lan }}` 内の実機から対向拠点LAN側端末へpingしてください。
+
+## 動作確認
+
+- `show vpn policy ipv4 site-to-site "To-RemoteSite"`でポリシーが有効(Enabled)、かつIKE/IPsec SAが確立していること
+- 表示された暗号スイートがAES-256・SHA-256・DHグループ14で、プロポーザルミスマッチが発生していないこと
+- `show vpn ike-dpd`でDead Peer Detectionが有効になっており、対向機器への生存確認が正常に応答していること
+- 自拠点LAN `{{ local_lan }}` の端末から対向拠点LAN `{{ remote_lan }}` の端末へpingが成功すること
+
+## 注意事項
+
+- 事前共有鍵は両拠点で完全に一致していないとIKEv2が確立しない。コピー&ペーストではなく台帳の同一値を参照するなど、入力ミスを防ぐ運用にする。
+- E-CLIでの変更は`commit`を実行するまで反映されない。設定投入後は必ず`commit`の成否を確認し、対向拠点側の担当者にも同様の投入・commitを依頼する。
+- ポリシーベースVPNは自動追加アクセスルールに依存するため、他のファイアウォールルールやNATポリシーとの優先順位によって意図しない通信許可・遮断が発生しないよう、`show access-rules`で影響範囲を都度確認する。
