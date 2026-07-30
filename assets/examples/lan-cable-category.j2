@@ -1,0 +1,72 @@
+# LANケーブルカテゴリ選定と敷設確認
+
+CSVの区間要件から、距離・速度・PoE要件に基づき妥当なLANケーブルカテゴリを選定し、選定結果をリンク速度で検証します。
+
+## 目的
+
+距離・速度・PoE要件からCat5e/6/6A/光を根拠を持って選定でき、選定結果をリンク速度で検証できるようになることを目指します。
+
+## 用語解説
+
+- **カテゴリ(Cat5e/6/6A)**: より対線(UTP/STP)の伝送性能等級
+- **10GBASE-T**: Cat6で最大55m、Cat6Aで最大100mまで10Gbpsを伝送できる規格
+- **1000BASE-T**: Cat5e/6/6Aいずれでも最大100mまで1Gbpsを伝送できる規格
+- **リンク速度とネゴシエーション**: 接続時に双方の機器が自動的に通信速度を取り決める仕組み
+- **PoE(給電)**: LANケーブル経由で電力を供給する仕組み。高出力なPoEでは発熱対策として上位カテゴリが推奨されることがある(ガイドライン、必須ではない)
+- **伝送距離100m規則**: 銅線LANケーブルの多くの規格に共通する上限距離
+- **光ファイバ(SM/MM)**: 距離制限を超える区間で使うシングルモード/マルチモードの光ケーブル
+- **ethtool**: LinuxでNICのリンク速度・双方向設定・ケーブル診断を確認するコマンドラインツール
+
+## 1. 区間一覧と選定結果を確認する
+
+| segment_name | distance_m | required_speed | poe_required | selected_category |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["segment_name"] }} | {{ r["distance_m"] }} | {{ r["required_speed"] }} | {{ r["poe_required"] }} | {{ r["selected_category"] }} |
+{% endfor %}
+
+## 2. 選定フローチャートに沿って各区間を判定する
+
+判定基準:
+- 距離が100mを超える → 光ファイバが必須
+- 10GbEかつ55m超 → Cat6A以上が必須（Cat6は10GBASE-Tで55mまで）
+- 10GbEかつ55m以下 → Cat6以上で可
+- 1GbEかつ100m以下 → Cat5e/6/6Aいずれでも可（PoEが必要な場合はCat6以上を推奨。必須ではなくガイドライン）
+
+```bash
+echo "各区間をフローチャートで判定します"
+```
+
+{% for r in csv_rows %}
+### {{ r["segment_name"] }}
+
+距離{{ r["distance_m"] }}m、要求速度{{ r["required_speed"] }}、選定カテゴリ{{ r["selected_category"] }}
+{% if (r["distance_m"] | int) > 100 %}判定: 100m超のため光ファイバ必須 → {% if "fiber" in r["selected_category"] %}選定は妥当（マルチモード(MM)光ファイバ。100m超でもSM/MMいずれかの光ファイバであれば距離制限を回避できる）{% else %}選定は**不適合（光ファイバへ変更が必要）**{% endif %}
+{% elif r["required_speed"] == "10GbE" and (r["distance_m"] | int) > 55 and r["selected_category"] == "Cat6" %}判定: 10GbEかつ55m超のためCat6A以上が必要 → 選定Cat6は**不適合（要是正）**
+{% elif r["required_speed"] == "1GbE" and r["poe_required"] == "yes" and r["selected_category"] == "Cat5e" and (r["distance_m"] | int) >= 90 %}判定: 距離・速度要件は満たすが、長距離・PoE併用のためCat6以上を推奨（**要検討**、必須ではない）
+{% else %}判定: 選定は要件を満たす（適合）
+{% endif %}
+{% endfor %}
+
+## 3. ethtoolでリンク速度を確認する
+
+```bash
+ethtool eth0
+```
+
+`Speed:` が要求速度と一致し、`100Mb/s` 等への意図しないネゴシエーション低下がないことを確認します。ケーブルテスターに対応するNICであれば、結線診断も実施します。
+
+```bash
+ethtool --cable-test eth0
+```
+
+## 動作確認
+
+- 全区間の選定根拠が判定基準から説明できること
+- 「不適合」と判定された区間（ServerRoom-Core-to-Storage）が是正されていること
+- `ethtool`のSpeedが設計速度と一致し、ネゴシエーション失敗がないこと
+
+## 注意事項
+
+- 実際の敷設・成端作業を伴う場合は、かしめ工具・テスターの安全な取り扱いに従ってください。
+- 距離制限(100m)を超える設計は、必ず光ファイバ等の代替を検討してください。
+- PoEに関するカテゴリ推奨は一般的なガイドラインであり、必須要件ではありません。発熱が懸念される高密度配線では上位カテゴリの採用を検討してください。

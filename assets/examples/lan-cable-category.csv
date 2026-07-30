@@ -1,0 +1,6 @@
+segment_name,distance_m,required_speed,poe_required,selected_category
+ServerRoom-Core-to-DB,3,10GbE,no,Cat6A
+ServerRoom-Core-to-Storage,60,10GbE,no,Cat6
+Office-Core-to-AP1,55,1GbE,yes,Cat6
+Warehouse-Core-to-Camera,120,1GbE,yes,fiber-MM
+MeetingRoom-Core-to-AP2,90,1GbE,yes,Cat5e

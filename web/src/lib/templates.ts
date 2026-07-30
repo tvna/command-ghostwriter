@@ -692,6 +692,7 @@ const META: Meta[] = [
   { id: "rack-mount-layout", name: "ラックマウント搭載位置設計", desc: "荷重・エアフロー・保守性を考慮して42Uラックの搭載位置を設計し、U番号表として文書化する手順書を生成。", category: "facility", subCategory: "ラック設計", format: "csv", output: "markdown", updated: "2026-07-30", live: true },
   { id: "dual-power-redundancy", name: "二重電源冗長化チェック（PDU系統分散）", desc: "冗長機器の各PSUがPDU A系・B系へ分散接続されているかを接続表から確認し、単一障害点を検出する手順書を生成。", category: "facility", subCategory: "電源設計", format: "csv", output: "markdown", updated: "2026-07-30", live: true },
   { id: "structured-cabling-plan", name: "構造化配線・配線表作成", desc: "配線表(ケーブルスケジュール)を正として敷設し、LLDPで実際の物理接続を照合する手順書を生成。", category: "facility", subCategory: "ケーブリング", format: "csv", output: "markdown", updated: "2026-07-30", live: true },
+  { id: "lan-cable-category", name: "LANケーブルカテゴリ選定と敷設確認", desc: "距離・速度・PoE要件からCat5e/6/6A/光を根拠を持って選定し、ethtoolのリンク速度で検証する手順書を生成。", category: "facility", subCategory: "ケーブリング", format: "csv", output: "markdown", updated: "2026-07-30", live: true },
 ];
 
 export const CGTemplates: Template[] = META.map((m) => ({
