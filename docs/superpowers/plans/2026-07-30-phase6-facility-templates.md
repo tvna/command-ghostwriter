@@ -706,7 +706,7 @@ CSVの区間要件から、距離・速度・PoE要件に基づき妥当なLAN�
 - 距離が100mを超える → 光ファイバが必須
 - 10GbEかつ55m超 → Cat6A以上が必須（Cat6は10GBASE-Tで55mまで）
 - 10GbEかつ55m以下 → Cat6以上で可
-- 1GbEかつ100m以下 → Cat5e/6/6Aいずれでも可（PoEが必要な場合はCat6以上を推奨。必須ではなくガイドライン）
+- 1GbEかつ100m以下（1000BASE-T） → Cat5e/6/6Aいずれでも可（PoEが必要な場合はCat6以上を推奨。必須ではなくガイドライン）
 
 ```bash
 echo "各区間をフローチャートで判定します"
@@ -925,6 +925,8 @@ EOF
 
 ### Task 8: cable-labeling-standard（ケーブルラベリング規約適用）
 
+> **Post-plan correction:** `features/validate_template.py` の静的検証は、`{% set 変数名 = 式 %}`（プレーンな変数名への代入。`namespace()`のNSRef属性代入 `ns.attr = ...` は対象外）のRHSを評価しようとするが、その評価器は `Name`/`Const`/`List`/`Dict`/`Call`/`Getattr` ノードしか扱えない。以下のテンプレート案にある `{% set derived = r["from_port"] ~ "_" ~ r["to_port"] %}`（`Concat`+`Getitem`）はこの評価器で扱えないノード型のため `TypeError: cannot evaluate expression` となり、**レンダリングが完全に失敗する**（実装エージェントが検出・修正済み）。実装の正としては、`derived`という中間変数への`{% set %}`を使わず、`r["from_port"] ~ "_" ~ r["to_port"]` を各使用箇所（`{{ }}`出力・`{% if %}`条件）に直接インライン展開すること。出力結果は完全に同一になる。
+
 **Files:**
 - Create: `assets/examples/cable-labeling-standard.csv`
 - Create: `assets/examples/cable-labeling-standard.j2`
@@ -973,7 +975,7 @@ CBL-104,RackA-U20-P2,RackA-U41-P1,RackA-U41-P1
 
 | cable_id | from_port | to_port | expected_label | 検算結果 |
 |---|---|---|---|---|
-{% for r in csv_rows %}{% set derived = r["from_port"] ~ "_" ~ r["to_port"] %}| {{ r["cable_id"] }} | {{ r["from_port"] }} | {{ r["to_port"] }} | {{ r["expected_label"] }} | {% if derived == r["expected_label"] %}一致{% else %}**不一致**（検算値: `{{ derived }}`）{% endif %} |
+{% for r in csv_rows %}| {{ r["cable_id"] }} | {{ r["from_port"] }} | {{ r["to_port"] }} | {{ r["expected_label"] }} | {% if (r["from_port"] ~ "_" ~ r["to_port"]) == r["expected_label"] %}一致{% else %}**不一致**（検算値: `{{ r["from_port"] ~ "_" ~ r["to_port"] }}`）{% endif %} |
 {% endfor %}
 
 ## 3. 規約違反行を記録する
@@ -982,7 +984,7 @@ CBL-104,RackA-U20-P2,RackA-U41-P1,RackA-U41-P1
 echo "検算結果が「不一致」の行を規約違反として記録します"
 ```
 
-{% for r in csv_rows %}{% set derived = r["from_port"] ~ "_" ~ r["to_port"] %}{% if derived != r["expected_label"] %}- **{{ r["cable_id"] }}**: 記載ラベル `{{ r["expected_label"] }}` / 規約からの検算値 `{{ derived }}` → 違反（{% if "_" not in r["expected_label"] %}片端のみの表記（対向側のみ記載、自分側ポート表記が欠落）{% else %}ラベル不一致（配線表との差分を目視で特定して是正する）{% endif %}）
+{% for r in csv_rows %}{% if (r["from_port"] ~ "_" ~ r["to_port"]) != r["expected_label"] %}- **{{ r["cable_id"] }}**: 記載ラベル `{{ r["expected_label"] }}` / 規約からの検算値 `{{ r["from_port"] ~ "_" ~ r["to_port"] }}` → 違反（{% if "_" not in r["expected_label"] %}片端のみの表記（対向側のみ記載、自分側ポート表記が欠落）{% else %}ラベル不一致（配線表との差分を目視で特定して是正する）{% endif %}）
 {% endif %}{% endfor %}
 
 ## 4. 貼付チェックリストを消化する
@@ -1351,6 +1353,8 @@ EOF
 
 ### Task 11: env-monitoring-setup（温湿度モニタリング設置と閾値設計）
 
+> **Post-plan correction:** 同じ理由（`features/validate_template.py`の静的評価器は`Name`/`Const`/`List`/`Dict`/`Call`/`Getattr`ノードしか扱えず、`Filter`ノードを含む式のプレーン変数`{% set %}`はレンダリング失敗を起こす。Task 8の是正を参照）により、以下のテンプレート案は当初 `{% set temp_diff = (server_inlet_temp_c - measured_values[1].temp_c) | abs %}` という中間変数を使っていたが、`| abs`フィルタを含む式のため同じ失敗モードに該当する。実装の正としては、この`{% set %}`を使わず、`(server_inlet_temp_c - measured_values[1].temp_c) | abs` を各使用箇所に直接インライン展開すること（以下は既にインライン化済みの正しい版）。
+
 **Files:**
 - Create: `assets/examples/env-monitoring-setup.yaml`
 - Create: `assets/examples/env-monitoring-setup.j2`
@@ -1454,8 +1458,7 @@ snmpwalk -v2c -c public <センサーIP> 1.3.6.1.4.1.<ベンダーOID>
 ipmitool sdr type Temperature
 ```
 
-{% set temp_diff = (server_inlet_temp_c - measured_values[1].temp_c) | abs %}
-サーバ吸気温度実測: {{ server_inlet_temp_c }}℃。中段センサー値（{{ sensor_plan[1].position }}: {{ measured_values[1].temp_c }}℃）との差は{{ temp_diff }}℃で、許容乖離{{ inlet_temp_deviation_threshold_c }}℃に対して{% if temp_diff <= inlet_temp_deviation_threshold_c %}許容範囲内です。{% else %}**許容範囲を超えています（要確認）**。{% endif %}
+サーバ吸気温度実測: {{ server_inlet_temp_c }}℃。中段センサー値（{{ sensor_plan[1].position }}: {{ measured_values[1].temp_c }}℃）との差は{{ (server_inlet_temp_c - measured_values[1].temp_c) | abs }}℃で、許容乖離{{ inlet_temp_deviation_threshold_c }}℃に対して{% if ((server_inlet_temp_c - measured_values[1].temp_c) | abs) <= inlet_temp_deviation_threshold_c %}許容範囲内です。{% else %}**許容範囲を超えています（要確認）**。{% endif %}
 
 ## 7. 閾値超過時の一次対応フローを確認する
 
