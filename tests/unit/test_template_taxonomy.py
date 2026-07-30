@@ -38,13 +38,21 @@ FORMATS: Final[frozenset[str]] = frozenset({"toml", "yaml", "csv"})
 ALLOWED_SUBCATEGORIES: Final[dict[str, frozenset[str]]] = {
     "network": frozenset(
         {
+                "Allied Telesis",
+                "Aruba",
                 "Cisco",
                 "DHCP",
+                "Fortinet",
                 "IDS・IPS",
                 "IPアドレス管理",
                 "IPアドレス設計",
+                "Juniper",
                 "L1/L2リンク",
+                "NEC",
                 "NIC",
+                "Palo Alto Networks",
+                "SonicWall",
+                "Ubiquiti",
                 "VLAN",
                 "YAMAHA",
                 "ZTNAオーバーレイ",
