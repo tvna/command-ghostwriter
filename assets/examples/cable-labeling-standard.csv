@@ -1,0 +1,5 @@
+cable_id,from_port,to_port,expected_label
+CBL-101,RackA-U10-P1,RackA-U40-P1,RackA-U10-P1_RackA-U40-P1
+CBL-102,RackA-U15-P1,RackA-U40-P2,RackA-U15-P1_RackA-U40-P3
+CBL-103,RackB-U05-P1,RackA-U40-P5,RackB-U05-P1_RackA-U40-P5
+CBL-104,RackA-U20-P2,RackA-U41-P1,RackA-U41-P1

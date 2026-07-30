@@ -1,0 +1,6 @@
+device_name,psu_count,psu1_pdu,psu2_pdu
+Server-DB,2,PDU-A1,PDU-B1
+Server-App,2,PDU-A1,PDU-A2
+Storage-Array,2,PDU-A2,PDU-B2
+Core-Switch,2,PDU-B1,PDU-B2
+Access-Switch,1,PDU-A1,none

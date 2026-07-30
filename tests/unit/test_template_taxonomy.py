@@ -27,7 +27,7 @@ UNIT: MarkDecorator = pytest.mark.unit
 
 TEMPLATES_TS: Final[Path] = Path(__file__).resolve().parents[2] / "web" / "src" / "lib" / "templates.ts"
 
-CATEGORIES: Final[frozenset[str]] = frozenset({"network", "server", "dns", "ai", "ops"})
+CATEGORIES: Final[frozenset[str]] = frozenset({"network", "server", "dns", "ai", "ops", "facility"})
 ACTIVITIES: Final[frozenset[str]] = frozenset({"build", "troubleshoot", "security-response", "change", "routine", "drill"})
 OUTPUTS: Final[frozenset[str]] = frozenset({"cli", "config", "markdown"})
 FORMATS: Final[frozenset[str]] = frozenset({"toml", "yaml", "csv"})
@@ -174,6 +174,16 @@ ALLOWED_SUBCATEGORIES: Final[dict[str, frozenset[str]]] = {
             "変更・メンテナンス進行",
             "監視・アラート",
             "証跡保全",
+        }
+    ),
+    "facility": frozenset(
+        {
+            "電源設計",
+            "ラック設計",
+            "ケーブリング",
+            "ラッキング",
+            "環境設計",
+            "環境監視",
         }
     ),
 }

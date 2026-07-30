@@ -1,0 +1,76 @@
+# UPS容量計算とバックアップ時間設計
+
+YAMLのUPS仕様と接続機器リストから負荷率を計算し、ランタイム表からバックアップ時間を見積もります。
+
+## 目的
+
+WとVAの違い・力率を理解し、負荷率からUPSの容量適合とバックアップ時間を見積もれるようになることを目指します。
+
+## 用語解説
+
+- **VAとW**: VA(皮相電力)は電圧×電流の単純な積、W(有効電力)は実際に消費される電力。W = VA × 力率
+- **力率**: 有効電力(W)と皮相電力(VA)の比率。UPSの評価では両方の定格を意識する必要がある
+- **負荷率**: UPS定格に対する接続負荷の割合
+- **バックアップ時間(ランタイム曲線)**: 負荷率に応じて変化する、UPSがバッテリーだけで給電し続けられる時間
+- **ラインインタラクティブ・常時インバータ**: UPSの方式の違い。常時インバータの方が高品質だが高価
+- **シャットダウン連携**: UPSがサーバへ停電を通知し、自動でシャットダウンさせる仕組み
+- **バッテリー劣化**: 経年でランタイムが公称値より短くなる現象
+
+## 1. UPS仕様と接続負荷を確認する
+
+UPS: {{ ups_spec.model }}（VA定格: {{ ups_spec.va_rating }}VA、W定格: {{ ups_spec.w_rating }}W、推奨負荷率: {{ ups_spec.recommended_load_pct }}%）。本機は常時インバータ(オンライン二重変換)方式です（ラインインタラクティブ方式より高価ですが、常時インバータで出力しているため停電時も切替による瞬断がありません）。
+
+| name | w |
+|---|---|
+{% for l in connected_loads %}| {{ l.name }} | {{ l.w }} |
+{% endfor %}
+
+## 2. 接続負荷の合計Wを計算する
+
+{% set ns = namespace(total_w=0) %}{% for l in connected_loads %}{% set ns.total_w = ns.total_w + l.w %}{% endfor %}
+合計消費電力: {{ ns.total_w }}W
+
+## 3. W定格に対する負荷率を算出する
+
+```bash
+echo "負荷率(W基準) = 合計W / W定格 x 100"
+```
+
+負荷率(W基準): {{ (ns.total_w * 100 / ups_spec.w_rating) | round(1) }}%（推奨{{ ups_spec.recommended_load_pct }}%に対する判定: {% if (ns.total_w * 100 / ups_spec.w_rating) > ups_spec.recommended_load_pct %}**超過**{% else %}OK{% endif %}）
+
+この「W基準が安全側」という関係は、接続機器側の力率がUPSの定格力率（{{ (ups_spec.w_rating / ups_spec.va_rating) | round(2) }}）以上である場合に成り立ちます。力率補正のないネットワーク機器等でこれを下回る場合はVA基準の負荷率がW基準を上回ることがあるため、正確な値が必要な場合はPDU/UPSの実測VA値を確認してください。
+
+## 4. ランタイム表から負荷率に対応するバックアップ時間を読み取る
+
+| load_pct | minutes |
+|---|---|
+{% for r in runtime_table %}| {{ r.load_pct }}% | {{ r.minutes }}分 |
+{% endfor %}
+
+{% set ns3 = namespace(load_pct=(ns.total_w * 100 / ups_spec.w_rating) | round | int, bracket_pct=0, bracket_minutes=0) %}
+{% for r in runtime_table %}{% if r.load_pct <= ns3.load_pct %}{% set ns3.bracket_pct = r.load_pct %}{% set ns3.bracket_minutes = r.minutes %}{% endif %}{% endfor %}
+負荷率は約{{ ns3.load_pct }}%のため、runtime_tableを負荷率の低い順に走査し「実測負荷率以下で最も近い区分」を採用します。該当するのは「{{ ns3.bracket_pct }}%」帯（{{ ns3.bracket_minutes }}分）です。
+
+## 5. 安全なシャットダウンに必要な時間と比較する
+
+- シャットダウンに必要な時間: {{ shutdown_required_minutes }}分
+- ランタイム見積もり: {{ ns3.bracket_minutes }}分 → {% if ns3.bracket_minutes >= shutdown_required_minutes %}OK（シャットダウン所要時間を上回っている）{% else %}NG（シャットダウンが間に合わない可能性）{% endif %}
+
+## 6. (実機があれば)実測のLOADPCT・TIMELEFTを確認する
+
+```bash
+apcaccess status
+```
+
+`LOADPCT`（実測負荷率）と`TIMELEFT`（実測ランタイム推定）を、Step 3・Step 4の計算値と比較します。あわせて、UPSとサーバ間のシャットダウン連携（NUT(Network UPS Tools)等のエージェント経由で、停電通知を受けたサーバが自動シャットダウンする仕組み）が設定・動作していることを確認します。
+
+## 動作確認
+
+- WとVA両方の観点で負荷率が閾値以下であること
+- TIMELEFT（または見積もりランタイム）がシャットダウン所要時間を上回ること
+- 計算値と実測LOADPCTの乖離が説明できること
+
+## 注意事項
+
+- 実機のUPS動作試験（バッテリー運転試験）は不意の停電と同じ影響があるため、必ず影響範囲と実施時間帯を関係者に事前周知してから行ってください。
+- バッテリーは経年劣化するため、公称のランタイム表より実際の値が短くなる場合があります。定期的な実測確認を推奨します。

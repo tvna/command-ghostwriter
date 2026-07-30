@@ -1,0 +1,24 @@
+ups_spec:
+  model: "APC Smart-UPS SRT 3000VA"
+  va_rating: 3000
+  w_rating: 2700
+  recommended_load_pct: 70
+connected_loads:
+  - name: Server-DB
+    w: 400
+  - name: Server-App
+    w: 350
+  - name: Storage
+    w: 500
+  - name: Switch
+    w: 150
+runtime_table:
+  - load_pct: 30
+    minutes: 45
+  - load_pct: 50
+    minutes: 22
+  - load_pct: 70
+    minutes: 12
+  - load_pct: 100
+    minutes: 6
+shutdown_required_minutes: 8

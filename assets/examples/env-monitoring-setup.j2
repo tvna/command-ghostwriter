@@ -1,0 +1,83 @@
+# 温湿度モニタリング設置と閾値設計
+
+YAMLの設置計画と閾値表に基づき、温湿度センサーを設置し、CLIで監視値を取得・判定します。
+
+## 目的
+
+温湿度センサーの設置位置(ラック前面上中下)と警告閾値の設計根拠を理解し、監視値をCLIで取得・判定できるようになることを目指します。
+
+## 用語解説
+
+- **温湿度センサー**: ラック内の温度・湿度を計測する機器
+- **閾値(Warning/Critical)**: 段階的に警告レベルを分ける監視の基準値
+- **相対湿度と結露・静電気**: 相対湿度が高すぎると結露、低すぎると静電気放電(ESD)による機器故障のリスクが高まる
+- **SNMP**: ネットワーク経由で機器の状態を取得するプロトコル
+- **OID**: SNMPで参照する情報の識別子(Object Identifier)
+- **ポーリング間隔**: 監視値を取得する周期
+- **IPMI**: OSを介さずサーバのハードウェア状態(温度センサー含む)を取得・管理するための規格・コマンド群
+
+## 1. 設置計画を確認する
+
+{{ sensor_plan[0].rack }}ラックの前面 上段・中段・下段の3箇所にセンサーを設置します（上段は熱気がこもりやすく、下段は床からの冷気の影響を受けやすいため、代表点として3点測定します）。
+
+| rack | position |
+|---|---|
+{% for s in sensor_plan %}| {{ s.rack }} | {{ s.position }} |
+{% endfor %}
+
+## 2. 閾値表を確認する
+
+| 項目 | Warning | Critical |
+|---|---|---|
+| 温度 | {{ thresholds.temp_warning_c }}℃ | {{ thresholds.temp_critical_c }}℃ |
+
+湿度の正常範囲: {{ thresholds.humidity_min_pct }}〜{{ thresholds.humidity_max_pct }}%（相対湿度が上限を超えると結露、下限を下回ると静電気放電(ESD)のリスクが高まるため、この範囲に収めます）
+
+## 3. 設置チェックリストを消化する
+
+{% for s in sensor_plan %}- [ ] {{ s.rack }} {{ s.position }}: センサー位置・ケーブル・電源を確認
+{% endfor %}
+
+## 4. 監視値を取得する
+
+ポーリング間隔5分でSNMP監視します。`-v2c`はSNMPバージョン、`-c`はコミュニティ文字列(認証情報)の指定オプションです。`public`はデフォルト値の例示であり、本番環境では推測されにくい値またはSNMPv3への変更を推奨します。
+
+```bash
+snmpwalk -v2c -c public <センサーIP> 1.3.6.1.4.1.<ベンダーOID>
+```
+
+模擬取得値（実機がない場合はこの値を使って判定演習を行う）:
+
+| position | temp_c | humidity_pct |
+|---|---|---|
+{% for m in measured_values %}| {{ m.position }} | {{ m.temp_c }}℃ | {{ m.humidity_pct }}% |
+{% endfor %}
+
+## 5. 閾値と照合し、判定する
+
+{% for m in measured_values %}- {{ m.position }}: 温度{{ m.temp_c }}℃ → {% if m.temp_c >= thresholds.temp_critical_c %}**Critical**{% elif m.temp_c >= thresholds.temp_warning_c %}**Warning**{% else %}正常{% endif %} / 湿度{{ m.humidity_pct }}% → {% if m.humidity_pct < thresholds.humidity_min_pct or m.humidity_pct > thresholds.humidity_max_pct %}**範囲外**{% else %}正常{% endif %}
+{% endfor %}
+
+## 6. サーバ側温度センサーとの乖離を確認する
+
+IPMI経由でサーバのハードウェア温度センサーを取得します。
+
+```bash
+ipmitool sdr type Temperature
+```
+
+サーバ吸気温度実測: {{ server_inlet_temp_c }}℃。中段センサー値（{{ sensor_plan[1].position }}: {{ measured_values[1].temp_c }}℃）との差は{{ (server_inlet_temp_c - measured_values[1].temp_c) | abs }}℃で、許容乖離{{ inlet_temp_deviation_threshold_c }}℃に対して{% if ((server_inlet_temp_c - measured_values[1].temp_c) | abs) <= inlet_temp_deviation_threshold_c %}許容範囲内です。{% else %}**許容範囲を超えています（要確認）**。{% endif %}
+
+## 7. 閾値超過時の一次対応フローを確認する
+
+Warning/Critical超過を検知した場合、まず通知内容を確認し、現地確認（センサー故障か実際の温湿度異常かの切り分け）を行った上でエスカレーションします。
+
+## 動作確認
+
+- 全設置点で温湿度の値が取得できていること
+- 取得値が閾値表の正常範囲内であること（範囲外の場合は一次対応フローに従っていること）
+- サーバ吸気温度とセンサー値の乖離が説明範囲内であること
+
+## 注意事項
+
+- センサー設置は電源・配線作業を伴う場合があるため、活線作業を避け、可能であれば無停電のタイミングで実施してください。

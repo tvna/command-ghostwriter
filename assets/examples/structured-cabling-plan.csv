@@ -1,0 +1,5 @@
+cable_id,from_port,to_port,cable_type,length_m
+CBL-001,RackA-U10-P1,RackA-U40-P1,Cat6A,3
+CBL-002,RackA-U15-P1,RackA-U40-P2,Cat6A,3
+CBL-003,RackB-U05-P1,RackA-U40-P3,fiber-MM,15
+CBL-004,RackA-U20-P1,RackA-U40-P4,Cat6,20

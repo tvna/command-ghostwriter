@@ -726,6 +726,16 @@ const META: Meta[] = [
   { id: "yamaha-ikev2-vpn", name: "YAMAHAルータのIKEv2拠点間IPsec VPN構築", desc: "RTX系ルータ2拠点間でIKEv2 IPsecトンネルを構成し、暗号プロファイル固定と相互疎通を検証する手順書を生成。", category: "network", subCategory: "YAMAHA", format: "toml", output: "markdown", updated: "2026-07-30", live: true },
   { id: "nec-ikev2-vpn", name: "NEC IX拠点間IKEv2 IPsec VPN構築", desc: "UNIVERGE IXシリーズルータ2拠点間でIKEv2 IPsecトンネルを構成し、IKE SA/Child SAの確立と相互疎通を検証する手順書を生成。", category: "network", subCategory: "NEC", format: "toml", output: "markdown", updated: "2026-07-30", live: true },
   { id: "alliedtelesis-ikev2-vpn", name: "AlliedWare Plusの拠点間IKEv2 IPsec VPN構築", desc: "AlliedWare Plus搭載ルータ2拠点間でIKEv2 IPsecトンネルを構成し、相互疎通と経路を検証する手順書を生成。", category: "network", subCategory: "Allied Telesis", format: "toml", output: "markdown", updated: "2026-07-30", live: true },
+  { id: "rack-power-budget", name: "ラック電源容量設計（ブレーカーマージン計算）", desc: "電源系統ごとの消費電力を積算し、ブレーカー定格に対する80%ルールでマージンを検算する手順書を生成。", category: "facility", subCategory: "電源設計", format: "csv", output: "markdown", updated: "2026-07-30", live: true },
+  { id: "rack-mount-layout", name: "ラックマウント搭載位置設計", desc: "荷重・エアフロー・保守性を考慮して42Uラックの搭載位置を設計し、U番号表として文書化する手順書を生成。", category: "facility", subCategory: "ラック設計", format: "csv", output: "markdown", updated: "2026-07-30", live: true },
+  { id: "dual-power-redundancy", name: "二重電源冗長化チェック（PDU系統分散）", desc: "冗長機器の各PSUがPDU A系・B系へ分散接続されているかを接続表から確認し、単一障害点を検出する手順書を生成。", category: "facility", subCategory: "電源設計", format: "csv", output: "markdown", updated: "2026-07-30", live: true },
+  { id: "structured-cabling-plan", name: "構造化配線・配線表作成", desc: "配線表(ケーブルスケジュール)を正として敷設し、LLDPで実際の物理接続を照合する手順書を生成。", category: "facility", subCategory: "ケーブリング", format: "csv", output: "markdown", updated: "2026-07-30", live: true },
+  { id: "lan-cable-category", name: "LANケーブルカテゴリ選定と敷設確認", desc: "距離・速度・PoE要件からCat5e/6/6A/光を根拠を持って選定し、ethtoolのリンク速度で検証する手順書を生成。", category: "facility", subCategory: "ケーブリング", format: "csv", output: "markdown", updated: "2026-07-30", live: true },
+  { id: "ups-capacity-plan", name: "UPS容量計算とバックアップ時間設計", desc: "WとVAの違い・力率を踏まえて負荷率を計算し、ランタイム表からバックアップ時間を見積もる手順書を生成。", category: "facility", subCategory: "電源設計", format: "yaml", output: "markdown", updated: "2026-07-30", live: true },
+  { id: "cable-labeling-standard", name: "ケーブルラベリング規約適用", desc: "命名規約からラベル文字列を機械的に導出し、台帳記載のラベルと照合して違反行を検出する手順書を生成。", category: "facility", subCategory: "ケーブリング", format: "csv", output: "markdown", updated: "2026-07-30", live: true },
+  { id: "server-racking-procedure", name: "サーバラッキング作業手順（レール・搭載・接地）", desc: "レール取付から搭載・接地・初回電源投入までを、2人作業判定と安全確認ポイントつきで実施する手順書を生成。", category: "facility", subCategory: "ラッキング", format: "yaml", output: "markdown", updated: "2026-07-30", live: true },
+  { id: "rack-airflow-design", name: "エアフロー設計とブランクパネル計画", desc: "ホットアイル/コールドアイル分離と再循環リスクを確認し、吸気温度基準で冷却の健全性を判定する手順書を生成。", category: "facility", subCategory: "環境設計", format: "yaml", output: "markdown", updated: "2026-07-30", live: true },
+  { id: "env-monitoring-setup", name: "温湿度モニタリング設置と閾値設計", desc: "ラック前面上中下段への温湿度センサー設置と警告閾値を設計し、CLIで監視値を取得・判定する手順書を生成。", category: "facility", subCategory: "環境監視", format: "yaml", output: "markdown", updated: "2026-07-30", live: true },
 ];
 
 export const CGTemplates: Template[] = META.map((m) => ({
