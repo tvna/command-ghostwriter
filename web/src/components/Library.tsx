@@ -10,12 +10,13 @@ import logoMark from '../assets/brand/logo-mark.svg';
 // Picking a card calls onOpen(template); 空から作成 calls onOpen(null).
 
 const CATS: { id: TemplateCategory | 'all'; label: string; icon: string }[] = [
-  { id: 'all',     label: 'すべて',          icon: 'topology' },
-  { id: 'network', label: 'ネットワーク機器', icon: 'router' },
-  { id: 'server',  label: 'サーバ / Linux',  icon: 'server' },
-  { id: 'dns',     label: 'DNS',            icon: 'ethernet-port' },
-  { id: 'ai',      label: 'AIインフラ',       icon: 'terminal' },
-  { id: 'ops',     label: '運用共通',         icon: 'config-file' },
+  { id: 'all',      label: 'すべて',          icon: 'topology' },
+  { id: 'network',  label: 'ネットワーク機器', icon: 'router' },
+  { id: 'server',   label: 'サーバ / Linux',  icon: 'server' },
+  { id: 'dns',      label: 'DNS',            icon: 'ethernet-port' },
+  { id: 'ai',       label: 'AIインフラ',       icon: 'terminal' },
+  { id: 'ops',      label: '運用共通',         icon: 'config-file' },
+  { id: 'facility', label: '物理設備',        icon: 'server' },
 ];
 
 // Activity axis (orthogonal to the domain category). "すべて" clears the filter.
