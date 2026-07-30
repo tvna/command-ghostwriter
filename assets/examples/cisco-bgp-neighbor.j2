@@ -1,0 +1,84 @@
+# CiscoルータのeBGPネイバー確立
+
+異なるAS(自律システム)間でeBGPネイバーを確立し、経路広告と受信経路の確認を行います。対向ルータのAS番号・IPアドレス・認証キーは事前に対向管理者と合意しておく必要があります。
+
+## 目的
+
+eBGPネイバーをリモートAS `{{ remote_asn }}` との間で確立し、`network`文による経路広告とネイバー状態`Established`の確認ができるようになることを目指します。
+
+## 用語解説
+
+- **AS(Autonomous System)**: BGPにおける経路制御の管理単位。組織ごとに一意なAS番号を持つ
+- **eBGP(External BGP)**: 異なるAS間で経路交換を行うBGPセッション(同一AS内は iBGP と呼ぶ)
+- **ネイバー(Neighbor/Peer)**: BGPセッションを確立する対向ルータ。TCP179番ポートでセッションを張る
+- **network文**: BGPで広告する自AS内のネットワークをルーティングテーブルから選んで宣言する設定
+- **MD5認証**: BGPセッションのTCPパケットにMD5ハッシュを付与し、なりすましを防ぐ任意機能
+
+## シナリオ設定
+
+自AS `{{ local_asn }}`(router-id `{{ router_id }}`)から、対向AS `{{ remote_asn }}`・アドレス `{{ neighbor_ip }}`(`{{ neighbor_description }}`)とeBGPネイバーを確立します。
+
+以下の{{ advertised_networks | length }}個のネットワークを広告します。
+
+{% for n in advertised_networks %}- `{{ n }}`
+{% endfor %}
+セッションはMD5認証で保護します。
+
+## 手順
+
+### 1. 事前にAS番号とIPの疎通を確認する
+
+```bash
+enable
+show ip route
+ping {{ neighbor_ip }}
+```
+
+対向ルータの直接接続インターフェース(またはループバック、iBGPマルチホップ構成の場合)への疎通が取れていることを確認します。
+
+### 2. router bgpとネイバーを設定する
+
+```bash
+configure terminal
+router bgp {{ local_asn }}
+ bgp router-id {{ router_id }}
+ neighbor {{ neighbor_ip }} remote-as {{ remote_asn }}
+ neighbor {{ neighbor_ip }} description {{ neighbor_description }}
+ neighbor {{ neighbor_ip }} password {{ bgp_password }}
+```
+
+### 3. network文で経路を広告する
+
+`network`文はサブネットマスク(ワイルドカードマスクではない)を明示指定する必要があるため、`advertised_networks`のプレフィックス長(/8〜/30)からマスクを導出します。
+
+```bash
+{% set cidr_masks = {'8': '255.0.0.0', '9': '255.128.0.0', '10': '255.192.0.0', '11': '255.224.0.0', '12': '255.240.0.0', '13': '255.248.0.0', '14': '255.252.0.0', '15': '255.254.0.0', '16': '255.255.0.0', '17': '255.255.128.0', '18': '255.255.192.0', '19': '255.255.224.0', '20': '255.255.240.0', '21': '255.255.248.0', '22': '255.255.252.0', '23': '255.255.254.0', '24': '255.255.255.0', '25': '255.255.255.128', '26': '255.255.255.192', '27': '255.255.255.224', '28': '255.255.255.240', '29': '255.255.255.248', '30': '255.255.255.252'} %}
+{% for n in advertised_networks %} network {{ n.split('/')[0] }} mask {{ cidr_masks[n.split('/')[1]] }}
+{% endfor %}end
+write memory
+```
+
+`network`文はルーティングテーブルに実在する経路のみ広告対象になるため、事前に`show ip route`で該当ネットワークがルーティングテーブルに存在することを確認してください。
+
+### 4. ネイバー状態と受信経路をshow ip bgp summaryで確認する
+
+```bash
+show ip bgp summary
+show ip bgp neighbors {{ neighbor_ip }}
+show ip route bgp
+```
+
+`show ip bgp summary`の対向IPの`State/PfxRcd`列が数値(受信プレフィックス数)であれば`Established`、`Idle`や`Active`等の文字列であれば未確立です。
+
+## 動作確認
+
+- `show ip bgp summary`で `{{ neighbor_ip }}` の状態が `Established`(PfxRcd列が数値)であること
+- `show ip bgp neighbors {{ neighbor_ip }}`のAS番号が `{{ remote_asn }}` と一致すること
+- `show ip route bgp`に対向AS経由のネットワークが `B`(BGP由来)として学習されていること
+- 自AS広告分({{ advertised_networks | join(', ') }})が対向ルータ側の`show ip bgp`で確認できること(対向機器での確認が必要)
+
+## 注意事項
+
+- MD5認証キーは両端で完全に一致させる必要があり、不一致だとTCPセッション自体が確立しない(BGPログに認証エラーは出ない場合があるため、疎通確認と合わせて切り分けること)。
+- `network`文はルーティングテーブルに厳密一致する経路がないと広告されない。サマライズしたい場合は`network`文のマスクをサマリ用に合わせるか、`aggregate-address`を使う。
+- 誤ったAS番号やネイバーIPを設定すると、意図しないASと経路交換してしまうリスクがある。投入前に対向情報を再確認し、可能であれば`neighbor {{ neighbor_ip }} prefix-list`等でフィルタも検討する。

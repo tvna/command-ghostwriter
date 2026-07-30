@@ -1,0 +1,94 @@
+# Dell OS10ルータのOSPF単一エリア設定
+
+複数のDell OS10スイッチ/ルータ間でOSPFエリア0(バックボーンエリア)を構成し、隣接関係(ネイバー)の確立と動的な経路交換を確認します。設定は管理コンソール接続で実施してください。
+
+## 目的
+
+OSPFの単一エリア構成をrouter-idとインターフェース単位の`ip ospf area`設定で定義し、`ip ospf passive`で不要な隣接形成を抑制した上で、ネイバー確立と経路交換を検証できるようになることを目指します。
+
+## 用語解説
+
+- **LSA(Link State Advertisement)**: OSPFルータ同士が交換する、自身のリンク状態(接続インターフェースや経路情報)の広告
+- **ネイバー(Neighbor)**: OSPFのHelloパケットをやり取りし、隣接関係が成立した対向ルータ。OS10では`FULL`/`2WAY`/`DROTHER`等の状態で表示される
+- **エリア(Area)**: OSPFのLSA伝播範囲を区切る論理単位。エリア0はバックボーンエリアと呼ばれ、他エリアは必ずエリア0を経由する
+- **ip ospf area(インターフェース単位のエリア割当)**: OS10はCisco IOSの`network`文(ワイルドカードマスクでエリア参加対象を指定)ではなく、インターフェースコンフィグモードで`ip ospf <process-id> area <area-id>`を個別に設定する方式を採る点がベンダー間の大きな差異
+- **ip ospf passive**: インターフェースモードでHelloパケットの送受信を止め、経路広告のみ行う設定。末端セグメントでの不要な隣接形成を防ぐ(Cisco IOSの`passive-interface`はrouterコンフィグモードで指定する点と異なり、OS10はインターフェースモードで直接指定する)
+
+## シナリオ設定
+
+router-id `{{ router_id }}` のルータで、エリア {{ area_id }} に以下の{{ ospf_interfaces | length }}個のインターフェースを参加させます。
+
+{% for intf in ospf_interfaces %}- `{{ intf }}`
+{% endfor %}
+
+このうち以下のインターフェースは末端セグメントのため`ip ospf passive`とします。
+
+{% for intf in passive_interfaces %}- `{{ intf }}`
+{% endfor %}
+
+参照帯域幅(reference-bandwidth)は `{{ reference_bandwidth }}` Mbpsに設定し、高速リンクのコスト差を正しく反映させます。
+
+## 手順
+
+### 1. 事前にインターフェースの状態を確認する
+
+```bash
+show ip interface brief
+{% for intf in ospf_interfaces %}show interface {{ intf }}
+{% endfor %}```
+
+対象インターフェースがOSPF参加予定のIPアドレス・帯域と一致しているか確認します。
+
+### 2. router-idと参照帯域幅を設定する
+
+```bash
+configure terminal
+router ospf 1
+ router-id {{ router_id }}
+ auto-cost reference-bandwidth {{ reference_bandwidth }}
+exit
+```
+
+### 3. インターフェース単位でエリアへ参加させる
+
+```bash
+{% for intf in ospf_interfaces %}interface {{ intf }}
+ ip ospf 1 area {{ area_id }}
+exit
+{% endfor %}```
+
+### 4. passiveインターフェースを設定する
+
+末端セグメントでは不要な隣接形成・Hello送出を止め、意図しないOSPFネイバーの成立を防ぎます。
+
+```bash
+{% for intf in passive_interfaces %}interface {{ intf }}
+ ip ospf passive
+exit
+{% endfor %}end
+write memory
+```
+
+### 5. ネイバー確立と経路をshow ip ospf neighborで確認する
+
+```bash
+show ip ospf 1 neighbor
+show ip route ospf 1
+show ip ospf 1 interface
+```
+
+`show ip ospf 1 interface`で、意図したインターフェースが`Passive`扱いになっていることも確認します。
+
+## 動作確認
+
+- `show ip ospf 1 neighbor`に対向ルータが`FULL`状態で表示されること(マルチアクセスセグメントではDR/DROTHER選出後に`FULL`または`2WAY`)
+- `show ip route ospf 1`に他ルータ経由のネットワークが`O`(OSPF由来)として学習されていること
+- `show ip ospf 1 interface`で`{{ passive_interfaces[0] }}`等のpassive対象インターフェースにネイバーが存在しないこと
+- `show ip ospf 1`のRouter IDが `{{ router_id }}` と一致していること
+
+## 注意事項
+
+- router-idはルータ内で一意である必要があり、他ルータと重複するとLSAの発信元が正しく識別できず経路計算が不安定になる。ループバックIP等、変化しないアドレスを使うのが望ましい。
+- OS10はCisco IOSの`network`文と異なり、インターフェース単位で`ip ospf <process-id> area`を明示的に設定する方式のため、対象インターフェースの列挙漏れ・過剰参加(意図しないインターフェースまでOSPFに参加させてしまうこと)がないか投入前に確認する。
+- reference-bandwidthを変更する場合は、OSPFが有効な全ルータで同じ値に揃えないと、コスト計算が機器間で食い違い最適経路選択がずれる原因になる。
+- 本手順では複数OSPFプロセスを想定せずprocess-id `1`に固定している。既存環境で別のprocess-idを既に使用している場合は、投入前に`show ip ospf`で使用中のprocess-idを確認し、本手順のコマンド中の`1`を実際の値に置き換えること。

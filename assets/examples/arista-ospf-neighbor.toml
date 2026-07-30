@@ -1,0 +1,5 @@
+router_id = "10.10.10.1"
+area_id = 0
+ospf_interfaces = ["Ethernet1", "Ethernet2", "Vlan10"]
+passive_interfaces = ["Vlan10"]
+reference_bandwidth = 10000

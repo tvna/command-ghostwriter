@@ -1,0 +1,90 @@
+# YAMAHA RTXルータのリンクアグリゲーション構成
+
+複数のLAN/SFPポートを束ねて論理リンク(リンクアグリゲーション)を構成し、帯域拡張とポート断時の縮退運用を実現します。対向機器(スイッチ等)の設定と必ず揃えて実施してください。RTXシリーズのルータ製品が公式に対応するのはスタティック方式のみで、CiscoのようなLACP動的ネゴシエーション(active/passive)ではない点に注意してください。
+
+## 目的
+
+`lan link-aggregation static` によるポート束ねを構成し、通常時の通信継続とポート断時の縮退動作を検証できるようになることを目指します。
+
+## 用語解説
+
+- **リンクアグリゲーション(スタティック)**: 複数の物理ポートを1つの論理リンクとして扱う機能。RTXシリーズのルータ製品(RTX1210/1220/1300/3500/3510/5000等)では公式コマンドリファレンス上スタティック方式のみが確認でき、LACP(IEEE802.3ad)による動的ネゴシエーション(active/passive)はYAMAHA SWXシリーズ(L2スイッチ製品)固有の機能である
+- **link_id**: 束ねる論理リンクを識別する番号。`lan link-aggregation static <link_id> <ポート> <ポート>...` で指定する
+- **lan1:N 表記**: RTX内蔵L2スイッチのポート番号表記(lan1の1番ポート、2番ポートなど)
+- **タグVLAN(802.1q)**: `vlan lan1/N 802.1q vid=<VLAN ID>` でlan1インターフェース単位に定義するVLANサブインターフェース。ポート単位ではなくlan1インターフェース全体に紐づくため、集約後の論理リンクにもそのまま適用される
+- **lan flexible-port**: 集約対象ポートを事前に同一LANインターフェースへ割り当てるための設定(本手順の前提条件で、既に同一lan1配下にある場合は不要)
+
+## シナリオ設定
+
+link_id `{{ channel_id }}` として以下の{{ member_interfaces | length }}本のポートを束ねます(スタティックリンクアグリゲーション)。
+
+{% for intf in member_interfaces %}- `{{ intf }}`
+{% endfor %}
+集約後のlan1インターフェースには、タグVLAN {{ trunk_vlans | join(', ') }} を設定します。
+
+## 手順
+
+### 1. 事前条件を確認する
+
+束ねるポートが同一のLANインターフェース(lan1)にflexible-port割当済みで、ポートの動作モード・VLAN所属が揃っているか確認します。設定が食い違うと集約後に意図しない動作になります。
+
+```bash
+show status lan1
+show config | grep "lan flexible-port"
+```
+
+### 2. スタティックリンクアグリゲーションを設定する
+
+```bash
+lan link-aggregation static {{ channel_id }} {{ member_interfaces | join(' ') }}
+```
+
+このコマンドの実行時、機種によっては対象LANインターフェースがリセットされる(例: RTX1210/RTX1220はlan1のみ、RTX3510/RTX1300は全LANインターフェース)ため、必ずメンテナンス時間帯に実施してください。
+
+### 3. タグVLANを設定する
+
+```bash
+{% for v in trunk_vlans %} vlan lan1/{{ loop.index }} 802.1q vid={{ v }}
+{% endfor %}save
+```
+
+### 4. 集約状態を確認する
+
+```bash
+show status lan1
+show status switching-hub macaddress
+show config | grep "lan link-aggregation"
+```
+
+RTXにはCiscoの`show etherchannel summary`に相当する集約専用の一覧コマンドが見当たらないため、各ポートの物理リンク状態(`show status lan1`)と、集約対象ポート間でMACアドレス学習状況が一貫していること(`show status switching-hub macaddress`)を組み合わせて判断します。
+
+### 5. ポート断時の縮退動作を検証する
+
+集約対象ポートの1本を一時的に切り離し、通信が継続することを確認します。RTX内蔵スイッチポートには、Ciscoの個別インターフェース`shutdown`に相当する確認済みコマンドが見当たらなかったため、ここでは物理的なケーブル抜線で検証します。
+
+```bash
+show status lan1
+```
+
+確認後は速やかにケーブルを再接続し、集約状態へ復帰することを確認します。
+
+```bash
+show status lan1
+show status switching-hub macaddress
+```
+
+## 動作確認
+
+- `show config`に`lan link-aggregation static {{ channel_id }} {{ member_interfaces | join(' ') }}`相当の設定が反映されていること
+- `show status lan1`で集約対象の全ポートがリンクアップしていること
+- `show status switching-hub macaddress`で集約対象ポート間のMACアドレス学習状況に矛盾がないこと(集約が機能している場合、学習MACは最大ポート番号側のテーブルに保持される)
+- ポートを1本切り離しても、lan1経由の通信が継続すること
+- 再接続後、自動的に集約状態へ復帰すること
+
+## 注意事項
+
+- **RTXシリーズのルータ製品が公式に対応するのはスタティックリンクアグリゲーション(`lan link-aggregation static`)のみ**であり、公式コマンドリファレンスにはLACP動的ネゴシエーション(active/passive)に相当するコマンドが見当たらなかった。動的LACPが必要な場合はYAMAHA SWXシリーズ(L2スイッチ)側の`channel-group mode active|passive`等を検討すること。対向機器がLACP前提の場合でも、RTX側は動的ネゴシエーションを行わないため、対向側もスタティック(またはLACPのforce/on相当)に固定して整合させる必要がある。
+- 集約対象ポートの動作モード・VLAN所属・速度/デュプレックスが両端で食い違うと、意図しない動作(ループ、片系のみ通信)になるおそれがある。投入前に対向機器の設定も確認する。
+- `lan link-aggregation static`実行時のLANインターフェースのリセット範囲は機種により異なる(例: RTX1210/1220はlan1のみ、RTX3510/RTX1300は全LANインターフェース)。実運用ネットワークへの影響が大きいため、必ずメンテナンス時間帯に実施する。
+- ロードバランス方式(トラフィック振り分けアルゴリズム)を明示的に選択するコマンドはRTXの公式ドキュメントで確認できなかった(YAMAHA SWXシリーズのL2スイッチには送信元/宛先MAC・IP等9種類の振り分けルールがあるが、これはL2スイッチ側の機能でありRTXルータには見当たらない)。振り分けの偏りが問題になる場合は、対向スイッチ側の設定やトラフィックパターンの見直しで対応する。
+- `save`を忘れると再起動時に設定が失われる。

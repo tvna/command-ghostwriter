@@ -1,0 +1,100 @@
+# アラクサラAXシリーズスイッチのLACPリンクアグリゲーション構成
+
+複数の物理リンクをLACPで束ね、帯域拡張とリンク冗長化を実現するリンクアグリゲーションを構成します。両端のスイッチで設定を揃える必要があるため、対向機器の設定と併せて実施してください。
+
+## 目的
+
+LACPによる複数リンクの論理的な集約(リンクアグリゲーション)を構成し、通常時の負荷分散動作とリンク断時の縮退動作の両方を検証できるようになることを目指します。
+
+## 用語解説
+
+- **LACP(Link Aggregation Control Protocol)**: IEEE 802.3ad標準の動的リンク集約プロトコル。対向機器とLACPDUを交換して自動的にチャネルを形成する
+- **モードの組合せ**: LACPは`active`(自らLACPDUの送信を開始)と`passive`(相手からのLACPDUを受信して初めて送信を開始)があり、両端の少なくとも一方が`active`である必要がある(`passive`同士は集約が成立しない)
+- **channel-group**: 束ねる物理インタフェースと、それらが所属する論理インタフェース(port-channel)を結びつける番号
+- **NIF(Network Interface)**: AXシリーズのインタフェース名は`gigabitethernet <NIF番号>/<ポート番号>`のように収容位置(NIF)とポート番号の組で表記する(Ciscoの`GigabitEthernet0/1`等とは表記体系が異なる)
+- **ロードバランス方式**: 集約したリンク間へのトラフィック振り分け基準。AXシリーズでは装置単位のグローバル設定(`port-channel load-balance`)で指定する点が、インタフェース単位で設定できる機種もあるCisco機器と異なる
+
+## シナリオ設定
+
+channel-group {{ channel_id }} として以下の{{ member_interfaces | length }}本の物理インタフェースを束ね、LACPモード `{{ lacp_mode }}` で集約します。
+
+{% for intf in member_interfaces %}- `{{ intf }}`
+{% endfor %}
+
+集約後のport-channel {{ channel_id }}はVLAN {{ trunk_vlans | join(', ') }} を通すトランクポートとし、ロードバランス方式は `{{ load_balance_method }}` を使用します。
+
+## 手順
+
+### 1. 事前条件を確認する
+
+両端のスイッチで、束ねる物理インタフェースの速度・デュプレックス・現在のVLAN設定が一致しているか確認します。設定が食い違うと集約が成立しないか、意図しない動作になります。
+
+```bash
+enable
+{% for intf in member_interfaces %}show interfaces {{ intf }}
+{% endfor %}```
+
+### 2. channel-groupとロードバランス方式を設定する
+
+```bash
+configure terminal
+{% for intf in member_interfaces %}interface {{ intf }}
+ channel-group {{ channel_id }} mode {{ lacp_mode }}
+exit
+{% endfor %}port-channel load-balance {{ load_balance_method }}
+```
+
+### 3. port-channelインタフェースをトランクとして設定する
+
+```bash
+interface port-channel {{ channel_id }}
+ switchport mode trunk
+ switchport trunk allowed vlan {{ trunk_vlans | join(',') }}
+exit
+save
+```
+
+### 4. show channel-groupで状態を確認する
+
+```bash
+show channel-group {{ channel_id }} detail
+show channel-group summary
+```
+
+`show channel-group summary`の`CH Status`が`Up`であり、束ねたポートがすべて集約状態(`Up`)として計上されていることを確認します。
+
+### 5. リンク断時の縮退動作を検証する
+
+メンバーインタフェースの1本を停止し、通信が継続すること、残りのリンクへ切り替わることを確認します。
+
+```bash
+interface {{ member_interfaces[0] }}
+ shutdown
+exit
+show channel-group {{ channel_id }} detail
+```
+
+確認後は必ず復旧します。
+
+```bash
+interface {{ member_interfaces[0] }}
+ no shutdown
+exit
+show channel-group {{ channel_id }} detail
+save
+```
+
+## 動作確認
+
+- `show channel-group summary`でチャネルグループ{{ channel_id }}の`CH Status`が`Up`であり、束ねた{{ member_interfaces | length }}本のポートが`Up(2)`のように全て計上されていること
+- `show channel-group {{ channel_id }} detail`の各ポートで`Status: Up`・`Reason: -`(阻害要因なし)であること
+- port-channel {{ channel_id }}経由の通信でVLAN {{ trunk_vlans | join(', ') }} が疎通すること
+- メンバーインタフェースを1本`shutdown`しても、port-channel経由の通信が継続すること。`no shutdown`後は自動的に集約状態へ復帰すること
+
+## 注意事項
+
+- 両端で`channel-group`のモードが不整合(例: 片方`passive`かつ相手も`passive`)だと集約が成立せず、各ポートが個別リンクとして動作してしまう。意図しないループの原因になるため、投入前に対向機器の設定も確認する。
+- `port-channel load-balance`はAXシリーズでは装置単位のグローバル設定であり、channel-groupごとに個別のロードバランス方式を割り当てることはできない。複数のchannel-groupを構成する装置では影響範囲に注意する。
+- 縮退動作の検証(手順5)は実運用トラフィックに影響し得るため、必ずメンテナンス時間帯に実施し、確認後は速やかに`no shutdown`で復旧すること。
+- 設定変更後は`save`(スタートアップコンフィグレーションファイルへの保存。`copy running-config startup-config`でも同義)を実行しないと、装置再起動時に設定が失われる。
+- 本テンプレートのコマンド体系はAX3660S/AX3640S/AX3630S/AX2400S等、複数モデルの公式コンフィグレーションガイド・コマンドリファレンスを基に記載しているが、機種・ファームウェアバージョンによりパラメータの対応状況が異なる場合があるため、実機投入前に対象機種のマニュアルで最終確認すること。

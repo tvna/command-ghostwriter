@@ -1,0 +1,104 @@
+# HPE Aruba(AOS-CX)スイッチのLAG(LACP)構成
+
+複数の物理リンクをLACPで束ね、帯域拡張とリンク冗長化を実現するLAG(Link Aggregation Group)を構成します。両端のスイッチで設定を揃える必要があるため、対向機器の設定と併せて実施してください。
+
+## 目的
+
+LACPによる複数リンクの論理的な集約(LAG)を構成し、通常時の負荷分散動作とリンク断時の縮退動作の両方を検証できるようになることを目指します。
+
+## 用語解説
+
+- **LAG(Link Aggregation Group)**: AOS-CXでの集約論理インターフェースの呼称(Ciscoの Port-channel、Junosの ae に相当)
+- **LACP(Link Aggregation Control Protocol)**: IEEE 802.3ad標準の動的リンク集約プロトコル。対向機器と制御パケットを交換して自動的にLAGを形成する
+- **モードの組合せ**: LACPは`active`(自ら集約を開始)と`passive`(相手からの要求を待つ)があり、両端の少なくとも一方が`active`である必要がある(`passive`同士は集約が成立しない)
+- **no routing**: AOS-CXの物理/LAGインターフェースは既定でL3ルーテッドポートとして動作するため、L2スイッチングポート(トランク)として使うには明示的に`no routing`を投入する必要がある(Cisco IOSのswitchportが既定という感覚とは逆の既定動作)
+- **vlan trunk native ... tag**: AOS-CXのトランクは常にネイティブVLANを持つ仕様のため、タグなし(untagged)フレームを受け付けない構成にする場合はネイティブVLANを`tag`指定して明示的にタグ付けする
+- **ロードバランス方式(hash)**: 集約リンク間へのトラフィック振り分け基準(送信元/宛先MAC、IPアドレスの組合せ等)。設定コマンド名は機種世代により異なる(詳細は注意事項)
+
+## シナリオ設定
+
+`lag {{ channel_id }}` として以下の{{ member_interfaces | length }}本の物理インターフェースを束ね、LACPモード `{{ lacp_mode }}` で集約します。
+
+{% for intf in member_interfaces %}- `{{ intf }}`
+{% endfor %}
+
+集約後のLAGインターフェースはVLAN {{ trunk_vlans | join(', ') }} を通すトランクポートとし、ロードバランス方式は `{{ load_balance_method }}` を使用します。
+
+## 手順
+
+### 1. 事前条件を確認する
+
+両端のスイッチで、束ねる物理インターフェースの速度・現在の管理状態が一致しているか確認します。速度が異なるメンバーは集約から除外されるため注意してください。
+
+```bash
+enable
+{% for intf in member_interfaces %}show interface {{ intf }}
+{% endfor %}```
+
+### 2. 各メンバーインターフェースをlagへ割り当てる
+
+```bash
+configure terminal
+{% for intf in member_interfaces %}interface {{ intf }}
+ no shutdown
+ lag {{ channel_id }}
+exit
+{% endfor %}```
+
+### 3. lagインターフェースをLACPモード・トランクとして設定する
+
+```bash
+interface lag {{ channel_id }}
+ no shutdown
+ no routing
+ lacp mode {{ lacp_mode }}
+ vlan trunk native {{ trunk_vlans[0] }} tag
+ vlan trunk allowed {{ trunk_vlans | join(',') }}
+ hash {{ load_balance_method }}
+exit
+end
+copy running-config startup-config
+```
+
+### 4. show lacp interfacesで集約状態を確認する
+
+```bash
+show lacp interfaces
+show interface lag {{ channel_id }}
+```
+
+Actor欄のState表示に A(Active)/F(Aggregable)/C(Collecting)/D(Distributing)が揃っており、対象メンバーが `lag{{ channel_id }}` のAggr Idに割り当てられていることを確認します。
+
+### 5. リンク断時の縮退動作を検証する
+
+メンバーインターフェースの1本を停止し、通信が継続すること、残りのリンクへ切り替わることを確認します。
+
+```bash
+interface {{ member_interfaces[0] }}
+ shutdown
+exit
+show lacp interfaces
+```
+
+確認後は必ず復旧します。
+
+```bash
+interface {{ member_interfaces[0] }}
+ no shutdown
+exit
+show lacp interfaces
+```
+
+## 動作確認
+
+- `show lacp interfaces`に束ねた{{ member_interfaces | length }}本のメンバーインターフェースが全て `lag{{ channel_id }}` のAggr Idの下に表示され、State欄が集約完了(Collecting/Distributing)を示すこと
+- `show interface lag {{ channel_id }}`のAllowed VLAN Listに `{{ trunk_vlans | join(', ') }}` が含まれること
+- メンバーインターフェースを1本停止しても、lag経由の通信が継続すること
+- 停止したインターフェースを`no shutdown`した後、自動的に集約状態へ復帰すること
+
+## 注意事項
+
+- 両端で`lacp mode`が不整合(例: 片方`passive`かつ相手も`passive`)だと集約が成立せず、各インターフェースが個別リンクとして動作してしまう。意図しないループやスパニングツリー障害の原因になるため、投入前に対向機器の設定も確認する。
+- ロードバランス方式のコマンド名は機種世代によって異なり、6000/6100/8400シリーズは`lacp hash {l2-src-dst|l3-src-dst|l4-src-dst}`、6200/6300/6400/8320/8325/9300/10000シリーズは`hash {l2-src-dst|l3-src-dst|l4-src-dst}`となる。本テンプレートは後者(`hash`)を採用しているため、対象機種が前者に該当する場合はコマンド名を`lacp hash`に読み替えること。
+- lagインターフェースは既定でL3ルーテッドポートとして動作するため、L2トランクとして使うには`no routing`が必須。この既定動作の違いは、Ciscoの「switchportが既定」という感覚と食い違いやすい典型的な誤設定ポイントであり、投入漏れがあると`vlan trunk`系コマンドが拒否される。
+- 縮退動作の検証(手順5)は実運用トラフィックに影響し得るため、必ずメンテナンス時間帯に実施し、確認後は速やかに`no shutdown`で復旧すること。

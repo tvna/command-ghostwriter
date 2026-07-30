@@ -38,3 +38,6 @@ DBE = "DBE"
 # TPE = the first three letters of Optuna's real `TPESampler` class name
 # (Tree-structured Parzen Estimator); not a misspelling of "TYPE".
 TPE = "TPE"
+# HPE = Hewlett Packard Enterprise, the real vendor name (HPE Aruba
+# Networking); not a misspelling of "HOPE".
+HPE = "HPE"

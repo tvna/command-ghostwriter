@@ -1,0 +1,96 @@
+# HPE Aruba(AOS-CX)のOSPF単一エリア設定
+
+複数のAOS-CXルータ/L3スイッチ間でOSPFエリア{{ area_id }}を構成し、隣接関係(ネイバー)の確立と動的な経路交換を確認します。対向機器のrouter-id・エリア設定と整合していることを事前に確認してください。
+
+## 目的
+
+OSPFの単一エリア構成をrouter-idとインターフェース単位のエリア割当で定義し、`ip ospf passive`で不要な隣接形成を抑制した上で、ネイバー確立と経路交換を検証できるようになることを目指します。
+
+## 用語解説
+
+- **LSA(Link State Advertisement)**: OSPFルータ同士が交換する、自身のリンク状態(接続インターフェースや経路情報)の広告
+- **ネイバー(Neighbor)**: OSPFのHelloパケットをやり取りし、隣接関係が成立した対向ルータ。AOS-CXでは`show ip ospf neighbors`(複数形)で確認する
+- **エリア(Area)**: OSPFのLSA伝播範囲を区切る論理単位。AOS-CXはCisco IOSのワイルドカードマスク付き`network`文と異なり、インターフェースコンフィグモードで`ip ospf <プロセスID> area <エリアID>`を個別に割り当てる方式を取る
+- **ip ospf passive**: Helloパケットの送出を止め、経路広告のみ行うインターフェース設定。Ciscoの`router ospf`配下`passive-interface`と異なり、AOS-CXではインターフェースコンフィグモードで個別に設定する
+- **reference-bandwidth**: OSPFのコスト計算基準となる帯域幅。AOS-CXでは`router ospf`配下の`reference-bandwidth`コマンド(単位Mbps)で設定し、Ciscoの`auto-cost reference-bandwidth`に相当する
+
+## シナリオ設定
+
+router-id `{{ router_id }}` のルータで、エリア {{ area_id }} に以下の{{ ospf_interfaces | length }}個のインターフェースを参加させます。
+
+{% for intf in ospf_interfaces %}- `{{ intf }}`
+{% endfor %}
+
+このうち以下のインターフェースは末端セグメントのため`ip ospf passive`とします。
+
+{% for intf in passive_interfaces %}- `{{ intf }}`
+{% endfor %}
+
+参照帯域幅(reference-bandwidth)は `{{ reference_bandwidth }}` Mbpsに設定し、高速リンクのコスト差を正しく反映させます。
+
+## 手順
+
+### 1. 事前にインターフェースの状態を確認する
+
+```bash
+enable
+show ip route
+{% for intf in ospf_interfaces %}show interface {{ intf }}
+{% endfor %}```
+
+対象インターフェースがOSPF参加予定のIPアドレスで有効化されているか確認します。
+
+### 2. router-idと参照帯域幅を設定する
+
+```bash
+configure terminal
+router ospf 1
+ router-id {{ router_id }}
+ reference-bandwidth {{ reference_bandwidth }}
+exit
+```
+
+### 3. インターフェースをエリアへ参加させる
+
+AOS-CXはCisco IOSの`network`文と異なり、インターフェースコンフィグモードで`ip ospf <プロセスID> area <エリアID>`を個別に割り当てます。
+
+```bash
+{% for intf in ospf_interfaces %}interface {{ intf }}
+ ip ospf 1 area {{ area_id }}
+exit
+{% endfor %}```
+
+### 4. ip ospf passiveで末端インターフェースを設計する
+
+末端セグメントでは不要な隣接形成・Hello送出を止め、意図しないOSPFネイバーの成立を防ぎます。
+
+```bash
+{% for intf in passive_interfaces %}interface {{ intf }}
+ ip ospf passive
+exit
+{% endfor %}end
+copy running-config startup-config
+```
+
+### 5. ネイバー確立と経路をshow ip ospf neighborsで確認する
+
+```bash
+show ip ospf neighbors
+show ip route ospf
+show ip ospf interface brief
+```
+
+`show ip ospf interface brief`のPassive列で、意図したインターフェースがYes(passive扱い)になっていることも確認します。
+
+## 動作確認
+
+- `show ip ospf neighbors`に対向ルータが`FULL`状態で表示されること(マルチアクセスセグメントではDR/BDR選出後に`FULL`または`2WAY`)
+- `show ip route ospf`に他ルータ経由のネットワークがOSPF由来として学習されていること
+- `show ip ospf interface brief`で`{{ passive_interfaces[0] }}`のPassive列が`Yes`になっていること
+- `show ip ospf`(またはOSPFプロセスのサマリ表示)のrouter-idが `{{ router_id }}` と一致していること
+
+## 注意事項
+
+- router-idはルータ内で一意である必要があり、他ルータと重複するとLSAの発信元が正しく識別できず経路計算が不安定になる。ループバックIP等、変化しないアドレスを使うのが望ましい。
+- AOS-CXはCisco IOSのようなワイルドカードマスクの`network`文を持たず、インターフェース単位で`ip ospf <プロセスID> area`を明示的に割り当てる方式のため、対象範囲の指定漏れ・過剰指定は起きにくい一方、インターフェース追加時に設定し忘れると意図せずOSPFへ参加しない点に注意する。
+- reference-bandwidthを変更する場合は、OSPFが有効な全ルータで同じ値に揃えないと、コスト計算が機器間で食い違い最適経路選択がずれる原因になる。

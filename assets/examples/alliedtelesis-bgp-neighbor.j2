@@ -1,0 +1,82 @@
+# Allied Telesis(AlliedWare Plus)ルータのeBGPネイバー確立
+
+異なるAS(自律システム)間でeBGPネイバーを確立し、経路広告と受信経路の確認を行います。対向ルータのAS番号・IPアドレス・認証キーは事前に対向管理者と合意しておく必要があります。
+
+## 目的
+
+eBGPネイバーをリモートAS `{{ remote_asn }}` との間で確立し、`network`文による経路広告とネイバー状態`Established`の確認ができるようになることを目指します。
+
+## 用語解説
+
+- **AS(Autonomous System)**: BGPにおける経路制御の管理単位。組織ごとに一意なAS番号を持つ
+- **eBGP(External BGP)**: 異なるAS間で経路交換を行うBGPセッション(同一AS内は iBGP と呼ぶ)
+- **ネイバー(Neighbor/Peer)**: BGPセッションを確立する対向ルータ。TCP179番ポートでセッションを張る
+- **network文**: AlliedWare PlusのBGPでは`network <アドレス>/<マスク長>`のCIDR表記で自AS内の広告対象ネットワークを直接指定できる(Cisco IOS classicの`network <アドレス> mask <サブネットマスク>`形式と異なる)
+- **MD5認証**: BGPセッションのTCPパケットにMD5ハッシュを付与し、なりすましを防ぐ任意機能。AlliedWare Plusでは`neighbor <アドレス> password <キー>`コマンドで設定する
+
+## シナリオ設定
+
+自AS `{{ local_asn }}`(router-id `{{ router_id }}`)から、対向AS `{{ remote_asn }}`・アドレス `{{ neighbor_ip }}`(`{{ neighbor_description }}`)とeBGPネイバーを確立します。
+
+以下の{{ advertised_networks | length }}個のネットワークを広告します。
+
+{% for n in advertised_networks %}- `{{ n }}`
+{% endfor %}
+セッションはMD5認証で保護します。
+
+## 手順
+
+### 1. 事前にAS番号とIPの疎通を確認する
+
+```bash
+enable
+show ip route
+ping {{ neighbor_ip }}
+```
+
+対向ルータの直接接続インターフェース(またはループバック、iBGPマルチホップ構成の場合)への疎通が取れていることを確認します。
+
+### 2. router bgpとネイバーを設定する
+
+```bash
+configure terminal
+router bgp {{ local_asn }}
+ bgp router-id {{ router_id }}
+ neighbor {{ neighbor_ip }} remote-as {{ remote_asn }}
+ neighbor {{ neighbor_ip }} description {{ neighbor_description }}
+ neighbor {{ neighbor_ip }} password {{ bgp_password }}
+```
+
+### 3. network文で経路を広告する
+
+```bash
+{% for n in advertised_networks %} network {{ n }}
+{% endfor %}end
+copy running-config startup-config
+```
+
+`network`文はルーティングテーブルに実在する経路のみ広告対象になるため、事前に`show ip route`で該当ネットワークがルーティングテーブルに存在することを確認してください。
+
+### 4. ネイバー状態と受信経路をshow ip bgp summaryで確認する
+
+```bash
+show ip bgp summary
+show ip bgp neighbors {{ neighbor_ip }}
+show ip route
+```
+
+`show ip bgp summary`の対向IPの状態列が数値(受信プレフィックス数)であれば`Established`、`Idle`や`Active`等の文字列であれば未確立です。
+
+## 動作確認
+
+- `show ip bgp summary`で `{{ neighbor_ip }}` の状態が `Established`(状態列が数値)であること
+- `show ip bgp neighbors {{ neighbor_ip }}`のAS番号が `{{ remote_asn }}` と一致すること
+- `show ip route`に対向AS経由のネットワークが `B`(BGP由来)として学習されていること
+- 自AS広告分({{ advertised_networks | join(', ') }})が対向ルータ側の`show ip bgp`で確認できること(対向機器での確認が必要)
+
+## 注意事項
+
+- MD5認証キー(`neighbor {{ neighbor_ip }} password`)は両端で完全に一致させる必要があり、不一致だとTCPセッション自体が確立しない(BGPログに認証エラーは出ない場合があるため、疎通確認と合わせて切り分けること)。
+- `neighbor <アドレス> description`コマンドは、AlliedWare PlusのBGP関連コマンド体系(`bgp router-id`・`neighbor remote-as`・`neighbor password`は一次情報で構文を確認済み)から類推した最有力候補として記載しているが、本セッションのWebSearchでは`description`キーワードそのものの一次情報は確定できなかった。実機投入前に対象機種のコマンドリファレンスで存在を確認し、無い場合は運用メモ等の別手段でネイバーの識別情報を管理すること。
+- `network`文はルーティングテーブルに厳密一致する経路がないと広告されない。サマライズしたい場合は集約ルート用のネットワークを別途ルーティングテーブルに用意するか、redistributeの利用を検討する。
+- 誤ったAS番号やネイバーIPを設定すると、意図しないASと経路交換してしまうリスクがある。投入前に対向情報を再確認し、可能であればprefix-list等の経路フィルタも検討する。
