@@ -38,6 +38,8 @@ FORMATS: Final[frozenset[str]] = frozenset({"toml", "yaml", "csv"})
 ALLOWED_SUBCATEGORIES: Final[dict[str, frozenset[str]]] = {
     "network": frozenset(
         {
+                "Alaxala",
+                "Allied Telesis",
                 "Arista",
                 "Cisco",
                 "Dell",

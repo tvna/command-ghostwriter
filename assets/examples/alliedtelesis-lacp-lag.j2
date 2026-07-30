@@ -1,0 +1,104 @@
+# Allied Telesis(AlliedWare Plus)スイッチのLACPリンクアグリゲーション構成
+
+複数の物理ポートをLACPで束ね、帯域拡張とリンク冗長化を実現するリンクアグリゲーション(チャネルグループ)を構成します。両端のスイッチで設定を揃える必要があるため、対向機器の設定と併せて実施してください。
+
+## 目的
+
+LACP(動的チャネルグループ)による複数ポートの論理的な集約を構成し、通常時の負荷分散動作とリンク断時の縮退動作の両方を検証できるようになることを目指します。
+
+## 用語解説
+
+- **LACP(Link Aggregation Control Protocol)**: IEEE 802.3ad標準の動的リンク集約プロトコル。対向機器とLACPDU(制御パケット)を交換して自動的にチャネルを形成する
+- **channel-group(動的チャネルグループ)**: `channel-group`コマンドで作成する、LACPによって自動的に集約が形成される論理グループ
+- **static-channel-group(静的チャネルグループ)**: LACPを使わず、ポートを手動で固定的に束ねる方式。対向機器がLACP非対応の場合や、LACPネゴシエーションを省略したい場合に使用する(本テンプレートは動的LACPを対象とし、静的集約が必要な場合は`static-channel-group`コマンドに読み替えること)
+- **モードの組合せ**: LACPは`active`(自ら集約を開始)と`passive`(相手からの要求を待つ)があり、両端の少なくとも一方が`active`である必要がある(`passive`同士は集約が成立しない)
+- **port1.0.x**: AlliedWare Plusのポート命名規則(ユニット番号.モジュール番号.ポート番号)。本テンプレートではスタンドアロン機を想定しユニット番号は1固定とする
+- **ロードバランス方式**: 集約したポート間へのトラフィック振り分け基準(送信元/宛先MAC、IPアドレスの組合せ等)。AlliedWare Plusでは装置全体に対する`platform load-balancing`コマンドで指定する(Ciscoの`port-channel load-balance`のようにチャネルグループ単位では設定しない)
+
+## シナリオ設定
+
+channel-group {{ channel_id }} として以下の{{ member_interfaces | length }}本のポートを束ね、LACPモード `{{ lacp_mode }}` で集約します。
+
+{% for intf in member_interfaces %}- `{{ intf }}`
+{% endfor %}
+
+集約後のポートはVLAN {{ trunk_vlans | join(', ') }} を通すトランクポートとし、ロードバランス方式は `{{ load_balance_method }}` を使用します。
+
+## 手順
+
+### 1. 事前条件を確認する
+
+両端のスイッチで、束ねるポートの速度・デュプレックス・現在のswitchport設定が一致しているか確認します。設定が食い違うと集約が成立しないか、意図しない動作になります。
+
+```bash
+enable
+{% for intf in member_interfaces %}show interface {{ intf }}
+{% endfor %}```
+
+### 2. channel-groupを設定する
+
+```bash
+configure terminal
+{% for intf in member_interfaces %}interface {{ intf }}
+ channel-group {{ channel_id }} mode {{ lacp_mode }}
+exit
+{% endfor %}```
+
+### 3. トランクポートとVLAN・ロードバランス方式を設定する
+
+AlliedWare Plusではswitchportのトランク設定は各メンバーポートに対して行い、ロードバランス方式は装置全体に対して`platform load-balancing`で設定します。
+
+```bash
+{% for intf in member_interfaces %}interface {{ intf }}
+ switchport mode trunk
+ switchport trunk allowed vlan add {{ trunk_vlans | join(',') }}
+exit
+{% endfor %}platform load-balancing {{ load_balance_method }}
+end
+copy running-config startup-config
+```
+
+### 4. LACPの状態を確認する
+
+```bash
+show lacp sys-id
+show lacp-counter
+{% for intf in member_interfaces %}show interface {{ intf }}
+{% endfor %}```
+
+`show lacp-counter`でLACPDUの送受信カウンタが両ポートとも増加し続けていることを確認します。増加が止まっている場合はネゴシエーション不成立を疑います。
+
+### 5. リンク断時の縮退動作を検証する
+
+メンバーポートの1本を停止し、通信が継続すること、残りのポートへ切り替わることを確認します。
+
+```bash
+interface {{ member_interfaces[0] }}
+ shutdown
+exit
+show lacp-counter
+```
+
+確認後は必ず復旧します。
+
+```bash
+interface {{ member_interfaces[0] }}
+ no shutdown
+exit
+show lacp-counter
+```
+
+## 動作確認
+
+- `show lacp sys-id`で自装置のLACPシステムID(MACアドレス)とシステムプライオリティが表示されること
+- `show lacp-counter`で束ねた{{ member_interfaces | length }}本のポート双方のLACPDU送受信カウンタが増加し続けていること(ネゴシエーション継続の証跡)
+- `show interface {{ member_interfaces[0] }}`等の各メンバーポートがUP状態であり、switchport trunk設定にVLAN {{ trunk_vlans | join(', ') }} が含まれること
+- メンバーポートを1本停止しても、集約経由の通信が継続すること
+- 停止したポートを`no shutdown`した後、自動的に集約状態へ復帰すること
+
+## 注意事項
+
+- 両端で`channel-group`のモードが不整合(例: 片方`passive`かつ相手も`passive`)だと集約が成立せず、各ポートが個別リンクとして動作してしまう。意図しないループやスパニングツリー障害の原因になるため、投入前に対向機器の設定も確認する。
+- `platform load-balancing`は装置全体に適用されるグローバルコマンドであり、Ciscoのようにチャネルグループごとに個別のロードバランス方式を持たせることはできない。複数の集約グループが同一装置上に存在する場合は影響範囲に注意する。
+- 動的集約(LACP)が確立された際の論理インターフェース名(装置・バージョンによって`channel-group`番号そのもので参照される場合と、専用の論理インターフェース名が割り当てられる場合がある)は、本セッションのWebSearchでは一次情報を確定できなかった。実機投入前に対象機種のコマンドリファレンスで、集約後の論理インターフェースの参照名と、switchport/VLAN設定をメンバーポート単位・集約後インターフェース単位のどちらで行うべきかを必ず確認すること。
+- 縮退動作の検証(手順5)は実運用トラフィックに影響し得るため、必ずメンテナンス時間帯に実施し、確認後は速やかに`no shutdown`で復旧すること。

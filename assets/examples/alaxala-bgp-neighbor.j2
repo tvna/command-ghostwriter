@@ -1,0 +1,87 @@
+# アラクサラAXシリーズスイッチのeBGPネイバー確立
+
+異なるAS(自律システム)間でeBGPネイバーを確立し、経路広告と受信経路の確認を行います。対向ルータのAS番号・IPアドレス・認証キーは事前に対向管理者と合意しておく必要があります。
+
+## 目的
+
+eBGPネイバーをリモートAS `{{ remote_asn }}` との間で確立し、`network`コマンドによる経路広告とネイバー状態`Established`の確認ができるようになることを目指します。
+
+## 用語解説
+
+- **AS(Autonomous System)**: BGPにおける経路制御の管理単位。組織ごとに一意なAS番号を持つ
+- **eBGP(External BGP)**: 異なるAS間で経路交換を行うBGPセッション(同一AS内はiBGPと呼ぶ)
+- **ネイバー(Neighbor/Peer)**: BGPセッションを確立する対向ルータ。TCP179番ポートでセッションを張る
+- **networkコマンド**: BGPで広告する自AS内のネットワークをルーティングテーブルから選んで宣言する設定。AXシリーズではCisco IOSのようなマスク併記(`mask`キーワード)ではなく、CIDR表記(`network 10.0.0.0/24`)で直接指定する
+- **TCP MD5認証**: BGPセッションのTCPパケットにMD5ハッシュを付与し、なりすましを防ぐ任意機能。AXシリーズでは`neighbor <アドレス> password <キー>`で設定する
+
+## シナリオ設定
+
+自AS `{{ local_asn }}`(router-id `{{ router_id }}`)から、対向AS `{{ remote_asn }}`・アドレス `{{ neighbor_ip }}`(`{{ neighbor_description }}`)とeBGPネイバーを確立します。
+
+以下の{{ advertised_networks | length }}個のネットワークを広告します。
+
+{% for n in advertised_networks %}- `{{ n }}`
+{% endfor %}
+
+セッションはTCP MD5認証で保護します。
+
+## 手順
+
+### 1. 事前にAS番号とIPの疎通を確認する
+
+```bash
+enable
+show ip route
+ping {{ neighbor_ip }}
+```
+
+対向ルータの直接接続インタフェース(またはループバック、iBGPマルチホップ構成の場合)への疎通が取れていることを確認します。
+
+### 2. router bgpとネイバーを設定する
+
+```bash
+configure terminal
+router bgp {{ local_asn }}
+ bgp router-id {{ router_id }}
+ neighbor {{ neighbor_ip }} remote-as {{ remote_asn }}
+ neighbor {{ neighbor_ip }} description {{ neighbor_description }}
+ neighbor {{ neighbor_ip }} password {{ bgp_password }}
+```
+
+`neighbor remote-as`でピアを先に登録してから`description`・`password`等の付随設定を行う必要があります。順序を誤ると付随設定コマンドが拒否されます。
+
+### 3. networkコマンドで経路を広告する
+
+```bash
+{% for n in advertised_networks %} network {{ n }}
+{% endfor %}exit
+save
+```
+
+`network`コマンドはルーティングテーブルに実在する経路のみ広告対象になるため、事前に`show ip route`で該当ネットワークがルーティングテーブルに存在することを確認してください。
+
+### 4. ネイバー状態と受信経路をshow ip bgp summaryで確認する
+
+```bash
+show ip bgp summary
+show ip bgp neighbors {{ neighbor_ip }}
+show ip route bgp
+```
+
+`show ip bgp summary`の対向IPの`Status`列が`Established`であるかを確認します(`Idle`・`Active`・`Connect`等はセッション未確立)。
+
+## 動作確認
+
+- `show ip bgp summary`で `{{ neighbor_ip }}` の`Status`列が `Established` であること
+- `show ip bgp neighbors {{ neighbor_ip }}`のAS番号が `{{ remote_asn }}` と一致すること
+- `show ip route bgp`に対向AS経由のネットワークがBGP由来の経路として学習されていること
+- 自AS広告分({{ advertised_networks | join(', ') }})が対向ルータ側の`show ip bgp`で確認できること(対向機器での確認が必要)
+
+## 注意事項
+
+- TCP MD5認証キーは両端で完全に一致させる必要があり、不一致だとTCPセッション自体が確立しない。疎通確認と合わせて切り分けること。
+- `network`コマンドはルーティングテーブルに厳密一致する経路がないと広告されない。集約して広告したい場合は、集約経路そのものをルーティングテーブルに存在させる必要がある。
+- `neighbor password`等のピア個別設定は、`neighbor remote-as`でピアそのものを先に登録していないと投入できない。本テンプレートの手順2はこの順序を守っている。
+- 誤ったAS番号やネイバーIPを設定すると、意図しないASと経路交換してしまうリスクがある。投入前に対向情報を再確認すること。
+- `show ip route bgp`は、OSPF側で確認されている`show ip route ospf`のようなプロトコル種別によるフィルタ表示の体系を踏まえた記載であり、対象機種・ファームウェアで実際にサポートされているかは調査時点で一次情報を確認できなかった。実機投入前に対象機種のマニュアルで確認し、未対応の場合は`show ip route`全体からBGP由来(`B`等の由来表示)の経路を目視で確認すること。
+- 設定変更後は`save`でスタートアップコンフィグレーションに保存しないと、装置再起動時に設定が失われる。
