@@ -1,0 +1,5 @@
+system_id,area,agent_type,last_inspection_date,next_inspection_due,gauge_pressure_psi,normal_min_psi,normal_max_psi
+FS-01,サーバルームA,不活性ガス(窒素),2026-06-01,2026-12-01,360,340,380
+FS-02,サーバルームB,不活性ガス(窒素),2025-06-01,2026-06-01,310,340,380
+FS-03,電気室,二酸化炭素,2026-07-01,2027-01-01,850,800,900
+FS-04,蓄電池室,不活性ガス(窒素),2026-01-15,2026-07-15,345,340,380

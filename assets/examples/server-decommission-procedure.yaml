@@ -1,0 +1,24 @@
+device:
+  name: "Server-App-Old-01"
+  asset_tag: "AST-0512"
+  rack: "RackC"
+  u_position: "U18"
+steps:
+  - name: "サービス停止・依存関係確認"
+    done: true
+  - name: "最終バックアップ取得"
+    done: true
+  - name: "資産台帳から利用中フラグを解除"
+    done: true
+  - name: "ディスクのデータ消去(上書き消去またはワイプ)"
+    done: false
+  - name: "消去証明書の取得・保管"
+    done: false
+  - name: "ラックからの撤去"
+    done: false
+  - name: "資産台帳から抹消登録"
+    done: false
+approval:
+  requested_by: "ito"
+  approved_by: "yamamoto"
+  approval_date: "2026-07-25"

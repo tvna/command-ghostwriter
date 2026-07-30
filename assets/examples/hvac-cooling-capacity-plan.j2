@@ -1,0 +1,88 @@
+# HVAC冷却能力計画（総発熱量とCRAC/CRAH容量の適合判定）
+
+YAMLのラック発熱量とCRAC(空調機)構成から、N+1冗長時に必要な冷却能力を検算します。
+
+## 目的
+
+IT負荷(発熱量)とCRAC/CRAHの冷却能力(kW)の関係を理解し、N+1冗長構成が安全マージンを含めて成立しているかを検算できるようになることを目指します。
+
+## 用語解説
+
+- **CRAC/CRAH**: サーバルームを冷却する空調機。CRACは冷媒直膨式、CRAHは冷水式
+- **冷却能力(kW)**: 空調機が単位時間あたりに除去できる熱量。IT機器の消費電力(kW)はほぼ全てが熱に変わるため、同じkW単位で比較できる
+- **N+1冗長**: 必要台数Nに対し予備を1台加える構成。1台が停止しても残りで必要能力を賄える設計
+- **安全マージン**: 将来の負荷増加や機器の経年劣化を見込んで、計算上の必要能力に上乗せする余裕率
+- **セットポイント**: 空調機が維持しようとする設定温度
+- **部分負荷率**: 冷却能力に対する実際のIT負荷の割合
+
+## 1. ラック発熱量とCRAC構成を確認する
+
+{{ room.name }}には、CRACが{{ crac_units | length }}台設置されています。冗長方針は{{ redundancy_target }}、安全マージンは{{ safety_margin_pct }}%です。
+
+| rack | it_load_kw |
+|---|---|
+{% for r in racks %}| {{ r.name }} | {{ r.it_load_kw }}kW |
+{% endfor %}
+
+| CRAC | capacity_kw |
+|---|---|
+{% for c in crac_units %}| {{ c.name }} | {{ c.capacity_kw }}kW |
+{% endfor %}
+
+## 2. IT負荷合計とCRAC総容量を計算する
+
+```bash
+echo "IT負荷合計とCRAC総容量(全台稼働時)を積算します"
+```
+
+{% set ns = namespace(it_total=0, crac_total=0) %}{% for r in racks %}{% set ns.it_total = ns.it_total + r.it_load_kw %}{% endfor %}{% for c in crac_units %}{% set ns.crac_total = ns.crac_total + c.capacity_kw %}{% endfor %}
+- IT負荷合計: {{ ns.it_total }}kW
+- CRAC総容量(全{{ crac_units | length }}台稼働時): {{ ns.crac_total }}kW
+
+## 3. N+1冗長時の利用可能容量を判定する
+
+{{ redundancy_target }}冗長のため、最大出力のCRAC1台が停止しても残りの台数で賄える必要があります。
+
+{% set ns2 = namespace(max_unit=0) %}{% for c in crac_units %}{% if c.capacity_kw > ns2.max_unit %}{% set ns2.max_unit = c.capacity_kw %}{% endif %}{% endfor %}
+- 最大出力CRAC1台分: {{ ns2.max_unit }}kW
+- N+1冗長時の利用可能容量(総容量 − 最大1台分): {{ ns.crac_total - ns2.max_unit }}kW
+
+## 4. 安全マージンを加味した必要容量と比較する
+
+```bash
+echo "必要容量 = IT負荷合計 x (1 + 安全マージン/100)"
+```
+
+{% set ns3 = namespace(required=0) %}{% set ns3.required = (ns.it_total * (100 + safety_margin_pct) / 100) | round(1) %}
+- 必要容量(マージン込み): {{ ns3.required }}kW
+- 判定: N+1利用可能容量{{ ns.crac_total - ns2.max_unit }}kW は 必要容量{{ ns3.required }}kW に対して{% if (ns.crac_total - ns2.max_unit) >= ns3.required %} OK（充足）{% else %}**NG（不足）**{% endif %}
+
+## 5. NGの場合の是正案を検討する
+
+CRACを1台追加({{ ns2.max_unit }}kW相当)した場合の再計算です。
+
+```bash
+echo "CRAC追加後のN+1利用可能容量 = (総容量 + 追加分) - 最大1台分"
+```
+
+- 追加後の総容量: {{ ns.crac_total + ns2.max_unit }}kW
+- 追加後のN+1利用可能容量: {{ ns.crac_total + ns2.max_unit - ns2.max_unit }}kW → 必要容量{{ ns3.required }}kWに対して{% if (ns.crac_total + ns2.max_unit - ns2.max_unit) >= ns3.required %} OK{% else %}まだ不足{% endif %}
+
+## 6. (実機があれば)CRACの稼働状態を確認する
+
+```bash
+snmpget -v2c -c public <CRAC管理IP> 1.3.6.1.4.1.<ベンダーOID>.coolingCapacityActual
+```
+
+各CRACのセットポイントと実際の吹出温度、部分負荷率(実IT負荷 ÷ 稼働中の総冷却能力)を取得し、Step 2〜4の計算値と大きく乖離していないかを確認します。
+
+## 動作確認
+
+- IT負荷合計とCRAC総容量が正しく積算されていること
+- N+1冗長時の利用可能容量が安全マージン込みの必要容量と比較され、判定結果が記載されていること
+- NGの場合、是正案(CRAC追加)後の再判定が記載されていること
+
+## 注意事項
+
+- 空調機の実機停止試験(N+1検証)は室温上昇を伴うため、必ず影響範囲と実施時間帯を関係者に事前周知してから行ってください。
+- 本シナリオの数値は演習用の簡略値であり、実際の設計では顕熱負荷・潜熱負荷の内訳や気流経路も含めた専門的な空調設計が必要です。

@@ -1,0 +1,25 @@
+generator:
+  name: "非常用発電機-1"
+  rated_kw: 500
+  max_start_attempts: 3
+ats:
+  name: "ATS-1"
+  detection_delay_sec: 2
+ups:
+  name: "UPS-1"
+  full_load_runtime_sec: 300
+test_log:
+  - event: "商用電源遮断検知開始"
+    elapsed_sec: 0
+  - event: "ATS検出遅延経過、発電機始動信号送信"
+    elapsed_sec: 2
+  - event: "発電機始動試行1回目(クランキング)"
+    elapsed_sec: 2
+  - event: "始動失敗(回転数不足を検知、再クランキング)"
+    elapsed_sec: 5
+  - event: "発電機始動試行2回目(クランキング)"
+    elapsed_sec: 8
+  - event: "発電機が定格周波数に到達"
+    elapsed_sec: 18
+  - event: "ATSが発電機側へ負荷移行完了"
+    elapsed_sec: 26

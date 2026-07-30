@@ -1,0 +1,72 @@
+# 発電機・ATS切替訓練（自動切替時間とUPSブリッジ時間の整合確認）
+
+YAMLの発電機・ATS・UPS仕様と切替試験ログから、UPSが商用電源遮断から発電機への負荷移行完了までを橋渡し(ブリッジ)できているかを検算します。
+
+## 目的
+
+非常用発電機・ATS(自動切替盤)・UPSの三者がどう連携して停電を乗り切るかを理解し、切替試験ログからブリッジ時間の妥当性を検算できるようになることを目指します。
+
+## 用語解説
+
+- **非常用発電機**: 商用電源が停止した際に代替電源を供給するエンジン発電機
+- **ATS(自動切替盤)**: 商用電源の異常を検出し、負荷を発電機側へ自動的に切り替える盤
+- **クランキング**: 発電機のエンジンを始動させるための初期回転動作
+- **定格周波数到達**: エンジンが安定回転に達し、規定の周波数(50/60Hz)で発電可能になった状態
+- **UPSブリッジ時間**: 商用電源遮断から発電機への負荷移行が完了するまでの間、UPSのバッテリーだけで給電を継続する時間
+- **始動失敗と再試行**: クランキングが規定回転数に届かず失敗し、自動的に再試行される動作
+
+## 1. 発電機・ATS・UPS仕様を確認する
+
+- 発電機: {{ generator.name }}（定格{{ generator.rated_kw }}kW、最大始動試行回数{{ generator.max_start_attempts }}回）
+- ATS: {{ ats.name }}（電源異常検出遅延{{ ats.detection_delay_sec }}秒）
+- UPS: {{ ups.name }}（満負荷時ブリッジ時間{{ ups.full_load_runtime_sec }}秒）
+
+## 2. 切替試験ログを確認する
+
+| elapsed_sec | event |
+|---|---|
+{% for e in test_log %}| {{ e.elapsed_sec }}s | {{ e.event }} |
+{% endfor %}
+
+## 3. 始動試行回数を数える
+
+```bash
+echo "ログ中の「試行」を含むイベント数を数えます"
+```
+
+{% set ns = namespace(attempts=0) %}{% for e in test_log %}{% if "試行" in e.event %}{% set ns.attempts = ns.attempts + 1 %}{% endif %}{% endfor %}
+- 実際の始動試行回数: {{ ns.attempts }}回 / 最大許容{{ generator.max_start_attempts }}回 → {% if ns.attempts <= generator.max_start_attempts %}許容範囲内{% else %}**上限超過（要調査）**{% endif %}
+
+## 4. 負荷移行完了までの経過時間とUPSブリッジ時間を比較する
+
+```bash
+echo "負荷移行完了イベントの経過時間を確認します"
+```
+
+{% set ns2 = namespace(transfer_complete_sec=0) %}{% for e in test_log %}{% if loop.last %}{% set ns2.transfer_complete_sec = e.elapsed_sec %}{% endif %}{% endfor %}
+- 負荷移行完了までの経過時間: {{ ns2.transfer_complete_sec }}秒
+- UPS満負荷時ブリッジ時間: {{ ups.full_load_runtime_sec }}秒
+- 判定: {% if ups.full_load_runtime_sec >= ns2.transfer_complete_sec %}UPSは負荷移行完了まで十分に橋渡しできている（マージン{{ ups.full_load_runtime_sec - ns2.transfer_complete_sec }}秒）{% else %}**UPSのブリッジ時間が不足しており、負荷移行前に停電が発生する恐れがある**{% endif %}
+
+## 5. 是正が必要な場合の対応方針を検討する
+
+始動試行が上限を超えた場合はエンジン整備(バッテリー・燃料・点火系統)の点検を、UPSブリッジ時間が不足する場合はUPSバッテリー増設または発電機始動シーケンスの高速化を検討します。
+
+## 6. (実機があれば)発電機コントローラのログを確認する
+
+```bash
+cat /var/log/genset-controller.log | tail -n 50
+```
+
+コントローラの実ログから、Step 2の試験ログと同様のイベント順序(始動信号→クランキング→定格到達→負荷移行完了)が記録されていることを確認します。
+
+## 動作確認
+
+- 始動試行回数が最大許容回数以内であること
+- 負荷移行完了までの経過時間がUPSブリッジ時間以内であること
+- 判定がNGの場合、是正方針が記載されていること
+
+## 注意事項
+
+- 実機での切替試験(商用電源を実際に遮断する試験)は本番負荷への影響が大きいため、必ず計画停電として関係者へ事前周知し、有資格者の立ち会いのもとで実施してください。
+- 発電機の燃料残量・バッテリー状態は試験前に必ず確認してください。
