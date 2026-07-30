@@ -51,6 +51,7 @@ ALLOWED_SUBCATEGORIES: Final[dict[str, frozenset[str]]] = {
                 "IPアドレス設計",
                 "Juniper",
                 "L1/L2リンク",
+                "NEC",
                 "NIC",
                 "VLAN",
                 "YAMAHA",
