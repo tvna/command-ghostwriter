@@ -21,6 +21,8 @@ CSVの配線表(ケーブルスケジュール)をもとに敷設し、LLDPで�
 
 これらの配線は、パッチパネルを介して機器とラック間を接続する水平配線（フロア内配線）に該当します（フロア間・室間を結ぶ幹線配線は本シナリオの対象外です）。
 
+各行の`from_port`/`to_port`は、ポート番号規約（ラック名・U番号・ポート番号を機械的に表す表記）に従って記載されています。
+
 | cable_id | from_port | to_port | cable_type | length_m |
 |---|---|---|---|---|
 {% for r in csv_rows %}| {{ r["cable_id"] }} | {{ r["from_port"] }} | {{ r["to_port"] }} | {{ r["cable_type"] }} | {{ r["length_m"] }} |
