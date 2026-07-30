@@ -649,6 +649,8 @@ Also: the "network {{ local_lan }}" / "network {{ remote_lan }}" address-object 
 
 WebFetch could not render any of the sonicwall.com PDF-viewer pages or several KB article URLs (returned empty/placeholder content), so the PDF was downloaded directly via curl and parsed locally (pypdf/pdfminer.six in an isolated venv, since the sandboxed environment's system `cryptography` package was broken) to get primary-source text.
 
+**Code-review update:** a deeper re-check of the same primary-source PDF during code review found the 3 gaps above were worse than "minor format inference" -- `network {{ local_lan }}` (unspaced CIDR) does not match the documented `network <ADDR_NETWORK> <ADDR_MASK>` two-token grammar, the flattened `vpn nat-traversal` / `vpn ike-dpd enable` one-liners do not match the documented nested-mode command tree, and `show vpn ike-dpd` / `show address-object ipv4 all` are not real command-tree entries at all. All four are now fixed below (CIDR split into two space-separated tokens, `vpn`/`ike-dpd` nested-mode sequence, `show address-objects`, and dropping `show vpn ike-dpd` in favor of relying on `show vpn policy` output).
+
 - [ ] **Step 1: データファイルを作成する**
 
 `assets/examples/sonicwall-ikev2-vpn.toml`:
@@ -709,11 +711,11 @@ configureモードでLAN側とVPN対向先のアドレスオブジェクトを�
 configure
 address-object ipv4 "Local-LAN"
   zone LAN
-  network {{ local_lan }}
+  network {{ local_lan.split('/')[0] }} /{{ local_lan.split('/')[1] }}
   exit
 address-object ipv4 "Remote-LAN"
   zone VPN
-  network {{ remote_lan }}
+  network {{ remote_lan.split('/')[0] }} /{{ remote_lan.split('/')[1] }}
   exit
 vpn policy site-to-site "To-RemoteSite"
   enable
@@ -735,9 +737,13 @@ vpn policy site-to-site "To-RemoteSite"
   proposal ipsec lifetime 3600
   bound-to zone WAN
   exit
-vpn nat-traversal
-vpn ike-dpd enable
-vpn ike-dpd interval 10
+vpn
+  nat-traversal
+  ike-dpd
+    enable
+    interval 10
+    exit
+  exit
 commit
 ```
 
@@ -749,7 +755,7 @@ SonicOSのsite-to-site(ポリシーベース)VPNでは、`network local`/`networ
 
 ```bash
 show access-rules
-show address-object ipv4 all
+show address-objects
 ```
 
 自動追加ルールを許可しない運用の場合は、VPNポリシー内で`suppress-auto-add-rule`を有効にし、別途アクセスルールを明示的に作成してください。
@@ -758,7 +764,6 @@ show address-object ipv4 all
 
 ```bash
 show vpn policy ipv4 site-to-site "To-RemoteSite"
-show vpn ike-dpd
 ping {{ remote_lan_test_host }}
 ```
 
@@ -770,7 +775,7 @@ ping {{ remote_lan_test_host }}
 
 - `show vpn policy ipv4 site-to-site "To-RemoteSite"`でポリシーが有効(Enabled)、かつIKE/IPsec SAが確立していること
 - 表示された暗号スイートがAES-256・SHA-256・DHグループ14で、プロポーザルミスマッチが発生していないこと
-- `show vpn ike-dpd`でDead Peer Detectionが有効になっており、対向機器への生存確認が正常に応答していること
+- 手順2で`ike-dpd`を有効化した設定が反映されており、対向機器との接続断が発生した際にトンネルが再確立されること(生存確認自体の応答状況を表示する単独のshowコマンドは確認できなかったため、`show vpn policy ipv4 site-to-site`の全体状態と組み合わせて確認する)
 - 自拠点LAN `{{ local_lan }}` の端末から対向拠点LAN `{{ remote_lan }}` の端末へpingが成功すること
 
 ## 注意事項
