@@ -543,13 +543,14 @@ CSVの配線表(ケーブルスケジュール)をもとに敷設し、LLDPで�
 - **パッチパネル**: 配線の端点をまとめ、機器側と柔軟に接続し直せるようにする盤
 - **配線表(ケーブルスケジュール)**: どのポートとどのポートを接続するかを一覧化した台帳
 - **水平配線・幹線配線**: フロア内の配線と、フロア間・室間を結ぶ配線
-- **LLDP**: 隣接機器同士が自機の情報(機器名・ポート名)を交換するプロトコル
+- **LLDP**: 隣接機器同士が自機の情報(機器名・ポート名)を交換するプロトコル。取得結果の`SysName`は隣接機器のホスト名、`PortDescr`は隣接機器が自己申告するポート情報を表す
 - **ポート番号規約**: `RackA-U40-P1` のようにラック・U番号・ポート番号を機械的に表す命名規則
 - **余長処理**: ケーブルの余った長さを整理し、たるみや断線を防ぐ処置
+- **リンクアップ・リンク速度**: リンクが確立し、双方が同じ速度で通信できている状態
 
 ## 1. 配線表を確認する
 
-これらの配線は、パッチパネルを介して機器とラック間を接続する水平配線（フロア内配線）に該当します。
+これらの配線は、パッチパネルを介して機器とラック間を接続する水平配線（フロア内配線）に該当します（フロア間・室間を結ぶ幹線配線は本シナリオの対象外です）。
 
 | cable_id | from_port | to_port | cable_type | length_m |
 |---|---|---|---|---|
@@ -593,13 +594,16 @@ Interface:    Gi1/0/2, via: LLDP, RID: 2, Time: 0 day, 00:05:12
 
 ## 4. 配線表とLLDPの結果を1行ずつ照合する
 
-CBL-002は配線表上 `{{ csv_rows[1]["to_port"] }}` ですが、LLDPの模擬出力では対向ポートが `RackA-U40-P5` と表示されており、**不一致**です（配線表の誤記、または実際の敷設ミスの可能性）。
+CBL-001は配線表上の対向ポート `{{ csv_rows[0]["to_port"] }}` が、LLDPの模擬出力（`SysName: RackA-U10-Server-DB` / `PortDescr: RackA-U40-P1`）と一致しており、配線に問題はありません。
+
+一方、CBL-002は配線表上 `{{ csv_rows[1]["to_port"] }}` ですが、LLDPの模擬出力では対向ポートが `RackA-U40-P5` と表示されており、**不一致**です（配線表の誤記、または実際の敷設ミスの可能性）。
 
 ```bash
+echo "一致: CBL-001 配線表={{ csv_rows[0]["to_port"] }} / LLDP実測=RackA-U40-P1"
 echo "不一致: CBL-002 配線表={{ csv_rows[1]["to_port"] }} / LLDP実測=RackA-U40-P5"
 ```
 
-他の3本（CBL-001, CBL-003, CBL-004）はLLDPの模擬出力に対向情報が含まれないため、リンクアップ状態の目視・`ip link`での確認に代替します。
+残り2本（CBL-003, CBL-004）はLLDPの模擬出力に対向情報が含まれないため、リンクアップ状態の目視・`ip link`での確認に代替します。なお、この模擬出力の`PortDescr`は「対向機器が自己申告する接続先ポート情報」という前提で表示しています（機器・設定によって内容は異なるため、実環境では自社のLLDP設定の実際の出力内容を確認してください）。
 
 ## 5. リンクアップとリンク速度を確認する
 
@@ -684,9 +688,10 @@ CSVの区間要件から、距離・速度・PoE要件に基づき妥当なLAN�
 - **10GBASE-T**: Cat6で最大55m、Cat6Aで最大100mまで10Gbpsを伝送できる規格
 - **1000BASE-T**: Cat5e/6/6Aいずれでも最大100mまで1Gbpsを伝送できる規格
 - **リンク速度とネゴシエーション**: 接続時に双方の機器が自動的に通信速度を取り決める仕組み
-- **PoE(給電)**: LANケーブル経由で電力を供給する仕組み。高出力なPoE+/PoE++は発熱対策として上位カテゴリが推奨される
+- **PoE(給電)**: LANケーブル経由で電力を供給する仕組み。高出力なPoEでは発熱対策として上位カテゴリが推奨されることがある(ガイドライン、必須ではない)
 - **伝送距離100m規則**: 銅線LANケーブルの多くの規格に共通する上限距離
 - **光ファイバ(SM/MM)**: 距離制限を超える区間で使うシングルモード/マルチモードの光ケーブル
+- **ethtool**: LinuxでNICのリンク速度・双方向設定・ケーブル診断を確認するコマンドラインツール
 
 ## 1. 区間一覧と選定結果を確認する
 
@@ -701,7 +706,7 @@ CSVの区間要件から、距離・速度・PoE要件に基づき妥当なLAN�
 - 距離が100mを超える → 光ファイバが必須
 - 10GbEかつ55m超 → Cat6A以上が必須（Cat6は10GBASE-Tで55mまで）
 - 10GbEかつ55m以下 → Cat6以上で可
-- 1GbEかつ100m以下 → Cat5e/6/6Aいずれでも可（PoE+/PoE++が必要な場合はCat6以上を推奨。必須ではなくガイドライン）
+- 1GbEかつ100m以下 → Cat5e/6/6Aいずれでも可（PoEが必要な場合はCat6以上を推奨。必須ではなくガイドライン）
 
 ```bash
 echo "各区間をフローチャートで判定します"
@@ -831,7 +836,7 @@ WとVAの違い・力率を理解し、負荷率からUPSの容量適合とバ�
 
 ## 1. UPS仕様と接続負荷を確認する
 
-UPS: {{ ups_spec.model }}（VA定格: {{ ups_spec.va_rating }}VA、W定格: {{ ups_spec.w_rating }}W、推奨負荷率: {{ ups_spec.recommended_load_pct }}%）。本機はラインインタラクティブ方式です（常時インバータ方式より安価だが、停電検知から出力切替までに数msの瞬断があります）。
+UPS: {{ ups_spec.model }}（VA定格: {{ ups_spec.va_rating }}VA、W定格: {{ ups_spec.w_rating }}W、推奨負荷率: {{ ups_spec.recommended_load_pct }}%）。本機は常時インバータ(オンライン二重変換)方式です（ラインインタラクティブ方式より高価ですが、常時インバータで出力しているため停電時も切替による瞬断がありません）。
 
 | name | w |
 |---|---|
@@ -851,7 +856,7 @@ echo "負荷率(W基準) = 合計W / W定格 x 100"
 
 負荷率(W基準): {{ (ns.total_w * 100 / ups_spec.w_rating) | round(1) }}%（推奨{{ ups_spec.recommended_load_pct }}%に対する判定: {% if (ns.total_w * 100 / ups_spec.w_rating) > ups_spec.recommended_load_pct %}**超過**{% else %}OK{% endif %}）
 
-VA側の負荷率は、力率が不明な場合はW基準の値を上回らないことが一般的なため、W基準の判定が厳しい側（安全側）の見積もりになります。
+この「W基準が安全側」という関係は、接続機器側の力率がUPSの定格力率（{{ (ups_spec.w_rating / ups_spec.va_rating) | round(2) }}）以上である場合に成り立ちます。力率補正のないネットワーク機器等でこれを下回る場合はVA基準の負荷率がW基準を上回ることがあるため、正確な値が必要な場合はPDU/UPSの実測VA値を確認してください。
 
 ## 4. ランタイム表から負荷率に対応するバックアップ時間を読み取る
 
@@ -860,12 +865,14 @@ VA側の負荷率は、力率が不明な場合はW基準の値を上回らな�
 {% for r in runtime_table %}| {{ r.load_pct }}% | {{ r.minutes }}分 |
 {% endfor %}
 
-負荷率は約{{ (ns.total_w * 100 / ups_spec.w_rating) | round | int }}%のため、直近下位の区分「{{ runtime_table[1].load_pct }}%」帯（{{ runtime_table[1].minutes }}分）を採用します。
+{% set ns3 = namespace(load_pct=(ns.total_w * 100 / ups_spec.w_rating) | round | int, bracket_pct=0, bracket_minutes=0) %}
+{% for r in runtime_table %}{% if r.load_pct <= ns3.load_pct %}{% set ns3.bracket_pct = r.load_pct %}{% set ns3.bracket_minutes = r.minutes %}{% endif %}{% endfor %}
+負荷率は約{{ ns3.load_pct }}%のため、runtime_tableを負荷率の低い順に走査し「実測負荷率以下で最も近い区分」を採用します。該当するのは「{{ ns3.bracket_pct }}%」帯（{{ ns3.bracket_minutes }}分）です。
 
 ## 5. 安全なシャットダウンに必要な時間と比較する
 
 - シャットダウンに必要な時間: {{ shutdown_required_minutes }}分
-- ランタイム見積もり: {{ runtime_table[1].minutes }}分 → {% if runtime_table[1].minutes >= shutdown_required_minutes %}OK（シャットダウン所要時間を上回っている）{% else %}NG（シャットダウンが間に合わない可能性）{% endif %}
+- ランタイム見積もり: {{ ns3.bracket_minutes }}分 → {% if ns3.bracket_minutes >= shutdown_required_minutes %}OK（シャットダウン所要時間を上回っている）{% else %}NG（シャットダウンが間に合わない可能性）{% endif %}
 
 ## 6. (実機があれば)実測のLOADPCT・TIMELEFTを確認する
 
@@ -873,7 +880,7 @@ VA側の負荷率は、力率が不明な場合はW基準の値を上回らな�
 apcaccess status
 ```
 
-`LOADPCT`（実測負荷率）と`TIMELEFT`（実測ランタイム推定）を、Step 3・Step 4の計算値と比較します。あわせて、UPSとサーバ間のシャットダウン連携（NUT等のエージェント経由で、停電通知を受けたサーバが自動シャットダウンする仕組み）が設定・動作していることを確認します。
+`LOADPCT`（実測負荷率）と`TIMELEFT`（実測ランタイム推定）を、Step 3・Step 4の計算値と比較します。あわせて、UPSとサーバ間のシャットダウン連携（NUT(Network UPS Tools)等のエージェント経由で、停電通知を受けたサーバが自動シャットダウンする仕組み）が設定・動作していることを確認します。
 
 ## 動作確認
 
@@ -952,6 +959,7 @@ CBL-104,RackA-U20-P2,RackA-U41-P1,RackA-U41-P1
 - **台帳(インベントリ)**: ケーブルの接続情報を管理する一覧
 - **面付け表記(例: RackA-U20-P1)**: ラック名・U番号・ポート番号を機械的に表す表記法
 - **セルフラミネートラベル**: 巻き付けて自己接着するタイプの、耐久性の高いケーブルラベル
+- **LLDP**: 隣接機器同士が自機の情報(機器名・ポート名)を交換するプロトコル。取得結果の`PortDescr`は隣接機器が自己申告するポート情報を表す
 
 ## 規約定義
 
@@ -974,7 +982,7 @@ CBL-104,RackA-U20-P2,RackA-U41-P1,RackA-U41-P1
 echo "検算結果が「不一致」の行を規約違反として記録します"
 ```
 
-{% for r in csv_rows %}{% set derived = r["from_port"] ~ "_" ~ r["to_port"] %}{% if derived != r["expected_label"] %}- **{{ r["cable_id"] }}**: 記載ラベル `{{ r["expected_label"] }}` / 規約からの検算値 `{{ derived }}` → 違反（{% if "_" not in r["expected_label"] %}片端のみの表記（桁欠け）{% else %}対向ポート番号の誤記{% endif %}）
+{% for r in csv_rows %}{% set derived = r["from_port"] ~ "_" ~ r["to_port"] %}{% if derived != r["expected_label"] %}- **{{ r["cable_id"] }}**: 記載ラベル `{{ r["expected_label"] }}` / 規約からの検算値 `{{ derived }}` → 違反（{% if "_" not in r["expected_label"] %}片端のみの表記（対向側のみ記載、自分側ポート表記が欠落）{% else %}ラベル不一致（配線表との差分を目視で特定して是正する）{% endif %}）
 {% endif %}{% endfor %}
 
 ## 4. 貼付チェックリストを消化する
@@ -990,7 +998,24 @@ echo "検算結果が「不一致」の行を規約違反として記録しま�
 lldpctl
 ```
 
+模擬出力例（`CBL-101`側の取得例）:
+
+```text
+-------------------------------------------------------------------------------
+LLDP neighbors:
+-------------------------------------------------------------------------------
+Interface:    Gi1/0/1, via: LLDP, RID: 1, Time: 0 day, 00:05:12
+  Chassis:
+    SysName:      RackA-U10-Server-DB
+  Port:
+    PortDescr:    RackA-U40-P1
+-------------------------------------------------------------------------------
+```
+
 取得したLLDP近隣情報の`PortDescr`と、ラベルの対向側表記(`to_port`)が一致することを確認します。
+
+{% for r in csv_rows %}- [ ] {{ r["cable_id"] }}: LLDPの`PortDescr`とラベルの対向側表記(`to_port`={{ r["to_port"] }})の一致を確認・記録
+{% endfor %}
 
 ## 動作確認
 
@@ -1080,7 +1105,8 @@ YAMLの機器仕様に基づき、レール取付から搭載・接地・初回�
 - **アース(接地)端子**: 感電・機器保護のため大地電位に接続する端子
 - **2人作業ルール**: 重量物の搭載・引き出しを1人で行わないという安全原則
 - **リフター**: 重量機器を持ち上げてラックへ挿入するための補助器具
-- **初回電源投入(PoST)**: 電源投入直後に機器が行う自己診断(Power-On Self Test)
+- **初回電源投入(POST)**: 電源投入直後に機器が行う自己診断(Power-On Self Test)
+- **PSU・PDU**: 電源ユニット(PSU)と、それを受電する電源分配ユニット(PDU)
 
 ## 1. 機器仕様を確認し、作業体制を判定する
 
@@ -1123,10 +1149,14 @@ echo "{{ device.name }} のアース端子とラックのアースバーを接�
 
 ## 5. 電源ケーブルを接続する（二重電源は別系統へ）
 
+本機はPSU(電源ユニット)を{{ device.psu_count }}基搭載しています。それぞれ別系統のPDUへ接続します。
+
 | psu | pdu |
 |---|---|
 {% for c in power_connections %}| PSU{{ c.psu }} | {{ c.pdu }} |
 {% endfor %}
+
+{% if power_connections | length != device.psu_count %}**警告**: power_connectionsの接続数（{{ power_connections | length }}）がpsu_count（{{ device.psu_count }}）と一致しません。台帳を見直してください。{% endif %}
 
 ## 6. 電源投入後の状態を確認する
 
@@ -1135,13 +1165,13 @@ ipmitool chassis status
 dmidecode -s system-serial-number
 ```
 
-- `chassis status` が `Power ON` かつ異常表示がないこと（初回電源投入時の自己診断(PoST)がエラーなく完了していること）
+- `chassis status` の System Power が on(電源投入状態)であり、異常表示がないこと（初回電源投入時の自己診断(POST)がエラーなく完了していること）
 - シリアル番号が台帳の期待値 `{{ expected_serial }}` と一致すること
 
 ## 動作確認
 
 - 固定・接地・（該当時は）2人作業の記録が全て完了していること
-- `chassis status` が Power ON かつ異常なしであること
+- `chassis status` の System Power が on であり、異常なしであること
 - シリアル番号が台帳(`{{ expected_serial }}`)と一致すること
 
 ## 注意事項
@@ -1250,7 +1280,7 @@ YAMLのラック列構成から再循環リスクを確認し、ASHRAE推奨吸�
 echo "orientationがback-to-frontのラックは、通路の冷気/熱気の流れが乱れる可能性があります"
 ```
 
-{% for r in row_layout %}{% if r.orientation == "back-to-front" %}- **{{ r.rack }}**: 逆向き（コールドアイル側に排熱するため再循環リスクあり）
+{% for r in row_layout %}{% if r.orientation == "back-to-front" %}- **{{ r.rack }}**: 逆向き（本来ホットアイル側へ排気すべき熱気がコールドアイル側へ回り込むため再循環リスクあり）
 {% endif %}{% endfor %}
 
 ## 3. 空きUのブランクパネル設置計画を確認する
@@ -1263,6 +1293,8 @@ echo "orientationがback-to-frontのラックは、通路の冷気/熱気の流�
 ## 4. 吸気温度で冷却の健全性を判定する（室温ではなく吸気温度で判定する）
 
 ASHRAE推奨範囲: {{ ashrae_recommended_range_c.min }}〜{{ ashrae_recommended_range_c.max }}℃
+
+サーバのBMC(IPMI)経由で吸気温度センサーの値を取得します。
 
 ```bash
 ipmitool sdr type Temperature
@@ -1284,6 +1316,8 @@ ipmitool sdr type Temperature
 ## 注意事項
 
 - 実機のブランクパネル設置・配置変更を稼働中に行う場合は、瞬間的な気流変化が周辺機器の温度に影響しないよう、順番に作業してください。
+- 床下空調(フリーアクセスフロア)方式では、対象ラック以外の場所で穿孔タイル（パーフォレーテッドタイル）を塞いだり新設したりすると、離れたラックの冷気供給量が変化することがあるため、変更前に周辺への影響を確認してください。
+- 是正策（ダクトによる排熱誘導・機器入れ替え）はCRAC(冷媒直膨式)とCRAH(冷水式)で対応可能な工事内容が異なる場合があるため、採用している空調方式を事前に確認してください。
 ```
 
 - [ ] **Step 3: `templates.ts` にエントリを追加する**
@@ -1348,6 +1382,7 @@ measured_values:
     temp_c: 23
     humidity_pct: 50
 server_inlet_temp_c: 25
+inlet_temp_deviation_threshold_c: 3
 ```
 
 - [ ] **Step 2: テンプレートファイルを作成する**
@@ -1365,11 +1400,11 @@ YAMLの設置計画と閾値表に基づき、温湿度センサーを設置し�
 
 - **温湿度センサー**: ラック内の温度・湿度を計測する機器
 - **閾値(Warning/Critical)**: 段階的に警告レベルを分ける監視の基準値
-- **相対湿度と結露**: 湿度が高すぎると結露、低すぎると静電気のリスクが高まる
-- **静電気と低湿度**: 湿度が低い環境では静電気放電(ESD)による機器故障リスクが高まる
+- **相対湿度と結露・静電気**: 相対湿度が高すぎると結露、低すぎると静電気放電(ESD)による機器故障のリスクが高まる
 - **SNMP**: ネットワーク経由で機器の状態を取得するプロトコル
 - **OID**: SNMPで参照する情報の識別子(Object Identifier)
 - **ポーリング間隔**: 監視値を取得する周期
+- **IPMI**: OSを介さずサーバのハードウェア状態(温度センサー含む)を取得・管理するための規格・コマンド群
 
 ## 1. 設置計画を確認する
 
@@ -1395,7 +1430,7 @@ YAMLの設置計画と閾値表に基づき、温湿度センサーを設置し�
 
 ## 4. 監視値を取得する
 
-ポーリング間隔5分でSNMP監視します。
+ポーリング間隔5分でSNMP監視します。`-v2c`はSNMPバージョン、`-c`はコミュニティ文字列(認証情報)の指定オプションです。`public`はデフォルト値の例示であり、本番環境では推測されにくい値またはSNMPv3への変更を推奨します。
 
 ```bash
 snmpwalk -v2c -c public <センサーIP> 1.3.6.1.4.1.<ベンダーOID>
@@ -1419,7 +1454,8 @@ snmpwalk -v2c -c public <センサーIP> 1.3.6.1.4.1.<ベンダーOID>
 ipmitool sdr type Temperature
 ```
 
-サーバ吸気温度実測: {{ server_inlet_temp_c }}℃。中段センサー値（{{ sensor_plan[1].position }}: {{ measured_values[1].temp_c }}℃）との差は{{ (server_inlet_temp_c - measured_values[1].temp_c) | abs }}℃で、許容範囲内の乖離です。
+{% set temp_diff = (server_inlet_temp_c - measured_values[1].temp_c) | abs %}
+サーバ吸気温度実測: {{ server_inlet_temp_c }}℃。中段センサー値（{{ sensor_plan[1].position }}: {{ measured_values[1].temp_c }}℃）との差は{{ temp_diff }}℃で、許容乖離{{ inlet_temp_deviation_threshold_c }}℃に対して{% if temp_diff <= inlet_temp_deviation_threshold_c %}許容範囲内です。{% else %}**許容範囲を超えています（要確認）**。{% endif %}
 
 ## 7. 閾値超過時の一次対応フローを確認する
 
@@ -1447,9 +1483,10 @@ Warning/Critical超過を検知した場合、まず通知内容を確認し、�
 共通の検証スクリプトを `TEMPLATE_ID = "env-monitoring-setup"`, `DATA_EXT = "yaml"` で実行する。加えて:
 ```python
 assert "正常" in content
-assert "1" in content
+assert "差は1℃" in content
+assert "許容範囲内です" in content
 ```
-Expected: 全 assert が通り `OK: env-monitoring-setup` が出力される。全設置点が正常判定、サーバ実測とセンサー値の差が1℃と算出されること。
+Expected: 全 assert が通り `OK: env-monitoring-setup` が出力される。全設置点が正常判定、サーバ実測とセンサー値の差が1℃（閾値3℃以下）と算出され、許容範囲内と判定されること。
 
 - [ ] **Step 5: コミット**
 
