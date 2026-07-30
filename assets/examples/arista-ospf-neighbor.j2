@@ -1,0 +1,96 @@
+# Arista EOSルータのOSPF単一エリア設定
+
+複数のArista EOSルータ(スイッチ)間でOSPFエリア {{ area_id }} を構成し、隣接関係(ネイバー)の確立と動的な経路交換を確認します。エリア番号・reference-bandwidthは対向ルータと揃えておく必要があります。
+
+## 目的
+
+OSPFの単一エリア構成をrouter-idとインターフェース単位のエリア割当で定義し、`passive-interface`で不要な隣接形成を抑制した上で、ネイバー確立と経路交換を検証できるようになることを目指します。
+
+## 用語解説
+
+- **LSA(Link State Advertisement)**: OSPFルータ同士が交換する、自身のリンク状態(接続インターフェースや経路情報)の広告
+- **ネイバー(Neighbor)**: OSPFのHelloパケットをやり取りし、隣接関係が成立した対向ルータ。EOSでは`show ip ospf neighbor`で`FULL/DR`・`FULL/BDR`等の状態を確認する
+- **DR/BDR(Designated Router/Backup Designated Router)**: マルチアクセスセグメント(イーサネット等)でLSA交換を集約する代表ルータとその予備
+- **エリア(Area)**: OSPFのLSA伝播範囲を区切る論理単位。エリア0はバックボーンエリアと呼ばれ、他エリアは必ずエリア0を経由する
+- **エリア参加方法のCisco IOSとの違い**: Cisco IOSでは`network <アドレス> <ワイルドカードマスク> area <id>`という間接指定が一般的だが、EOSでは対象インターフェースの設定モードで直接`ip ospf area <id>`を指定する方式が実務でよく使われる(EOSも`network`文自体はサポートするが、本書ではインターフェース単位の指定を採用する)
+- **passive-interface**: OSPFのHelloパケットを送出させず、経路広告のみ行うインターフェース設定。router ospf配下で設定する点はCisco IOSと共通
+- **router-idの確認方法の違い**: Cisco IOSの`show ip protocols`に相当する単体コマンドはEOSに存在せず、`show ip ospf`(または`show ip ospf database`のヘッダ)でrouter-idとプロセスIDを確認する
+
+## シナリオ設定
+
+router-id `{{ router_id }}` のルータで、エリア {{ area_id }} に以下の{{ ospf_interfaces | length }}本のインターフェースを参加させます。
+
+{% for intf in ospf_interfaces %}- `{{ intf }}`
+{% endfor %}
+
+このうち以下のインターフェースは末端セグメントのため`passive-interface`とします。
+
+{% for intf in passive_interfaces %}- `{{ intf }}`
+{% endfor %}
+
+参照帯域幅(reference-bandwidth)は `{{ reference_bandwidth }}` Mbpsに設定し、高速リンクのコスト差を正しく反映させます。
+
+## 手順
+
+### 1. 事前にインターフェースの状態を確認する
+
+```bash
+show interfaces status
+show ip interface brief
+```
+
+対象インターフェースがOSPF参加予定のIPアドレス・帯域と一致しているか確認します。
+
+### 2. router-idと参照帯域幅を設定する
+
+```bash
+configure terminal
+router ospf 1
+   router-id {{ router_id }}
+   auto-cost reference-bandwidth {{ reference_bandwidth }}
+exit
+```
+
+### 3. インターフェース単位でエリアへ参加させる
+
+```bash
+{% for intf in ospf_interfaces %}interface {{ intf }}
+   ip ospf area {{ area_id }}
+exit
+{% endfor %}```
+
+### 4. passive-interfaceを設定する
+
+末端セグメントでは不要な隣接形成・Hello送出を止め、意図しないOSPFネイバーの成立を防ぎます。
+
+```bash
+router ospf 1
+{% for intf in passive_interfaces %}   passive-interface {{ intf }}
+{% endfor %}exit
+write memory
+```
+
+### 5. ネイバー確立と経路をshow ip ospf neighborで確認する
+
+```bash
+show ip ospf neighbor
+show ip ospf interface brief
+show ip route ospf
+show ip ospf
+```
+
+`show ip ospf interface brief`のState/Nbrs列で、意図したインターフェースがpassive扱い(Nbrs 0)になっていることも確認します。
+
+## 動作確認
+
+- `show ip ospf neighbor`に対向ルータが`FULL`状態で表示されること(マルチアクセスセグメントではDR/BDR選出後に`FULL`または`2WAY`)
+- `show ip ospf interface brief`で`{{ passive_interfaces[0] }}`等のpassive対象インターフェースのNbrs列が`0`であること
+- `show ip route ospf`に他ルータ経由のネットワークが`O`(OSPF由来)として学習されていること
+- `show ip ospf`の出力にあるrouter-idが `{{ router_id }}` と一致していること
+
+## 注意事項
+
+- router-idはルータ内で一意である必要があり、他ルータと重複するとLSAの発信元が正しく識別できず経路計算が不安定になる。ループバックIP等、変化しないアドレスを使うのが望ましい。
+- インターフェース単位で`ip ospf area`を設定する範囲を広げすぎると、意図しないインターフェースまでOSPFに参加し、不要な隣接形成やLSA増加を招く。対象範囲は必要最小限にする。
+- reference-bandwidthを変更する場合は、OSPFが有効な全ルータで同じ値に揃えないと、コスト計算が機器間で食い違い最適経路選択がずれる原因になる。
+- `show ip route ospf`のようなプロトコル別フィルタ表記はEOSバージョンによって挙動が変わる可能性があるため、投入前に実機の`show ip route ?`で対応状況を確認すること(本書執筆時点では一次情報で確定できなかった箇所であり、要人的レビュー)。

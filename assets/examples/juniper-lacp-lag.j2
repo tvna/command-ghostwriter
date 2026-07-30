@@ -1,0 +1,104 @@
+# JuniperスイッチのLACPリンクアグリゲーション(aeインターフェース)構成
+
+複数の物理インターフェースをLACPで束ね、Junosの集約イーサネット(`ae`インターフェース)として帯域拡張とリンク冗長化を実現します。両端のスイッチで設定を揃える必要があるため、対向機器の設定と併せて実施してください。
+
+## 目的
+
+LACPによる複数リンクの論理的な集約(`ae{{ channel_id }}`)を構成し、通常時の負荷分散動作とリンク断時の縮退動作の両方を検証できるようになることを目指します。
+
+## 用語解説
+
+- **ae(Aggregated Ethernet)インターフェース**: Junosにおける集約リンクの論理インターフェース。Cisco IOSの`Port-channel`に相当し、`ae0`のように番号で識別する
+- **LACP(Link Aggregation Control Protocol)**: IEEE 802.3ad標準の動的リンク集約プロトコル。Junosでは`aggregated-ether-options lacp`配下で`active`/`passive`モードを指定する(Cisco IOSの`channel-group ... mode active/passive`に相当)
+- **device-count**: `[edit chassis aggregated-devices ethernet]`階層で事前に確保する`ae`インターフェースの本数枠。Cisco IOSにはこの事前枠取りの概念がなく、`interface Port-channel`は使うたびに暗黙生成される
+- **set/commit**: JunosはCisco IOSの`configure terminal` ... `end`ではなく、`configure`で候補設定(candidate configuration)に入って`set`文を積み重ね、`commit`して初めて動作設定に反映する。投入前の構文検証は`commit check`、一定時間後に自動ロールバックする`commit confirmed`が利用できる
+- **enhanced-hash-key**: Junosの負荷分散(ロードバランス)対象フィールドの制御方式。Cisco IOSの`port-channel load-balance <方式名>`のような単一の方式名指定ではなく、デフォルトで有効な複数フィールド(送信元/宛先IPアドレス、L4送信元/宛先ポート)から特定のフィールドを`no-*`オプションで除外する形式を取る
+
+## シナリオ設定
+
+`ae{{ channel_id }}` として以下の{{ member_interfaces | length }}本の物理インターフェースを束ね、LACPモード `{{ lacp_mode }}` で集約します。
+
+{% for intf in member_interfaces %}- `{{ intf }}`
+{% endfor %}
+
+集約後の`ae{{ channel_id }}`はVLAN {{ trunk_vlans | join(', ') }} を通すトランクポートとし、ハッシュキーからは `{{ load_balance_method }}` を除外して負荷分散を調整します。
+
+## 手順
+
+### 1. 事前条件を確認する
+
+両端のスイッチで、束ねる物理インターフェースの速度・リンク状態が一致しているか確認します。設定が食い違うと集約が成立しないか、意図しない動作になります。
+
+```bash
+{% for intf in member_interfaces %}show interfaces {{ intf }} terse
+{% endfor %}```
+
+### 2. aeインターフェースの枠を確保する
+
+```bash
+configure
+set chassis aggregated-devices ethernet device-count {{ channel_id + 1 }}
+```
+
+### 3. 物理インターフェースをaeへ割り当てる
+
+```bash
+{% for intf in member_interfaces %}set interfaces {{ intf }} gigether-options 802.3ad ae{{ channel_id }}
+{% endfor %}```
+
+### 4. LACPモードを設定する
+
+```bash
+set interfaces ae{{ channel_id }} aggregated-ether-options lacp {{ lacp_mode }}
+```
+
+### 5. トランクポートとVLAN・ロードバランス方式を設定する
+
+```bash
+set interfaces ae{{ channel_id }} unit 0 family ethernet-switching interface-mode trunk
+set interfaces ae{{ channel_id }} unit 0 family ethernet-switching vlan members [ {{ trunk_vlans | join(' ') }} ]
+set forwarding-options enhanced-hash-key inet {{ load_balance_method }}
+commit
+```
+
+### 6. show lacp interfacesとshow interfaces ae terseで状態を確認する
+
+```bash
+show lacp interfaces ae{{ channel_id }}
+show interfaces ae{{ channel_id }} terse
+```
+
+`show lacp interfaces ae{{ channel_id }}`のActor/Partner双方で`Synchronization: Yes`・`Collecting: Yes`・`Distributing: Yes`であることを確認します。
+
+### 7. リンク断時の縮退動作を検証する
+
+メンバーインターフェースの1本を無効化し、通信が継続すること、残りのリンクへ切り替わることを確認します。
+
+```bash
+set interfaces {{ member_interfaces[0] }} disable
+commit
+show lacp interfaces ae{{ channel_id }}
+show interfaces ae{{ channel_id }} terse
+```
+
+確認後は必ず復旧します。
+
+```bash
+delete interfaces {{ member_interfaces[0] }} disable
+commit
+show lacp interfaces ae{{ channel_id }}
+```
+
+## 動作確認
+
+- `show interfaces ae{{ channel_id }} terse`に束ねた{{ member_interfaces | length }}本のメンバーインターフェースが`aenet`として`ae{{ channel_id }}`に紐付いて表示されること
+- `show lacp interfaces ae{{ channel_id }}`でActor/Partner双方の`Synchronization`・`Collecting`・`Distributing`が`Yes`であること
+- `show interfaces ae{{ channel_id }} unit 0`のVLANメンバーに `{{ trunk_vlans | join(', ') }}` が含まれること
+- メンバーインターフェースを1本`disable`しても、`ae{{ channel_id }}`経由の通信が継続すること
+- `disable`を`delete`(解除)した後、自動的に集約状態(`Collecting`/`Distributing`が`Yes`)へ復帰すること
+
+## 注意事項
+
+- 両端で`aggregated-ether-options lacp`のモードが不整合(例: 双方`passive`)だと集約が成立せず、各インターフェースが個別リンクとして動作してしまう。意図しないループやスパニングツリー障害の原因になるため、投入前に対向機器の設定も確認する。
+- `chassis aggregated-devices ethernet device-count`の枠が不足していると、新規`ae`インターフェースの参照が`commit`時に失敗する。既存の`ae`番号を含めた最大値+1以上を確保すること。
+- 縮退動作の検証(手順7)は実運用トラフィックに影響し得るため、必ずメンテナンス時間帯に実施し、確認後は速やかに`disable`を解除して復旧すること。`commit confirmed 5`のように確認付きコミットを使えば、誤設定でリモート接続が切れた場合も一定時間後に自動でロールバックされ、ロックアウトを防止できる。
