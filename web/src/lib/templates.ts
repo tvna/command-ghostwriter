@@ -695,6 +695,7 @@ const META: Meta[] = [
   { id: "lan-cable-category", name: "LANケーブルカテゴリ選定と敷設確認", desc: "距離・速度・PoE要件からCat5e/6/6A/光を根拠を持って選定し、ethtoolのリンク速度で検証する手順書を生成。", category: "facility", subCategory: "ケーブリング", format: "csv", output: "markdown", updated: "2026-07-30", live: true },
   { id: "ups-capacity-plan", name: "UPS容量計算とバックアップ時間設計", desc: "WとVAの違い・力率を踏まえて負荷率を計算し、ランタイム表からバックアップ時間を見積もる手順書を生成。", category: "facility", subCategory: "電源設計", format: "yaml", output: "markdown", updated: "2026-07-30", live: true },
   { id: "cable-labeling-standard", name: "ケーブルラベリング規約適用", desc: "命名規約からラベル文字列を機械的に導出し、台帳記載のラベルと照合して違反行を検出する手順書を生成。", category: "facility", subCategory: "ケーブリング", format: "csv", output: "markdown", updated: "2026-07-30", live: true },
+  { id: "server-racking-procedure", name: "サーバラッキング作業手順（レール・搭載・接地）", desc: "レール取付から搭載・接地・初回電源投入までを、2人作業判定と安全確認ポイントつきで実施する手順書を生成。", category: "facility", subCategory: "ラッキング", format: "yaml", output: "markdown", updated: "2026-07-30", live: true },
 ];
 
 export const CGTemplates: Template[] = META.map((m) => ({

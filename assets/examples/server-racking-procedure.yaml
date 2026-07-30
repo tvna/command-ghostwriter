@@ -1,0 +1,17 @@
+device:
+  name: Server-DB-02
+  weight_kg: 22
+  u_position: "U12"
+  psu_count: 2
+two_person_threshold_kg: 18
+cage_nut_positions:
+  - "U12 front-left-top"
+  - "U12 front-left-bottom"
+  - "U12 front-right-top"
+  - "U12 front-right-bottom"
+power_connections:
+  - psu: 1
+    pdu: "PDU-A1"
+  - psu: 2
+    pdu: "PDU-B1"
+expected_serial: "SN-DB02-2026"
