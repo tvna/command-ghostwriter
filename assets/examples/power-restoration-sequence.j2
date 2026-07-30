@@ -1,0 +1,70 @@
+# 停電復旧後の起動順序計画（依存関係順の起動シーケンス設計）
+
+YAMLの依存関係定義と起動予定順序を突合し、依存先が依存元より先に起動する計画になっているかを検証します。
+
+## 目的
+
+停電復旧時は機器を無秩序に起動するのではなく、依存関係(ネットワーク→ストレージ→データベース→アプリケーション、の順)に従った順序で起動する必要があることを理解し、起動予定順序が依存関係と矛盾していないかを検証できるようになることを目指します。
+
+## 用語解説
+
+- **起動シーケンス**: 停電復旧後に機器を起動する順序の計画
+- **依存関係**: あるシステムが正常に起動するために、先に起動していなければならない別システムとの関係
+- **起動待ち合わせ**: 依存先システムの起動完了を確認してから、依存元システムを起動する運用
+- **ヘルスチェック**: システムが正常に起動・応答しているかを確認する手続き
+- **カスケード障害**: 起動順序を誤り、依存先が未起動のまま依存元を起動した結果、連鎖的にエラーが広がる状態
+
+## 1. 依存関係と起動予定順序を確認する
+
+| system | depends_on |
+|---|---|
+{% for s in systems %}| {{ s.name }} | {{ s.depends_on | join(", ") if s.depends_on else "(なし)" }} |
+{% endfor %}
+
+起動予定順序: {{ planned_order | join(" → ") }}
+
+## 2. 各システムの起動予定順序上の位置を求める
+
+```bash
+echo "planned_order内での各systemの位置(1始まり)を求めます"
+```
+
+{% for s in systems %}{% set ns_pos = namespace(pos=0) %}{% for name in planned_order %}{% if name == s.name %}{% set ns_pos.pos = loop.index %}{% endif %}{% endfor %}- {{ s.name }}: {{ ns_pos.pos }}番目
+{% endfor %}
+
+## 3. 依存先が依存元より先に起動する計画になっているかを検証する
+
+```bash
+echo "各systemについて、depends_onの全てが自分より前の位置にあるか検証します"
+```
+
+{% for s in systems %}{% set ns_pos = namespace(pos=0) %}{% for name in planned_order %}{% if name == s.name %}{% set ns_pos.pos = loop.index %}{% endif %}{% endfor %}{% for dep in s.depends_on %}{% set ns_dep = namespace(pos=0) %}{% for name in planned_order %}{% if name == dep %}{% set ns_dep.pos = loop.index %}{% endif %}{% endfor %}{% if ns_dep.pos > ns_pos.pos %}- **{{ s.name }}（{{ ns_pos.pos }}番目）**: 依存先「{{ dep }}」が{{ ns_dep.pos }}番目に計画されており、自分より後になっている。**NG（順序違反）**
+{% endif %}{% endfor %}{% endfor %}
+
+## 4. 是正した起動順序を提示する
+
+順序違反を解消するには、`database`を`storage`の後に配置します。是正後の順序:
+
+```text
+core-switch → storage → database → app-server → web-frontend
+```
+
+## 5. (実機があれば)起動後にヘルスチェックを実施する
+
+```bash
+curl -sf http://database.internal:5432/healthz
+curl -sf http://app-server.internal:8080/healthz
+```
+
+前段のシステムのヘルスチェックが成功してから次段を起動する「起動待ち合わせ」を徹底し、カスケード障害を防ぎます。
+
+## 動作確認
+
+- 全システムの起動予定順序上の位置が求められていること
+- 順序違反(database/storage)が検出されていること
+- 是正後の起動順序が依存関係を満たしていること
+
+## 注意事項
+
+- 実際の停電復旧作業では、電源自体の安定性(電圧・周波数)を確認してから機器を起動してください。不安定な電源での起動は機器故障の原因になります。
+- 起動順序を誤って依存先が未起動のまま依存元を起動した場合、単純な再起動では復旧しないことがあるため、必ずヘルスチェックで各段の正常性を確認してから次に進んでください。

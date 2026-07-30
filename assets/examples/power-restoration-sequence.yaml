@@ -1,0 +1,17 @@
+systems:
+  - name: "core-switch"
+    depends_on: []
+  - name: "storage"
+    depends_on: ["core-switch"]
+  - name: "database"
+    depends_on: ["core-switch", "storage"]
+  - name: "app-server"
+    depends_on: ["database"]
+  - name: "web-frontend"
+    depends_on: ["app-server"]
+planned_order:
+  - "core-switch"
+  - "database"
+  - "storage"
+  - "app-server"
+  - "web-frontend"

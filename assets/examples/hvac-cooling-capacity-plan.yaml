@@ -1,0 +1,20 @@
+room:
+  name: "サーバルームA"
+redundancy_target: "N+1"
+safety_margin_pct: 20
+crac_units:
+  - name: CRAC-1
+    capacity_kw: 15
+  - name: CRAC-2
+    capacity_kw: 15
+  - name: CRAC-3
+    capacity_kw: 15
+racks:
+  - name: RackA
+    it_load_kw: 8
+  - name: RackB
+    it_load_kw: 7
+  - name: RackC
+    it_load_kw: 9
+  - name: RackD
+    it_load_kw: 6

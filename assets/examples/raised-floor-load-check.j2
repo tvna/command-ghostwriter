@@ -1,0 +1,62 @@
+# フリーアクセスフロア床荷重確認（点荷重・分布荷重の耐荷重照合）
+
+CSVのラック重量とフロアタイル仕様から、キャスターにかかる点荷重とラック設置面の分布荷重をそれぞれ耐荷重と照合します。
+
+## 目的
+
+フリーアクセスフロア(二重床)における点荷重と分布荷重という2種類の荷重評価の違いを理解し、ラックごとに適切なタイル種別(標準/補強)を選定できるようになることを目指します。
+
+## 用語解説
+
+- **フリーアクセスフロア(二重床)**: 配線や空調のためにかさ上げされた床構造。ラックはこの床の上に設置される
+- **点荷重**: キャスターや脚など、局所的な1点にかかる荷重
+- **分布荷重**: ラック設置面全体に均等にかかると仮定した、単位面積あたりの荷重
+- **タイル耐荷重**: 床タイル1枚が安全に支えられる荷重の上限。点荷重・分布荷重それぞれに規定値がある
+- **標準タイルと補強タイル**: 補強タイルは芯材や支持構造を強化し、標準タイルより高い耐荷重を持つ
+
+## 1. ラック重量とタイル仕様を確認する
+
+| rack_name | weight_kg | caster_count | tile_type | point_load_rating_kg | distributed_load_rating_kg_per_m2 | footprint_area_m2 |
+|---|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["rack_name"] }} | {{ r["weight_kg"] }} | {{ r["caster_count"] }} | {{ r["tile_type"] }} | {{ r["point_load_rating_kg"] }} | {{ r["distributed_load_rating_kg_per_m2"] }} | {{ r["footprint_area_m2"] }} |
+{% endfor %}
+
+## 2. キャスター1点あたりの点荷重を計算し、タイル点荷重耐荷重と比較する
+
+```bash
+echo "点荷重(kg) = weight_kg / caster_count"
+```
+
+{% set ns_pt = namespace(v=0, w=0, c=0) %}{% for r in csv_rows %}{% set ns_pt.w = r["weight_kg"] | int %}{% set ns_pt.c = r["caster_count"] | int %}{% set ns_pt.v = (ns_pt.w / ns_pt.c) | round(1) %}- {{ r["rack_name"] }}: {{ ns_pt.v }}kg/キャスター（{{ r["tile_type"] }}タイル耐荷重{{ r["point_load_rating_kg"] }}kg） → {% if ns_pt.v > (r["point_load_rating_kg"] | int) %}**NG（点荷重超過）**{% else %}OK{% endif %}
+{% endfor %}
+
+## 3. 設置面の分布荷重を計算し、タイル分布荷重耐荷重と比較する
+
+```bash
+echo "分布荷重(kg/m2) = weight_kg / footprint_area_m2"
+```
+
+{% set ns_dl = namespace(v=0, w=0, a=0) %}{% for r in csv_rows %}{% set ns_dl.w = r["weight_kg"] | int %}{% set ns_dl.a = r["footprint_area_m2"] | float %}{% set ns_dl.v = (ns_dl.w / ns_dl.a) | round(1) %}- {{ r["rack_name"] }}: {{ ns_dl.v }}kg/m2（{{ r["tile_type"] }}タイル耐荷重{{ r["distributed_load_rating_kg_per_m2"] }}kg/m2） → {% if ns_dl.v > (r["distributed_load_rating_kg_per_m2"] | int) %}**NG（分布荷重超過）**{% else %}OK{% endif %}
+{% endfor %}
+
+## 4. NGのラックについて是正案を検討する
+
+点荷重・分布荷重のいずれかがNGの場合、標準タイルを補強タイルへ交換するか、キャスター数を増やして点荷重を分散させることを検討します。
+
+{% set ns_pt2 = namespace(v=0, w=0, c=0) %}{% set ns_dl2 = namespace(v=0, w=0, a=0) %}{% for r in csv_rows %}{% set ns_pt2.w = r["weight_kg"] | int %}{% set ns_pt2.c = r["caster_count"] | int %}{% set ns_pt2.v = (ns_pt2.w / ns_pt2.c) | round(1) %}{% set ns_dl2.w = r["weight_kg"] | int %}{% set ns_dl2.a = r["footprint_area_m2"] | float %}{% set ns_dl2.v = (ns_dl2.w / ns_dl2.a) | round(1) %}{% if ns_pt2.v > (r["point_load_rating_kg"] | int) or ns_dl2.v > (r["distributed_load_rating_kg_per_m2"] | int) %}- [ ] {{ r["rack_name"] }}: {% if r["tile_type"] == "standard" %}補強タイルへの交換を検討{% else %}キャスター数増加または設置位置の分散を検討{% endif %}
+{% endif %}{% endfor %}
+
+## 5. (実機があれば)フロアのたわみ・沈み込みを目視確認する
+
+計算上OKであっても、フロアタイルに目視でわかる沈み込みやひび割れがないかを定期的に確認します。異常があれば計算値によらずタイル交換を検討します。
+
+## 動作確認
+
+- 全ラックの点荷重・分布荷重が計算され、耐荷重との比較結果が記載されていること
+- いずれかがNGとなったラック(RackB)に是正案が記載されていること
+- 補強タイルを使用しているラック(RackD)が両基準を満たしていることが確認できること
+
+## 注意事項
+
+- 重量ラックの移動・設置作業は、床タイルの局所破損や転倒のリスクがあるため、必ず耐荷重を確認した経路上で、複数人で慎重に行ってください。
+- 本シナリオの数値は演習用の簡略値であり、実際の設計では床下配線の断面欠損等も含めた構造計算が必要です。

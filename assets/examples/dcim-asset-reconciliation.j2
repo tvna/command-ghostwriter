@@ -1,0 +1,73 @@
+# DCIM資産棚卸し（台帳と実地棚卸しの差分検出）
+
+CSVの台帳位置と現地棚卸し結果を突合し、DCIM(データセンター基盤管理)資産台帳の差分を4区分で検出します。
+
+## 目的
+
+DCIM資産台帳と現地の実機配置を突合する棚卸し作業を理解し、差分を「一致」「位置不一致」「見つからない」「未登録」の4区分に分類できるようになることを目指します。
+
+## 用語解説
+
+- **DCIM(データセンター基盤管理)**: ラック・電源・配線・搭載機器等の物理資産を一元管理する仕組み
+- **資産タグ(アセットタグ)**: 機器1台ごとに貼付する一意な識別番号のラベル
+- **台帳(インベントリ)**: 資産タグと搭載位置(ラック・U番号)を記録した一覧
+- **現地棚卸し**: 台帳の記載内容を実際の現地確認によって検証する作業
+- **位置不一致**: 台帳上の搭載位置と、現地で確認した実際の搭載位置が異なる状態
+- **未登録資産**: 現地には存在するが台帳に記載がない資産。無許可の設置や台帳更新漏れの疑いがある
+
+## 1. 台帳と現地棚卸し結果を確認する
+
+| asset_tag | device_name | ledger_rack/U | physical_rack/U | status |
+|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["asset_tag"] }} | {{ r["device_name"] }} | {{ r["ledger_rack"] }}/{{ r["ledger_u"] }} | {{ r["physical_rack"] }}/{{ r["physical_u"] }} | {{ r["status"] }} |
+{% endfor %}
+
+## 2. 4区分に分類して差分を検出する
+
+```bash
+echo "statusフィールドで4区分に分類します"
+```
+
+### 一致（found）
+
+{% for r in csv_rows %}{% if r["status"] == "found" %}- {{ r["asset_tag"] }}（{{ r["device_name"] }}）: 台帳どおり{{ r["physical_rack"] }}/{{ r["physical_u"] }}で確認
+{% endif %}{% endfor %}
+
+### 位置不一致（mismatch）
+
+{% for r in csv_rows %}{% if r["status"] == "mismatch" %}- **{{ r["asset_tag"] }}（{{ r["device_name"] }}）**: 台帳は{{ r["ledger_rack"] }}/{{ r["ledger_u"] }}だが、現地は{{ r["physical_rack"] }}/{{ r["physical_u"] }}で発見。台帳の是正が必要
+{% endif %}{% endfor %}
+
+### 見つからない（not-found）
+
+{% for r in csv_rows %}{% if r["status"] == "not-found" %}- **{{ r["asset_tag"] }}（{{ r["device_name"] }}）**: 台帳記載位置{{ r["ledger_rack"] }}/{{ r["ledger_u"] }}に現物が見つからない。撤去記録の有無を確認し、なければ紛失として調査
+{% endif %}{% endfor %}
+
+### 未登録（unregistered）
+
+{% for r in csv_rows %}{% if r["status"] == "unregistered" %}- **{{ r["asset_tag"] }}（{{ r["device_name"] }}）**: {{ r["physical_rack"] }}/{{ r["physical_u"] }}に現物があるが台帳に記載がない。無許可設置か台帳未更新の可能性があり、設置経緯を確認のうえ台帳へ追加登録
+{% endif %}{% endfor %}
+
+## 3. 是正チェックリストを消化する
+
+{% for r in csv_rows %}{% if r["status"] != "found" %}- [ ] {{ r["asset_tag"] }}: {{ r["status"] }}区分の是正（台帳更新または現地調査）を実施
+{% endif %}{% endfor %}
+
+## 4. (実機があれば)資産タグをスキャンして自動突合する
+
+```bash
+dcim-cli scan --rack RackA --format json
+```
+
+バーコード/RFIDスキャナで取得した資産タグ一覧をDCIMシステムへ投入し、Step 2の手動突合と同じ4区分判定が自動生成されることを確認します。
+
+## 動作確認
+
+- 全資産がfound/mismatch/not-found/unregisteredのいずれかに分類されていること
+- mismatch・not-found・unregistered区分の資産すべてに是正チェックリストの項目があること
+- 未登録資産(AST-1006)の設置経緯確認が是正対応に含まれていること
+
+## 注意事項
+
+- 「見つからない」資産は情報漏洩・盗難の可能性もあるため、単なる台帳ミスと決めつけず、必要に応じてセキュリティ部門へエスカレーションしてください。
+- 台帳の更新は棚卸し担当者の一存で行わず、変更管理プロセス(承認記録)に従ってください。

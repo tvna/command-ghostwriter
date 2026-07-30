@@ -1,0 +1,68 @@
+# 消火設備点検（ガス系消火設備の点検記録確認）
+
+CSVの点検記録から、ガス系消火設備の圧力ゲージが正常範囲内か、次回点検期限が到来していないかを確認します。
+
+## 目的
+
+ガス系消火設備の圧力ゲージ確認と点検周期管理の重要性を理解し、点検記録から是正が必要な設備を検出できるようになることを目指します。
+
+## 用語解説
+
+- **ガス系消火設備**: 不活性ガスや二酸化炭素等を放出して酸素濃度を下げ、消火する設備。水損を避けたいサーバルーム等で使われる
+- **圧力ゲージ**: 消火剤ボンベの充填圧力を示す計器。正常範囲を外れると、放出時に十分な消火性能が発揮できない可能性がある
+- **点検周期**: 消防法令等に基づき定期的に実施が義務付けられている点検の間隔
+- **次回点検期限**: 前回点検日から点検周期を経過した、次に点検が必要な期限日
+- **誤放出防止(インターロック)**: 誤操作による消火剤の誤放出を防ぐ機構
+- **酸欠リスク**: ガス放出時に酸素濃度が低下するため、放出前に退避が必要となるリスク
+
+## 1. 点検記録を確認する
+
+監査基準日は2026-07-30です。
+
+| system_id | area | agent_type | last_inspection_date | next_inspection_due | gauge_pressure_psi |
+|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["system_id"] }} | {{ r["area"] }} | {{ r["agent_type"] }} | {{ r["last_inspection_date"] }} | {{ r["next_inspection_due"] }} | {{ r["gauge_pressure_psi"] }}psi |
+{% endfor %}
+
+## 2. 圧力ゲージが正常範囲内か確認する
+
+正常範囲は`normal_min_psi`〜`normal_max_psi`です。
+
+```bash
+echo "各設備の圧力ゲージを正常範囲と照合します"
+```
+
+{% for r in csv_rows %}- {{ r["system_id"] }}: {{ r["gauge_pressure_psi"] }}psi（正常範囲{{ r["normal_min_psi"] }}〜{{ r["normal_max_psi"] }}psi） → {% if (r["gauge_pressure_psi"] | int) < (r["normal_min_psi"] | int) or (r["gauge_pressure_psi"] | int) > (r["normal_max_psi"] | int) %}**範囲外（漏れの疑いあり、要点検）**{% else %}正常{% endif %}
+{% endfor %}
+
+## 3. 次回点検期限が到来していないか確認する
+
+```bash
+echo "next_inspection_dueが監査基準日(2026-07-30)を過ぎていないか確認します"
+```
+
+{% for r in csv_rows %}{% if r["next_inspection_due"] < "2026-07-30" %}- **{{ r["system_id"] }}**: 次回点検期限{{ r["next_inspection_due"] }}が経過済み。**点検期限超過（要早急な点検実施）**
+{% else %}- {{ r["system_id"] }}: 次回点検期限{{ r["next_inspection_due"] }}（未到来）
+{% endif %}{% endfor %}
+
+## 4. 是正対象の一覧を記録する
+
+Step 2・Step 3で検出した項目を一元化した是正リストです。
+
+{% for r in csv_rows %}{% if (r["gauge_pressure_psi"] | int) < (r["normal_min_psi"] | int) or (r["gauge_pressure_psi"] | int) > (r["normal_max_psi"] | int) or r["next_inspection_due"] < "2026-07-30" %}- [ ] {{ r["system_id"] }}（{{ r["area"] }}）: {% if (r["gauge_pressure_psi"] | int) < (r["normal_min_psi"] | int) %}圧力低下{% endif %}{% if r["next_inspection_due"] < "2026-07-30" %} 点検期限超過{% endif %} の是正を実施
+{% endif %}{% endfor %}
+
+## 5. (実機があれば)設備の外観点検を実施する
+
+ボンベの損傷・腐食の有無、圧力ゲージの指針が正常ゾーン(多くの製品で緑色表示域)にあるかを目視で確認し、噴射ヘッドやインターロック機構に異物・障害物がないかを確認します。
+
+## 動作確認
+
+- 全設備の圧力ゲージが正常範囲と照合され、範囲外の設備(FS-02)が検出されていること
+- 点検期限超過の設備(FS-02, FS-04)が検出され、是正リストに記載されていること
+- 是正リストの各項目に具体的な対応内容が記載されていること
+
+## 注意事項
+
+- ガス系消火設備の点検・作業中は誤放出を防ぐため、必ず作動装置を点検モード(または手動操作禁止措置)にしてから作業してください。
+- 放出試験や実際のボンベ交換作業は、酸欠リスクを伴うため必ず有資格者が行い、作業区画への立入りを制限してください。

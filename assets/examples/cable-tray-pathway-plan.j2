@@ -1,0 +1,63 @@
+# ケーブルトレイ・配線経路計画（許容重量と最大充填率の検算）
+
+CSVのケーブルトレイ一覧から、単位長あたりの積載重量が許容荷重を超えていないか、充填率がケーブル追加の余裕を保つ上限を超えていないかを検算します。
+
+## 目的
+
+ケーブルトレイの許容荷重(単位長あたり)と充填率(断面積に対するケーブル占有率)という2つの制約を理解し、配線経路が両方の基準を満たしているかを検算できるようになることを目指します。
+
+## 用語解説
+
+- **ケーブルトレイ**: 複数のケーブルをまとめて敷設するための、はしご状または穴あき鋼板のパスウェイ(配線経路)
+- **許容荷重(単位長あたり)**: トレイが1メートルあたりに支えられるケーブル重量の上限
+- **充填率**: トレイの断面積に対して、実際にケーブルが占める断面積の割合
+- **40%充填率ルール**: 将来のケーブル増設余地と放熱性を確保するため、充填率を40%以下に抑えるという一般的な設計指針(必須の法規制ではなく業界慣行)
+- **幹線配線**: フロア間・室間など長距離を結ぶ配線経路(トレイはこの幹線配線でよく使われる)
+- **サポート間隔**: トレイを支持する金具の設置間隔。荷重がたわみに影響する
+
+## 1. トレイ一覧を確認する
+
+| tray_id | location | width_mm | max_load_kg_per_m | length_m | total_cable_weight_kg | fill_ratio_pct |
+|---|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["tray_id"] }} | {{ r["location"] }} | {{ r["width_mm"] }} | {{ r["max_load_kg_per_m"] }} | {{ r["length_m"] }} | {{ r["total_cable_weight_kg"] }} | {{ r["fill_ratio_pct"] }}% |
+{% endfor %}
+
+## 2. 単位長あたりの積載重量を計算し、許容荷重と比較する
+
+```bash
+echo "積載重量(kg/m) = total_cable_weight_kg / length_m"
+```
+
+{% set ns_load = namespace(v=0, w=0, l=0) %}{% for r in csv_rows %}{% set ns_load.w = r["total_cable_weight_kg"] | int %}{% set ns_load.l = r["length_m"] | int %}{% set ns_load.v = (ns_load.w / ns_load.l) | round(2) %}- {{ r["tray_id"] }}: {{ ns_load.v }}kg/m（許容{{ r["max_load_kg_per_m"] }}kg/m） → {% if ns_load.v > (r["max_load_kg_per_m"] | int) %}**NG（荷重超過）**{% else %}OK{% endif %}
+{% endfor %}
+
+## 3. 充填率を40%ルールと比較する
+
+```bash
+echo "fill_ratio_pctを40%上限と比較します"
+```
+
+{% for r in csv_rows %}- {{ r["tray_id"] }}: 充填率{{ r["fill_ratio_pct"] }}% → {% if (r["fill_ratio_pct"] | int) > 40 %}**NG（40%超過、増設余地不足）**{% else %}OK{% endif %}
+{% endfor %}
+
+## 4. 総合判定と是正案をまとめる
+
+両基準のいずれかでNGとなったトレイは、ケーブルの一部を別トレイへ振り分けるか、トレイ自体の増設・上位規格への交換を検討します。
+
+{% set ns_load2 = namespace(v=0, w=0, l=0) %}{% for r in csv_rows %}{% set ns_load2.w = r["total_cable_weight_kg"] | int %}{% set ns_load2.l = r["length_m"] | int %}{% set ns_load2.v = (ns_load2.w / ns_load2.l) | round(2) %}{% if ns_load2.v > (r["max_load_kg_per_m"] | int) or (r["fill_ratio_pct"] | int) > 40 %}- [ ] {{ r["tray_id"] }}（{{ r["location"] }}）: {% if ns_load2.v > (r["max_load_kg_per_m"] | int) %}荷重超過{% endif %}{% if (r["fill_ratio_pct"] | int) > 40 %} 充填率超過{% endif %} の是正案を検討
+{% endif %}{% endfor %}
+
+## 5. (実機があれば)トレイのたわみとサポート間隔を目視確認する
+
+トレイが荷重で目に見えてたわんでいないか、サポート金具の間隔がメーカー仕様どおりかを確認します。異常なたわみがある場合は、計算上OKであっても追加サポートの設置を検討します。
+
+## 動作確認
+
+- 全トレイの積載重量が計算され、許容荷重との比較結果が記載されていること
+- 40%充填率ルールに対する判定が全トレイで記載されていること
+- 両基準またはいずれかでNGとなったトレイ(CT-02, CT-04)に是正案が記載されていること
+
+## 注意事項
+
+- 実際のケーブル追加・トレイ増設作業では、活線状態のケーブルを誤って損傷させないよう、既存配線の識別・養生を行ってから作業してください。
+- 高所でのトレイ作業は落下防止措置(安全帯・脚立の固定等)を徹底してください。

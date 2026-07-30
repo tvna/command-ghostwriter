@@ -1,0 +1,6 @@
+circuit_no,panel_label,diagram_load_name,onsite_label,onsite_breaker_amp,diagram_breaker_amp
+1,PNL-A-01,Server-DB系統,Server-DB系統,20,20
+2,PNL-A-02,Server-App系統,Server-App系統,20,20
+3,PNL-A-03,Storage系統,Storage系統,30,20
+4,PNL-A-04,Switch-Core系統,(ラベルなし),20,20
+5,PNL-A-05,予備,UPS-mgmt系統,15,15

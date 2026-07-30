@@ -1,0 +1,7 @@
+asset_tag,device_name,ledger_rack,ledger_u,physical_rack,physical_u,status
+AST-1001,Server-DB-01,RackA,U08,RackA,U08,found
+AST-1002,Server-App-01,RackA,U10,RackA,U10,found
+AST-1003,Server-App-02,RackA,U11,-,-,not-found
+AST-1004,Switch-Core-1,RackA,U40,RackA,U40,found
+AST-1005,Storage-01,RackB,U04,RackB,U06,mismatch
+AST-1006,Server-Web-01,-,-,RackB,U12,unregistered

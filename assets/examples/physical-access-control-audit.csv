@@ -1,0 +1,7 @@
+user_id,name,role,area,access_granted,last_used_date
+U001,tanaka,運用担当,サーバルームA,yes,2026-07-28
+U002,sato,運用担当,サーバルームA,yes,2026-07-29
+U003,suzuki,退職者,サーバルームA,yes,2026-05-10
+U004,ito,警備員,共用エントランス,yes,2026-07-30
+U005,yamamoto,外部業者,サーバルームA,yes,2026-01-15
+U006,watanabe,運用担当,サーバルームB,yes,2026-07-30

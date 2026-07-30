@@ -184,6 +184,11 @@ ALLOWED_SUBCATEGORIES: Final[dict[str, frozenset[str]]] = {
             "ラッキング",
             "環境設計",
             "環境監視",
+            "非常用電源",
+            "物理セキュリティ",
+            "消防設備",
+            "資産管理",
+            "廃棄",
         }
     ),
 }

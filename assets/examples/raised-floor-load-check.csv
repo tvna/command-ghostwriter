@@ -1,0 +1,5 @@
+rack_name,weight_kg,caster_count,tile_type,point_load_rating_kg,distributed_load_rating_kg_per_m2,footprint_area_m2
+RackA,450,4,standard,130,732,0.6
+RackB,600,4,standard,130,732,0.6
+RackC,300,6,standard,130,732,0.6
+RackD,500,4,reinforced,150,900,0.6

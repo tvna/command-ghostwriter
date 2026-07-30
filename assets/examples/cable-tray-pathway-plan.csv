@@ -1,0 +1,5 @@
+tray_id,location,width_mm,max_load_kg_per_m,length_m,total_cable_weight_kg,fill_ratio_pct
+CT-01,RackA-U40系統,300,20,10,150,35
+CT-02,RackB幹線,300,20,15,340,52
+CT-03,天井裏-電気室間,450,30,25,600,38
+CT-04,フロア間シャフト,200,15,8,110,44
