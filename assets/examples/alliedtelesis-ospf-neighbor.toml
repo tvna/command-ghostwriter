@@ -1,5 +1,5 @@
 router_id = "10.10.10.1"
 area_id = 0
-ospf_interfaces = ["vlan10", "port1.0.3"]
+ospf_interfaces = ["vlan10", "port1.0.3", "vlan20"]
 passive_interfaces = ["vlan20"]
 reference_bandwidth = 10000
