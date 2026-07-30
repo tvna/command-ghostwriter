@@ -697,6 +697,7 @@ const META: Meta[] = [
   { id: "cable-labeling-standard", name: "ケーブルラベリング規約適用", desc: "命名規約からラベル文字列を機械的に導出し、台帳記載のラベルと照合して違反行を検出する手順書を生成。", category: "facility", subCategory: "ケーブリング", format: "csv", output: "markdown", updated: "2026-07-30", live: true },
   { id: "server-racking-procedure", name: "サーバラッキング作業手順（レール・搭載・接地）", desc: "レール取付から搭載・接地・初回電源投入までを、2人作業判定と安全確認ポイントつきで実施する手順書を生成。", category: "facility", subCategory: "ラッキング", format: "yaml", output: "markdown", updated: "2026-07-30", live: true },
   { id: "rack-airflow-design", name: "エアフロー設計とブランクパネル計画", desc: "ホットアイル/コールドアイル分離と再循環リスクを確認し、吸気温度基準で冷却の健全性を判定する手順書を生成。", category: "facility", subCategory: "環境設計", format: "yaml", output: "markdown", updated: "2026-07-30", live: true },
+  { id: "env-monitoring-setup", name: "温湿度モニタリング設置と閾値設計", desc: "ラック前面上中下段への温湿度センサー設置と警告閾値を設計し、CLIで監視値を取得・判定する手順書を生成。", category: "facility", subCategory: "環境監視", format: "yaml", output: "markdown", updated: "2026-07-30", live: true },
 ];
 
 export const CGTemplates: Template[] = META.map((m) => ({
