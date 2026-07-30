@@ -29,7 +29,7 @@ ArubaOSの`crypto isakmp policy`(IKE)と`crypto ipsec transform-set`/`crypto-loc
 対向拠点の管理者と、WAN側アドレス・LANアドレス帯・事前共有鍵・IKEポリシー番号・transform-set名が食い違っていないか確認します。片方だけ変更すると確立できません。
 
 ```bash
-show crypto-local ipsec-map
+show crypto-local ipsec
 show crypto isakmp policy
 ```
 
@@ -85,7 +85,7 @@ write memory
 ### 4. 動作確認コマンドを実行する
 
 ```bash
-show crypto-local ipsec-map tag s2s-branch-to-hq
+show crypto-local ipsec tag s2s-branch-to-hq
 show crypto isakmp sa
 show ip route
 ```
@@ -98,7 +98,7 @@ ping {{ remote_lan_test_host }}
 
 ## 動作確認
 
-- `show crypto-local ipsec-map tag s2s-branch-to-hq`で、IKEv2ポリシー10・transform-set(`ikev2-aes256-sha256`)・PFSグループ14・SAライフタイム3600秒が意図通り反映され、トンネル状態(IKE/IPSEC)が`UP`であること
+- `show crypto-local ipsec tag s2s-branch-to-hq`で、IKEv2ポリシー10・transform-set(`ikev2-aes256-sha256`)・PFSグループ14・SAライフタイム3600秒が意図通り反映され、トンネル状態(IKE/IPSEC)が`UP`であること
 - `show crypto isakmp sa`で自拠点`{{ local_wan_ip }}`と対向拠点`{{ remote_wan_ip }}`間のIKE SAが確立し、暗号AES-256・ハッシュSHA-256・グループ14で一致していること
 - `show ip route`で対向拠点LAN`{{ remote_lan }}`宛の経路がIPsecマップ`s2s-branch-to-hq`経由になっていること
 - 自拠点LAN`{{ local_lan }}`の端末から対向拠点LAN`{{ remote_lan }}`の端末へpingが成功すること
