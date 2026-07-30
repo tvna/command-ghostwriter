@@ -124,8 +124,8 @@ export function groupBySubCategory(list: Template[]): { key: string; label: stri
   return groups;
 }
 
-export function countByCategory(list: Template[], id: TemplateCategory | 'all'): number {
-  return id === 'all' ? list.length : list.filter((t) => t.category === id).length;
+export function countByCategory(list: Template[], filter: (t: Template) => boolean): number {
+  return list.filter(filter).length;
 }
 
 export function countByActivity(list: Template[], id: TemplateActivity | 'all'): number {

@@ -65,14 +65,22 @@ describe("countByCategory", () => {
     tpl({ id: "3", category: "network" }),
   ];
 
-  it("returns the full list length for 'all'", () => {
-    expect(countByCategory(list, "all")).toBe(3);
+  it("returns the full list length for an always-true predicate", () => {
+    expect(countByCategory(list, () => true)).toBe(3);
   });
 
-  it("counts only templates matching the given category", () => {
-    expect(countByCategory(list, "server")).toBe(2);
-    expect(countByCategory(list, "network")).toBe(1);
-    expect(countByCategory(list, "dns")).toBe(0);
+  it("counts only templates matching the given predicate", () => {
+    expect(countByCategory(list, (t) => t.category === "server")).toBe(2);
+    expect(countByCategory(list, (t) => t.category === "network")).toBe(1);
+    expect(countByCategory(list, (t) => t.category === "dns")).toBe(0);
+  });
+
+  it("supports predicates finer than raw category equality", () => {
+    const debianOnly = [
+      tpl({ id: "d1", category: "server", subCategory: "Debian系" }),
+      tpl({ id: "d2", category: "server", subCategory: "RHEL系" }),
+    ];
+    expect(countByCategory(debianOnly, (t) => t.category === "server" && t.subCategory === "Debian系")).toBe(1);
   });
 });
 
