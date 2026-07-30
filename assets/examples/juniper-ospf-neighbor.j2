@@ -1,0 +1,87 @@
+# JuniperルータのOSPF単一エリア(area {{ area_id }})設定
+
+複数のJuniperルータ間でOSPFエリア {{ area_id }} を構成し、隣接関係(ネイバー)の確立と動的な経路交換を確認します。設定はコンソール接続で実施してください。
+
+## 目的
+
+router-idとインターフェース単位の`area`設定でOSPF単一エリアを構成し、`passive`インターフェースで不要な隣接形成を抑制した上で、ネイバー確立(`Full`)と経路交換を検証できるようになることを目指します。
+
+## 用語解説
+
+- **LSA(Link State Advertisement)**: OSPFルータ同士が交換する、自身のリンク状態(接続インターフェースや経路情報)の広告。Junos/Cisco IOSで概念は共通
+- **ネイバー(Neighbor)**: OSPFのHelloパケットをやり取りし、隣接関係が成立した対向ルータ。Junosでは状態`Full`が完全な隣接を示す(Cisco IOSの`FULL`と同義)
+- **DR/BDR(Designated Router/Backup Designated Router)**: マルチアクセスセグメントでLSA交換を集約する代表ルータとその予備。Junosの`show ospf interface brief`では`DR`/`BDR`/`DRother`として表示される
+- **エリアへの参加方式の違い**: Cisco IOSは`router ospf`配下の`network <subnet> <wildcard> area <id>`文でエリア参加インターフェースを間接的に指定するが、Junosには`network`文が存在せず、`[edit protocols ospf area <area-id>]`配下で`interface <interface-name>`をインターフェース単位で直接列挙する
+- **passive**: Junosは対象インターフェースの`area`設定に`passive`フラグを追加する形で末端セグメントのHello送出を止める(`set protocols ospf area <id> interface <intf> passive`)。Cisco IOSのようにルータ全体設定の中に独立した`passive-interface <intf>`文を持つわけではなく、インターフェース単位のarea設定に属性として付与する点が異なる
+- **set/commit**: JunosはCisco IOSの`configure terminal` ... `end`ではなく、`configure`で候補設定に入り`set`文を積み重ねた後`commit`して初めて動作設定に反映する
+
+## シナリオ設定
+
+router-id `{{ router_id }}` のルータで、エリア {{ area_id }} に以下の{{ ospf_interfaces | length }}個のインターフェースを参加させます。
+
+{% for intf in ospf_interfaces %}- `{{ intf }}`
+{% endfor %}
+
+このうち以下のインターフェースは末端セグメントのため`passive`とします。
+
+{% for intf in passive_interfaces %}- `{{ intf }}`
+{% endfor %}
+
+参照帯域幅(reference-bandwidth)は {{ reference_bandwidth }} Mbps相当({{ reference_bandwidth * 1000000 }} bps)に設定し、高速リンクのコスト差を正しく反映させます。
+
+## 手順
+
+### 1. 事前にインターフェースの状態を確認する
+
+```bash
+{% for intf in ospf_interfaces %}show interfaces {{ intf }} terse
+{% endfor %}```
+
+対象インターフェースがOSPF参加予定のIPアドレスで有効(`up/up`)になっているか確認します。
+
+### 2. router-idと参照帯域幅を設定する
+
+```bash
+configure
+set routing-options router-id {{ router_id }}
+set protocols ospf reference-bandwidth {{ reference_bandwidth * 1000000 }}
+```
+
+### 3. インターフェースをエリアへ参加させる
+
+```bash
+{% for intf in ospf_interfaces %}set protocols ospf area {{ area_id }} interface {{ intf }}
+{% endfor %}```
+
+### 4. passiveインターフェースを設定する
+
+末端セグメントでは不要な隣接形成・Hello送出を止め、意図しないOSPFネイバーの成立を防ぎます。
+
+```bash
+{% for intf in passive_interfaces %}set protocols ospf area {{ area_id }} interface {{ intf }} passive
+{% endfor %}commit
+```
+
+### 5. ネイバー確立と経路をshow ospf neighborで確認する
+
+```bash
+show ospf neighbor
+show route protocol ospf
+show ospf interface brief
+```
+
+`show ospf interface brief`の`Nbrs`列で、意図した`passive`対象インターフェースにネイバーが存在しない(0のまま)ことも確認します。
+
+## 動作確認
+
+- `show ospf neighbor`に対向ルータが`Full`状態で表示されること(マルチアクセスセグメントではDR/BDR選出後に`Full`または`2Way`)
+- `show route protocol ospf`に他ルータ経由のネットワークがOSPF由来として学習されていること
+- `show ospf interface brief`で`{{ passive_interfaces[0] }}`等のpassive対象インターフェースの`Nbrs`列が0のままであること
+- `show ospf overview`のrouter-idが `{{ router_id }}` と一致していること
+
+## 注意事項
+
+- router-idはルータ内で一意である必要があり、他ルータと重複するとLSAの発信元が正しく識別できず経路計算が不安定になる。ループバックIP等、変化しないアドレスを使うのが望ましい。
+- インターフェース単位でエリア参加を明示する方式のため、意図しないインターフェースを追加すると不要な隣接形成やLSA増加を招く。`ospf_interfaces`の対象範囲は必要最小限にする。
+- `reference-bandwidth`を変更する場合は、OSPFが有効な全ルータで同じ値に揃えないと、コスト計算が機器間で食い違い最適経路選択がずれる原因になる。Junosは`10g`のような単位付きショートカット表記も受け付けるが、本手順ではCisco側とのMbps値の対応関係を明確にするため、明示的なbps整数値で投入している。
+- 設定投入後にリモート接続経由のインターフェースが誤って`passive`化・無効化されると、そのセッション自体で復旧できなくなる恐れがある。`commit confirmed 5`のような確認付きコミットを使うと、誤設定時に一定時間後で自動的に直前の設定へロールバックされ、ロックアウトを防止できる。

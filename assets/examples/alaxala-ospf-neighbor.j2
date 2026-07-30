@@ -1,0 +1,94 @@
+# アラクサラAXシリーズスイッチのOSPFネイバー確立(単一エリア)
+
+複数のAXシリーズL3スイッチ間でOSPFの単一エリアを構成し、隣接関係(ネイバー)の確立と動的な経路交換を確認します。対向機器のドメイン番号・エリアID・router-idの割り当て方針は、事前に対向管理者と合意しておく必要があります。
+
+## 目的
+
+OSPFの単一エリア構成をrouter-idとVLANインタフェース単位の`ip ospf area`設定で定義し、`passive-interface`で不要な隣接形成を抑制した上で、ネイバー確立と経路交換を検証できるようになることを目指します。
+
+## 用語解説
+
+- **LSA(Link State Advertisement)**: OSPFルータ同士が交換する、自身のリンク状態(接続インタフェースや経路情報)の広告
+- **ネイバー(Neighbor)**: OSPFのHelloパケットをやり取りし、隣接関係が成立した対向ルータ
+- **エリア(Area)**: OSPFのLSA伝播範囲を区切る論理単位。エリア0はバックボーンエリアと呼ばれる
+- **ドメイン番号**: AXシリーズ固有の概念で、`router ospf`コマンドと各インタフェースの`ip ospf`コマンドを結びつける識別番号(1〜65535)。Cisco IOSの`router ospf <process-id>`に相当するが、インタフェース側の`ip ospf <ドメイン番号> area <エリアID>`でも同じ番号を明示する必要がある点が異なる
+- **VLANインタフェース**: AXシリーズのL3スイッチはEthernetポートに直接IPアドレスを持たせるのではなく、`interface vlan <VLAN ID>`で作成したVLANインタフェースにIPアドレスを設定してルーティングに用いる
+- **passive-interface**: OSPFのHelloパケットを送出させず、経路広告のみ行うインタフェース設定。AXシリーズでは`passive-interface vlan <VLAN ID>`、または全インタフェースを対象にする`passive-interface default`で指定する
+
+## シナリオ設定
+
+router-id `{{ router_id }}` のスイッチで、エリア {{ area_id }} に以下の{{ ospf_interfaces | length }}個のVLANインタフェースを参加させます。
+
+{% for intf in ospf_interfaces %}- `{{ intf }}`
+{% endfor %}
+
+このうち以下のインタフェースは末端セグメントのため`passive-interface`とします。
+
+{% for intf in passive_interfaces %}- `{{ intf }}`
+{% endfor %}
+
+なお、AXシリーズにはCisco IOSの`auto-cost reference-bandwidth`に相当する「コスト自動計算の基準帯域幅」をグローバルに変更するコンフィグレーションコマンドが公式資料上で確認できなかったため、本テンプレートではインタフェースコストは実帯域から自動算出される値をそのまま用います(詳細は注意事項を参照)。
+
+## 手順
+
+### 1. 事前にインタフェースの状態を確認する
+
+```bash
+enable
+show ip interface
+{% for intf in ospf_interfaces %}show interfaces {{ intf }}
+{% endfor %}```
+
+対象VLANインタフェースがOSPF参加予定のIPアドレスで設定されているか確認します。
+
+### 2. router ospfとrouter-idを設定する
+
+```bash
+configure terminal
+router ospf 1
+ router-id {{ router_id }}
+exit
+```
+
+### 3. インタフェース単位でエリアへ参加させる
+
+```bash
+{% for intf in ospf_interfaces %}interface {{ intf }}
+ ip ospf 1 area {{ area_id }}
+exit
+{% endfor %}```
+
+### 4. passive-interfaceを設定する
+
+末端セグメントでは不要な隣接形成・Hello送出を止め、意図しないOSPFネイバーの成立を防ぎます。
+
+```bash
+router ospf 1
+{% for intf in passive_interfaces %} passive-interface {{ intf }}
+{% endfor %}exit
+save
+```
+
+### 5. ネイバー確立と経路をshow ip ospf neighborで確認する
+
+```bash
+show ip ospf neighbor
+show ip route ospf
+show ip ospf
+```
+
+## 動作確認
+
+- `show ip ospf neighbor`に対向スイッチが`Full`状態で表示されること(マルチアクセスセグメントではDR/BDR選出後に`Full`または`Two Ways`)
+- `show ip route ospf`に他スイッチ経由のネットワークがOSPF由来の経路として学習されていること
+- `show ip ospf neighbor`に`{{ passive_interfaces[0] }}`収容セグメント側のネイバーが表示されないこと(passive-interfaceにより意図的にHelloを止めているため)
+- `show ip ospf`のrouter-idが `{{ router_id }}` と一致していること
+
+## 注意事項
+
+- router-idはスイッチ内で一意である必要があり、他スイッチと重複するとLSAの発信元が正しく識別できず経路計算が不安定になる。ループバックインタフェースなど、変化しないアドレスを使うのが望ましい。
+- `router ospf`で指定するドメイン番号と、各インタフェースの`ip ospf <ドメイン番号> area <エリアID>`で指定するドメイン番号は一致させる必要がある。本テンプレートでは単一ドメイン運用を前提に`1`で統一しているが、複数OSPFドメインを運用する環境では番号の管理に注意する。
+- AXシリーズの公式コマンドリファレンス・コンフィグレーションガイドでは、Ciscoの`auto-cost reference-bandwidth`に相当する「コスト自動計算の基準帯域幅」をグローバルに変更するコンフィグレーションコマンドが確認できなかった(調査時点)。インタフェースコストは実際の回線速度から自動算出され、個別インタフェースでコストを上書きする`ip ospf cost`相当のコマンドは別途存在する。高速リンクと低速リンクが混在する環境では、経路選択が意図通りかを`show ip route ospf`で個別に確認すること。
+- `passive-interface`は`vlan <VLAN ID>`単位、またはインタフェース全体を対象とする`default`指定のみで、Cisco IOSのように任意のインタフェース種別・番号を個別指定するわけではない点に注意する。
+- 誤ったエリアIDやドメイン番号を設定すると、意図しないエリア・ドメインでネイバーが成立しない、あるいは意図せず成立して経路が漏洩するリスクがある。投入前に対向情報を再確認すること。
+- 設定変更後は`save`でスタートアップコンフィグレーションに保存しないと、装置再起動時に設定が失われる。

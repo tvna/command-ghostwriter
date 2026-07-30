@@ -1,0 +1,8 @@
+local_wan_ip = "203.0.113.1"
+remote_wan_ip = "198.51.100.1"
+local_lan = "192.168.10.0/24"
+remote_lan = "192.168.20.0/24"
+remote_lan_test_host = "192.168.20.10"
+pre_shared_key_note = "事前共有鍵の実値は社内の鍵管理台帳(Vault)で一元管理し、平文では保存せず、設定投入時にコンソールから直接入力します。"
+local_lan_netmask = "255.255.255.0"
+remote_lan_netmask = "255.255.255.0"

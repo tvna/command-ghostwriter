@@ -1,0 +1,85 @@
+# NEC UNIVERGE IXルータのeBGPネイバー確立
+
+異なるAS(自律システム)間でeBGPネイバーを確立し、経路広告と受信経路の確認を行います。対向ルータのAS番号・IPアドレス・認証キーは事前に対向管理者と合意しておく必要があります。
+
+## 目的
+
+eBGPネイバーをリモートAS `{{ remote_asn }}` との間で確立し、`address-family ipv4 unicast`配下の`network`文による経路広告とネイバー状態`Established`の確認ができるようになることを目指します。
+
+## 用語解説
+
+- **AS(Autonomous System)**: BGPにおける経路制御の管理単位。組織ごとに一意なAS番号を持つ
+- **eBGP(External BGP)**: 異なるAS間で経路交換を行うBGPセッション(同一AS内は iBGP と呼ぶ)
+- **ネイバー(Neighbor/Peer)**: BGPセッションを確立する対向ルータ。TCP179番ポートでセッションを張る
+- **address-family**: IXシリーズはIPv4ユニキャストの経路広告(`network`文)を`address-family ipv4 unicast`サブモード配下で設定する。Cisco IOS classicの一部設定例のように`router bgp`直下へ`network`文を書く方式ではない点がIX固有の差異
+- **router-id(BGP)**: BGPコンフィグモード配下の`router-id`コマンドで設定する、BGP用のルータID(OSPFのrouter-idとはコマンドの適用範囲が異なる)
+- **MD5認証**: `neighbor <アドレス> password <パスワード>`コマンドでBGPセッションのTCPパケットにRFC2385のMD5ハッシュを付与し、なりすましを防ぐ任意機能
+
+## シナリオ設定
+
+自AS `{{ local_asn }}`(router-id `{{ router_id }}`)から、対向AS `{{ remote_asn }}`・アドレス `{{ neighbor_ip }}`(`{{ neighbor_description }}`)とeBGPネイバーを確立します。
+
+以下の{{ advertised_networks | length }}個のネットワークを広告します。
+
+{% for n in advertised_networks %}- `{{ n }}`
+{% endfor %}
+セッションはMD5認証で保護します。
+
+## 手順
+
+### 1. 事前にAS番号とIPの疎通を確認する
+
+```bash
+show ip route
+ping {{ neighbor_ip }}
+```
+
+対向ルータの直接接続インターフェース(またはループバック、iBGPマルチホップ構成の場合)への疎通が取れていることを確認します。
+
+### 2. router bgpとネイバーを設定する
+
+```bash
+configure
+router bgp {{ local_asn }}
+ router-id {{ router_id }}
+ neighbor {{ neighbor_ip }} remote-as {{ remote_asn }}
+ neighbor {{ neighbor_ip }} description {{ neighbor_description }}
+ neighbor {{ neighbor_ip }} password {{ bgp_password }}
+```
+
+### 3. address-familyでネットワークを広告する
+
+```bash
+ address-family ipv4 unicast
+{% for n in advertised_networks %}  network {{ n }}
+{% endfor %} exit
+exit
+exit
+write memory
+```
+
+`network`文はBGPが参照するルーティングテーブル(RIB)に実在する経路のみ広告対象になるため、事前に`show ip route`で該当ネットワークが存在することを確認してください。
+
+### 4. ネイバー状態と受信経路をshow ip bgp summaryで確認する
+
+```bash
+show ip bgp summary
+show ip bgp neighbors {{ neighbor_ip }} detail
+show ip route bgp
+```
+
+## 動作確認
+
+- `show ip bgp summary`で `{{ neighbor_ip }}` の状態が `Established` であること
+- `show ip bgp neighbors {{ neighbor_ip }} detail`のAS番号が `{{ remote_asn }}` と一致すること
+- `show ip route bgp`に対向AS経由のネットワークがBGP由来として学習されていること
+- 自AS広告分({{ advertised_networks | join(', ') }})が対向ルータ側の`show ip bgp`で確認できること(対向機器での確認が必要)
+
+## 注意事項
+
+- MD5認証キーは両端で完全に一致させる必要があり、不一致だとTCPセッション自体が確立しない。疎通確認と合わせて切り分けること。
+- **address-familyの扱いに注意**: IXシリーズは`network`文を`address-family ipv4 unicast`サブモード配下に置く必要がある。Cisco IOS classicの感覚で`router bgp`直下に`network`文を書くと反映されない可能性があるため、他ベンダーからの読み替え時は特に注意する。
+- `network`文はルーティングテーブルに厳密一致する経路がないと広告されない。サマライズしたい場合は`aggregate-address`コマンド(`summary-only`オプション付き)の利用を検討する。
+- 誤ったAS番号やネイバーIPを設定すると、意図しないASと経路交換してしまうリスクがある。投入前に対向情報を再確認する。
+- **未確認事項(要レビュー)**: 本テンプレートは公式のIX-R/IX-Vコマンドリファレンス(BGP編)に記載された個々のコマンド(`router bgp`/`router-id`/`neighbor ... remote-as`/`neighbor ... password`/`neighbor ... description`/`address-family ipv4 unicast`/`network`/各種showコマンド)を組み合わせて構成していますが、これら全体を1つの投入セッションとして通しで示す公式の実行例(特にaddress-familyモードからの`exit`段数)は確認できませんでした。本番投入前に対象機種の実機で流れを確認してください。
+- BGPの`router-id`はOSPFの`router-id`と同名のコマンドですが、それぞれBGPコンフィグモード/OSPFコンフィグモード配下で個別に設定するものであり、共有される値ではありません(便宜上同じIPアドレスを使うことは一般的ですが、コマンドとしては独立しています)。

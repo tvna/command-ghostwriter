@@ -1,0 +1,4 @@
+router_id = "10.10.10.1"
+area_id = 0
+ospf_interfaces = ["GigaEthernet0.0", "GigaEthernet1.0"]
+passive_interfaces = ["GigaEthernet1.0"]

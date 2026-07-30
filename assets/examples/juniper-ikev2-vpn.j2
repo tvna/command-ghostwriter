@@ -1,0 +1,136 @@
+# Juniper Networks SRX(JunOS)の拠点間IKEv2 IPsec VPN構築
+
+SRXシリーズファイアウォール2台を使い、ルートベースVPN(st0トンネルインターフェース)方式で拠点間をIKEv2 IPsecトンネルで接続します。両拠点のパラメータを事前に突き合わせたうえで、片方ずつではなく対応するペアとして設定してください。
+
+## 目的
+
+JunOSのIKE(Phase1)/IPsec(Phase2)オブジェクトモデルとst0トンネルインターフェースの役割分担を理解した上で、拠点間IKEv2 IPsecトンネルを構築し、経路とセキュリティポリシーを整えて相互疎通を検証できるようになることを目指します。
+
+## 用語解説
+
+- **IKEゲートウェイ(ike gateway)**: 対向機器のアドレスや外部インターフェース、IKEポリシーを束ねるオブジェクト。`version v2-only`を指定することでIKEv2のみを使用させる
+- **IKEプロポーザル/ポリシー(ike proposal/policy)**: 暗号アルゴリズム・認証方式・DHグループなどPhase1条件をまとめたプロポーザルと、それを参照するポリシー。IKEv2ではネゴシエーションにmain/aggressiveの区別がないため、ポリシーに`mode`は設定しない
+- **st0トンネルインターフェース**: ルートベースVPNでIPsecトンネルの出入口となる論理インターフェース。経路(`routing-options static`)やセキュリティゾーンへの割り当て対象になる
+- **セキュリティゾーンとアドレス帳(address-book)**: SRXでは通信可否をゾーン単位のポリシーで判断する。LAN側・VPN側のプレフィックスをアドレス帳に登録し、ゾーン間ポリシーで明示的に許可する必要がある
+- **Perfect Forward Secrecy(PFS)**: IPsecポリシーで`perfect-forward-secrecy keys groupN`を指定し、Phase2鍵generationにDHグループを再利用させる仕組み
+- **デッドピア検出(dead-peer-detection)**: 対向機器の生死をIKEで定期的に確認する機能。`always-send`・`interval`・`threshold`で挙動を調整する
+- **establish-tunnels immediately**: IPsec VPNオブジェクトに設定すると、トラフィック待ちではなくコミット直後にトンネル確立を試みる
+
+## シナリオ設定
+
+自拠点WAN側アドレス `{{ local_wan_ip }}` と対向拠点WAN側アドレス `{{ remote_wan_ip }}` の間にIKEv2でIPsecトンネルを確立し、自拠点LAN `{{ local_lan }}` と対向拠点LAN `{{ remote_lan }}` を相互疎通させます。{{ pre_shared_key_note }}
+
+このテンプレートは、IKEv2マルチベンダー相互接続シリーズ(10ベンダー共通)の一つです。全テンプレートで暗号プロファイルを統一しており、このシリーズの他ベンダーのルータ/ファイアウォールとの間でも、以下の共通プロファイルに沿っていれば相互接続できます: IKEv2/IKE暗号AES-256(CBC)・ハッシュSHA-256・DHグループ14 / IPsec(ESP)暗号AES-256・認証SHA-256・PFSグループ14 / 認証方式PSK / IKE SAライフタイム28800秒・IPsec SAライフタイム3600秒 / NAT-T自動検出有効・DPD有効。
+
+## 手順
+
+### 1. 両拠点のパラメータを突き合わせる
+
+対向拠点の管理者と、WAN側アドレス・LANアドレス帯・事前共有鍵・外部インターフェース名が食い違っていないか確認します。片方だけ変更すると確立できません。
+
+```bash
+show interfaces terse | match ge-
+show security zones
+```
+
+### 2. IKEv2/IPsecプロファイルとトンネルを設定する(自拠点側)
+
+configureモードで、Phase1(IKE)とPhase2(IPsec)のプロポーザル・ポリシー・ゲートウェイ・VPNオブジェクトを投入し、st0トンネルインターフェースをVPN用ゾーンに割り当てます。対向拠点側では`{{ local_wan_ip }}`と`{{ remote_wan_ip }}`を入れ替え、`external-interface`を対向側の実インターフェース名に置き換えた設定を投入してもらいます。
+
+```bash
+edit security ike proposal IKE-PROP-P1
+set authentication-method pre-shared-keys
+set dh-group group14
+set authentication-algorithm sha-256
+set encryption-algorithm aes-256-cbc
+set lifetime-seconds 28800
+top
+
+edit security ike policy IKE-POL-P1
+set proposals IKE-PROP-P1
+set pre-shared-key ascii-text "********"
+top
+
+edit security ike gateway GW-TO-REMOTE
+set ike-policy IKE-POL-P1
+set version v2-only
+set address {{ remote_wan_ip }}
+set local-address {{ local_wan_ip }}
+set external-interface ge-0/0/0.0
+set dead-peer-detection always-send
+set dead-peer-detection interval 10
+set dead-peer-detection threshold 3
+top
+
+edit security ipsec proposal IPSEC-PROP-P2
+set protocol esp
+set authentication-algorithm hmac-sha-256-128
+set encryption-algorithm aes-256-cbc
+set lifetime-seconds 3600
+top
+
+edit security ipsec policy IPSEC-POL-P2
+set perfect-forward-secrecy keys group14
+set proposals IPSEC-PROP-P2
+top
+
+edit security ipsec vpn VPN-TO-REMOTE
+set bind-interface st0.0
+set ike gateway GW-TO-REMOTE
+set ike ipsec-policy IPSEC-POL-P2
+set establish-tunnels immediately
+top
+
+set interfaces st0 unit 0 family inet mtu 1400
+set security zones security-zone VPN-TO-REMOTE interfaces st0.0
+```
+
+NAT-TはJunOSの既定動作として自動検出が有効になっており、明示的な有効化コマンドは不要です(対向側がNAT配下にある場合のみ自動的にUDP 4500へフォールバックします)。
+
+### 3. 経路を設定する
+
+対向拠点LAN宛の経路をst0経由に向け、アドレス帳とゾーン間ポリシーで双方向の通信を許可します。
+
+```bash
+set routing-options static route {{ remote_lan }} next-hop st0.0
+
+set security address-book global address LOCAL-LAN {{ local_lan }}
+set security address-book global address REMOTE-LAN {{ remote_lan }}
+set security address-book global attach zone trust
+set security address-book global attach zone VPN-TO-REMOTE
+
+set security policies from-zone trust to-zone VPN-TO-REMOTE policy ALLOW-TO-REMOTE match source-address LOCAL-LAN
+set security policies from-zone trust to-zone VPN-TO-REMOTE policy ALLOW-TO-REMOTE match destination-address REMOTE-LAN
+set security policies from-zone trust to-zone VPN-TO-REMOTE policy ALLOW-TO-REMOTE match application any
+set security policies from-zone trust to-zone VPN-TO-REMOTE policy ALLOW-TO-REMOTE then permit
+
+set security policies from-zone VPN-TO-REMOTE to-zone trust policy ALLOW-FROM-REMOTE match source-address REMOTE-LAN
+set security policies from-zone VPN-TO-REMOTE to-zone trust policy ALLOW-FROM-REMOTE match destination-address LOCAL-LAN
+set security policies from-zone VPN-TO-REMOTE to-zone trust policy ALLOW-FROM-REMOTE match application any
+set security policies from-zone VPN-TO-REMOTE to-zone trust policy ALLOW-FROM-REMOTE then permit
+
+commit
+```
+
+### 4. 動作確認コマンドを実行する
+
+```bash
+show security ike security-associations
+show security ipsec security-associations detail
+ping {{ remote_lan_test_host }}
+```
+
+SRX自身が発信する`ping`は自己トラフィック(self-traffic)として扱われ、`ALLOW-TO-REMOTE`/`ALLOW-FROM-REMOTE`ゾーン間ポリシーを経由しないため、IKE/IPsec/経路の健全性は確認できてもポリシー自体の正しさまでは検証できません。ポリシーの実効性まで確認するには、自拠点LAN`{{ local_lan }}`内の実機から対向拠点LAN側端末へpingし、`show security flow session`でセッションが`ALLOW-TO-REMOTE`ポリシーに基づいて許可されていることを確認してください。
+
+## 動作確認
+
+- `show security ike security-associations`で対向拠点`{{ remote_wan_ip }}`向けのIKE SAが表示され、Stateが`UP`であること
+- `show security ipsec security-associations detail`で有効なIPsec SAが表示され、暗号アルゴリズムが`ESP:aes-256-cbc/sha-256`相当であること
+- `show security flow session`または対向拠点LAN`{{ remote_lan }}`の端末へのpingが成功し、自拠点LAN`{{ local_lan }}`との相互疎通が確認できること
+- `show interfaces st0.0 terse`でst0.0インターフェースがトンネル確立に伴い`Up`状態であること
+
+## 注意事項
+
+- 事前共有鍵は両拠点で完全に一致していないとIKEが確立しない。`pre-shared-key`はコンソール投入時のみ台帳(鍵管理システム)から参照し、`show configuration`の出力やコミット履歴に平文が残らないよう扱いに注意する。
+- JunOSは`commit`を実行するまで設定が反映されない。`commit confirmed`の利用も検討し、WAN側の設定ミスでリモート管理経路が失われた場合に自動ロールバックできるようにしておく。
+- ゾーン間ポリシー(`ALLOW-TO-REMOTE`/`ALLOW-FROM-REMOTE`)を投入し忘れるとIPsec SAが確立していてもトラフィックがドロップされる。トンネル確立と通信可否は別レイヤーであることを踏まえて両方を確認する。

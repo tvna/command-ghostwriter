@@ -1,0 +1,113 @@
+# Ubiquiti EdgeRouter(EdgeOS)の拠点間IKEv2 IPsec VPN構築
+
+EdgeOS(Vyattaベース)を搭載したEdgeRouter 2台を使い、拠点間をルートベース(VTI)のIPsecトンネルで接続します。両拠点のパラメータを事前に突き合わせたうえで、片方ずつではなく対応するペアとして設定してください。
+
+## 目的
+
+ike-group/esp-groupによるIKEv2/IPsecプロファイルの組み方を理解した上で、拠点間IPsecトンネルをVTI(仮想トンネルインターフェース)として構築し、拠点間の経路を整えて相互疎通を検証できるようになることを目指します。
+
+## 用語解説
+
+- **ike-group**: IKEv2(Phase1)の鍵交換パラメータ(暗号化・ハッシュ・DHグループ・ライフタイム)をまとめた名前付きプロファイル。`set vpn ipsec ike-group <name> ...`で定義する
+- **esp-group**: IPsec(Phase2/ESP)の暗号化・認証アルゴリズムとPFS・ライフタイムをまとめた名前付きプロファイル。`set vpn ipsec esp-group <name> ...`で定義する
+- **site-to-site peer**: 対向拠点ごとに認証方式・ike-group・esp-group・トンネル/VTIの割り当てをまとめる設定オブジェクト
+- **VTI(Virtual Tunnel Interface)**: IPsecトンネルをルーテッドな仮想インターフェース(`vti0`など)として扱う方式。トンネル経由の経路は通常のスタティックルート(`set protocols static interface-route`)で設定できる
+- **dead-peer-detection(DPD)**: 対向機器の生存確認を行い、一定時間応答がない場合にトンネルを再確立する仕組み。`ike-group`側で`action`/`interval`/`timeout`を指定する
+- **pfs(Perfect Forward Secrecy)**: Phase2の鍵をPhase1の鍵と切り離して再計算する仕組み。EdgeOSでは`esp-group`側で使用するDHグループ(`dh-group14`など)を明示できる
+- **commit / save**: `configure`モードで投入した設定は`commit`で動作に反映されるが、`save`を実行するまでは起動設定に書き込まれず再起動で失われる(Vyatta系CLI共通の作法)
+
+## シナリオ設定
+
+自拠点WAN側アドレス `{{ local_wan_ip }}` と対向拠点WAN側アドレス `{{ remote_wan_ip }}` の間にIKEv2でIPsecトンネルを確立し、自拠点LAN `{{ local_lan }}` と対向拠点LAN `{{ remote_lan }}` を相互疎通させます。{{ pre_shared_key_note }}
+
+このテンプレートは、IKEv2マルチベンダー相互接続シリーズ(10ベンダー共通)の一つです。全テンプレートで暗号プロファイルを統一しており、このシリーズの他ベンダーのルータ/ファイアウォールとの間でも、以下の共通プロファイルに沿っていれば相互接続できます: IKEv2/IKE暗号AES-256(CBC)・ハッシュSHA-256・DHグループ14 / IPsec(ESP)暗号AES-256・認証SHA-256・PFSグループ14 / 認証方式PSK / IKE SAライフタイム28800秒・IPsec SAライフタイム3600秒 / NAT-T自動検出有効・DPD有効。
+
+## 手順
+
+### 1. 両拠点のパラメータを突き合わせる
+
+対向拠点の管理者と、WAN側アドレス・LANアドレス帯・事前共有鍵・暗号プロファイルが食い違っていないか確認します。片方だけ変更すると確立できません。
+
+```bash
+show vpn ipsec
+show interfaces
+```
+
+### 2. IKEv2/IPsecプロファイルとトンネルを設定する(自拠点側)
+
+`configure`モードでike-group/esp-groupを作成し、site-to-site peerに紐づけます。対向拠点側では`{{ local_wan_ip }}`と`{{ remote_wan_ip }}`を入れ替え、VTIアドレスの下位オクテットも入れ替えた設定を投入してもらいます。
+
+```bash
+configure
+
+set vpn ipsec ike-group IKE-S2S key-exchange ikev2
+set vpn ipsec ike-group IKE-S2S lifetime 28800
+set vpn ipsec ike-group IKE-S2S proposal 1 encryption aes256
+set vpn ipsec ike-group IKE-S2S proposal 1 hash sha256
+set vpn ipsec ike-group IKE-S2S proposal 1 dh-group 14
+set vpn ipsec ike-group IKE-S2S dead-peer-detection action restart
+set vpn ipsec ike-group IKE-S2S dead-peer-detection interval 30
+set vpn ipsec ike-group IKE-S2S dead-peer-detection timeout 120
+
+set vpn ipsec esp-group ESP-S2S lifetime 3600
+set vpn ipsec esp-group ESP-S2S pfs dh-group14
+set vpn ipsec esp-group ESP-S2S proposal 1 encryption aes256
+set vpn ipsec esp-group ESP-S2S proposal 1 hash sha256
+
+set vpn ipsec auto-firewall-nat-exclude enable
+
+set vpn ipsec site-to-site peer {{ remote_wan_ip }} description ipsec-s2s
+set vpn ipsec site-to-site peer {{ remote_wan_ip }} local-address {{ local_wan_ip }}
+set vpn ipsec site-to-site peer {{ remote_wan_ip }} authentication mode pre-shared-secret
+set vpn ipsec site-to-site peer {{ remote_wan_ip }} authentication pre-shared-secret ********
+set vpn ipsec site-to-site peer {{ remote_wan_ip }} ike-group IKE-S2S
+set vpn ipsec site-to-site peer {{ remote_wan_ip }} vti bind vti0
+set vpn ipsec site-to-site peer {{ remote_wan_ip }} vti esp-group ESP-S2S
+
+set interfaces vti vti0 address 10.255.255.1/30
+
+commit
+save
+```
+
+事前共有鍵の実際の値は、コンソール入力時のみ台帳(鍵管理システム)から参照し、設定表示や保存先には平文で残さないようにします。NAT-T(NATトラバーサル)はEdgeOSのIPsec実装(strongSwan)が既定でNAT越しの対向を自動検出するため、個別の有効化コマンドは不要です。
+
+### 3. 経路を設定する
+
+対向拠点LAN宛の通信をVTI経由に向けるスタティックルートを追加します。
+
+```bash
+configure
+
+set protocols static interface-route {{ remote_lan }} next-hop-interface vti0
+
+commit
+save
+```
+
+### 4. 動作確認コマンドを実行する
+
+```bash
+show vpn ipsec sa
+show vpn ipsec status
+show interfaces vti vti0
+```
+
+`show vpn ipsec sa`でSA(Security Association)が`up`の状態で確立していることを確認したうえで、対向拠点LAN側の端末へpingを実行します。
+
+```bash
+ping {{ remote_lan_test_host }}
+```
+
+## 動作確認
+
+- `show vpn ipsec sa`に自拠点`{{ local_wan_ip }}`と対向拠点`{{ remote_wan_ip }}`の間のSAが`up`で表示され、暗号化アルゴリズムが`aes256`・ハッシュが`sha256`であること
+- `show vpn ipsec status`でトンネル(peer `{{ remote_wan_ip }}`)がアクティブ(active)と表示されること
+- `show interfaces vti vti0`でVTIインターフェースが`u/u`(administratively up / link up)であり、パケットカウンタが増加していること
+- 自拠点LAN`{{ local_lan }}`の端末から対向拠点LAN`{{ remote_lan }}`の端末へpingが成功すること
+
+## 注意事項
+
+- 事前共有鍵は両拠点で完全に一致していないとIKEが確立しない。コピー&ペーストではなく台帳の同一値を参照するなど、入力ミスを防ぐ運用にする。
+- CLIで`ike-group`/`esp-group`/`site-to-site peer`をカスタマイズした後にGUI(Web UI)側でIPsec設定を変更すると、既定値にリセットされる場合がある。以降の変更はCLIに統一する。
+- `commit`だけでは再起動時に設定が失われる。`save`の実施を忘れず、対向拠点側の担当者にも同様の実施を依頼する。
