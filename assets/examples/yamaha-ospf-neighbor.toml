@@ -1,0 +1,4 @@
+router_id = "10.10.10.1"
+area_id = 0
+ospf_interfaces = ["lan1", "lan2", "lan3"]
+passive_interfaces = ["lan3"]

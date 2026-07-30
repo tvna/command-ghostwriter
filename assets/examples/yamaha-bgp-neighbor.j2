@@ -1,0 +1,98 @@
+# YAMAHA RTXルータのeBGPネイバー確立
+
+異なるAS(自律システム)間でeBGPネイバーを確立し、経路広告と受信経路の確認を行います。対向ルータのAS番号・IPアドレス・認証キーは事前に対向管理者と合意しておく必要があります。RTX830/840/1210/1220/1300/3500/3510/5000等、BGP-4に対応したモデル・ファームウェアであることを事前に確認してください。
+
+## 目的
+
+eBGPネイバーをリモートAS `{{ remote_asn }}` との間で確立し、フィルタを介した経路広告と、ネイバー状態`Established`の確認ができるようになることを目指します。
+
+## 用語解説
+
+- **AS(Autonomous System)**: BGPにおける経路制御の管理単位。組織ごとに一意なAS番号を持つ
+- **eBGP(External BGP)**: 異なるAS間で経路交換を行うBGPセッション
+- **bgp neighbor**: 対向ルータを登録するコマンド。`bgp neighbor <neighbor_id> <remote_as> <remote_address>`という書式で、先頭の`neighbor_id`は任意の管理番号(Ciscoのように相手のIPアドレスそのものをキーにしない点がRTX特有)
+- **bgp import / bgp export**: 自AS内の経路をBGPに取り込み(import)、対向ASへ広告する範囲を絞り込む(export)ための一対のコマンド。Ciscoの`network`文に相当する機能を、フィルタ番号を介して組み立てる
+- **bgp neighbor pre-shared-key**: BGPセッションをTCP MD5認証で保護するための、`bgp neighbor`とは別立てのコマンド
+
+## シナリオ設定
+
+自AS `{{ local_asn }}`(router-id `{{ router_id }}`)から、対向AS `{{ remote_asn }}`・アドレス `{{ neighbor_ip }}`(`{{ neighbor_description }}`)とeBGPネイバーを確立します。
+
+以下の{{ advertised_networks | length }}個のネットワークを広告します。
+
+{% for n in advertised_networks %}- `{{ n }}`
+{% endfor %}
+セッションはMD5認証で保護します。
+
+## 手順
+
+### 1. 事前にAS番号とIPの疎通を確認する
+
+```bash
+show ip route
+ping {{ neighbor_ip }}
+```
+
+対向ルータの直接接続インターフェース(またはループバック、マルチホップ構成の場合)への疎通が取れていることを確認します。
+
+### 2. BGPを有効化しAS番号とrouter-idを設定する
+
+```bash
+bgp use on
+bgp autonomous-system {{ local_asn }}
+bgp router id {{ router_id }}
+```
+
+### 3. 広告するネットワークをフィルタで定義し、自AS発の経路としてBGPへ取り込む
+
+広告したい各ネットワークにフィルタ番号を割り当てます。
+
+```bash
+{% for n in advertised_networks %} bgp import filter {{ loop.index }} equal {{ n }}
+{% endfor %} bgp import {{ local_asn }} static filter {% for n in advertised_networks %}{{ loop.index }} {% endfor %}
+```
+
+`bgp import`は該当フィルタに一致するstatic経路(ルーティングテーブル上に実在する経路)のみをBGPへ取り込みます。事前に`show ip route`で対象ネットワークが経路として存在することを確認してください。
+
+### 4. エクスポートフィルタで対向ASへの広告内容を絞り込む
+
+```bash
+{% for n in advertised_networks %} bgp export filter {{ loop.index }} equal {{ n }}
+{% endfor %} bgp export {{ remote_asn }} filter {% for n in advertised_networks %}{{ loop.index }} {% endfor %}
+```
+
+### 5. ネイバーとMD5認証を設定する
+
+```bash
+bgp neighbor 1 {{ remote_asn }} {{ neighbor_ip }}
+bgp neighbor pre-shared-key 1 text {{ bgp_password }}
+bgp configure refresh
+save
+```
+
+RTXの`bgp neighbor`コマンドにはCiscoの`neighbor ... description`に相当するパラメータが確認できなかったため、`{{ neighbor_description }}`は台帳・コメント等の運用ドキュメント側で対向先を識別する用途に用いてください。
+
+### 6. ネイバー状態と受信経路をshow status bgp neighborで確認する
+
+```bash
+show status bgp neighbor
+show ip route
+```
+
+`show status bgp neighbor`の`BGP state`が`Established`であることを確認します。
+
+## 動作確認
+
+- `show status bgp neighbor`で `{{ neighbor_ip }}` の`BGP state`が`Established`であること
+- `show status bgp neighbor`のAS番号が `{{ remote_asn }}` と一致すること
+- `show ip route`に対向AS経由のネットワークが`BGP`種別として学習されていること
+- 自AS広告分({{ advertised_networks | join(', ') }})が対向ルータ側の`show ip route`(または`show status bgp neighbor`の詳細)で確認できること(対向機器での確認が必要)
+
+## 注意事項
+
+- MD5認証キー(`bgp neighbor pre-shared-key`)は両端で完全に一致させる必要があり、不一致だとTCPセッション自体が確立しない。疎通確認と合わせて切り分けること。
+- `bgp import`はルーティングテーブルに実在するstatic経路のみを取り込む。広告したいネットワークが動的経路(OSPF等)でしか存在しない場合は、その旨をimportの取り込み元プロトコル(`static`以外に`rip`/`ospf`等)に合わせて調整する必要がある。
+- `bgp import`/`bgp export`の複数フィルタ番号をまとめて1つのコマンドに列挙する書式(`filter 1 2 ...`)は、公式ドキュメントで確認できた単一フィルタの設定例からの類推であり、実機・ファームウェアでの動作は導入前に対向管理者と合意のうえ`show status bgp neighbor`等で必ず検証すること。
+- 誤ったAS番号やネイバーIPを設定すると、意図しないASと経路交換してしまうリスクがある。投入前に対向情報を再確認し、`bgp import filter`/`bgp export filter`の範囲を必要最小限に絞ること。
+- `neighbor_description`(`{{ neighbor_description }}`)はRTXの設定コマンドとして保存される項目ではない。対向先の識別は構成管理台帳やコンフィグ中のコメント行など、運用ドキュメント側で管理すること。
+- `save`を忘れると再起動時に設定が失われる。

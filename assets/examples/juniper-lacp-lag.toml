@@ -1,0 +1,5 @@
+channel_id = 0
+member_interfaces = ["ge-0/0/1", "ge-0/0/2"]
+lacp_mode = "active"
+trunk_vlans = [10, 20, 30]
+load_balance_method = "no-l4-destination-port"

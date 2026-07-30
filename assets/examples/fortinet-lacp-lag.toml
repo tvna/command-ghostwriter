@@ -1,0 +1,5 @@
+channel_id = 1
+member_interfaces = ["port1", "port2"]
+lacp_mode = "active"
+trunk_vlans = [10, 20, 30]
+load_balance_method = "L4"

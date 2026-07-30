@@ -1,0 +1,7 @@
+local_asn = 65001
+router_id = "10.10.10.1"
+neighbor_ip = "192.0.2.2"
+remote_asn = 65002
+neighbor_description = "ISP-A-EDGE"
+advertised_networks = ["10.10.10.0/24", "10.10.20.0/24"]
+bgp_password = "CHANGE-ME-BGP-KEY"

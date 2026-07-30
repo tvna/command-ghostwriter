@@ -1,0 +1,93 @@
+# FortiGateのeBGPネイバー確立
+
+異なるAS(自律システム)間でeBGPネイバーを確立し、経路広告と受信経路の確認を行います。対向ルータのAS番号・IPアドレス・認証キーは事前に対向管理者と合意しておく必要があります。
+
+## 目的
+
+eBGPネイバーをリモートAS `{{ remote_asn }}` との間で確立し、`config network`による経路広告とネイバー状態`Established`の確認ができるようになることを目指します。
+
+## 用語解説
+
+- **AS(Autonomous System)**: BGPにおける経路制御の管理単位。組織ごとに一意なAS番号を持つ
+- **eBGP(External BGP)**: 異なるAS間で経路交換を行うBGPセッション(同一AS内は iBGP と呼ぶ)
+- **ネイバー(Neighbor/Peer)**: BGPセッションを確立する対向ルータ。TCP179番ポートでセッションを張る。FortiOSでは`config neighbor`ブロック配下に対向IPアドレスを`edit`で登録する
+- **config network**: BGPで広告する自AS内のネットワークを、Cisco IOSの`network`文と同様にプレフィックス単位で宣言する設定ブロック
+- **MD5認証(password)**: BGPセッションのTCPパケットにMD5ハッシュを付与し、なりすましを防ぐ任意機能。FortiOSでは`config neighbor`配下の`set password`で設定する
+- **CLIブロック構文(`config`/`edit`/`set`/`next`/`end`)**: FortiOSのCLIはCisco IOSの`configure terminal`後にモードへ入るコマンド体系とは異なり、`config`でオブジェクト種別に入り、`edit`で個々の設定項目(ネイバーIP等)を選択し、`set`でパラメータを設定、`next`で次の項目へ、`end`でブロックを抜ける構文を採る
+
+## シナリオ設定
+
+自AS `{{ local_asn }}`(router-id `{{ router_id }}`)から、対向AS `{{ remote_asn }}`・アドレス `{{ neighbor_ip }}`(`{{ neighbor_description }}`)とeBGPネイバーを確立します。
+
+以下の{{ advertised_networks | length }}個のネットワークを広告します。
+
+{% for n in advertised_networks %}- `{{ n }}`
+{% endfor %}
+セッションはMD5認証(password)で保護します。
+
+## 手順
+
+### 1. 事前にAS番号とIPの疎通を確認する
+
+```bash
+get router info routing-table all
+execute ping {{ neighbor_ip }}
+```
+
+対向ルータの直接接続インターフェース(またはループバック、iBGPマルチホップ構成の場合)への疎通が取れていることを確認します。
+
+### 2. router bgpとネイバーを設定する
+
+```bash
+config router bgp
+    set as {{ local_asn }}
+    set router-id {{ router_id }}
+    config neighbor
+        edit "{{ neighbor_ip }}"
+            set remote-as {{ remote_asn }}
+            set description "{{ neighbor_description }}"
+            set password "{{ bgp_password }}"
+            set soft-reconfiguration enable
+        next
+    end
+end
+```
+
+### 3. config networkで経路を広告する
+
+```bash
+config router bgp
+    config network
+{% for n in advertised_networks %}        edit {{ loop.index }}
+            set prefix {{ n.split('/')[0] }} 255.255.255.0
+        next
+{% endfor %}    end
+end
+```
+
+`config network`はルーティングテーブルに実在する経路のみ広告対象になるため(`network-import-check`が既定で有効)、事前に`get router info routing-table all`で該当ネットワークがルーティングテーブルに存在することを確認してください。
+
+### 4. ネイバー状態と受信経路をget router info bgp summaryで確認する
+
+```bash
+get router info bgp summary
+get router info bgp neighbors {{ neighbor_ip }}
+get router info bgp neighbors {{ neighbor_ip }} received-routes
+get router info routing-table bgp
+```
+
+`get router info bgp summary`の対向IPの`State/PfxRcd`列が数値(受信プレフィックス数)であれば`Established`、`Idle`や`Active`等の文字列であれば未確立です。
+
+## 動作確認
+
+- `get router info bgp summary`で `{{ neighbor_ip }}` の状態が `Established`(State/PfxRcd列が数値)であること
+- `get router info bgp neighbors {{ neighbor_ip }}`のAS番号が `{{ remote_asn }}` と一致すること
+- `get router info routing-table bgp`に対向AS経由のネットワークが `B`(BGP由来)として学習されていること
+- 自AS広告分({{ advertised_networks | join(', ') }})が対向ルータ側の`get router info bgp neighbors`(対向機器での確認が必要)で受信できていること
+
+## 注意事項
+
+- MD5認証(password)は両端で完全に一致させる必要があり、不一致だとTCPセッション自体が確立しない(BGPログに明確な認証エラーが出ない場合があるため、疎通確認と合わせて切り分けること)。
+- `config network`はルーティングテーブルに厳密一致する経路がないと広告されない(`network-import-check`を無効化すれば緩和できるが、意図しない経路の誤広告リスクが増すため既定の有効設定を推奨する)。サマライズしたい場合は`config network`のマスクをサマリ用に合わせるか、`config router aggregate-address`を使う。
+- 誤ったAS番号やネイバーIPを設定すると、意図しないASと経路交換してしまうリスクがある。投入前に対向情報を再確認し、可能であれば`config neighbor`配下の`set prefix-list-in`/`set prefix-list-out`等でフィルタも検討する。
+- `bgp_password`はサンプル値であり、実運用では推測されない強固な値を対向管理者と個別の経路(暗号化されたチャネル)で共有し、設定ファイルや手順書に平文で残さないこと。

@@ -1,0 +1,95 @@
+# NEC UNIVERGE IXシリーズのリンクアグリゲーション(スタティック)構成
+
+スイッチハブ(SWHUB)ポートを束ねてリンクアグリゲーション(LAG)を構成し、帯域拡張とポート冗長化を実現します。NEC UNIVERGE IXシリーズは**スタティック(静的)設定のみ対応し、LACPによる動的ネゴシエーションには対応していません**。対向スイッチ側もスタティックな集約設定で揃える必要があるため、対向機器の設定と併せて実施してください。
+
+## 目的
+
+IXシリーズのスイッチハブポートをLAGグループ {{ channel_id }} としてスタティックに集約し、通常時の動作とポート断時の縮退動作の両方を検証できるようになることを目指します。
+
+## 用語解説
+
+- **リンクアグリゲーション(LAG)**: 複数の物理ポートを束ねて1つの論理リンクとして扱う機能。IXシリーズは`port link-aggregation`コマンドによるスタティック設定のみをサポートする
+- **LACP(Link Aggregation Control Protocol)**: IEEE 802.3ad標準の動的リンク集約プロトコル。CiscoやJuniper等の多くの機器はactive/passiveモードでLACPを動的にネゴシエーションできるが、**IXシリーズはこの動的ネゴシエーションに対応していない**(公式FAQで明記されている既知の制約)
+- **SWHUB(スイッチハブ)ポート**: IXシリーズの一部機種が備える内蔵L2スイッチのLANポート群。機種によって搭載デバイス名・ポート数が異なる(例: IX2215は`GigaEthernet2`が8ポートのSWHUBデバイス)
+- **LAGグループ番号**: `port <ポート番号> link-aggregation <LAGグループ番号>`で指定する、集約先の論理グループ番号
+- **ポートVLANグループ**: `vlan-group`コマンドで構成する、SWHUBポート単位のVLAN割り当て。同一LAGに属する全ポートは同一のポートVLANに揃える必要がある
+
+## シナリオ設定
+
+SWHUBデバイス `GigaEthernet2`(本書では例としてIX2215相当の8ポートSWHUBを想定)配下の、以下{{ member_interfaces | length }}本の物理ポートをLAGグループ {{ channel_id }} としてスタティックに集約します。
+
+{% for p in member_interfaces %}- ポート {{ p }}(`GigaEthernet2` 配下)
+{% endfor %}
+
+本書では`lacp_mode`(active/passive)・`trunk_vlans`・ロードバランス方式の変数化は行っていません。理由は「注意事項」を参照してください。
+
+## 手順
+
+### 1. 事前に対象ポートの状態を確認する
+
+両端の機器で、束ねる物理ポートの速度・デュプレックス・現在のポートVLAN設定が一致しているか確認します。設定が食い違うと集約が成立しないか、意図しない動作になります。
+
+```bash
+show devices GigaEthernet2 detail
+show interfaces
+```
+
+### 2. deviceコンフィグモードでLAGへポートを割り当てる
+
+```bash
+configure
+device GigaEthernet2
+{% for p in member_interfaces %} port {{ p }} link-aggregation {{ channel_id }}
+{% endfor %}exit
+exit
+write memory
+```
+
+### 3. LAGの状態を確認する
+
+```bash
+show devices GigaEthernet2 detail
+show interfaces
+```
+
+束ねた{{ member_interfaces | length }}本のポートが同一LAGグループ {{ channel_id }} に所属し、いずれも稼働状態(up)であることを確認します。
+
+### 4. ポート断時の縮退動作を検証する
+
+メンバーポートの1本(ポート{{ member_interfaces[0] }})を停止し、通信が継続すること、残りのポートで集約が維持されることを確認します。
+
+```bash
+configure
+device GigaEthernet2
+ port {{ member_interfaces[0] }} shutdown
+exit
+exit
+show devices GigaEthernet2 detail
+```
+
+確認後は必ず復旧します。
+
+```bash
+configure
+device GigaEthernet2
+ no port {{ member_interfaces[0] }} shutdown
+exit
+exit
+show devices GigaEthernet2 detail
+```
+
+## 動作確認
+
+- `show devices GigaEthernet2 detail`で、ポート{{ member_interfaces | join(', ') }}がいずれも稼働状態(up)で、同一LAGグループ {{ channel_id }} に所属していることが表示されること
+- `show interfaces`でLAGグループ {{ channel_id }} に対応する論理インターフェースが表示されること
+- ポート{{ member_interfaces[0] }}を停止しても、LAG経由の通信が残りのポートで継続すること
+- 停止したポートを`no port {{ member_interfaces[0] }} shutdown`で復旧した後、自動的に集約状態へ復帰すること
+
+## 注意事項
+
+- **最重要: IXシリーズはLACPの動的ネゴシエーションに対応していません。** スタティック設定のみのため、対向機器がLACPの`active`/`passive`モードで動的にネゴシエーションする前提の設定になっていると、IX側は応答せず集約が成立しません。対向機器側も同一のスタティック(手動)設定に揃える必要があります。本テンプレートのTOMLスキーマから`lacp_mode`フィールドを削除しているのはこのためです。
+- LAGを構成する全ポートは同一のポートVLANグループに属している必要があるとNEC公式ドキュメントに明記されています。そのため、Cisco等の`switchport trunk allowed vlan`のように**1つのLAGで複数VLANを同時にタグ付けトランクする構成はIXシリーズでは想定されていません**。複数VLANを扱う必要がある場合は、LAG化しないWAN側インターフェースでサブインターフェース(`interface GigaEthernetX.Y`)ごとに`encapsulation dot1q <VLAN-ID>`を設定する方式を検討し、LAGとの組み合わせ可否は必ず対象機種のマニュアルで確認してください(本テンプレートの`trunk_vlans`フィールド削除はこの制約に基づきます)。
+- ロードバランス方式(送信元/宛先MACアドレスに基づく方式)は固定であり、設定変更コマンドは確認できませんでした。そのため`load_balance_method`フィールドは削除しています。
+- SWHUBデバイス名(`GigaEthernet2`)とポート数は機種依存です(例: IX2106は`GigaEthernet1`、IX2215は`GigaEthernet2`)。投入前に対象機種のハードウェアマニュアルでデバイス名を必ず確認してください。
+- **未確認事項(要レビュー)**: 本テンプレートのコマンド体系はNEC公式のIX-R/IX-Vコマンドリファレンス(現行機種向け)を一次情報として構成しています。`configure`(コンフィグモード遷移)と`exit`によるモード復帰の正確な段数、および`show devices`/`show interfaces`の実際の出力フォーマットは、参照した文書内に完全な実行例が見当たらず断定できませんでした。本番投入前に、対象機種・ファームウェアバージョンの実機またはコマンドリファレンスで必ず裏取りしてください。
+- ポート停止による縮退動作検証(手順4)は実運用トラフィックに影響し得るため、必ずメンテナンス時間帯に実施し、確認後は速やかに`no port ... shutdown`で復旧すること。

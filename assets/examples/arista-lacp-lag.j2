@@ -1,0 +1,103 @@
+# Arista EOSスイッチのPort-Channel(LACP)構成
+
+複数の物理リンクをLACPで束ね、帯域拡張とリンク冗長化を実現するPort-Channelを構成します。両端のスイッチで設定を揃える必要があるため、対向機器の設定と併せて実施してください。
+
+## 目的
+
+LACPによる複数リンクの論理的な集約(Port-Channel)を構成し、通常時の負荷分散動作とリンク断時の縮退動作の両方を検証できるようになることを目指します。
+
+## 用語解説
+
+- **LACP(Link Aggregation Control Protocol)**: IEEE 802.3ad標準の動的リンク集約プロトコル。対向機器と制御パケットを交換して自動的にチャネルを形成する
+- **Port-Channel**: EOSにおける集約済み論理インターフェースの呼称。Cisco IOSは同じ機能を「EtherChannel」と呼ぶため、`show etherchannel summary`のようなCisco用語のコマンドはEOSには存在せず、`show port-channel`系のコマンドに読み替える必要がある
+- **モードの組合せ**: LACPは`active`(自ら集約を開始)と`passive`(相手からの要求を待つ)があり、両端の少なくとも一方が`active`である必要がある(`passive`同士は集約が成立しない)。LACPを使わない静的集約は`channel-group <id> mode on`
+- **channel-group**: 束ねる物理インターフェースと、それらが所属する論理インターフェース(Port-Channel)を結びつける番号。コマンド名自体はCisco IOSと共通
+- **ロードバランス方式**: Cisco IOSの`port-channel load-balance src-dst-ip`のような単純なキーワード指定とは異なり、EOSはスイッチのASICプラットフォーム名(`trident`、`fm6000`等)とハッシュ対象フィールドを組み合わせて指定する。プラットフォームによりコマンド体系が変わるため、実機のモデルに合わせた確認が必須
+- **min-links**: Port-Channelがアクティブになるために必要な最小メンバーリンク数。下回るとPort-Channel全体がダウンする
+
+## シナリオ設定
+
+channel-group {{ channel_id }} として以下の{{ member_interfaces | length }}本の物理インターフェースを束ね、LACPモード `{{ lacp_mode }}` で集約します。
+
+{% for intf in member_interfaces %}- `{{ intf }}`
+{% endfor %}
+
+集約後のPort-Channel{{ channel_id }}はVLAN {{ trunk_vlans | join(', ') }} を通すL2トランクポートとし(L3集約にする場合はメンバー・Port-Channel双方に`no switchport`が必要になる点に注意)、ロードバランス方式は `{{ load_balance_method }}` を使用します。
+
+## 手順
+
+### 1. 事前条件を確認する
+
+両端のスイッチで、束ねる物理インターフェースの速度・現在のswitchport設定が一致しているか確認します。設定が食い違うと集約が成立しないか、意図しない動作になります。
+
+```bash
+show interfaces status
+{% for intf in member_interfaces %}show interfaces {{ intf }} status
+{% endfor %}```
+
+### 2. Port-Channelインターフェースを作成し、メンバーへchannel-groupを設定する
+
+```bash
+configure terminal
+interface Port-Channel{{ channel_id }}
+exit
+{% for intf in member_interfaces %}interface {{ intf }}
+   channel-group {{ channel_id }} mode {{ lacp_mode }}
+exit
+{% endfor %}```
+
+### 3. Port-Channelをトランクとして設定する
+
+```bash
+interface Port-Channel{{ channel_id }}
+   switchport mode trunk
+   switchport trunk allowed vlan {{ trunk_vlans | join(',') }}
+exit
+port-channel load-balance {{ load_balance_method }}
+end
+write memory
+```
+
+### 4. show port-channelとshow lacpで状態を確認する
+
+```bash
+show port-channel {{ channel_id }}
+show lacp interface {{ member_interfaces[0] }}
+show interfaces trunk
+```
+
+`show port-channel {{ channel_id }}`のメンバー行が全てbundled(集約済み)として表示されることを確認します。
+
+### 5. リンク断時の縮退動作を検証する
+
+メンバーインターフェースの1本を停止し、通信が継続すること、残りのリンクへ切り替わることを確認します。
+
+```bash
+interface {{ member_interfaces[0] }}
+   shutdown
+exit
+show port-channel {{ channel_id }}
+```
+
+確認後は必ず復旧します。
+
+```bash
+interface {{ member_interfaces[0] }}
+   no shutdown
+exit
+show port-channel {{ channel_id }}
+```
+
+## 動作確認
+
+- `show port-channel {{ channel_id }}`に束ねた{{ member_interfaces | length }}本のメンバーインターフェースが全てbundled状態で表示されること
+- `show interfaces status`で各メンバーインターフェースが`connected`かつ`in Po{{ channel_id }}`と表示されること
+- `show interfaces trunk`のPo{{ channel_id }}行でAllowed VLANsに `{{ trunk_vlans | join(', ') }}` が含まれること
+- メンバーインターフェースを1本停止しても、Port-Channel経由の通信が継続すること
+- 停止したインターフェースを`no shutdown`した後、自動的に集約状態へ復帰すること
+
+## 注意事項
+
+- 両端で`channel-group`のモードが不整合(例: 片方`passive`かつ相手も`passive`)だと集約が成立せず、各インターフェースが個別リンクとして動作してしまう。意図しないループやスパニングツリー障害の原因になるため、投入前に対向機器の設定も確認する。
+- `port-channel load-balance`はスイッチのASICプラットフォームに依存するコマンド体系であるため、本書の`{{ load_balance_method }}`はTrident系チップセットを前提とした一例。実機のプラットフォームに応じて`show port-channel load-balance`で対応キーワードを確認してから投入すること(未検証の場合は投入前に必ず確認する)。
+- 縮退動作の検証(手順5)は実運用トラフィックに影響し得るため、必ずメンテナンス時間帯に実施し、確認後は速やかに`no shutdown`で復旧すること。

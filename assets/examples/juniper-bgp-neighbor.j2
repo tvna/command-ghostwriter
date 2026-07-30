@@ -1,0 +1,85 @@
+# JuniperルータのeBGPネイバー確立
+
+異なるAS(自律システム)間でeBGPネイバーを確立し、経路広告と受信経路の確認を行います。対向ルータのAS番号・IPアドレス・認証キーは事前に対向管理者と合意しておく必要があります。
+
+## 目的
+
+eBGPネイバーをリモートAS `{{ remote_asn }}` との間で確立し、エクスポートポリシーによる経路広告とネイバー状態`Establ`の確認ができるようになることを目指します。
+
+## 用語解説
+
+- **AS(Autonomous System)**: BGPにおける経路制御の管理単位。組織ごとに一意なAS番号を持つ。Junos/Cisco IOSで概念は共通
+- **eBGP(External BGP)**: 異なるAS間で経路交換を行うBGPセッション。Junosでは`group`の`type`を`external`に設定することで明示する(同一AS内のiBGPは`type internal`)
+- **group/neighbor**: Junosは対向ルータを`neighbor`単体ではなく、共通設定をまとめる`group`配下に`neighbor`を所属させて設定する。Cisco IOSの`router bgp`直下に個々の`neighbor <ip>`文を並べる方式と異なり、複数ネイバーで共通のポリシーやAS番号をグループ単位で使い回せる
+- **export policy**: Junosは経路広告に`network`文を持たず、`policy-options policy-statement`で作成したポリシーを`group`の`export`に適用する方式を取る。Cisco IOSの`network <ip> mask <mask>`に相当する処理を、ポリシーの`route-filter <prefix> exact`条件で表現する
+- **route-filter exact**: ポリシー条件の1つで、指定したプレフィックスに完全一致する経路のみを対象にする。マスク長が異なる経路(部分集合・上位集約)は対象外になる
+- **authentication-key**: BGPセッションのTCPパケットにMD5ハッシュを付与し、なりすましを防ぐ任意機能。Cisco IOSの`neighbor <ip> password <key>`に相当する
+- **set/commit**: JunosはCisco IOSの`configure terminal` ... `end`ではなく、`configure`で候補設定に入り`set`文を積み重ねた後`commit`して初めて動作設定に反映する
+
+## シナリオ設定
+
+自AS `{{ local_asn }}`(router-id `{{ router_id }}`)から、対向AS `{{ remote_asn }}`・アドレス `{{ neighbor_ip }}`(`{{ neighbor_description }}`)とeBGPネイバーを確立します。
+
+以下の{{ advertised_networks | length }}個のネットワークを広告します。
+
+{% for n in advertised_networks %}- `{{ n }}`
+{% endfor %}
+セッションはMD5認証(`authentication-key`)で保護します。
+
+## 手順
+
+### 1. 事前にAS番号とIPの疎通を確認する
+
+```bash
+show route
+ping {{ neighbor_ip }} count 5
+```
+
+対向ルータの直接接続インターフェース(またはループバック、マルチホップ構成の場合)への疎通が取れていることを確認します。
+
+### 2. 自ASとrouter-id、BGPグループ・ネイバーを設定する
+
+```bash
+configure
+set routing-options autonomous-system {{ local_asn }}
+set routing-options router-id {{ router_id }}
+set protocols bgp group EBGP-AS{{ remote_asn }} type external
+set protocols bgp group EBGP-AS{{ remote_asn }} peer-as {{ remote_asn }}
+set protocols bgp group EBGP-AS{{ remote_asn }} neighbor {{ neighbor_ip }} description "{{ neighbor_description }}"
+set protocols bgp group EBGP-AS{{ remote_asn }} neighbor {{ neighbor_ip }} authentication-key "{{ bgp_password }}"
+```
+
+### 3. エクスポートポリシーで経路を広告する
+
+```bash
+{% for n in advertised_networks %}set policy-options policy-statement EXPORT-TO-AS{{ remote_asn }} term {{ loop.index }} from route-filter {{ n }} exact
+set policy-options policy-statement EXPORT-TO-AS{{ remote_asn }} term {{ loop.index }} then accept
+{% endfor %}set protocols bgp group EBGP-AS{{ remote_asn }} export EXPORT-TO-AS{{ remote_asn }}
+commit
+```
+
+`route-filter <prefix> exact`はルーティングテーブルに完全一致する経路のみ広告対象になるため、事前に`show route`で該当ネットワークがルーティングテーブルに存在することを確認してください。
+
+### 4. ネイバー状態と受信経路をshow bgp summaryで確認する
+
+```bash
+show bgp summary
+show bgp neighbor {{ neighbor_ip }}
+show route protocol bgp
+```
+
+`show bgp summary`の対向IPの`State`列が`Establ`であれば確立、`Active`や`Idle`等であれば未確立です。
+
+## 動作確認
+
+- `show bgp summary`で `{{ neighbor_ip }}` の状態(State/#Active/Received/Accepted/Damped列)が `Establ` であること
+- `show bgp neighbor {{ neighbor_ip }}`のPeer ASが `{{ remote_asn }}` と一致すること
+- `show route protocol bgp`に対向AS経由のネットワークがBGP由来として学習されていること
+- `show route advertising-protocol bgp {{ neighbor_ip }}`で自AS広告分({{ advertised_networks | join(', ') }})が広告されていること
+
+## 注意事項
+
+- `authentication-key`は両端で完全に一致させる必要があり、不一致だとTCPセッション自体が確立しない(ログに明確な認証エラーが出ない場合があるため、疎通確認と合わせて切り分けること)。
+- `route-filter <prefix> exact`はルーティングテーブルに厳密一致する経路がないと広告されない。集約(サマリ)して広告したい場合は`aggregate-address`相当の`routing-options aggregate route`と組み合わせるか、`route-filter`のマッチ条件(`orlonger`等)を見直す。
+- 誤ったAS番号やネイバーIPを設定すると、意図しないASと経路交換してしまうリスクがある。投入前に対向情報を再確認し、可能であれば`import`ポリシーで受信経路にもプレフィックスフィルタを検討する。
+- リモート接続経由で設定変更する場合、誤ったAS番号やフィルタでセッション自体が切れると復旧できなくなる恐れがある。`commit confirmed 5`のような確認付きコミットを使えば、一定時間後に自動で直前の設定へロールバックされ、ロックアウトを防止できる。

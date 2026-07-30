@@ -1,0 +1,89 @@
+# NEC UNIVERGE IXルータのOSPF単一エリア設定
+
+複数のNEC UNIVERGE IXルータ間でOSPFエリア{{ area_id }}を構成し、隣接関係(ネイバー)の確立と動的な経路交換を確認します。設定はコンソール接続で実施してください。
+
+## 目的
+
+OSPFの単一エリア構成をrouter-idと`network ... area`文で定義し、`passive-interface`で不要な隣接形成を抑制した上で、ネイバー確立と経路交換を検証できるようになることを目指します。
+
+## 用語解説
+
+- **OSPFプロセスID**: IXシリーズでは`ip router ospf <プロセスID>`(1〜65535)でOSPFプロセスを開始する。本書ではプロセスID`1`を使用する
+- **LSA(Link State Advertisement)**: OSPFルータ同士が交換する、自身のリンク状態(接続インターフェースや経路情報)の広告
+- **ネイバー(Neighbor)**: OSPFのHelloパケットをやり取りし、隣接関係が成立した対向ルータ
+- **エリア(Area)**: OSPFのLSA伝播範囲を区切る論理単位。IXシリーズでは`area <エリアID>`コマンドでエリア自体を登録し、`network`文でインターフェース(またはプレフィックス)を各エリアに参加させる
+- **passive-interface**: OSPFのHelloパケットを送出させず、経路広告のみ行うインターフェース設定。末端セグメントでの不要な隣接形成を防ぐ。IXシリーズも同名のコマンドで対応する
+
+## シナリオ設定
+
+router-id `{{ router_id }}` のルータで、`ip router ospf 1`プロセス配下のエリア {{ area_id }} に以下の{{ ospf_interfaces | length }}本のインターフェースを参加させます。
+
+{% for intf in ospf_interfaces %}- `{{ intf }}`
+{% endfor %}
+
+このうち以下のインターフェースは末端セグメントのため`passive-interface`とします。
+
+{% for intf in passive_interfaces %}- `{{ intf }}`
+{% endfor %}
+
+IXシリーズにはCisco IOSの`auto-cost reference-bandwidth`に相当する自動コスト再計算コマンドが見当たらなかったため、本書では参照帯域幅の変数化は行っていません(詳細は「注意事項」を参照)。
+
+## 手順
+
+### 1. 事前にインターフェースの状態を確認する
+
+```bash
+show interfaces
+show running-config
+```
+
+対象インターフェースがOSPF参加予定のIPアドレス・帯域と一致しているか確認します。
+
+### 2. OSPFプロセスを開始しrouter-idとエリアを登録する
+
+```bash
+configure
+ip router ospf 1
+ router-id {{ router_id }}
+ area {{ area_id }}
+```
+
+### 3. network文でエリアへ参加させる
+
+```bash
+{% for intf in ospf_interfaces %} network {{ intf }} area {{ area_id }}
+{% endfor %}```
+
+### 4. passive-interfaceを設定する
+
+末端セグメントでは不要な隣接形成・Hello送出を止め、意図しないOSPFネイバーの成立を防ぎます。
+
+```bash
+{% for intf in passive_interfaces %} passive-interface {{ intf }}
+{% endfor %}exit
+exit
+write memory
+```
+
+### 5. ネイバー確立と経路をshow ip ospf neighborで確認する
+
+```bash
+show ip ospf neighbor
+show ip ospf interface
+show ip route ospf
+```
+
+## 動作確認
+
+- `show ip ospf neighbor`に対向ルータが`Full`状態(マルチアクセスセグメントではDR/BDR選出後に`Full`または`2-Way`)で表示されること
+- `show ip route ospf`に他ルータ経由のネットワークがOSPF由来として学習されていること
+- `show ip ospf interface`で `{{ passive_interfaces[0] }}` 等のpassive対象インターフェースにネイバーが形成されていないこと
+- 対向ルータの`show ip ospf neighbor`上で、本ルータが Neighbor ID `{{ router_id }}` として認識されていること
+
+## 注意事項
+
+- router-idはルータ内で一意である必要があり、他ルータと重複するとLSAの発信元が正しく識別できず経路計算が不安定になる。ループバックIP等、変化しないアドレスを使うのが望ましい。
+- **参照帯域幅(reference-bandwidth)/auto-cost相当のコマンドは、確認した公式コマンドリファレンス(IX-R/IX-Vコマンドリファレンス)の全OSPFコマンド一覧には含まれておらず、対応する自動コスト再計算機能はないと判断しました。** 高速リンクと低速リンクが混在しコスト差を明示したい場合は、インターフェースごとに`ip ospf cost <コスト値>`コマンドで手動設定する必要があります(このため`reference_bandwidth`フィールドはTOMLスキーマから削除しています)。
+- `area <エリアID>`によるエリア登録コマンドは、stubエリアやNSSA等の特殊属性を持たない通常エリアでも必要かどうか、参照した資料内の実行例だけでは断定できませんでした。念のため本書では明示的に登録する手順としていますが、対象機種で不要・重複エラーとなる場合は対象機種のコマンドリファレンスに従って読み替えてください。
+- `network`文の対象を広く取りすぎると、意図しないインターフェースまでOSPFに参加し、不要な隣接形成やLSA増加を招く。対象範囲は必要最小限にする。
+- **未確認事項(要レビュー)**: `configure`から`ip router ospf 1`配下への遷移、および設定完了後の`exit`によるモード復帰の正確な段数は、公式リファレンスのコマンド単体説明から組み立てたものであり、複数コマンドを含む完全な対話セッションの実行例では裏取りできていません。本番投入前に対象機種の実機で流れを確認してください。

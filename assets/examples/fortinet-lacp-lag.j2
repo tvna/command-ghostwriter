@@ -1,0 +1,111 @@
+# FortiGate/FortiSwitchのLACPリンクアグリゲーション構成
+
+複数の物理ポートをLACPで束ね、帯域拡張とリンク冗長化を実現する集約インターフェース(aggregate interface)を構成します。両端の機器(対向FortiGate/FortiSwitch、または対向スイッチ)で設定を揃える必要があるため、対向機器の設定と併せて実施してください。
+
+## 目的
+
+LACPによる複数物理ポートの論理的な集約(aggregate interface)を構成し、通常時の負荷分散動作とリンク断時の縮退動作の両方を検証できるようになることを目指します。
+
+## 用語解説
+
+- **LACP(Link Aggregation Control Protocol)**: IEEE 802.3ad標準の動的リンク集約プロトコル。対向機器と制御パケットを交換して自動的に集約を形成する
+- **CLIブロック構文(`config`/`edit`/`set`/`next`/`end`)**: FortiOSのCLIはCisco IOSの`configure terminal`後にモードへ入るコマンド体系とは異なり、`config`でオブジェクト種別に入り、`edit`で個々の設定項目(インターフェース名等)を選択し、`set`でパラメータを設定、`next`で次の項目へ、`end`でブロックを抜ける、という宣言的な構文を採る
+- **aggregate interface(type aggregate)**: FortiOSにおけるLACP/静的リンク集約の論理インターフェース種別。`config system interface`で`set type aggregate`として作成する
+- **lacp-mode**: LACPの動作モード。`active`(自ら集約を開始)、`passive`(相手からの要求を待つ)、`static`(LACPを使わない静的集約)があり、`active`と`passive`の組合せでは少なくとも一方が`active`である必要がある(`passive`同士は集約が成立しない)
+- **algorithm**: 集約したリンク間へのトラフィック振り分け方式。`L2`(MACアドレスベース)、`L3`(IPアドレスベース)、`L4`(ポート番号まで含めたベース)から選択する
+- **VLANサブインターフェース**: FortiOSにはCisco IOSの`switchport trunk allowed vlan`に相当する単一コマンドはなく、集約インターフェースの上にVLAN ID(802.1Q)ごとの論理インターフェース(`type vlan`)を重ねて作成することでトランクを表現する
+
+## シナリオ設定
+
+集約インターフェース `agg{{ channel_id }}` として以下の{{ member_interfaces | length }}本の物理ポートを束ね、LACPモード `{{ lacp_mode }}` で集約します。
+
+{% for intf in member_interfaces %}- `{{ intf }}`
+{% endfor %}
+集約インターフェースの上にVLAN {{ trunk_vlans | join(', ') }} のサブインターフェースを作成してトランクとし、ロードバランス方式(algorithm)は `{{ load_balance_method }}` を使用します。
+
+## 手順
+
+### 1. 事前条件を確認する
+
+両端の機器で、束ねる物理ポートの速度・デュプレックス・現在の状態が一致しているか確認します。設定が食い違うと集約が成立しないか、意図しない動作になります。
+
+```bash
+{% for intf in member_interfaces %}get hardware nic {{ intf }}
+{% endfor %}diagnose hardware deviceinfo nic {{ member_interfaces[0] }}
+```
+
+### 2. 集約インターフェース(agg{{ channel_id }})を作成する
+
+```bash
+config system interface
+    edit "agg{{ channel_id }}"
+        set type aggregate
+        set member {% for intf in member_interfaces %}"{{ intf }}"{% if not loop.last %} {% endif %}{% endfor %}
+        set lacp-mode {{ lacp_mode }}
+        set lacp-speed fast
+        set algorithm {{ load_balance_method }}
+    next
+end
+```
+
+### 3. VLANサブインターフェースを作成してトランクとする
+
+```bash
+config system interface
+{% for vlan in trunk_vlans %}    edit "agg{{ channel_id }}.{{ vlan }}"
+        set type vlan
+        set interface "agg{{ channel_id }}"
+        set vlanid {{ vlan }}
+        set vdom "root"
+    next
+{% endfor %}end
+```
+
+### 4. 集約状態をdiagnose netlink aggregateで確認する
+
+```bash
+diagnose netlink aggregate name agg{{ channel_id }}
+get system interface physical
+show system interface agg{{ channel_id }}
+```
+
+`diagnose netlink aggregate name agg{{ channel_id }}`の各メンバーポートが`selected`(distributing/collecting状態)であることを確認します。
+
+### 5. リンク断時の縮退動作を検証する
+
+メンバーポートの1本を停止し、通信が継続すること、残りのポートへ切り替わることを確認します。
+
+```bash
+config system interface
+    edit "{{ member_interfaces[0] }}"
+        set status down
+    next
+end
+diagnose netlink aggregate name agg{{ channel_id }}
+```
+
+確認後は必ず復旧します。
+
+```bash
+config system interface
+    edit "{{ member_interfaces[0] }}"
+        set status up
+    next
+end
+diagnose netlink aggregate name agg{{ channel_id }}
+```
+
+## 動作確認
+
+- `diagnose netlink aggregate name agg{{ channel_id }}`に束ねた{{ member_interfaces | length }}本のメンバーポートが全て`selected`状態で表示されること
+- `get system interface physical`で`agg{{ channel_id }}`がリンクアップしていること
+- `show system interface agg{{ channel_id }}.{{ trunk_vlans[0] }}`等、作成したVLANサブインターフェースがそれぞれ設定通りのVLAN IDで存在すること
+- メンバーポートを1本`set status down`にしても、agg{{ channel_id }}経由の通信が継続すること
+- 停止したポートを`set status up`に戻した後、自動的に`selected`状態へ復帰すること
+
+## 注意事項
+
+- 両端で`lacp-mode`の組合せが不整合(例: 片方`passive`かつ相手も`passive`)だと集約が成立せず、各ポートが個別リンクとして動作してしまう。意図しないループの原因になるため、投入前に対向機器の設定も確認する。
+- 集約インターフェースを構成する前に、メンバーポート個々に他のVLANサブインターフェースやポリシーが割り当たっていないか確認する。既存設定が残っていると`set member`コマンド自体が拒否される場合がある。
+- FortiOSのVLANトランクはCisco IOSのような単一の`switchport trunk allowed vlan`設定ではなく、VLAN IDごとに独立した論理インターフェース(`agg{{ channel_id }}.{{ trunk_vlans[0] }}`等)として作成する点に注意する。対向機器がタグ付けするVLAN IDと過不足なく一致させること。
+- 縮退動作の検証(手順5)は実運用トラフィックに影響し得るため、必ずメンテナンス時間帯に実施し、確認後は速やかに`set status up`で復旧すること。
