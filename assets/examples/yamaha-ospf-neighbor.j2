@@ -1,0 +1,89 @@
+# YAMAHA RTXルータのOSPFネイバー設定
+
+複数のRTXルータ間でOSPFエリアを構成し、隣接関係(ネイバー)の確立と動的な経路交換を確認します。administratorモードで、コンソール接続のうえ実施してください。
+
+## 目的
+
+router-idとエリア設定でOSPFネイバーを確立し、末端セグメントでは`passive`パラメータでHello送出を止めたうえで、ネイバー確立(`Full`相当)と経路交換を検証できるようになることを目指します。
+
+## 用語解説
+
+- **ospf use**: RTXでOSPF機能そのものを有効化するコマンド(`ospf use on`)。Ciscoの`router ospf`に相当する起動スイッチ
+- **ospf area**: ルータ全体で有効化するエリアを宣言するコマンド。バックボーンエリアは数値の`0`ではなく`backbone`というキーワードで指定する(`0.0.0.0`表記は使用不可)
+- **ip <interface> ospf area**: インターフェース単位でOSPFへの参加エリアを指定するコマンド。Ciscoの`network`文(ワイルドカードマスクでネットワーク単位に指定)とは異なり、RTXはインターフェース単位で明示的に指定する
+- **passive パラメータ**: `ip <interface> ospf area <area> passive`のようにコマンド末尾へ付与する形で設定する。Ciscoの`passive-interface`のような独立コマンドではなく、インターフェース参加コマンドのオプションとして指定する点がRTX特有の作法
+- **ospf configure refresh**: OSPF関連の設定変更を反映させるための適用コマンド。これを実行し忘れると、`show config`上は設定済みに見えても動作に反映されない
+
+## シナリオ設定
+
+router-id `{{ router_id }}` のルータで、エリア {{ area_id }} に以下の{{ ospf_interfaces | length }}本のインターフェースを参加させます。
+
+{% for intf in ospf_interfaces %}- `{{ intf }}`
+{% endfor %}
+このうち以下のインターフェースは末端セグメントのため`passive`とします。
+
+{% for intf in passive_interfaces %}- `{{ intf }}`
+{% endfor %}
+RTXの公式コマンドリファレンスにはCiscoの`auto-cost reference-bandwidth`に相当する参照帯域幅の一括調整コマンドが見当たらなかったため、高速リンクのコスト差を反映させたい場合はインターフェースごとの`cost=`パラメータで個別に調整します。
+
+## 手順
+
+### 1. 事前にインターフェースの状態を確認する
+
+```bash
+{% for intf in ospf_interfaces %}show status {{ intf }}
+{% endfor %}show ip route
+```
+
+対象インターフェースがOSPF参加予定のIPアドレスで有効になっているか確認します。
+
+### 2. OSPFを有効化しrouter-idを設定する
+
+router-idは明示的に指定しないと、LANインターフェースのプライマリIPアドレスから自動選択されてしまい、ネットワーク構成の変化で意図せず変わるおそれがあります。
+
+```bash
+ospf use on
+ospf router id {{ router_id }}
+```
+
+### 3. エリアを宣言する
+
+```bash
+{% if area_id == 0 %}ospf area backbone
+{% else %}ospf area {{ area_id }}
+{% endif %}```
+
+### 4. インターフェースをエリアへ参加させ、passiveを設計する
+
+末端セグメントでは`passive`パラメータでHello送出を止め、意図しないOSPFネイバーの成立を防ぎます。
+
+```bash
+{% for intf in ospf_interfaces %} ip {{ intf }} ospf area {% if area_id == 0 %}backbone{% else %}{{ area_id }}{% endif %}{% if intf in passive_interfaces %} passive{% endif %}
+{% endfor %}ospf configure refresh
+save
+```
+
+### 5. ネイバー確立と経路をshow status ospf neighborで確認する
+
+```bash
+show status ospf neighbor
+show status ospf interface
+show ip route
+```
+
+`show status ospf interface`の該当インターフェースが`passive`扱いになっていること(Helloを送出していないこと)も確認します。
+
+## 動作確認
+
+- `show status ospf neighbor`に対向ルータが`Full`状態(またはマルチアクセスセグメントではDR/BDR選出後に`Full`/`2-Way`)で表示されること
+- `show ip route`に他ルータ経由のネットワークが`OSPF`種別として学習されていること
+- `show status ospf interface`で`{{ passive_interfaces[0] }}`等のpassive対象インターフェースにネイバーが存在しないこと
+- `ospf router id`で指定した`{{ router_id }}`が実際のrouter-idとして使われていること
+
+## 注意事項
+
+- router-idはルータ内で一意である必要があり、他ルータと重複するとLSAの発信元が正しく識別できず経路計算が不安定になる。明示的に`ospf router id`を指定し、自動選択に任せないこと。
+- エリア指定は数値の`0`ではなく`backbone`キーワードを使う(RTXの公式ドキュメントでは`0.0.0.0`表記は不可、非バックボーンエリアは1以上の数値かIPアドレス表記)。Ciscoの構成書からそのまま`area 0`を読み替える際に取り違えないよう注意する。
+- `passive`はインターフェース参加コマンド(`ip <interface> ospf area`)のオプションとして付与するため、Ciscoの独立した`passive-interface`コマンドのようにOSPFプロセス全体を見渡して一括指定する仕組みではない。インターフェース名を書き間違えると、意図したインターフェースがpassiveにならず不要な隣接形成が残るおそれがある。
+- 設定変更後は`ospf configure refresh`を実行しないと反映されない。`show config`上は設定済みに見えても動作に反映されていない状態になり得るため、必ず実行し`show status ospf neighbor`等で反映を確認する。
+- reference-bandwidth相当の一括調整コマンドはRTXの公式ドキュメントで確認できなかった(見つかったのはインターフェース単位の`cost=`パラメータのみ)。高速リンクと低速リンクが混在する構成でコスト差を明示したい場合は、各インターフェースの`cost=`を個別に設定し、両端のルータで整合させること。

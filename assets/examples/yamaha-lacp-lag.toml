@@ -1,0 +1,4 @@
+channel_id = 1
+member_interfaces = ["lan1:1", "lan1:2"]
+lacp_mode = "static"
+trunk_vlans = [10, 20, 30]
