@@ -1,0 +1,9 @@
+device_name,u_size,weight_kg,airflow,desired_u
+UPS,3,45,front-to-back,U1
+Storage-Array,4,38,front-to-back,U4
+Server-DB,2,22,front-to-back,U8
+Server-App1,1,12,front-to-back,U10
+Server-App2,1,12,front-to-back,U11
+Core-Switch,1,8,back-to-front,U12
+Access-Switch,1,6,front-to-back,U13
+Patch-Panel,1,3,na,U14
