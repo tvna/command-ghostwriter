@@ -1381,6 +1381,8 @@ git commit -m "feat: add fortinet-ikev2-vpn IKEv2 multi-vendor interop template 
 
 **検証時の注記:** All CLI commands were verified against YAMAHA's official RTpro command reference manual pages (rtpro.yamaha.co.jp/RT/manual/rt-common/ipsec/*), which is authoritative for the RTX series (applicable models per the manual pages: vRXシリーズ, RTX5000, RTX3510, RTX3500, RTX1300, RTX1220, RTX1210, RTX840, RTX830). Key findings that shaped the template: (1) `ipsec ike version gateway_id version` takes a single version number (1 or 2), matching the existing yamaha-ipsec-vpn.j2 pattern with version=2 hardcoded for IKEv2. (2) `ipsec ike encryption`/`ipsec ike hash`/`ipsec ike group`/`ipsec sa policy` alone do NOT restrict the IKEv2 proposal to only the configured algorithm -- by default (proposal-limitation=off) the router proposes ALL supported algorithms and lets the peer choose. To actually enforce the shared crypto profile (AES-256/SHA-256/group14 only, not a superset), `ipsec ike proposal-limitation 1 on` must be set; I added this command explicitly since it is required for byte-for-byte compliance with the cross-vendor profile, and flagged it in "注意事項". (3) DH group 14 (2048-bit MODP) maps to the RTX keyword `modp2048`, confirmed from the official ipsec_ike_group.html page's parameter table. (4) `ipsec ike duration` uses sa-type keywords `ike-sa`/`isakmp-sa` and `ipsec-sa`/`child-sa` (both accepted); I used `ike-sa`/`ipsec-sa`, confirmed via the official ipsec_ike_duration.html raw page and cross-checked against a network.yamaha.com IKEv2 site-to-site example (Alibaba Cloud setup guide) which uses the same `ike-sa`/`child-sa` forms. (5) `ipsec sa policy policy_id gateway_id esp esp_algorithm ah_algorithm` uses `aes256-cbc` for AES-256-CBC and `sha256-hmac` for SHA-256, confirmed from the official ipsec_sa_policy.html parameter table and its official example `# ipsec sa policy 101 1 esp aes-cbc sha-hmac`. (6) DPD: RTX does not use the literal term "DPD" as a top-level toggle; it is exposed as a `dpd` sub-mode of `ipsec ike keepalive use gateway_id switch dpd`, confirmed on the official ipsec_ike_keepalive_use.html page. I used `ipsec ike keepalive use 1 on dpd` to satisfy the "DPD enabled" requirement using the vendor's real keyword. (7) NAT-T auto-detection is the default behavior of `ipsec ike nat-traversal gateway_id on` (the `force=` sub-option, left unset/off, is what would force NAT-T even without a detected NAT) -- confirmed via the official ipsec_ike_nat-traversal.html page. One genuine gap: I could not find an official RTpro page for `show ipsec sa` (the URL I guessed, ipsec_show_sa.html, 404'd, and I did not find the correct manual slug in the time available); the "動作確認" section's description of `show ipsec sa` output content is based on the existing repo template (yamaha-ipsec-vpn.j2, which already uses this command) and general vendor documentation excerpts found via search rather than a directly fetched official command-reference page for that specific show command, so I softened the wording to avoid asserting an unverified exact output string. Everything else (all `ipsec ike *` and `ipsec sa policy` configuration commands) was verified directly against fetched official manual pages.
 
+**Code-review update:** the plan's own cited source #1 (rtpro.yamaha.co.jp/RT/docs/ipsec/ike2.html) was fetched more thoroughly during code review and its own worked example shows bare `show ipsec sa` displays only a terse table with no algorithm names or IKE-version field -- those only appear under `show ipsec sa gateway <id> detail`. The 動作確認 claims about algorithm/IKE-version content have been moved to reference `show ipsec sa gateway 1 detail` (step 4 now runs both commands) and softened to avoid asserting an unconfirmed exact output string format. Also added a 注意事項 caveat: gateway/tunnel/policy number `1`/`1`/`101` collide with the pre-existing `yamaha-ipsec-vpn` template's own numbering if both are applied to the same router.
+
 - [ ] **Step 1: データファイルを作成する**
 
 `assets/examples/yamaha-ikev2-vpn.toml`:
@@ -1473,10 +1475,11 @@ save
 
 ```bash
 show ipsec sa
+show ipsec sa gateway 1 detail
 show status tunnel 1
 ```
 
-SA(Security Association)が確立していることを確認したうえで、対向拠点LAN側の端末へpingを実行します。
+`show ipsec sa`はSA一覧の簡易表示のみで、暗号アルゴリズムやIKEバージョンの詳細は表示されません。詳細は`show ipsec sa gateway 1 detail`で確認します。SA(Security Association)が確立していることを確認したうえで、対向拠点LAN側の端末へpingを実行します。
 
 ```bash
 ping {{ remote_lan_test_host }}
@@ -1485,15 +1488,16 @@ ping {{ remote_lan_test_host }}
 ## 動作確認
 
 - `show status tunnel 1`でトンネル1のステータスが`Up`(接続確立)であること
-- `show ipsec sa`に、自拠点`{{ local_wan_ip }}`と対向拠点`{{ remote_wan_ip }}`の間のSAが表示され、暗号アルゴリズムが`AES256-CBC`・認証アルゴリズムが`SHA2-256`相当であること
-- `show ipsec sa`のIKEバージョン表示が`IKEv2`になっていること(IKEv1にフォールバックしていないこと)
+- `show ipsec sa`に、自拠点`{{ local_wan_ip }}`と対向拠点`{{ remote_wan_ip }}`の間のSAが表示されていること
+- `show ipsec sa gateway 1 detail`で、暗号アルゴリズム・認証アルゴリズムが意図通り(AES-256/SHA-256相当)であり、IKEバージョンが`IKEv2`になっていること(IKEv1にフォールバックしていないこと)
 - 自拠点LAN`{{ local_lan }}`の端末から対向拠点LAN`{{ remote_lan }}`の端末へpingが成功すること
 
 ## 注意事項
 
 - 事前共有鍵は両拠点で完全に一致していないとIKEv2の鍵交換が確立しない。コピー&ペーストではなく台帳の同一値を参照するなど、入力ミスを防ぐ運用にする。
-- `ipsec ike proposal-limitation`を`on`にし忘れると、意図した暗号プロファイル以外のアルゴリズムでも対向機と合意できてしまうため、必ず設定して`show ipsec sa`で実際に選択されたアルゴリズムを確認する。
+- `ipsec ike proposal-limitation`を`on`にし忘れると、意図した暗号プロファイル以外のアルゴリズムでも対向機と合意できてしまうため、必ず設定して`show ipsec sa gateway 1 detail`で実際に選択されたアルゴリズムを確認する。
 - `save`コマンドを忘れると再起動時に設定が失われる。対向拠点側の担当者にも同様に`save`実施を依頼する。
+- ゲートウェイ番号1・トンネル番号1・SAポリシー番号101は、既存の`yamaha-ipsec-vpn`テンプレート(IKEv1向け)と同じ番号を使っている。同一ルータに両テンプレートを適用する場合は番号が衝突し、片方の設定を上書きしてしまうため、いずれかの番号を空いている値に読み替えること。
 ```
 
 - [ ] **Step 3: `templates.ts` にエントリを追加する**
