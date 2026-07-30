@@ -1,0 +1,122 @@
+# Cisco IOS-XE(IKEv2 VTI)拠点間IPsec VPN構築
+
+Cisco IOS-XEルータ2台を使い、IKEv2とIPsec VTI(Virtual Tunnel Interface)で拠点間をルーテッドIPsecトンネル接続します。両拠点のパラメータを事前に突き合わせたうえで、片方ずつではなく対応するペアとして設定してください。
+
+## 目的
+
+IKEv2プロポーザル/プロファイルとIPsec VTIの役割分担を理解した上で、拠点間IPsecトンネルを構築し、拠点間の経路を整えて相互疎通を検証できるようになることを目指します。
+
+## 用語解説
+
+- **IKEv2プロポーザル(crypto ikev2 proposal)**: 暗号化・完全性・PRF・DHグループなど、IKE SAネゴシエーションで使うアルゴリズムの組み合わせを定義するオブジェクト
+- **IKEv2プロファイル(crypto ikev2 profile)**: 対向アドレスの識別条件、認証方式、キーリング、ライフタイム、DPDなどピアごとの動作を束ねる設定単位。トンネルインターフェースの保護に紐付ける
+- **IKEv2キーリング(crypto ikev2 keyring)**: 対向ごとの事前共有鍵(PSK)を管理する独立したオブジェクトで、プロファイルから参照する
+- **IPsecプロファイル(crypto ipsec profile)**: トランスフォームセット・IKEv2プロファイル・PFSグループ・SAライフタイムをまとめ、トンネルインターフェースに適用する設定単位
+- **トランスフォームセット(crypto ipsec transform-set)**: ESPで使う暗号化・認証アルゴリズムの組み合わせ(Phase2相当)を定義する
+- **IPsec VTI(Virtual Tunnel Interface)**: crypto mapを使わず、ルーテッドのトンネルインターフェース上でIPsecを実装する方式。通常のインターフェースと同様に静的/動的経路制御と組み合わせられる
+- **DPD(Dead Peer Detection)**: 対向機器の生存確認を行い、応答がない場合にIKE SA/IPsec SAを再確立するための仕組み
+
+## シナリオ設定
+
+自拠点WAN側アドレス `{{ local_wan_ip }}` と対向拠点WAN側アドレス `{{ remote_wan_ip }}` の間にIKEv2でIPsecトンネルを確立し、自拠点LAN `{{ local_lan }}` と対向拠点LAN `{{ remote_lan }}` を相互疎通させます。{{ pre_shared_key_note }}
+
+このテンプレートは、IKEv2マルチベンダー相互接続シリーズ(10ベンダー共通)の一つです。全テンプレートで暗号プロファイルを統一しており、このシリーズの他ベンダーのルータ/ファイアウォールとの間でも、以下の共通プロファイルに沿っていれば相互接続できます: IKEv2/IKE暗号AES-256(CBC)・ハッシュSHA-256・DHグループ14 / IPsec(ESP)暗号AES-256・認証SHA-256・PFSグループ14 / 認証方式PSK / IKE SAライフタイム28800秒・IPsec SAライフタイム3600秒 / NAT-T自動検出有効・DPD有効。
+
+## 手順
+
+### 1. 両拠点のパラメータを突き合わせる
+
+対向拠点の管理者と、WAN側アドレス・LANアドレス帯・事前共有鍵・暗号プロファイルが食い違っていないか確認します。片方だけ変更すると確立できません。
+
+```bash
+show running-config | section crypto ikev2
+show running-config interface Tunnel10
+```
+
+### 2. IKEv2プロポーザル・ポリシー・キーリング・プロファイルを設定する(自拠点側)
+
+IKE(Phase1)のアルゴリズムとPSK、ピア識別条件、ライフタイム、DPDを設定します。対向拠点側では`{{ local_wan_ip }}`と`{{ remote_wan_ip }}`を入れ替えた設定を投入してもらいます。NAT-Tは対向機器がNAT-T対応であれば自動検出・自動ネゴシエーションされるため、明示的な設定は不要です。
+
+```bash
+crypto ikev2 proposal CG-IKEV2-PROPOSAL
+ encryption aes-cbc-256
+ integrity sha256
+ prf sha256
+ group 14
+!
+crypto ikev2 policy CG-IKEV2-POLICY
+ proposal CG-IKEV2-PROPOSAL
+!
+crypto ikev2 keyring CG-IKEV2-KEYRING
+ peer SITE-B
+  address {{ remote_wan_ip }}
+  pre-shared-key local ********
+  pre-shared-key remote ********
+!
+crypto ikev2 profile CG-IKEV2-PROFILE
+ match identity remote address {{ remote_wan_ip }} 255.255.255.255
+ authentication local pre-share
+ authentication remote pre-share
+ keyring local CG-IKEV2-KEYRING
+ lifetime 28800
+ dpd 10 5 on-demand
+```
+
+事前共有鍵の実際の値は、コンソール入力時のみ台帳(鍵管理システム)から参照し、設定表示や保存先には平文で残さないようにします。
+
+### 3. IPsecトランスフォームセット・プロファイルとトンネルインターフェースを設定する
+
+IPsec(Phase2/ESP)のアルゴリズムとPFS、SAライフタイムをまとめたプロファイルを作成し、VTIに適用します。
+
+```bash
+crypto ipsec transform-set CG-IPSEC-TS esp-aes 256 esp-sha256-hmac
+!
+crypto ipsec profile CG-IPSEC-PROFILE
+ set transform-set CG-IPSEC-TS
+ set ikev2-profile CG-IKEV2-PROFILE
+ set pfs group14
+ set security-association lifetime seconds 3600
+!
+interface Tunnel10
+ ip address 169.254.100.1 255.255.255.252
+ ip tcp adjust-mss 1360
+ tunnel source {{ local_wan_ip }}
+ tunnel destination {{ remote_wan_ip }}
+ tunnel mode ipsec ipv4
+ tunnel protection ipsec profile CG-IPSEC-PROFILE
+ no shutdown
+```
+
+トンネルインターフェースのIPアドレス(`169.254.100.1/30`)は例示です。実運用では拠点ごとに重複しないアドレスを割り当ててください。
+
+### 4. 経路を設定する
+
+対向拠点LAN宛の経路をトンネルインターフェース経由に向けます。classic IOSの`ip route`はCIDR表記(`/24`等)を受け付けず、ネットワークアドレスとサブネットマスクを別々の引数で渡す必要があるため、`{{ remote_lan }}`からネットワークアドレス部分のみを取り出しつつ、サブネットマスクは別変数`{{ remote_lan_netmask }}`として明示的に渡します(`remote_lan`のプレフィックス長を変更する場合は`remote_lan_netmask`も対応する値に必ず更新してください)。
+
+```bash
+ip route {{ remote_lan.split('/')[0] }} {{ remote_lan_netmask }} Tunnel10
+```
+
+### 5. 動作確認コマンドを実行する
+
+```bash
+show crypto ikev2 sa detail
+show crypto ipsec sa
+show interfaces Tunnel10
+ping {{ remote_lan.split('/')[0] }} source {{ local_wan_ip }}
+```
+
+`show crypto ikev2 sa detail`でIKE SAが確立(`READY`相当の状態)していることを確認したうえで、対向拠点LAN側の端末へpingを実行します。
+
+## 動作確認
+
+- `show crypto ikev2 sa detail`で自拠点`{{ local_wan_ip }}`と対向`{{ remote_wan_ip }}`間のIKEv2 SAが`READY`状態で、暗号アルゴリズムがAES-CBC-256/SHA256/DHグループ14であること
+- `show crypto ipsec sa`でESPのSA(inbound/outbound)が確立し、暗号がaes-cbc(256)、認証がhmac-sha256であること、暗号化/復号パケットカウンタが増加していること
+- `show interfaces Tunnel10`でline protocolが`up`であること
+- 自拠点LAN`{{ local_lan }}`の端末から対向拠点LAN`{{ remote_lan }}`の端末へpingが成功すること
+
+## 注意事項
+
+- 事前共有鍵は`pre-shared-key`コマンド入力時のみ台帳から参照し、`show running-config`や設定ファイル、チケット等へ平文で残さない。type 6暗号化(`key config-key password-encrypt`と`password encryption aes`)による保存の暗号化も検討する
+- 設定投入後は`copy running-config startup-config`を必ず実行し、対向拠点側にも同様の保存を依頼する。保存を忘れると再起動時にトンネル設定が失われる
+- WAN側インターフェースの設定変更中にコンソール/管理経路を失わないよう、コンソールポートまたはLAN内から作業する。VTIはcrypto map方式と異なりトンネルダウン時の経路切り替えが自動化されていない構成もあるため、経路設計とバックアップ経路の有無を事前に確認する

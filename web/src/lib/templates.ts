@@ -688,6 +688,7 @@ const META: Meta[] = [
   { id: "opa-policy-governance-drill", name: "OPAポリシー統制の定期棚卸し訓練", desc: "稼働ポリシー・data・例外を定期棚卸しし逸脱や陳腐化を洗い出すOPAガバナンス訓練手順書を生成。", category: "ops", subCategory: "ポリシー統制", format: "csv", output: "markdown", activity: "drill", updated: "2026-07-17", live: true },
   { id: "opa-secrets-access-policy", name: "OPAによるシークレットアクセスポリシー統制", desc: "Vault等のシークレットアクセス要求をOPAで判定し最小権限をポリシーで一元化する構成手順書を生成。", category: "ops", subCategory: "ポリシー統制", format: "csv", output: "markdown", updated: "2026-07-17", live: true },
   { id: "opa-server-deployment-hardening", name: "OPAサーバの本番配備とハードニング", desc: "opa runサーバをTLS・認証・最小権限で本番配備しヘルスチェックまで構成するOPA手順書を生成。", category: "ops", subCategory: "ポリシー統制", format: "yaml", output: "markdown", updated: "2026-07-17", live: true },
+  { id: "cisco-ikev2-vpn", name: "Cisco IOS-XE(IKEv2 VTI)拠点間IPsec VPN構築", desc: "IOS-XEルータ2台でIKEv2 VTIによる拠点間IPsecトンネルを構成し、暗号設定と相互疎通を検証する手順書を生成。", category: "network", subCategory: "Cisco", format: "toml", output: "markdown", updated: "2026-07-30", live: true },
 ];
 
 export const CGTemplates: Template[] = META.map((m) => ({
