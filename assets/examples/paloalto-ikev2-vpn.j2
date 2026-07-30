@@ -18,7 +18,9 @@ IKEゲートウェイと暗号プロファイル、トンネルインターフ�
 
 ## シナリオ設定
 
-自拠点WAN側アドレス `{{ local_wan_ip }}` と対向拠点WAN側アドレス `{{ remote_wan_ip }}` の間にIKEv2でIPsecトンネルを確立し、自拠点LAN `{{ local_lan }}` と対向拠点LAN `{{ remote_lan }}` を相互疎通させます。{{ pre_shared_key_note }} このテンプレートは、IKEv2マルチベンダー相互接続シリーズ(10ベンダー共通)の一つです。全テンプレートで暗号プロファイルを統一しており、このシリーズの他ベンダーのルータ/ファイアウォールとの間でも、以下の共通プロファイルに沿っていれば相互接続できます: IKEv2/IKE暗号AES-256(CBC)・ハッシュSHA-256・DHグループ14 / IPsec(ESP)暗号AES-256・認証SHA-256・PFSグループ14 / 認証方式PSK / IKE SAライフタイム28800秒・IPsec SAライフタイム3600秒 / NAT-T自動検出有効・DPD有効。
+自拠点WAN側アドレス `{{ local_wan_ip }}` と対向拠点WAN側アドレス `{{ remote_wan_ip }}` の間にIKEv2でIPsecトンネルを確立し、自拠点LAN `{{ local_lan }}` と対向拠点LAN `{{ remote_lan }}` を相互疎通させます。{{ pre_shared_key_note }}
+
+このテンプレートは、IKEv2マルチベンダー相互接続シリーズ(10ベンダー共通)の一つです。全テンプレートで暗号プロファイルを統一しており、このシリーズの他ベンダーのルータ/ファイアウォールとの間でも、以下の共通プロファイルに沿っていれば相互接続できます: IKEv2/IKE暗号AES-256(CBC)・ハッシュSHA-256・DHグループ14 / IPsec(ESP)暗号AES-256・認証SHA-256・PFSグループ14 / 認証方式PSK / IKE SAライフタイム28800秒・IPsec SAライフタイム3600秒 / NAT-T自動検出有効・DPD有効。
 
 ## 手順
 
@@ -54,6 +56,7 @@ set network ike gateway IKE-GW-TO-REMOTE protocol ikev2 dpd enable yes
 set network ike gateway IKE-GW-TO-REMOTE protocol-common nat-traversal enable yes
 set network ike gateway IKE-GW-TO-REMOTE authentication pre-shared-key key ********
 set network ike gateway IKE-GW-TO-REMOTE local-address ip {{ local_wan_ip }}
+set network ike gateway IKE-GW-TO-REMOTE local-address interface ethernet1/1
 set network ike gateway IKE-GW-TO-REMOTE peer-address ip {{ remote_wan_ip }}
 
 set network interface tunnel units tunnel.1 comment "to-remote-site"
@@ -65,15 +68,19 @@ set network tunnel ipsec IPSEC-TUNNEL-TO-REMOTE tunnel-interface tunnel.1
 set network tunnel ipsec IPSEC-TUNNEL-TO-REMOTE auto-key proxy-id PROXY-ID-1 protocol any local {{ local_lan }} remote {{ remote_lan }}
 ```
 
-事前共有鍵の実際の値は、コンソール入力時のみ台帳(鍵管理システム)から参照し、`set`コマンドの履歴や構成バックアップに平文で残さないようにします。
+事前共有鍵の実際の値は、コンソール入力時のみ台帳(鍵管理システム)から参照し、`set`コマンドの履歴や構成バックアップに平文で残さないようにします。`local-address interface`の`ethernet1/1`は例示であり、実運用では自拠点WAN側の実インターフェース名に置き換えてください。
 
-### 3. 経路を設定する
+### 3. 経路とSecurity Policyを設定する
 
-対向拠点LAN宛の経路を、トンネルインターフェース経由で仮想ルータに追加します。
+トンネルインターフェースを仮想ルータに割り当てたうえで対向拠点LAN宛の経路を追加し、あわせてLAN側ゾーン(`trust`、既存のLANインターフェースが所属している前提)と`VPN-TRUST`ゾーンの間の通信をSecurity Policyで明示的に許可します。PAN-OSはゾーン間通信を既定で拒否(interzone-default deny)するため、IKE/IPsec SAが確立してもこのルールがなければLAN間の通信は許可されません。
 
 ```bash
+set network virtual-router default interface tunnel.1
 set network virtual-router default routing-table ip static-route TO-REMOTE-LAN destination {{ remote_lan }}
 set network virtual-router default routing-table ip static-route TO-REMOTE-LAN interface tunnel.1
+
+set rulebase security rules ALLOW-TO-REMOTE from trust to VPN-TRUST source any destination any application any service application-default action allow
+set rulebase security rules ALLOW-FROM-REMOTE from VPN-TRUST to trust source any destination any application any service application-default action allow
 
 commit
 ```
@@ -113,3 +120,4 @@ ping host {{ remote_lan_test_host }}
 - 事前共有鍵は両拠点で完全に一致していないとIKEが確立しない。コピー&ペーストではなく台帳の同一値を参照するなど、入力ミスを防ぐ運用にする。
 - `set`コマンドはcandidate configへの積み込みに過ぎず、`commit`を実行するまで実機の動作には反映されない。特にWAN側の設定変更を伴う場合は、`commit`後にコンソール/管理接続が失われないことを確認してから作業を終える。
 - プロキシID(Proxy ID)は対向拠点と完全に一致している必要があり、片方だけサブネットを追加・変更するとPhase2が再確立できず既存の通信も止まることがあるため、変更時は両拠点同時に反映する。
+- Security Policy(`ALLOW-TO-REMOTE`/`ALLOW-FROM-REMOTE`)を投入し忘れると、IKE/IPsec SAが確立していてもPAN-OSの既定拒否(interzone-default deny)によりLAN間トラフィックがドロップされる。トンネル確立とポリシー許可は別レイヤーであることを踏まえて両方を確認する。
