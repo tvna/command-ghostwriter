@@ -74,10 +74,11 @@ save
 
 ```bash
 show ipsec sa
+show ipsec sa gateway 1 detail
 show status tunnel 1
 ```
 
-SA(Security Association)が確立していることを確認したうえで、対向拠点LAN側の端末へpingを実行します。
+`show ipsec sa`はSA一覧の簡易表示のみで、暗号アルゴリズムやIKEバージョンの詳細は表示されません。詳細は`show ipsec sa gateway 1 detail`で確認します。SA(Security Association)が確立していることを確認したうえで、対向拠点LAN側の端末へpingを実行します。
 
 ```bash
 ping {{ remote_lan_test_host }}
@@ -86,12 +87,13 @@ ping {{ remote_lan_test_host }}
 ## 動作確認
 
 - `show status tunnel 1`でトンネル1のステータスが`Up`(接続確立)であること
-- `show ipsec sa`に、自拠点`{{ local_wan_ip }}`と対向拠点`{{ remote_wan_ip }}`の間のSAが表示され、暗号アルゴリズムが`AES256-CBC`・認証アルゴリズムが`SHA2-256`相当であること
-- `show ipsec sa`のIKEバージョン表示が`IKEv2`になっていること(IKEv1にフォールバックしていないこと)
+- `show ipsec sa`に、自拠点`{{ local_wan_ip }}`と対向拠点`{{ remote_wan_ip }}`の間のSAが表示されていること
+- `show ipsec sa gateway 1 detail`で、暗号アルゴリズム・認証アルゴリズムが意図通り(AES-256/SHA-256相当)であり、IKEバージョンが`IKEv2`になっていること(IKEv1にフォールバックしていないこと)
 - 自拠点LAN`{{ local_lan }}`の端末から対向拠点LAN`{{ remote_lan }}`の端末へpingが成功すること
 
 ## 注意事項
 
 - 事前共有鍵は両拠点で完全に一致していないとIKEv2の鍵交換が確立しない。コピー&ペーストではなく台帳の同一値を参照するなど、入力ミスを防ぐ運用にする。
-- `ipsec ike proposal-limitation`を`on`にし忘れると、意図した暗号プロファイル以外のアルゴリズムでも対向機と合意できてしまうため、必ず設定して`show ipsec sa`で実際に選択されたアルゴリズムを確認する。
+- `ipsec ike proposal-limitation`を`on`にし忘れると、意図した暗号プロファイル以外のアルゴリズムでも対向機と合意できてしまうため、必ず設定して`show ipsec sa gateway 1 detail`で実際に選択されたアルゴリズムを確認する。
 - `save`コマンドを忘れると再起動時に設定が失われる。対向拠点側の担当者にも同様に`save`実施を依頼する。
+- ゲートウェイ番号1・トンネル番号1・SAポリシー番号101は、既存の`yamaha-ipsec-vpn`テンプレート(IKEv1向け)と同じ番号を使っている。同一ルータに両テンプレートを適用する場合は番号が衝突し、片方の設定を上書きしてしまうため、いずれかの番号を空いている値に読み替えること。
