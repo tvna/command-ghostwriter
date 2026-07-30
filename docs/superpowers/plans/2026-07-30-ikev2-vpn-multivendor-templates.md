@@ -1704,6 +1704,8 @@ git commit -m "feat: add nec-ikev2-vpn IKEv2 multi-vendor interop template (#595
 
 **検証時の注記:** Fully confirmed against Allied Telesis's official AlliedWare Plus "Internet Protocol Security (IPsec) Feature Overview and Configuration Guide" (C613-22020-00 REV U), fetched directly from alliedtelesis.com (the alliedtelesis.com URL itself returned HTTP 403 to the WebFetch tool proxy, so the PDF was downloaded via curl with a browser User-Agent and read directly as a PDF document; this is a direct primary-source fetch, not a secondary summary). All CLI syntax used is taken verbatim from that guide's command descriptions and worked examples: `crypto isakmp key <key> address <ip>`, `crypto isakmp profile <name>` with `version 2`, `transform <n> integrity sha256 encryption aes256 group 14`, `lifetime <seconds>`, `dpd-timeout <seconds>`; `crypto isakmp peer address <ip> profile <name>`; `crypto ipsec profile <name>` with `lifetime seconds <n>`, `pfs 14`, `transform <n> protocol esp integrity sha256 encryption aes256`; `interface tunnel<n>` with `tunnel source`, `tunnel destination`, `tunnel local/remote selector`, `tunnel protection ipsec profile <name>`, `tunnel mode ipsec ipv4`; `ip route <subnet> <tunnel-name>`; and the diagnostic commands `show isakmp sa`, `show ipsec sa`, `show interface tunnel<n>`. Group 14 for both the IKE DH group and the IPsec PFS group is explicitly listed as a valid, documented option in the guide (default ISAKMP transform table and the `pfs <2|5|14|16|18>` command), and an AES256/SHA256/group-14/PFS-14 combination matching this exact shared profile appears as Transform 1 in the vendor's own documented default ISAKMP profile table, and the "IPsec over GRE" worked example (Example 5) uses AES256/SHA256/group 14 for IKEv2 ISAKMP. NAT-T is confirmed to be automatic/non-configurable ("Automatic NAT-Traversal negotiation" is a listed IPsec feature, negotiated transparently during ISAKMP SA setup) -- no explicit enable command exists, so none was added; this is noted in the template's 用語解説 rather than as a command. DPD is enabled by default at a 30-second interval per ISAKMP profile; the template sets `dpd-timeout 30` explicitly in the custom profile for clarity/documentation even though it matches the default. The `copy running-config startup-config` save command was confirmed against the official "Getting Started with the AlliedWare Plus Command Line Interface" guide (same product line, C613-22045-00 REV M), not the IPsec guide itself, closing the one gap flagged during drafting. One minor deviation from strict primary-source proof: the VTI's internal point-to-point address (169.254.0.1/30 <-> 169.254.0.2/30) and the eth1 WAN prefix length (/30) are illustrative values in the style of the vendor's own worked examples (which use similarly small host addresses/prefixes for point-to-point WAN links), not derived from the toml's single-IP-without-prefix local_wan_ip value -- flagged as engineering judgment, not fabricated CLI syntax. No part of the required IKEv2/AES-256/SHA-256/DH14/PFS14/PSK/28800s/3600s/NAT-T/DPD profile had to be invented or left unconfirmed.
 
+**Code-review update:** a deeper fetch of the product-specific AR1050V Command Reference (as opposed to the general IPsec Feature Overview guide originally cited) found that `dpd-timeout` is documented as IKEv1-only ("in IKEv2 the default retransmission timeout applies as every exchange is used to detect dead peers") -- it is a silent no-op on this `version 2` profile. Changed to `dpd-interval 30`, the command that actually applies generally (including IKEv2) and already defaults to 30s. The same deeper check found that `ping 169.254.0.2` (VTI point-to-point address) in the original 動作確認 step would fail on a healthy tunnel, since the configured traffic selectors scope the Child SA to `local_lan`/`remote_lan` only, excluding the VTI link-local subnet -- removed that ping and added an explanatory caveat instead. Also added a console-access caution around the `interface eth1` WAN IP change, matching the equivalent warnings already present in the Cisco/Juniper/Palo Alto siblings for their own WAN-facing changes.
+
 - [ ] **Step 1: データファイルを作成する**
 
 `assets/examples/alliedtelesis-ikev2-vpn.toml`:
@@ -1767,7 +1769,7 @@ crypto isakmp profile ikev2-s2s
  version 2
  transform 1 integrity sha256 encryption aes256 group 14
  lifetime 28800
- dpd-timeout 30
+ dpd-interval 30
 !
 ! IPsec(ESP)プロファイル: Phase2 - AES256/SHA256/PFSグループ14, SAライフタイム3600秒
 crypto ipsec profile ikev2-s2s
@@ -1795,7 +1797,7 @@ interface tunnel0
 end
 ```
 
-eth1のWAN側サブネットマスクは実際にISPから割り当てられた値に合わせて調整してください。VTIのアドレス(`169.254.0.1/30`)はトンネル内部のリンクローカルなポイントツーポイントアドレスで、対向拠点側は`169.254.0.2/30`とします。
+eth1のWAN側サブネットマスクは実際にISPから割り当てられた値に合わせて調整してください。VTIのアドレス(`169.254.0.1/30`)はトンネル内部のリンクローカルなポイントツーポイントアドレスで、対向拠点側は`169.254.0.2/30`とします。`interface eth1`の`ip address`変更は投入直後に反映されるため、リモートでこの手順を実施する場合は管理接続(SSH等)がWAN側経由になっていないか事前に確認し、可能であればコンソール接続で作業してください。
 
 ### 3. 経路を設定する
 
@@ -1813,10 +1815,9 @@ end
 show isakmp sa
 show ipsec sa
 show interface tunnel0
-ping 169.254.0.2
 ```
 
-ISAKMP SA・IPsec SAがともに確立していることを確認したうえで、対向拠点LAN側の端末へpingを実行します。
+ISAKMP SA・IPsec SAがともに確立していることを確認したうえで、対向拠点LAN側の端末へpingを実行します。VTIのポイントツーポイントアドレス(`169.254.0.2`宛)へのpingは、トラフィックセレクタが`{{ local_lan }}`/`{{ remote_lan }}`にのみ限定されているため通過対象外となり、正常なトンネルでも失敗します。トンネル自体の疎通確認には使わないでください。
 
 ```bash
 ping {{ remote_lan_test_host }}
