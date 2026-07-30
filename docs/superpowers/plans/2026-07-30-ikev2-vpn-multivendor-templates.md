@@ -16,6 +16,8 @@
 
 各タスクの「レンダリング確認」ステップでは、以下のPythonスクリプトパターンを使う。`<id>` をタスクごとに置き換える(`DATA_EXT`は全タスクで`"toml"`固定)。
 
+**変数セットについての補足:** 共通5変数(`local_wan_ip`, `remote_wan_ip`, `local_lan`, `remote_lan`, `pre_shared_key_note`)に加え、全10ベンダーで `remote_lan_test_host`(例: `"192.168.20.10"`)を追加している。動作確認の`ping`コマンドはネットワークアドレス(`remote_lan`そのもの、または`remote_lan`の`/24`部分)ではなく対向拠点LAN内の実在しうる1台のホストアドレスを対象にする必要があるため(ネットワークアドレス宛のpingは正常なトンネルでも応答が返らず、誤った失敗と誤認される)。Cisco(Task 1)のみ、classic IOSの`ip route`がCIDR表記を受け付けないことに対応するため、`remote_lan_netmask`という追加変数も持つ(経路コマンド専用で、pingコマンドには使わない)。
+
 ```python
 import sys
 from io import BytesIO
@@ -91,6 +93,7 @@ local_wan_ip = "203.0.113.1"
 remote_wan_ip = "198.51.100.1"
 local_lan = "192.168.10.0/24"
 remote_lan = "192.168.20.0/24"
+remote_lan_test_host = "192.168.20.10"
 pre_shared_key_note = "事前共有鍵の値は社内の鍵管理台帳(Vault)で別管理し、コンソール入力時にのみ参照する。設定ファイルやチャット等への平文貼り付けは禁止とする"
 remote_lan_netmask = "255.255.255.0"
 ```
@@ -204,7 +207,7 @@ ip route {{ remote_lan.split('/')[0] }} {{ remote_lan_netmask }} Tunnel10
 show crypto ikev2 sa detail
 show crypto ipsec sa
 show interfaces Tunnel10
-ping {{ remote_lan.split('/')[0] }} source {{ local_wan_ip }}
+ping {{ remote_lan_test_host }} source {{ local_wan_ip }}
 ```
 
 `show crypto ikev2 sa detail`でIKE SAが確立(`READY`相当の状態)していることを確認したうえで、対向拠点LAN側の端末へpingを実行します。
@@ -271,6 +274,7 @@ local_wan_ip = "203.0.113.1"
 remote_wan_ip = "198.51.100.1"
 local_lan = "192.168.10.0/24"
 remote_lan = "192.168.20.0/24"
+remote_lan_test_host = "192.168.20.10"
 pre_shared_key_note = "事前共有鍵(PSK)の実際の値は鍵管理台帳(社内Vault)で別途管理し、コンソール投入時のみ参照する。設定ファイルやコミット履歴への平文保存は行わない"
 ```
 
@@ -397,7 +401,7 @@ commit
 ```bash
 show security ike security-associations
 show security ipsec security-associations detail
-ping {{ remote_lan }}
+ping {{ remote_lan_test_host }}
 ```
 
 ## 動作確認
@@ -462,6 +466,7 @@ local_wan_ip = "203.0.113.1"
 remote_wan_ip = "198.51.100.1"
 local_lan = "192.168.10.0/24"
 remote_lan = "192.168.20.0/24"
+remote_lan_test_host = "192.168.20.10"
 pre_shared_key_note = "事前共有鍵の実際の値は鍵管理台帳(社内Vault)側で別途管理し、設定投入時のコンソール入力でのみ参照する。設定ファイルや構成バックアップへの平文保存は禁止"
 ```
 
@@ -567,7 +572,7 @@ show vpn flow
 SAの確立を確認したうえで、対向拠点LAN側の端末へpingを実行します。
 
 ```bash
-ping host {{ remote_lan }}
+ping host {{ remote_lan_test_host }}
 ```
 
 ## 動作確認
@@ -640,6 +645,7 @@ local_wan_ip = "203.0.113.1"
 remote_wan_ip = "198.51.100.1"
 local_lan = "192.168.10.0/24"
 remote_lan = "192.168.20.0/24"
+remote_lan_test_host = "192.168.20.10"
 pre_shared_key_note = "事前共有鍵の実値は鍵管理台帳(社内Vault)で別途管理し、コンソール投入時のみ参照する。設定バックアップやエクスポートファイルに平文で残さないこと"
 ```
 
@@ -741,7 +747,7 @@ show address-object ipv4 all
 ```bash
 show vpn policy ipv4 site-to-site "To-RemoteSite"
 show vpn ike-dpd
-ping {{ remote_lan }}
+ping {{ remote_lan_test_host }}
 ```
 
 `show vpn policy`の出力で、Phase1/Phase2の暗号アルゴリズムが意図通り(AES-256/SHA-256/DHグループ14)であること、SAが確立していることを確認したうえで、対向拠点LAN側の端末へpingを実行します。
@@ -808,6 +814,7 @@ local_wan_ip = "203.0.113.1"
 remote_wan_ip = "198.51.100.1"
 local_lan = "192.168.10.0/24"
 remote_lan = "192.168.20.0/24"
+remote_lan_test_host = "192.168.20.10"
 pre_shared_key_note = "事前共有鍵は鍵管理台帳(社内Vault)で別途管理し、コンソール投入時のみ参照する。設定ファイルや構成バックアップへの平文保存は行わない"
 ```
 
@@ -913,7 +920,7 @@ show interfaces vti vti0
 `show vpn ipsec sa`でSA(Security Association)が`up`の状態で確立していることを確認したうえで、対向拠点LAN側の端末へpingを実行します。
 
 ```bash
-ping {{ remote_lan }}
+ping {{ remote_lan_test_host }}
 ```
 
 ## 動作確認
@@ -978,6 +985,7 @@ local_wan_ip = "203.0.113.1"
 remote_wan_ip = "198.51.100.1"
 local_lan = "192.168.10.0/24"
 remote_lan = "192.168.20.0/24"
+remote_lan_test_host = "192.168.20.10"
 pre_shared_key_note = "事前共有鍵の値は鍵管理台帳(社内Vault)で別途管理し、コンソール投入時にのみ参照する。設定ファイルや手順書への平文保存は行わない"
 ```
 
@@ -1080,7 +1088,7 @@ show ip route
 トンネルのIKE/IPsec両方が`UP`であることを確認したうえで、対向拠点LAN側の端末へpingを実行します。
 
 ```bash
-ping {{ remote_lan }}
+ping {{ remote_lan_test_host }}
 ```
 
 ## 動作確認
@@ -1145,6 +1153,7 @@ local_wan_ip = "203.0.113.1"
 remote_wan_ip = "198.51.100.1"
 local_lan = "192.168.10.0/24"
 remote_lan = "192.168.20.0/24"
+remote_lan_test_host = "192.168.20.10"
 pre_shared_key_note = "事前共有鍵の実値は社内の鍵管理台帳(Vault)で一元管理し、平文では保存せず、設定投入時にコンソールから直接入力します。"
 ```
 
@@ -1288,7 +1297,7 @@ get vpn ipsec tunnel summary
 `diagnose vpn ike gateway list`でPhase1のSAが確立していること、`get vpn ipsec tunnel summary`でPhase2セレクタの送受信カウンタが増加していることを確認したうえで、対向拠点LAN側の端末へpingを実行します。
 
 ```bash
-execute ping {{ remote_lan }}
+execute ping {{ remote_lan_test_host }}
 ```
 
 ## 動作確認
@@ -1353,6 +1362,7 @@ local_wan_ip = "203.0.113.1"
 remote_wan_ip = "198.51.100.1"
 local_lan = "192.168.10.0/24"
 remote_lan = "192.168.20.0/24"
+remote_lan_test_host = "192.168.20.10"
 pre_shared_key_note = "事前共有鍵の値は鍵管理台帳(社内Vault)側でのみ保持し、コンソール投入の直前に参照する。コンフィグ上や作業メモに平文で書き残さない"
 ```
 
@@ -1442,7 +1452,7 @@ show status tunnel 1
 SA(Security Association)が確立していることを確認したうえで、対向拠点LAN側の端末へpingを実行します。
 
 ```bash
-ping {{ remote_lan }}
+ping {{ remote_lan_test_host }}
 ```
 
 ## 動作確認
@@ -1507,6 +1517,7 @@ local_wan_ip = "203.0.113.1"
 remote_wan_ip = "198.51.100.1"
 local_lan = "192.168.10.0/24"
 remote_lan = "192.168.20.0/24"
+remote_lan_test_host = "192.168.20.10"
 pre_shared_key_note = "事前共有鍵の実値は鍵管理台帳(社内Vault)で別管理とし、コンソール入力時のみ参照する。設定ファイルや手順書には平文で残さない"
 ```
 
@@ -1601,7 +1612,7 @@ save
 show ikev2 sa
 show ikev2 child-sa
 show interfaces Tunnel0.0
-ping {{ remote_lan }}
+ping {{ remote_lan_test_host }}
 ```
 
 ## 動作確認
@@ -1664,6 +1675,7 @@ local_wan_ip = "203.0.113.1"
 remote_wan_ip = "198.51.100.1"
 local_lan = "192.168.10.0/24"
 remote_lan = "192.168.20.0/24"
+remote_lan_test_host = "192.168.20.10"
 pre_shared_key_note = "事前共有鍵(PSK)は社内の鍵管理台帳(鍵ボールト)で別途保管し、コンソールから設定投入する際にのみ参照して入力する。設定ファイルや構成管理リポジトリに平文で保存しないこと"
 ```
 
@@ -1770,7 +1782,7 @@ ping 169.254.0.2
 ISAKMP SA・IPsec SAがともに確立していることを確認したうえで、対向拠点LAN側の端末へpingを実行します。
 
 ```bash
-ping {{ remote_lan }}
+ping {{ remote_lan_test_host }}
 ```
 
 ## 動作確認

@@ -40,7 +40,7 @@ Refs #595
 - IKE SAライフタイム 28800秒(8時間)、IPsec SAライフタイム 3600秒(1時間)
 - NAT-T: 自動検出で有効、DPD(Dead Peer Detection): 有効
 
-暗号スイート自体はテンプレート変数化せず、各ベンダーの実CLI構文として直接記述する(パラメータ化すると相互接続性を崩す設定を投入できてしまうため)。変数化するのは拠点固有値のみ: `local_wan_ip`, `remote_wan_ip`, `local_lan`, `remote_lan`, `pre_shared_key_note`(既存`yamaha-ipsec-vpn`の変数命名を踏襲)。
+暗号スイート自体はテンプレート変数化せず、各ベンダーの実CLI構文として直接記述する(パラメータ化すると相互接続性を崩す設定を投入できてしまうため)。変数化するのは拠点固有値のみ: `local_wan_ip`, `remote_wan_ip`, `local_lan`, `remote_lan`, `pre_shared_key_note`(既存`yamaha-ipsec-vpn`の変数命名を踏襲)、および`remote_lan_test_host`(動作確認の`ping`コマンド専用。`remote_lan`のネットワークアドレスそのものをpingすると正常なトンネルでも応答が返らず誤った失敗と誤認されるため、対向拠点LAN内の実在しうる1台のホストアドレスを別変数として持つ。実装時の code review で発見)。Cisco(classic IOSの`ip route`がCIDR表記を受け付けないため)のみ`remote_lan_netmask`も追加で持つ。
 
 ## 4. 命名・内容規約
 
