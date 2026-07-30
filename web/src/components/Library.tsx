@@ -136,6 +136,15 @@ function CatIcon({ name, size, color }: { name: string; size: number; color?: st
   return <Icon name={name} size={size} color={color} />;
 }
 
+const CATEGORY_ICON: Record<TemplateCategory, string> = {
+  network: 'router',
+  server: 'server',
+  dns: 'ethernet-port',
+  ai: 'terminal',
+  ops: 'config-file',
+  facility: 'server',
+};
+
 function TemplateCard({ tpl, onOpen }: { tpl: Template; onOpen: (tpl: Template) => void }) {
   const [hover, setHover] = React.useState(false);
   return (
@@ -161,7 +170,7 @@ function TemplateCard({ tpl, onOpen }: { tpl: Template; onOpen: (tpl: Template) 
     >
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <span style={{ width: 34, height: 34, borderRadius: 'var(--radius-sm)', background: 'var(--cg-bg)', border: '1px solid var(--cg-border)', display: 'grid', placeItems: 'center' }}>
-          <CatIcon name={CATS.find((c) => c.id === tpl.category)!.icon} size={18} color="var(--cg-red)" />
+          <CatIcon name={CATEGORY_ICON[tpl.category]} size={18} color="var(--cg-red)" />
         </span>
         {tpl.live && <Badge tone="success">ライブ</Badge>}
       </div>
