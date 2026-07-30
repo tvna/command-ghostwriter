@@ -43,6 +43,7 @@ ALLOWED_SUBCATEGORIES: Final[dict[str, frozenset[str]]] = {
                 "Dell",
                 "DHCP",
                 "Fortinet",
+                "HPE Aruba",
                 "IDS・IPS",
                 "IPアドレス管理",
                 "IPアドレス設計",
