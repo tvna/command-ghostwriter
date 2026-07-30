@@ -103,7 +103,7 @@ ip route {{ remote_lan.split('/')[0] }} {{ remote_lan_netmask }} Tunnel10
 show crypto ikev2 sa detail
 show crypto ipsec sa
 show interfaces Tunnel10
-ping {{ remote_lan.split('/')[0] }} source {{ local_wan_ip }}
+ping {{ remote_lan_test_host }} source {{ local_wan_ip }}
 ```
 
 `show crypto ikev2 sa detail`でIKE SAが確立(`READY`相当の状態)していることを確認したうえで、対向拠点LAN側の端末へpingを実行します。
