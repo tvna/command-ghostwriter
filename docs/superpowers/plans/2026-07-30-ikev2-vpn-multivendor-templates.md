@@ -404,6 +404,8 @@ show security ipsec security-associations detail
 ping {{ remote_lan_test_host }}
 ```
 
+SRX自身が発信する`ping`は自己トラフィック(self-traffic)として扱われ、`ALLOW-TO-REMOTE`/`ALLOW-FROM-REMOTE`ゾーン間ポリシーを経由しないため、IKE/IPsec/経路の健全性は確認できてもポリシー自体の正しさまでは検証できません。ポリシーの実効性まで確認するには、自拠点LAN`{{ local_lan }}`内の実機から対向拠点LAN側端末へpingし、`show security flow session`でセッションが`ALLOW-TO-REMOTE`ポリシーに基づいて許可されていることを確認してください。
+
 ## 動作確認
 
 - `show security ike security-associations`で対向拠点`{{ remote_wan_ip }}`向けのIKE SAが表示され、Stateが`UP`であること
@@ -574,6 +576,8 @@ SAの確立を確認したうえで、対向拠点LAN側の端末へpingを実�
 ```bash
 ping host {{ remote_lan_test_host }}
 ```
+
+このファイアウォール自身が発信する`ping`は自己トラフィックとして扱われ、必ずしもゾーン間のSecurity Policyを経由した検証にはなりません。ポリシーの実効性まで確認するには、自拠点LAN`{{ local_lan }}`内の実機から対向拠点LAN側端末へpingし、セッションテーブルで該当ポリシーに基づいて許可されていることを別途確認してください。
 
 ## 動作確認
 
@@ -751,6 +755,8 @@ ping {{ remote_lan_test_host }}
 ```
 
 `show vpn policy`の出力で、Phase1/Phase2の暗号アルゴリズムが意図通り(AES-256/SHA-256/DHグループ14)であること、SAが確立していることを確認したうえで、対向拠点LAN側の端末へpingを実行します。
+
+装置自身が発信する`ping`は自己トラフィックとして扱われ、ゾーン/アクセスルールを経由した検証にはならない場合があります。ルールの実効性まで確認するには、自拠点LAN `{{ local_lan }}` 内の実機から対向拠点LAN側端末へpingしてください。
 
 ## 動作確認
 
@@ -1299,6 +1305,8 @@ get vpn ipsec tunnel summary
 ```bash
 execute ping {{ remote_lan_test_host }}
 ```
+
+FortiGate自身が発信する`ping`は自己トラフィックとして扱われ、`lan-to-branch`/`branch-to-lan`ファイアウォールポリシーを経由した検証にはならない場合があります。ポリシーの実効性まで確認するには、自拠点LAN`{{ local_lan }}`内の実機から対向拠点LAN側端末へpingしてください。
 
 ## 動作確認
 
