@@ -695,6 +695,7 @@ const META: Meta[] = [
   { id: "edgerouter-ikev2-vpn", name: "EdgeRouter(EdgeOS)の拠点間IKEv2 IPsec VPN構築", desc: "EdgeOSのike-group/esp-groupとVTIでIKEv2拠点間トンネルを構成し、経路と疎通を検証する手順書を生成。", category: "network", subCategory: "Ubiquiti", format: "toml", output: "markdown", updated: "2026-07-30", live: true },
   { id: "aruba-ikev2-vpn", name: "Aruba拠点間IKEv2 IPsec VPN構築", desc: "ArubaOSブランチゲートウェイ2拠点間でIKEv2 IPsecトンネルを構成し、暗号プロファイルと疎通を検証する手順書を生成。", category: "network", subCategory: "Aruba", format: "toml", output: "markdown", updated: "2026-07-30", live: true },
   { id: "fortinet-ikev2-vpn", name: "FortiGate拠点間IKEv2 IPsec VPN構築", desc: "FortiGate/FortiOSでIKEv2 IPsecトンネルを構成し、拠点間の相互疎通と経路・ポリシーを検証する手順書を生成。", category: "network", subCategory: "Fortinet", format: "toml", output: "markdown", updated: "2026-07-30", live: true },
+  { id: "yamaha-ikev2-vpn", name: "YAMAHAルータのIKEv2拠点間IPsec VPN構築", desc: "RTX系ルータ2拠点間でIKEv2 IPsecトンネルを構成し、暗号プロファイル固定と相互疎通を検証する手順書を生成。", category: "network", subCategory: "YAMAHA", format: "toml", output: "markdown", updated: "2026-07-30", live: true },
 ];
 
 export const CGTemplates: Template[] = META.map((m) => ({

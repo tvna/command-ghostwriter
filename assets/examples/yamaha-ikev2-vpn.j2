@@ -1,0 +1,97 @@
+# YAMAHAルータ(RTXシリーズ)の拠点間IKEv2 IPsec VPN構築
+
+RTX系ルータ2台を使い、IKEv2で拠点間IPsecトンネルを確立します。IKEv1をベースにした既存手順とはコマンド体系が一部異なるため、両拠点とも本手順に沿って設定してください。
+
+## 目的
+
+RTXのセキュリティ・ゲートウェイ識別子(gateway_id)を軸にしたIKEv2固有の折衝パラメーター制御を理解した上で、拠点間IPsecトンネルを構築し、拠点間の経路を整えて相互疎通を検証できるようになることを目指します。
+
+## 用語解説
+
+- **セキュリティ・ゲートウェイ識別子(gateway_id)**: `ipsec ike`系コマンドが共通して参照する対向拠点ごとの識別番号。トンネル番号とは別に採番し、暗号アルゴリズムやSAポリシーをこの番号にひも付ける
+- **ipsec ike proposal-limitation**: IKEv2では既定(off)だと対応する全アルゴリズムを同時に提案してしまう。`on`にすることで`ipsec ike encryption`/`ipsec ike hash`/`ipsec ike group`/`ipsec sa policy`で明示指定した組み合わせのみを提案するようになり、対向機と合意する暗号スイートを固定できる
+- **ipsec ike duration ike-sa / ipsec-sa**: IKEv2ではSA寿命は双方で折衝されず各機器が独立管理する仕様のため、両拠点で同じ秒数を設定しておかないと更新タイミングがずれる
+- **PFS(Perfect Forward Secrecy)**: `ipsec ike pfs`で有効化し、フェーズ2(CHILD SA)の鍵生成に`ipsec ike group`で設定したDHグループを再利用する
+- **NATトラバーサル(nat-traversal)**: `NAT_DETECTION`通知ペイロードで経路上のNATを自動検出し、検出時のみUDPカプセル化(ポート4500)に切り替える仕組み。`force`オプションを付けない限り自動検出動作になる
+- **キープアライブ(dpd)**: `ipsec ike keepalive use`コマンドの`dpd`キーワードで、対向機の死活監視(Dead Peer Detection相当)を有効化する
+- **local-id/remote-id**: `ipsec sa policy`のオプションで、IKEv1では複数SAの振り分けに使うが、IKEv2では効力を持たない点に注意が必要
+
+## シナリオ設定
+
+自拠点WAN側アドレス `{{ local_wan_ip }}` と対向拠点WAN側アドレス `{{ remote_wan_ip }}` の間にIKEv2でIPsecトンネルを確立し、自拠点LAN `{{ local_lan }}` と対向拠点LAN `{{ remote_lan }}` を相互疎通させます。{{ pre_shared_key_note }}
+
+このテンプレートは、IKEv2マルチベンダー相互接続シリーズ(10ベンダー共通)の一つです。全テンプレートで暗号プロファイルを統一しており、このシリーズの他ベンダーのルータ/ファイアウォールとの間でも、以下の共通プロファイルに沿っていれば相互接続できます: IKEv2/IKE暗号AES-256(CBC)・ハッシュSHA-256・DHグループ14 / IPsec(ESP)暗号AES-256・認証SHA-256・PFSグループ14 / 認証方式PSK / IKE SAライフタイム28800秒・IPsec SAライフタイム3600秒 / NAT-T自動検出有効・DPD有効。
+
+## 手順
+
+### 1. 両拠点のパラメータを突き合わせる
+
+対向拠点の管理者と、WAN側アドレス・LANアドレス帯・事前共有鍵・IKEバージョン(2固定)が食い違っていないか確認します。片方だけ変更すると鍵交換が確立しません。
+
+```bash
+show status pp
+show ip route
+```
+
+### 2. IKEv2/IPsecプロファイルとトンネルを設定する(自拠点側)
+
+administratorモードでゲートウェイ1・トンネル1番を作成します。対向拠点側では`{{ local_wan_ip }}`と`{{ remote_wan_ip }}`を入れ替えた設定を投入してもらいます。
+
+```bash
+tunnel select 1
+ ipsec tunnel 1
+  ipsec ike version 1 2
+  ipsec ike encryption 1 aes256-cbc
+  ipsec ike hash 1 sha256
+  ipsec ike group 1 modp2048
+  ipsec ike proposal-limitation 1 on
+  ipsec ike duration ike-sa 1 28800
+  ipsec ike duration ipsec-sa 1 3600
+  ipsec ike pfs 1 on
+  ipsec ike local address 1 {{ local_wan_ip }}
+  ipsec ike remote address 1 {{ remote_wan_ip }}
+  ipsec ike pre-shared-key 1 text ********
+  ipsec ike nat-traversal 1 on
+  ipsec ike keepalive use 1 on dpd
+  ipsec sa policy 101 1 esp aes256-cbc sha256-hmac
+ ip tunnel tcp mss limit auto
+ tunnel enable 1
+ipsec auto refresh on
+```
+
+事前共有鍵の実際の値は、コンソール入力時のみ台帳(鍵管理システム)から参照し、設定表示や保存先には平文で残さないようにします。
+
+### 3. 経路を設定する
+
+対向拠点LAN宛の経路をトンネル経由に向けます。
+
+```bash
+ip route {{ remote_lan }} gateway tunnel 1
+save
+```
+
+### 4. 動作確認コマンドを実行する
+
+```bash
+show ipsec sa
+show status tunnel 1
+```
+
+SA(Security Association)が確立していることを確認したうえで、対向拠点LAN側の端末へpingを実行します。
+
+```bash
+ping {{ remote_lan_test_host }}
+```
+
+## 動作確認
+
+- `show status tunnel 1`でトンネル1のステータスが`Up`(接続確立)であること
+- `show ipsec sa`に、自拠点`{{ local_wan_ip }}`と対向拠点`{{ remote_wan_ip }}`の間のSAが表示され、暗号アルゴリズムが`AES256-CBC`・認証アルゴリズムが`SHA2-256`相当であること
+- `show ipsec sa`のIKEバージョン表示が`IKEv2`になっていること(IKEv1にフォールバックしていないこと)
+- 自拠点LAN`{{ local_lan }}`の端末から対向拠点LAN`{{ remote_lan }}`の端末へpingが成功すること
+
+## 注意事項
+
+- 事前共有鍵は両拠点で完全に一致していないとIKEv2の鍵交換が確立しない。コピー&ペーストではなく台帳の同一値を参照するなど、入力ミスを防ぐ運用にする。
+- `ipsec ike proposal-limitation`を`on`にし忘れると、意図した暗号プロファイル以外のアルゴリズムでも対向機と合意できてしまうため、必ず設定して`show ipsec sa`で実際に選択されたアルゴリズムを確認する。
+- `save`コマンドを忘れると再起動時に設定が失われる。対向拠点側の担当者にも同様に`save`実施を依頼する。
