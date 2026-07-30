@@ -78,6 +78,8 @@ config vpn ipsec phase2-interface
 end
 ```
 
+`src-subnet`/`dst-subnet`はCIDR表記ではなくアドレス+ダットデシマルマスクの2引数を取ります。`local_lan`/`remote_lan`のプレフィックス長を変更する場合は、`local_lan_netmask`/`remote_lan_netmask`も対応する値に必ず更新してください(次の手順の`subnet`/`dst`も同様です)。
+
 ### 4. ファイアウォールポリシーと経路を設定する
 
 自動生成されたトンネルインターフェース`to-branch`を経由できるよう、アドレスオブジェクトとポリシーを作成し、対向拠点LAN宛の静的経路を追加します。

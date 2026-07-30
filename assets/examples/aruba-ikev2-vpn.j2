@@ -73,9 +73,11 @@ set security-association lifetime seconds 3600
 trusted enable
 ```
 
+`src-net`/`dst-net`もCIDR表記ではなくアドレス+ダットデシマルマスクの2引数を取ります。`local_lan`/`remote_lan`のプレフィックス長を変更する場合は、`local_lan_netmask`/`remote_lan_netmask`も対応する値に必ず更新してください。
+
 ### 3. 経路を設定する
 
-対向拠点LAN宛の経路を、作成したIPsecマップ経由に向けます。`ip route`もCIDR表記ではなくアドレス+ダットデシマルマスクの2引数を取るため、`remote_lan_netmask`を使います。
+対向拠点LAN宛の経路を、作成したIPsecマップ経由に向けます。`ip route`もCIDR表記ではなくアドレス+ダットデシマルマスクの2引数を取るため、`remote_lan_netmask`を使います(こちらも`remote_lan`のプレフィックス長を変更する場合は更新が必要です)。
 
 ```bash
 ip route {{ remote_lan.split('/')[0] }} {{ remote_lan_netmask }} ipsec s2s-branch-to-hq

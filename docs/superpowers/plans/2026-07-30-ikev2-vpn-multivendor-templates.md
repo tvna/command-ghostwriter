@@ -74,7 +74,7 @@ PYEOF2
 - Create: `assets/examples/cisco-ikev2-vpn.j2`
 - Modify: `web/src/lib/templates.ts`
 
-**一次情報:** 以下の公式ドキュメントでCLI構文を検証済み(全件はワークフロー記録 `wf_65b35ee0-4cd` を参照):
+**一次情報:** 以下の公式ドキュメントでCLI構文を検証済み(各ベンダーのURLは下記のとおり。一次情報の全文検証プロセスの詳細はこのPRの実装過程で確認可能):
   - https://www.cisco.com/c/en/us/td/docs/routers/ios/config/17-x/sec-vpn/b-security-vpn/m_sec-cfg-ikev2-flex.html
   - https://www.cisco.com/c/en/us/td/docs/routers/ios/config/17-x/sec-vpn/b-security-vpn/m_sec-ipsec-virt-tunnl-0.html
   - https://www.cisco.com/c/en/us/td/docs/ios-xml/ios/sec_conn_ike2vpn/configuration/xe-16-10/sec-flex-vpn-xe-16-10-book/sec-cfg-ikev2-flex.html
@@ -255,7 +255,7 @@ git commit -m "feat: add cisco-ikev2-vpn IKEv2 multi-vendor interop template (#5
 - Create: `assets/examples/juniper-ikev2-vpn.j2`
 - Modify: `web/src/lib/templates.ts`
 
-**一次情報:** 以下の公式ドキュメントでCLI構文を検証済み(全件はワークフロー記録 `wf_65b35ee0-4cd` を参照):
+**一次情報:** 以下の公式ドキュメントでCLI構文を検証済み(各ベンダーのURLは下記のとおり。一次情報の全文検証プロセスの詳細はこのPRの実装過程で確認可能):
   - https://www.juniper.net/documentation/us/en/software/junos/vpn-ipsec/topics/topic-map/security-ipsecvpns-for-ikev2.html
   - https://www.juniper.net/documentation/en_US/junos12.1x46/topics/example/ipsec-route-based-vpn-configuring-ikev2.html
   - https://www.juniper.net/documentation/us/en/software/junos/vpn-ipsec/topics/topic-map/security-ipsec-vpn-configuration-overview.html
@@ -449,7 +449,7 @@ git commit -m "feat: add juniper-ikev2-vpn IKEv2 multi-vendor interop template (
 - Create: `assets/examples/paloalto-ikev2-vpn.j2`
 - Modify: `web/src/lib/templates.ts`
 
-**一次情報:** 以下の公式ドキュメントでCLI構文を検証済み(全件はワークフロー記録 `wf_65b35ee0-4cd` を参照):
+**一次情報:** 以下の公式ドキュメントでCLI構文を検証済み(各ベンダーのURLは下記のとおり。一次情報の全文検証プロセスの詳細はこのPRの実装過程で確認可能):
   - https://docs.paloaltonetworks.com/network-security/ipsec-vpn/administration/set-up-site-to-site-vpn/define-cryptographic-profiles/define-ike-crypto-profiles
   - https://docs.paloaltonetworks.com/pan-os/9-1/pan-os-admin/vpns/set-up-site-to-site-vpn
   - https://docs.paloaltonetworks.com/pan-os/9-1/pan-os-admin/vpns/set-up-site-to-site-vpn/define-cryptographic-profiles/define-ipsec-crypto-profiles
@@ -630,7 +630,7 @@ git commit -m "feat: add paloalto-ikev2-vpn IKEv2 multi-vendor interop template 
 - Create: `assets/examples/sonicwall-ikev2-vpn.j2`
 - Modify: `web/src/lib/templates.ts`
 
-**一次情報:** 以下の公式ドキュメントでCLI構文を検証済み(全件はワークフロー記録 `wf_65b35ee0-4cd` を参照):
+**一次情報:** 以下の公式ドキュメントでCLI構文を検証済み(各ベンダーのURLは下記のとおり。一次情報の全文検証プロセスの詳細はこのPRの実装過程で確認可能):
   - https://www.sonicwall.com/support/knowledge-base/configuring-site-to-site-vpn-policies-using-enterprise-command-line-interface-e-cli/kA1VN0000000JUH0A2
   - https://assets-cms.sonicwall.com/technical-documentation/pdf/sonicosx-7-command-line-interface-reference-guide/sonicosx-7-command-line-interface-reference-guide.pdf
   - https://www.sonicwall.com/support/technical-documentation/docs/sonicos-7-0-0-0-ipsec_vpn/Content/ipsec-vpn-types-auto-added-acess-rule.htm
@@ -814,7 +814,7 @@ git commit -m "feat: add sonicwall-ikev2-vpn IKEv2 multi-vendor interop template
 - Create: `assets/examples/edgerouter-ikev2-vpn.j2`
 - Modify: `web/src/lib/templates.ts`
 
-**一次情報:** 以下の公式ドキュメントでCLI構文を検証済み(全件はワークフロー記録 `wf_65b35ee0-4cd` を参照):
+**一次情報:** 以下の公式ドキュメントでCLI構文を検証済み(各ベンダーのURLは下記のとおり。一次情報の全文検証プロセスの詳細はこのPRの実装過程で確認可能):
   - https://help.ui.com/hc/en-us/articles/115012831287-EdgeRouter-IPsec-Policy-Based-Site-to-Site-VPN
   - https://help.ui.com/hc/en-us/articles/216771078 (EdgeRouter - Modifying the Default IPsec Site-to-Site VPN, fetched via r.jina.ai reader after direct WebFetch/curl returned HTTP 403)
   - https://help.ui.com/hc/en-us/articles/115011377588 (EdgeRouter - Route-Based Site-to-Site IPsec VPN, fetched via r.jina.ai reader after direct WebFetch/curl returned HTTP 403)
@@ -985,7 +985,7 @@ git commit -m "feat: add edgerouter-ikev2-vpn IKEv2 multi-vendor interop templat
 - Create: `assets/examples/aruba-ikev2-vpn.j2`
 - Modify: `web/src/lib/templates.ts`
 
-**一次情報:** 以下の公式ドキュメントでCLI構文を検証済み(全件はワークフロー記録 `wf_65b35ee0-4cd` を参照):
+**一次情報:** 以下の公式ドキュメントでCLI構文を検証済み(各ベンダーのURLは下記のとおり。一次情報の全文検証プロセスの詳細はこのPRの実装過程で確認可能):
   - https://arubanetworking.hpe.com/techdocs/Archived/AOS-8/ArubaOS_81_Web_Help/Content/ArubaFrameStyles/VPNs/Site_to_Site_VPNs.htm
   - https://arubanetworking.hpe.com/techdocs/CLI-Bank/Content/aos8/crypt-isakmp.htm
   - https://arubanetworking.hpe.com/techdocs/CLI-Bank/Content/aos8/cry-lcl-ipsc-map.htm
@@ -1089,9 +1089,11 @@ set security-association lifetime seconds 3600
 trusted enable
 ```
 
+`src-net`/`dst-net`もCIDR表記ではなくアドレス+ダットデシマルマスクの2引数を取ります。`local_lan`/`remote_lan`のプレフィックス長を変更する場合は、`local_lan_netmask`/`remote_lan_netmask`も対応する値に必ず更新してください。
+
 ### 3. 経路を設定する
 
-対向拠点LAN宛の経路を、作成したIPsecマップ経由に向けます。`ip route`もCIDR表記ではなくアドレス+ダットデシマルマスクの2引数を取るため、`remote_lan_netmask`を使います。
+対向拠点LAN宛の経路を、作成したIPsecマップ経由に向けます。`ip route`もCIDR表記ではなくアドレス+ダットデシマルマスクの2引数を取るため、`remote_lan_netmask`を使います(こちらも`remote_lan`のプレフィックス長を変更する場合は更新が必要です)。
 
 ```bash
 ip route {{ remote_lan.split('/')[0] }} {{ remote_lan_netmask }} ipsec s2s-branch-to-hq
@@ -1155,7 +1157,7 @@ git commit -m "feat: add aruba-ikev2-vpn IKEv2 multi-vendor interop template (#5
 - Create: `assets/examples/fortinet-ikev2-vpn.j2`
 - Modify: `web/src/lib/templates.ts`
 
-**一次情報:** 以下の公式ドキュメントでCLI構文を検証済み(全件はワークフロー記録 `wf_65b35ee0-4cd` を参照):
+**一次情報:** 以下の公式ドキュメントでCLI構文を検証済み(各ベンダーのURLは下記のとおり。一次情報の全文検証プロセスの詳細はこのPRの実装過程で確認可能):
   - https://docs.fortinet.com/document/fortigate/6.2.1/cli-reference/286620/vpn-ipsec-phase1-interface
   - https://docs.fortinet.com/document/fortigate/6.2.1/cli-reference/287620/vpn-ipsec-phase2-interface
   - https://docs.fortinet.com/document/fortigate/7.6.6/cli-reference/305883427/config-vpn-ipsec-phase1-interface
@@ -1266,6 +1268,8 @@ config vpn ipsec phase2-interface
 end
 ```
 
+`src-subnet`/`dst-subnet`はCIDR表記ではなくアドレス+ダットデシマルマスクの2引数を取ります。`local_lan`/`remote_lan`のプレフィックス長を変更する場合は、`local_lan_netmask`/`remote_lan_netmask`も対応する値に必ず更新してください(次の手順の`subnet`/`dst`も同様です)。
+
 ### 4. ファイアウォールポリシーと経路を設定する
 
 自動生成されたトンネルインターフェース`to-branch`を経由できるよう、アドレスオブジェクトとポリシーを作成し、対向拠点LAN宛の静的経路を追加します。
@@ -1370,7 +1374,7 @@ git commit -m "feat: add fortinet-ikev2-vpn IKEv2 multi-vendor interop template 
 - Create: `assets/examples/yamaha-ikev2-vpn.j2`
 - Modify: `web/src/lib/templates.ts`
 
-**一次情報:** 以下の公式ドキュメントでCLI構文を検証済み(全件はワークフロー記録 `wf_65b35ee0-4cd` を参照):
+**一次情報:** 以下の公式ドキュメントでCLI構文を検証済み(各ベンダーのURLは下記のとおり。一次情報の全文検証プロセスの詳細はこのPRの実装過程で確認可能):
   - https://www.rtpro.yamaha.co.jp/RT/docs/ipsec/ike2.html
   - https://network.yamaha.com/setting/router_firewall/cloud/alibaba_cloud/setup_rt_ikev2
   - https://www.rtpro.yamaha.co.jp/RT/manual/rt-common/ipsec/ipsec_chapter.html
@@ -1529,7 +1533,7 @@ git commit -m "feat: add yamaha-ikev2-vpn IKEv2 multi-vendor interop template (#
 - Create: `assets/examples/nec-ikev2-vpn.j2`
 - Modify: `web/src/lib/templates.ts`
 
-**一次情報:** 以下の公式ドキュメントでCLI構文を検証済み(全件はワークフロー記録 `wf_65b35ee0-4cd` を参照):
+**一次情報:** 以下の公式ドキュメントでCLI構文を検証済み(各ベンダーのURLは下記のとおり。一次情報の全文検証プロセスの詳細はこのPRの実装過程で確認可能):
   - https://jpn.nec.com/univerge/ix/faq/ikev2.html
   - https://jpn.nec.com/univerge/ix/faq/ipsec-ike.html
   - https://support.necplatforms.co.jp/ix-nrv/manual/ex/Section1/5_internet-vpn_ikev2.html (fetch blocked: proxy returned 502/DNS failure)
@@ -1689,7 +1693,7 @@ git commit -m "feat: add nec-ikev2-vpn IKEv2 multi-vendor interop template (#595
 - Create: `assets/examples/alliedtelesis-ikev2-vpn.j2`
 - Modify: `web/src/lib/templates.ts`
 
-**一次情報:** 以下の公式ドキュメントでCLI構文を検証済み(全件はワークフロー記録 `wf_65b35ee0-4cd` を参照):
+**一次情報:** 以下の公式ドキュメントでCLI構文を検証済み(各ベンダーのURLは下記のとおり。一次情報の全文検証プロセスの詳細はこのPRの実装過程で確認可能):
   - https://www.alliedtelesis.com/sites/default/files/documents/configuration-guides/ipsec_feature_overview_guide.pdf (Internet Protocol Security (IPsec) Feature Overview and Configuration Guide, C613-22020-00 REV U)
   - https://www.alliedtelesis.com/sites/default/files/documents/getting-started-guides/getting_started_aw_feature_overview_guide.pdf (Getting Started with the AlliedWare Plus Command Line Interface, C613-22045-00 REV M)
   - WebSearch: AlliedWare Plus IKEv2 IPsec feature overview crypto isakmp policy command reference
