@@ -549,6 +549,8 @@ CSVの配線表(ケーブルスケジュール)をもとに敷設し、LLDPで�
 
 ## 1. 配線表を確認する
 
+これらの配線は、パッチパネルを介して機器とラック間を接続する水平配線（フロア内配線）に該当します。
+
 | cable_id | from_port | to_port | cable_type | length_m |
 |---|---|---|---|---|
 {% for r in csv_rows %}| {{ r["cable_id"] }} | {{ r["from_port"] }} | {{ r["to_port"] }} | {{ r["cable_type"] }} | {{ r["length_m"] }} |
@@ -709,7 +711,7 @@ echo "各区間をフローチャートで判定します"
 ### {{ r["segment_name"] }}
 
 距離{{ r["distance_m"] }}m、要求速度{{ r["required_speed"] }}、選定カテゴリ{{ r["selected_category"] }}
-{% if (r["distance_m"] | int) > 100 %}判定: 100m超のため光ファイバ必須 → {% if "fiber" in r["selected_category"] %}選定は妥当{% else %}選定は**不適合（光ファイバへ変更が必要）**{% endif %}
+{% if (r["distance_m"] | int) > 100 %}判定: 100m超のため光ファイバ必須 → {% if "fiber" in r["selected_category"] %}選定は妥当（マルチモード(MM)光ファイバ。100m超でもSM/MMいずれかの光ファイバであれば距離制限を回避できる）{% else %}選定は**不適合（光ファイバへ変更が必要）**{% endif %}
 {% elif r["required_speed"] == "10GbE" and (r["distance_m"] | int) > 55 and r["selected_category"] == "Cat6" %}判定: 10GbEかつ55m超のためCat6A以上が必要 → 選定Cat6は**不適合（要是正）**
 {% elif r["required_speed"] == "1GbE" and r["poe_required"] == "yes" and r["selected_category"] == "Cat5e" and (r["distance_m"] | int) >= 90 %}判定: 距離・速度要件は満たすが、長距離・PoE併用のためCat6以上を推奨（**要検討**、必須ではない）
 {% else %}判定: 選定は要件を満たす（適合）
@@ -829,7 +831,7 @@ WとVAの違い・力率を理解し、負荷率からUPSの容量適合とバ�
 
 ## 1. UPS仕様と接続負荷を確認する
 
-UPS: {{ ups_spec.model }}（VA定格: {{ ups_spec.va_rating }}VA、W定格: {{ ups_spec.w_rating }}W、推奨負荷率: {{ ups_spec.recommended_load_pct }}%）
+UPS: {{ ups_spec.model }}（VA定格: {{ ups_spec.va_rating }}VA、W定格: {{ ups_spec.w_rating }}W、推奨負荷率: {{ ups_spec.recommended_load_pct }}%）。本機はラインインタラクティブ方式です（常時インバータ方式より安価だが、停電検知から出力切替までに数msの瞬断があります）。
 
 | name | w |
 |---|---|
@@ -871,7 +873,7 @@ VA側の負荷率は、力率が不明な場合はW基準の値を上回らな�
 apcaccess status
 ```
 
-`LOADPCT`（実測負荷率）と`TIMELEFT`（実測ランタイム推定）を、Step 3・Step 4の計算値と比較します。
+`LOADPCT`（実測負荷率）と`TIMELEFT`（実測ランタイム推定）を、Step 3・Step 4の計算値と比較します。あわせて、UPSとサーバ間のシャットダウン連携（NUT等のエージェント経由で、停電通知を受けたサーバが自動シャットダウンする仕組み）が設定・動作していることを確認します。
 
 ## 動作確認
 
@@ -953,7 +955,7 @@ CBL-104,RackA-U20-P2,RackA-U41-P1,RackA-U41-P1
 
 ## 規約定義
 
-ラベル文字列 = `<from_port>_<to_port>`（自分側ポート表記の後にアンダースコアで対向側ポート表記を続ける）
+ラベル文字列 = `<from_port>_<to_port>`（自分側ポート表記の後にアンダースコアで対向側ポート表記を続ける）。`from_port`/`to_port` は `RackA-U20-P1`（ラック名・U番号・ポート番号）のような面付け表記で、ケーブルID採番（`cable_id`列）とあわせて台帳(インベントリ)であるCSVに記録されています。
 
 ## 1. 例題でラベルを手で導出する
 
@@ -977,7 +979,9 @@ echo "検算結果が「不一致」の行を規約違反として記録しま�
 
 ## 4. 貼付チェックリストを消化する
 
-{% for r in csv_rows %}- [ ] {{ r["cable_id"] }}: 両端に規約どおりのラベルを貼付・視認位置を確認・脱落防止処置
+セルフラミネートラベル（巻き付けて自己接着するタイプ）を使い、両端ラベルとして貼付します。
+
+{% for r in csv_rows %}- [ ] {{ r["cable_id"] }}: 両端にセルフラミネートラベルで規約どおりのラベルを貼付・視認位置を確認・脱落防止処置
 {% endfor %}
 
 ## 5. LLDPの対向情報とラベル記載のTo情報を照合する
@@ -1094,10 +1098,10 @@ echo "以下の位置にケージナットを取り付けます"
 {% for pos in cage_nut_positions %}- [ ] {{ pos }}
 {% endfor %}
 
-## 3. レールを取り付け、機器を搭載する
+## 3. スライドレールを取り付け、機器を搭載する
 
 ```bash
-echo "インナーレールを {{ device.name }} に、アウターレールを {{ device.u_position }} に取り付けます"
+echo "スライドレール（インナーレールを {{ device.name }} に、アウターレールを {{ device.u_position }} に）を取り付けます"
 ```
 
 - [ ] インナーレールを機器側面に固定する
@@ -1131,7 +1135,7 @@ ipmitool chassis status
 dmidecode -s system-serial-number
 ```
 
-- `chassis status` が `Power ON` かつ異常表示がないこと
+- `chassis status` が `Power ON` かつ異常表示がないこと（初回電源投入時の自己診断(PoST)がエラーなく完了していること）
 - シリアル番号が台帳の期待値 `{{ expected_serial }}` と一致すること
 
 ## 動作確認
@@ -1217,7 +1221,7 @@ measured_inlet_temps:
 ```jinja
 # エアフロー設計とブランクパネル計画
 
-YAMLのラック列構成から再循環リスクを確認し、ASHRAE推奨吸気温度範囲で冷却の健全性を判定します。
+YAMLのラック列構成から再循環リスクを確認し、ASHRAE推奨吸気温度範囲で冷却の健全性を判定します。本データセンターはCRAC（冷媒直膨式空調機）による床下空調(フリーアクセスフロア)方式で、床下から供給された冷気がラック前面（コールドアイル）から吸気され、背面（ホットアイル）へ排気されます。
 
 ## 目的
 
@@ -1382,7 +1386,7 @@ YAMLの設置計画と閾値表に基づき、温湿度センサーを設置し�
 |---|---|---|
 | 温度 | {{ thresholds.temp_warning_c }}℃ | {{ thresholds.temp_critical_c }}℃ |
 
-湿度の正常範囲: {{ thresholds.humidity_min_pct }}〜{{ thresholds.humidity_max_pct }}%
+湿度の正常範囲: {{ thresholds.humidity_min_pct }}〜{{ thresholds.humidity_max_pct }}%（相対湿度が上限を超えると結露、下限を下回ると静電気放電(ESD)のリスクが高まるため、この範囲に収めます）
 
 ## 3. 設置チェックリストを消化する
 
@@ -1390,6 +1394,8 @@ YAMLの設置計画と閾値表に基づき、温湿度センサーを設置し�
 {% endfor %}
 
 ## 4. 監視値を取得する
+
+ポーリング間隔5分でSNMP監視します。
 
 ```bash
 snmpwalk -v2c -c public <センサーIP> 1.3.6.1.4.1.<ベンダーOID>
