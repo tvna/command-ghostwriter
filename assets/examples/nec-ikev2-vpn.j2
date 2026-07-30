@@ -1,0 +1,102 @@
+# NEC(IXシリーズ、UNIVERGE IX)の拠点間IKEv2 IPsec VPN構築
+
+UNIVERGE IXシリーズルータ2台を使い、拠点間をIKEv2 IPsecトンネルで接続します。両拠点のパラメータを事前に突き合わせたうえで、片方ずつではなく対応するペアとして設定してください。
+
+## 目的
+
+IKEv2におけるIKE SA(鍵交換用、旧Phase1相当)とChild SA(データ暗号化用、旧Phase2相当)の役割分担を理解した上で、UNIVERGE IXシリーズでの拠点間IPsecトンネルを構築し、拠点間の経路を整えて相互疎通を検証できるようになることを目指します。
+
+## 用語解説
+
+- **IKE SA / Child SA**: IKEv2では鍵交換そのものを行うIKE SAと、実データを暗号化するChild SA(IPsec SA)を区別して管理する。IKEv1のPhase1/Phase2に相当する
+- **tunnel mode ipsec-ikev2**: UNIVERGE IXではTunnelインターフェース上にIPsec設定を行い、`tunnel mode ipsec-ikev2`を指定することでIKEv1ではなくIKEv2であることを明示する
+- **ikev2 default-profile**: 装置全体で共有するIKEv2の既定パラメータ(DPD間隔や送信元インターフェースなど)を定義する設定単位。Tunnelインターフェース側の個別設定が優先される
+- **ikev2 peer**: Tunnelインターフェース上で対向機器のアドレスと認証方式を紐付ける設定。`authentication psk id ipv4`のようにID種別とPSK認証をあわせて指定する
+- **child-pfs**: Child SA確立・再鍵交換時にPFS(Perfect Forward Secrecy)を適用するDHグループを指定する設定。IKE SA用の`sa-proposal dh`とは別に指定が必要
+- **DPD(Dead Peer Detection)**: 対向機器の生死を監視する仕組み。`dpd interval`で送信間隔(秒)を指定する
+- **事前共有鍵(PSK)**: `ikev2 authentication psk`で対向アドレスごとに設定する認証鍵。設定ファイルや台帳への平文保存は避ける
+
+## シナリオ設定
+
+自拠点WAN側アドレス `{{ local_wan_ip }}` と対向拠点WAN側アドレス `{{ remote_wan_ip }}` の間にIKEv2でIPsecトンネルを確立し、自拠点LAN `{{ local_lan }}` と対向拠点LAN `{{ remote_lan }}` を相互疎通させます。{{ pre_shared_key_note }}
+
+このテンプレートは、IKEv2マルチベンダー相互接続シリーズ(10ベンダー共通)の一つです。全テンプレートで暗号プロファイルを統一しており、このシリーズの他ベンダーのルータ/ファイアウォールとの間でも、以下の共通プロファイルに沿っていれば相互接続できます: IKEv2/IKE暗号AES-256(CBC)・ハッシュSHA-256・DHグループ14 / IPsec(ESP)暗号AES-256・認証SHA-256・PFSグループ14 / 認証方式PSK / IKE SAライフタイム28800秒・IPsec SAライフタイム3600秒 / NAT-T自動検出有効・DPD有効。
+
+## 手順
+
+### 1. 両拠点のパラメータを突き合わせる
+
+対向拠点の管理者と、WAN側アドレス・LANアドレス帯・事前共有鍵・暗号プロファイル(AES-256/SHA-256/DHグループ14)が食い違っていないか確認します。片方だけ変更すると確立できません。
+
+```bash
+show running-config
+show ip route
+```
+
+### 2. IKEv2認証とdefault-profileを設定する(自拠点側)
+
+グローバルコンフィグモードで対向拠点のPSK認証情報と、DPDなど装置共通のIKEv2既定パラメータを設定します。
+
+```bash
+ikev2 authentication psk id ipv4 {{ remote_wan_ip }} key char ********
+
+ikev2 default-profile
+ dpd interval 10
+ source-address GigaEthernet0.1
+```
+
+事前共有鍵の実際の値は、コンソール入力時のみ台帳(鍵管理システム)から参照し、設定表示や保存先には平文で残さないようにします。
+
+### 3. Tunnelインターフェースを設定する(自拠点側)
+
+Tunnel0.0にIKEv2/IPsecの暗号プロファイルと対向情報を設定します。対向拠点側では`{{ local_wan_ip }}`と`{{ remote_wan_ip }}`を入れ替えた設定を投入してもらいます。
+
+```bash
+interface Tunnel0.0
+ tunnel mode ipsec-ikev2
+ ip unnumbered GigaEthernet0.1
+ ip tcp adjust-mss auto
+ ikev2 sa-proposal enc aes-cbc-256
+ ikev2 sa-proposal integrity sha2-256
+ ikev2 sa-proposal dh 2048-bit
+ ikev2 sa-lifetime 28800
+ ikev2 child-proposal enc aes-cbc-256
+ ikev2 child-proposal integrity sha2-256
+ ikev2 child-pfs 2048-bit
+ ikev2 child-lifetime 3600
+ ikev2 connect-type auto
+ ikev2 outgoing-interface GigaEthernet0.1
+ ikev2 peer {{ remote_wan_ip }} authentication psk id ipv4 {{ remote_wan_ip }}
+ no shutdown
+```
+
+### 4. 経路を設定する
+
+対向拠点LAN宛の経路をTunnel0.0経由に向けます。
+
+```bash
+ip route {{ remote_lan }} Tunnel0.0
+save
+```
+
+### 5. 動作確認コマンドを実行する
+
+```bash
+show ikev2 sa
+show ikev2 child-sa
+show interfaces Tunnel0.0
+ping {{ remote_lan_test_host }}
+```
+
+## 動作確認
+
+- `show ikev2 sa`にIKE SAが表示され、暗号アルゴリズムがAES-CBC-256、ハッシュがSHA2-256、DHグループが2048-bit(グループ14相当)であること
+- `show ikev2 child-sa`にChild SA(ESP)が確立して表示され、暗号AES-CBC-256・認証SHA2-256であること
+- `show interfaces Tunnel0.0`でTunnel0.0のステータスが`Up`であること
+- 自拠点LAN`{{ local_lan }}`の端末から対向拠点LAN`{{ remote_lan }}`の端末へpingが成功すること
+
+## 注意事項
+
+- 事前共有鍵は両拠点で完全に一致していないとIKE SAが確立しない。コピー&ペーストではなく台帳の同一値を参照するなど、入力ミスを防ぐ運用にする。
+- 設定変更後は`save`を忘れると再起動時に設定が失われる。対向拠点側の担当者にも同様に`save`実施を依頼する。
+- `ikev2 default-profile`の値はTunnelインターフェース側の`ikev2 sa-proposal`/`ikev2 child-proposal`などの個別設定で上書きされる。装置全体の既定値のつもりで変更しても既存Tunnelには反映されない場合があるため、影響範囲を都度確認する。
