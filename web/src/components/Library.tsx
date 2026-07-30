@@ -9,14 +9,78 @@ import logoMark from '../assets/brand/logo-mark.svg';
 // Library — template gallery. Left category rail + right card grid + 空から作成.
 // Picking a card calls onOpen(template); 空から作成 calls onOpen(null).
 
-const CATS: { id: TemplateCategory | 'all'; label: string; icon: string }[] = [
-  { id: 'all',      label: 'すべて',          icon: 'topology' },
-  { id: 'network',  label: 'ネットワーク機器', icon: 'router' },
-  { id: 'server',   label: 'サーバ / Linux',  icon: 'server' },
-  { id: 'dns',      label: 'DNS',            icon: 'ethernet-port' },
-  { id: 'ai',       label: 'AIインフラ',       icon: 'terminal' },
-  { id: 'ops',      label: '運用共通',         icon: 'config-file' },
-  { id: 'facility', label: '物理設備',        icon: 'server' },
+export interface RailEntry {
+  id: string;
+  label: string;
+  icon: string;
+  group?: string;
+  filter: (t: Template) => boolean;
+}
+
+// Vendor labels must match `subCategory` values in templates.ts exactly.
+// Explicit, reviewable list — not derived by scanning templates.ts at
+// runtime, same reasoning as the ACTS array below.
+const NETWORK_VENDORS: { id: string; label: string }[] = [
+  { id: 'cisco', label: 'Cisco' },
+  { id: 'yamaha', label: 'YAMAHA' },
+  { id: 'juniper', label: 'Juniper' },
+  { id: 'fortinet', label: 'Fortinet' },
+  { id: 'allied-telesis', label: 'Allied Telesis' },
+  { id: 'nec', label: 'NEC' },
+  { id: 'arista', label: 'Arista' },
+  { id: 'dell', label: 'Dell' },
+  { id: 'hpe-aruba', label: 'HPE Aruba' },
+  { id: 'alaxala', label: 'Alaxala' },
+  { id: 'palo-alto', label: 'Palo Alto Networks' },
+  { id: 'sonicwall', label: 'SonicWall' },
+  { id: 'ubiquiti', label: 'Ubiquiti' },
+];
+const NETWORK_VENDOR_LABELS = new Set(NETWORK_VENDORS.map((v) => v.label));
+const SERVER_DISTRO_LABELS = new Set(['Debian系', 'RHEL系']);
+
+export const RAIL: RailEntry[] = [
+  { id: 'all', label: 'すべて', icon: 'topology', filter: () => true },
+  ...NETWORK_VENDORS.map(
+    (v): RailEntry => ({
+      id: `network-${v.id}`,
+      label: v.label,
+      icon: 'router',
+      group: 'ネットワーク機器',
+      filter: (t) => t.category === 'network' && t.subCategory === v.label,
+    }),
+  ),
+  {
+    id: 'network-common',
+    label: 'ネットワーク機器 (共通)',
+    icon: 'router',
+    group: 'ネットワーク機器',
+    filter: (t) => t.category === 'network' && !NETWORK_VENDOR_LABELS.has(t.subCategory),
+  },
+  {
+    id: 'server-common',
+    label: 'サーバ (共通)',
+    icon: 'server',
+    group: 'サーバ',
+    filter: (t) => t.category === 'server' && !SERVER_DISTRO_LABELS.has(t.subCategory),
+  },
+  {
+    id: 'server-debian',
+    label: 'サーバ (Debian系)',
+    icon: 'server',
+    group: 'サーバ',
+    filter: (t) => t.category === 'server' && t.subCategory === 'Debian系',
+  },
+  {
+    id: 'server-rhel',
+    label: 'サーバ (RHEL系)',
+    icon: 'server',
+    group: 'サーバ',
+    filter: (t) => t.category === 'server' && t.subCategory === 'RHEL系',
+  },
+  { id: 'dns', label: 'DNS', icon: 'ethernet-port', filter: (t) => t.category === 'dns' },
+  { id: 'ai', label: 'AIインフラ', icon: 'terminal', filter: (t) => t.category === 'ai' },
+  { id: 'ops', label: '運用共通', icon: 'config-file', filter: (t) => t.category === 'ops' },
+  { id: 'facility', label: '物理設備', icon: 'server', filter: (t) => t.category === 'facility' },
 ];
 
 // Activity axis (orthogonal to the domain category). "すべて" clears the filter.
@@ -36,14 +100,14 @@ const activityOf = (t: Template): TemplateActivity => t.activity ?? 'build';
 const FMT_TONE: Record<Format, 'brand' | 'info' | 'warning'> = { toml: 'brand', yaml: 'info', csv: 'warning' };
 const OUT_LABEL: Record<TemplateOutput, string> = { cli: 'CLI', config: 'config', markdown: 'Markdown' };
 
-const CAT_ORDER = CATS.map((c) => c.id);
+const DOMAIN_ORDER: TemplateCategory[] = ['network', 'server', 'dns', 'ai', 'ops', 'facility'];
 
 // Group templates into ordered sub-category sections. Groups are ordered by
 // their category (so same-category sub-categories stay adjacent, even in the
 // "すべて" view) and, within that, by first appearance; template order inside a
 // group is preserved.
 export function groupBySubCategory(list: Template[]): { key: string; label: string; items: Template[] }[] {
-  const sorted = [...list].sort((a, b) => CAT_ORDER.indexOf(a.category) - CAT_ORDER.indexOf(b.category));
+  const sorted = [...list].sort((a, b) => DOMAIN_ORDER.indexOf(a.category) - DOMAIN_ORDER.indexOf(b.category));
   const groups: { key: string; label: string; items: Template[] }[] = [];
   for (const t of sorted) {
     // Group by (category, subCategory), not sub-category text alone: the same
