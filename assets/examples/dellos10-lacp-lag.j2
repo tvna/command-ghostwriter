@@ -1,0 +1,108 @@
+# Dell OS10スイッチのポートチャネル(LACP)構成
+
+複数の物理リンクをLACPで束ね、帯域拡張とリンク冗長化を実現するport-channelを構成します。両端のスイッチで設定を揃える必要があるため、対向機器の設定と併せて実施してください。
+
+## 目的
+
+LACPによる複数リンクの論理的な集約(port-channel)をDell OS10上に構成し、通常時の負荷分散動作とリンク断時の縮退動作の両方を検証できるようになることを目指します。
+
+## 用語解説
+
+- **LACP(Link Aggregation Control Protocol)**: IEEE 802.3ad標準の動的リンク集約プロトコル。対向機器と制御パケットを交換して自動的にチャネルを形成する
+- **channel-group**: 束ねる物理インターフェースと、それらが所属する論理インターフェース(port-channel)を結びつける番号。OS10ではメンバーインターフェース側で`channel-group <id> mode {active|passive}`を設定する
+- **モードの組合せ**: LACPは`active`(自ら集約を開始)と`passive`(相手からの要求を待つ)があり、両端の少なくとも一方が`active`である必要がある(`passive`同士は集約が成立しない)
+- **インターフェース表記**: OS10の物理ポートは`ethernet <スロット>/<ポート>/<レーン>`という表記で、`interface ethernet 1/1/1`のようにキーワードと番号の間にスペースを挟む(Cisco IOSの`GigabitEthernet0/1`のような単一トークン表記とは異なる)
+- **hash-algorithm**: OS10ではロードバランス方式(ハッシュアルゴリズム)はport-channel個別ではなく`hash-algorithm lag <アルゴリズム名>`としてシステム全体に適用するグローバル設定であり、Ciscoの`port-channel load-balance`のようなport-channel単位の設定とは概念が異なる
+
+## シナリオ設定
+
+channel-group {{ channel_id }}(`interface port-channel {{ channel_id }}`)として以下の{{ member_interfaces | length }}本の物理インターフェースを束ね、LACPモード `{{ lacp_mode }}` で集約します。
+
+{% for intf in member_interfaces %}- `{{ intf }}`
+{% endfor %}
+集約後のport-channelはVLAN {{ trunk_vlans | join(', ') }} を通すトランクポートとし、システム全体のロードバランスアルゴリズムは `{{ load_balance_method }}` を使用します。
+
+## 手順
+
+### 1. 事前条件を確認する
+
+両端のスイッチで、束ねる物理インターフェースの速度・デュプレックス・現在のswitchport設定が一致しているか確認します。設定が食い違うと集約が成立しないか、意図しない動作になります。
+
+```bash
+{% for intf in member_interfaces %}show interface {{ intf }}
+{% endfor %}```
+
+### 2. port-channelインターフェースを作成し、メンバーへchannel-groupを設定する
+
+```bash
+configure terminal
+interface port-channel {{ channel_id }}
+exit
+{% for intf in member_interfaces %}interface {{ intf }}
+ channel-group {{ channel_id }} mode {{ lacp_mode }}
+exit
+{% endfor %}```
+
+### 3. port-channelインターフェースをトランクとして設定する
+
+```bash
+interface port-channel {{ channel_id }}
+ switchport mode trunk
+ switchport trunk allowed vlan {{ trunk_vlans | join(',') }}
+exit
+```
+
+### 4. ロードバランスアルゴリズムを設定する
+
+```bash
+hash-algorithm lag {{ load_balance_method }}
+end
+write memory
+```
+
+`hash-algorithm`はOS10ではport-channel個別設定ではなくシステム全体(ECMP/LAG共通)に適用されるグローバル設定である点に注意してください。
+
+### 5. show port-channel summaryとshow lacpで状態を確認する
+
+```bash
+show port-channel summary
+show lacp port-channel {{ channel_id }}
+show vlan
+```
+
+`show port-channel summary`のMember Ports欄が各メンバーで`(P)`(up and active)であることを確認します。
+
+### 6. リンク断時の縮退動作を検証する
+
+メンバーインターフェースの1本を停止し、通信が継続すること、残りのリンクへ切り替わることを確認します。
+
+```bash
+interface {{ member_interfaces[0] }}
+ shutdown
+exit
+show port-channel summary
+```
+
+確認後は必ず復旧します。
+
+```bash
+interface {{ member_interfaces[0] }}
+ no shutdown
+exit
+show port-channel summary
+```
+
+## 動作確認
+
+- `show port-channel summary`に`port-channel{{ channel_id }}`が作成され、束ねた{{ member_interfaces | length }}本のメンバーポートが全て`(P)`フラグで表示されること
+- `show lacp port-channel {{ channel_id }}`でActor/Partner双方が`IN_SYNC`・`Collection enabled`・`Distribution enabled`状態であること
+- `show vlan`でVLAN {{ trunk_vlans | join(', ') }} が`port-channel{{ channel_id }}`に対してタグ付き(`T`)で表示されること
+- メンバーインターフェースを1本停止しても、port-channel経由の通信が継続すること
+- 停止したインターフェースを`no shutdown`した後、自動的に集約状態へ復帰すること
+
+## 注意事項
+
+- 両端で`channel-group`のモードが不整合(例: 片方`passive`かつ相手も`passive`)だと集約が成立せず、各インターフェースが個別リンクとして動作してしまう。意図しないループやスパニングツリー障害の原因になるため、投入前に対向機器の設定も確認する。
+- `hash-algorithm`コマンドはシステム全体(ECMP/LAGを含む)に影響するグローバル設定であるため、他のport-channelや既存のECMP経路のトラフィック分散にも波及する。稼働中環境で変更する場合は影響範囲を事前に確認すること。
+- 縮退動作の検証(手順6)は実運用トラフィックに影響し得るため、必ずメンテナンス時間帯に実施し、確認後は速やかに`no shutdown`で復旧すること。
+- `show lacp port-channel`の出力フォーマットやフラグ表記はOS10のリリースにより差異がある場合がある。実機投入前にリリースノートで確認すること。

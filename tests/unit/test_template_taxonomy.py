@@ -40,6 +40,7 @@ ALLOWED_SUBCATEGORIES: Final[dict[str, frozenset[str]]] = {
         {
                 "Arista",
                 "Cisco",
+                "Dell",
                 "DHCP",
                 "IDS・IPS",
                 "IPアドレス管理",
