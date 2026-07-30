@@ -1,0 +1,115 @@
+# Palo Alto Networks(PAN-OS)の拠点間IKEv2 IPsec VPN構築
+
+PAN-OS搭載ファイアウォール2台を使い、拠点間をIKEv2ベースのIPsecトンネルで接続します。PAN-OSはIKEゲートウェイ・暗号プロファイル・トンネルインターフェースを個別オブジェクトとして組み合わせる構成モデルのため、両拠点のオブジェクト名と設定値を事前に突き合わせたうえで、片方ずつではなく対応するペアとして設定してください。
+
+## 目的
+
+IKEゲートウェイと暗号プロファイル、トンネルインターフェースの役割分担を理解した上で、拠点間IKEv2 IPsecトンネルを構築し、拠点間の経路を整えて相互疎通を検証できるようになることを目指します。
+
+## 用語解説
+
+- **IKEゲートウェイ(IKE Gateway)**: 対向機器のアドレス・認証方式(事前共有鍵/証明書)・IKEバージョン・使用するIKE暗号プロファイルをひとつにまとめたオブジェクト。`set network ike gateway`配下で設定する
+- **IKE Crypto Profile / IPsec Crypto Profile**: それぞれPhase1(IKE SA)とPhase2(IPsec SA)で使う暗号化・ハッシュ・DHグループ・ライフタイムを定義する独立オブジェクト。IKEゲートウェイやトンネルから参照する形で適用する
+- **トンネルインターフェース(tunnel.x)**: IPsecで暗号化された通信が出入りする論理インターフェース。ゾーンや仮想ルータへの割り当て、経路設定は他の物理/サブインターフェースと同様に行う
+- **プロキシID(Proxy ID)**: Phase2ネゴシエーションで対向機器と一致させるローカル/リモートのサブネット対。ポリシーベースVPN機器や一部のIKEv2実装と接続する際に一致していないとPhase2が確立しない
+- **Liveness Check(生存確認)**: PAN-OSにおけるIKEv2向けの経路断検出機能。IKEv1のDead Peer Detection(DPD)に相当するが、GUI表示名は"Liveness Check"であるのに対し、CLIの設定キーワードは`dpd`のまま据え置かれている
+- **仮想ルータ(Virtual Router)**: PAN-OSの経路制御の単位。静的経路やダイナミックルーティングは特定の仮想ルータに紐づけて設定し、トンネルインターフェースもいずれかの仮想ルータに所属させる必要がある
+- **コミット(commit)**: PAN-OSはcandidate configとrunning configを分離する二段階構成モデルを採る。`set`コマンドで積んだ変更はコミットするまで実機の動作に反映されない
+
+## シナリオ設定
+
+自拠点WAN側アドレス `{{ local_wan_ip }}` と対向拠点WAN側アドレス `{{ remote_wan_ip }}` の間にIKEv2でIPsecトンネルを確立し、自拠点LAN `{{ local_lan }}` と対向拠点LAN `{{ remote_lan }}` を相互疎通させます。{{ pre_shared_key_note }} このテンプレートは、IKEv2マルチベンダー相互接続シリーズ(10ベンダー共通)の一つです。全テンプレートで暗号プロファイルを統一しており、このシリーズの他ベンダーのルータ/ファイアウォールとの間でも、以下の共通プロファイルに沿っていれば相互接続できます: IKEv2/IKE暗号AES-256(CBC)・ハッシュSHA-256・DHグループ14 / IPsec(ESP)暗号AES-256・認証SHA-256・PFSグループ14 / 認証方式PSK / IKE SAライフタイム28800秒・IPsec SAライフタイム3600秒 / NAT-T自動検出有効・DPD有効。
+
+## 手順
+
+### 1. 両拠点のパラメータを突き合わせる
+
+対向拠点の管理者と、WAN側アドレス・LANアドレス帯・事前共有鍵・暗号プロファイルの値(暗号化/ハッシュ/DHグループ/ライフタイム)が食い違っていないか確認します。あわせて経路上にNAT機器が存在するか(NATトラバーサルの要否)も突き合わせておきます。片方だけ値がずれると、Phase1またはPhase2のネゴシエーションが確立しません。
+
+```bash
+show system info
+show interface all
+```
+
+### 2. IKEv2/IPsecプロファイルとトンネルを設定する(自拠点側)
+
+configureモードで、IKE Crypto ProfileとIPsec Crypto Profileをそれぞれ作成し、IKEゲートウェイとIPsecトンネルから参照させます。対向拠点側では`{{ local_wan_ip }}`と`{{ remote_wan_ip }}`、`{{ local_lan }}`と`{{ remote_lan }}`を入れ替えた設定を投入してもらいます。
+
+```bash
+configure
+
+set network ike crypto-profiles ike-crypto-profiles IKE-CRYPTO-PROFILE-1 encryption aes-256-cbc
+set network ike crypto-profiles ike-crypto-profiles IKE-CRYPTO-PROFILE-1 hash sha256
+set network ike crypto-profiles ike-crypto-profiles IKE-CRYPTO-PROFILE-1 dh-group group14
+set network ike crypto-profiles ike-crypto-profiles IKE-CRYPTO-PROFILE-1 lifetime seconds 28800
+
+set network ike crypto-profiles ipsec-crypto-profiles IPSEC-CRYPTO-PROFILE-1 esp encryption aes-256-cbc
+set network ike crypto-profiles ipsec-crypto-profiles IPSEC-CRYPTO-PROFILE-1 esp authentication sha256
+set network ike crypto-profiles ipsec-crypto-profiles IPSEC-CRYPTO-PROFILE-1 dh-group group14
+set network ike crypto-profiles ipsec-crypto-profiles IPSEC-CRYPTO-PROFILE-1 lifetime seconds 3600
+
+set network ike gateway IKE-GW-TO-REMOTE protocol version ikev2
+set network ike gateway IKE-GW-TO-REMOTE protocol ikev2 ike-crypto-profile IKE-CRYPTO-PROFILE-1
+set network ike gateway IKE-GW-TO-REMOTE protocol ikev2 dpd enable yes
+set network ike gateway IKE-GW-TO-REMOTE protocol-common nat-traversal enable yes
+set network ike gateway IKE-GW-TO-REMOTE authentication pre-shared-key key ********
+set network ike gateway IKE-GW-TO-REMOTE local-address ip {{ local_wan_ip }}
+set network ike gateway IKE-GW-TO-REMOTE peer-address ip {{ remote_wan_ip }}
+
+set network interface tunnel units tunnel.1 comment "to-remote-site"
+set zone VPN-TRUST network layer3 tunnel.1
+
+set network tunnel ipsec IPSEC-TUNNEL-TO-REMOTE auto-key ike-gateway IKE-GW-TO-REMOTE
+set network tunnel ipsec IPSEC-TUNNEL-TO-REMOTE auto-key ipsec-crypto-profile IPSEC-CRYPTO-PROFILE-1
+set network tunnel ipsec IPSEC-TUNNEL-TO-REMOTE tunnel-interface tunnel.1
+set network tunnel ipsec IPSEC-TUNNEL-TO-REMOTE auto-key proxy-id PROXY-ID-1 protocol any local {{ local_lan }} remote {{ remote_lan }}
+```
+
+事前共有鍵の実際の値は、コンソール入力時のみ台帳(鍵管理システム)から参照し、`set`コマンドの履歴や構成バックアップに平文で残さないようにします。
+
+### 3. 経路を設定する
+
+対向拠点LAN宛の経路を、トンネルインターフェース経由で仮想ルータに追加します。
+
+```bash
+set network virtual-router default routing-table ip static-route TO-REMOTE-LAN destination {{ remote_lan }}
+set network virtual-router default routing-table ip static-route TO-REMOTE-LAN interface tunnel.1
+
+commit
+```
+
+`commit`を実行するまでcandidate configはrunning configに反映されないため、投入後は必ず実行し、コミット結果(Success/Warning/Error)を確認します。
+
+### 4. 動作確認コマンドを実行する
+
+Phase1・Phase2それぞれのSA確立状況を確認し、必要であれば手動でネゴシエーションを開始します。
+
+```bash
+test vpn ike-sa gateway IKE-GW-TO-REMOTE
+test vpn ipsec-sa tunnel IPSEC-TUNNEL-TO-REMOTE
+
+show vpn ike-sa gateway IKE-GW-TO-REMOTE
+show vpn ipsec-sa tunnel IPSEC-TUNNEL-TO-REMOTE
+show vpn flow
+```
+
+SAの確立を確認したうえで、対向拠点LAN側の端末へpingを実行します。
+
+```bash
+ping host {{ remote_lan_test_host }}
+```
+
+このファイアウォール自身が発信する`ping`は自己トラフィックとして扱われ、必ずしもゾーン間のSecurity Policyを経由した検証にはなりません。ポリシーの実効性まで確認するには、自拠点LAN`{{ local_lan }}`内の実機から対向拠点LAN側端末へpingし、セッションテーブルで該当ポリシーに基づいて許可されていることを別途確認してください。
+
+## 動作確認
+
+- `show vpn ike-sa gateway IKE-GW-TO-REMOTE`でPhase1のIKE SAが確立し、暗号化(aes-256-cbc)・ハッシュ(sha256)・DHグループ(group14)が意図通りであること
+- `show vpn ipsec-sa tunnel IPSEC-TUNNEL-TO-REMOTE`でPhase2のIPsec SAが確立し、ESP暗号化・認証アルゴリズムが意図通りであること
+- `show vpn flow`でトンネルの状態が有効(active)であり、送受信パケットカウンタが増加していること
+- 自拠点LAN`{{ local_lan }}`の端末から対向拠点LAN`{{ remote_lan }}`の端末へpingが成功すること
+
+## 注意事項
+
+- 事前共有鍵は両拠点で完全に一致していないとIKEが確立しない。コピー&ペーストではなく台帳の同一値を参照するなど、入力ミスを防ぐ運用にする。
+- `set`コマンドはcandidate configへの積み込みに過ぎず、`commit`を実行するまで実機の動作には反映されない。特にWAN側の設定変更を伴う場合は、`commit`後にコンソール/管理接続が失われないことを確認してから作業を終える。
+- プロキシID(Proxy ID)は対向拠点と完全に一致している必要があり、片方だけサブネットを追加・変更するとPhase2が再確立できず既存の通信も止まることがあるため、変更時は両拠点同時に反映する。

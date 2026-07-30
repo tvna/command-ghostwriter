@@ -690,6 +690,7 @@ const META: Meta[] = [
   { id: "opa-server-deployment-hardening", name: "OPAサーバの本番配備とハードニング", desc: "opa runサーバをTLS・認証・最小権限で本番配備しヘルスチェックまで構成するOPA手順書を生成。", category: "ops", subCategory: "ポリシー統制", format: "yaml", output: "markdown", updated: "2026-07-17", live: true },
   { id: "cisco-ikev2-vpn", name: "Cisco IOS-XE(IKEv2 VTI)拠点間IPsec VPN構築", desc: "IOS-XEルータ2台でIKEv2 VTIによる拠点間IPsecトンネルを構成し、暗号設定と相互疎通を検証する手順書を生成。", category: "network", subCategory: "Cisco", format: "toml", output: "markdown", updated: "2026-07-30", live: true },
   { id: "juniper-ikev2-vpn", name: "Juniper SRXの拠点間IKEv2 IPsec VPN構築", desc: "SRX2台でIKEv2ルートベースVPNを構成し、暗号プロファイルと経路・ポリシーを検証する手順書を生成。", category: "network", subCategory: "Juniper", format: "toml", output: "markdown", updated: "2026-07-30", live: true },
+  { id: "paloalto-ikev2-vpn", name: "Palo Alto Networks拠点間IKEv2 IPsec VPN構築", desc: "PAN-OSファイアウォール2拠点間でIKEv2 IPsecトンネルを構成し、SA確立と相互疎通を検証する手順書を生成。", category: "network", subCategory: "Palo Alto Networks", format: "toml", output: "markdown", updated: "2026-07-30", live: true },
 ];
 
 export const CGTemplates: Template[] = META.map((m) => ({
