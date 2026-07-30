@@ -718,12 +718,21 @@ function MarkdownView({ output }: { output: string }) {
       }
       const tKey = key++;
       blocks.push(
-        <div key={tKey} style={{ overflowX: 'auto', margin: '0 0 14px' }}>
+        <div key={tKey} style={{ overflowX: 'auto', margin: '0 0 14px', border: '1px solid var(--cg-border)', borderRadius: 'var(--radius-md)' }}>
           <table style={{ borderCollapse: 'collapse', fontSize: 'var(--text-sm)', color: 'var(--cg-text)', minWidth: '100%' }}>
             <thead>
               <tr>
                 {headerCells.map((c, j) => (
-                  <th key={j} style={{ textAlign: aligns[j] ?? 'left', padding: '6px 12px', borderBottom: '2px solid var(--cg-border-strong)', whiteSpace: 'nowrap' }}>
+                  <th
+                    key={j}
+                    style={{
+                      textAlign: aligns[j] ?? 'left',
+                      padding: '6px 12px',
+                      borderBottom: '2px solid var(--cg-border-strong)',
+                      borderRight: j < headerCells.length - 1 ? '1px solid var(--cg-border)' : undefined,
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
                     {renderInline(c, 'th' + tKey + '-' + j)}
                   </th>
                 ))}
@@ -731,9 +740,16 @@ function MarkdownView({ output }: { output: string }) {
             </thead>
             <tbody>
               {rows.map((r, ri) => (
-                <tr key={ri} style={{ borderBottom: '1px solid var(--cg-border)' }}>
+                <tr key={ri} style={{ borderBottom: ri < rows.length - 1 ? '1px solid var(--cg-border)' : undefined }}>
                   {r.map((c, ci) => (
-                    <td key={ci} style={{ textAlign: aligns[ci] ?? 'left', padding: '6px 12px' }}>
+                    <td
+                      key={ci}
+                      style={{
+                        textAlign: aligns[ci] ?? 'left',
+                        padding: '6px 12px',
+                        borderRight: ci < r.length - 1 ? '1px solid var(--cg-border)' : undefined,
+                      }}
+                    >
                       {renderInline(c, 'td' + tKey + '-' + ri + '-' + ci)}
                     </td>
                   ))}
