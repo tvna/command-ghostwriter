@@ -45,7 +45,7 @@ crypto isakmp profile ikev2-s2s
  version 2
  transform 1 integrity sha256 encryption aes256 group 14
  lifetime 28800
- dpd-timeout 30
+ dpd-interval 30
 !
 ! IPsec(ESP)プロファイル: Phase2 - AES256/SHA256/PFSグループ14, SAライフタイム3600秒
 crypto ipsec profile ikev2-s2s
@@ -73,7 +73,7 @@ interface tunnel0
 end
 ```
 
-eth1のWAN側サブネットマスクは実際にISPから割り当てられた値に合わせて調整してください。VTIのアドレス(`169.254.0.1/30`)はトンネル内部のリンクローカルなポイントツーポイントアドレスで、対向拠点側は`169.254.0.2/30`とします。
+eth1のWAN側サブネットマスクは実際にISPから割り当てられた値に合わせて調整してください。VTIのアドレス(`169.254.0.1/30`)はトンネル内部のリンクローカルなポイントツーポイントアドレスで、対向拠点側は`169.254.0.2/30`とします。`interface eth1`の`ip address`変更は投入直後に反映されるため、リモートでこの手順を実施する場合は管理接続(SSH等)がWAN側経由になっていないか事前に確認し、可能であればコンソール接続で作業してください。
 
 ### 3. 経路を設定する
 
@@ -91,10 +91,9 @@ end
 show isakmp sa
 show ipsec sa
 show interface tunnel0
-ping 169.254.0.2
 ```
 
-ISAKMP SA・IPsec SAがともに確立していることを確認したうえで、対向拠点LAN側の端末へpingを実行します。
+ISAKMP SA・IPsec SAがともに確立していることを確認したうえで、対向拠点LAN側の端末へpingを実行します。VTIのポイントツーポイントアドレス(`169.254.0.2`宛)へのpingは、トラフィックセレクタが`{{ local_lan }}`/`{{ remote_lan }}`にのみ限定されているため通過対象外となり、正常なトンネルでも失敗します。トンネル自体の疎通確認には使わないでください。
 
 ```bash
 ping {{ remote_lan_test_host }}
