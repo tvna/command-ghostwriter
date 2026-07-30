@@ -1091,10 +1091,10 @@ trusted enable
 
 ### 3. 経路を設定する
 
-対向拠点LAN宛の経路を、作成したIPsecマップ経由に向けます。
+対向拠点LAN宛の経路を、作成したIPsecマップ経由に向けます。`ip route`もCIDR表記ではなくアドレス+ダットデシマルマスクの2引数を取るため、`remote_lan_netmask`を使います。
 
 ```bash
-ip route {{ remote_lan }} ipsec s2s-branch-to-hq
+ip route {{ remote_lan.split('/')[0] }} {{ remote_lan_netmask }} ipsec s2s-branch-to-hq
 write memory
 ```
 
