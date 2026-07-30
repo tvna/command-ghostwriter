@@ -1,0 +1,24 @@
+row_layout:
+  - rack: RackA
+    orientation: front-to-back
+  - rack: RackB
+    orientation: front-to-back
+  - rack: RackC
+    orientation: back-to-front
+empty_u_slots:
+  - rack: RackA
+    range: "U38-U42"
+  - rack: RackB
+    range: "U35-U42"
+  - rack: RackC
+    range: "U38-U42"
+ashrae_recommended_range_c:
+  min: 18
+  max: 27
+measured_inlet_temps:
+  - rack: RackA
+    temp_c: 22
+  - rack: RackB
+    temp_c: 24
+  - rack: RackC
+    temp_c: 29
