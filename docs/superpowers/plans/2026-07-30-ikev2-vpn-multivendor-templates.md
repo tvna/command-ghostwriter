@@ -264,7 +264,9 @@ git commit -m "feat: add cisco-ikev2-vpn IKEv2 multi-vendor interop template (#5
   - https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/security-edit-dead-peer-detection.html
   - (他6件、詳細はワークフロー記録を参照)
 
-**検証時の注記:** All core CLI keywords were cross-confirmed against official Juniper TechLibrary/CLI-reference pages (via WebSearch/WebFetch summaries of those pages, not raw HTML diffs), specifically: `set security ike proposal ... authentication-method pre-shared-keys / dh-group group14 / authentication-algorithm sha-256 / encryption-algorithm aes-256-cbc / lifetime-seconds`; `set security ike gateway ... version v2-only / address / local-address / external-interface / dead-peer-detection always-send|interval|threshold`; `set security ipsec proposal ... protocol esp / authentication-algorithm hmac-sha-256-128 / encryption-algorithm aes-256-cbc / lifetime-seconds`; `set security ipsec policy ... perfect-forward-secrecy keys group14`; `set security ipsec vpn ... bind-interface / ike gateway / ike ipsec-policy / establish-tunnels immediately`; `set security address-book global address ... / attach zone`; and the verification commands `show security ike security-associations` / `show security ipsec security-associations detail`. One documented fact I relied on but did not see a single canonical page enumerate in full: that IKEv2 policies omit the `mode` statement entirely (main/aggressive is IKEv1-only) -- this is stated across multiple Juniper community/support threads and is consistent with the fact `mode` never appears in any IKEv2 example fetched, so I omitted it rather than fabricate a value. NAT-T: confirmed from Juniper docs that NAT-T detection is enabled by default on SRX and disabled via `no-nat-traversal`; there is no separate "enable" statement to turn it on, so the template states this in prose instead of inventing a `nat-traversal enable` command (this is the one deliberate CLI-syntax gap flagged per the task's instructions). The `ge-0/0/0.0` external-interface name and st0 unit numbering, security-zone/policy names, and proposal/policy/gateway object names are illustrative identifiers (a real deployment substitutes its own interface name and object names) rather than fixed vendor keywords -- this mirrors how the reference YAMAHA template uses illustrative tunnel-select numbers. Both files were written to the scratchpad directory: /tmp/claude-0/-home-user-command-ghostwriter/5109274c-bb3f-5133-b145-63a8b3114015/scratchpad/juniper-ikev2-vpn.toml and .../juniper-ikev2-vpn.j2 (not yet copied into assets/examples/ or wired into templates.ts -- that integration step was not part of this task's instructions).
+**検証時の注記:** All core CLI keywords were cross-confirmed against official Juniper TechLibrary/CLI-reference pages (via WebSearch/WebFetch summaries of those pages, not raw HTML diffs), specifically: `set security ike proposal ... authentication-method pre-shared-keys / dh-group group14 / authentication-algorithm sha-256 / encryption-algorithm aes-256-cbc / lifetime-seconds`; `set security ike gateway ... version v2-only / address / local-address / external-interface / dead-peer-detection always-send|interval|threshold`; `set security ipsec proposal ... protocol esp / authentication-algorithm hmac-sha-256-128 / encryption-algorithm aes-256-cbc / lifetime-seconds`; `set security ipsec policy ... perfect-forward-secrecy keys group14`; `set security ipsec vpn ... bind-interface / ike gateway / ike ipsec-policy / establish-tunnels immediately`; `set security address-book global address ... / attach zone`; and the verification commands `show security ike security-associations` / `show security ipsec security-associations detail`. One documented fact I relied on but did not see a single canonical page enumerate in full: that IKEv2 policies omit the `mode` statement entirely (main/aggressive is IKEv1-only) -- this is stated across multiple Juniper community/support threads and is consistent with the fact `mode` never appears in any IKEv2 example fetched, so I omitted it rather than fabricate a value. NAT-T: confirmed from Juniper docs that NAT-T detection is enabled by default on SRX and disabled via `no-nat-traversal`; there is no separate "enable" statement to turn it on, so the template states this in prose instead of inventing a `nat-traversal enable` command (this is the one deliberate CLI-syntax gap flagged per the task's instructions). The `ge-0/0/0.0` external-interface name and st0 unit numbering, security-zone/policy names, and proposal/policy/gateway object names are illustrative identifiers (a real deployment substitutes its own interface name and object names) rather than fixed vendor keywords -- this mirrors how the reference YAMAHA template uses illustrative tunnel-select numbers. Both files were written to `assets/examples/juniper-ikev2-vpn.toml` and `assets/examples/juniper-ikev2-vpn.j2`.
+
+**Code-review update:** the original version of this note referenced an internal agent-harness scratchpad path (an absolute `/tmp/...` path containing a session UUID) instead of the final repo-relative destination. Replaced with the actual repo path per CLAUDE.md's provenance-disclosure hygiene rule (internal tooling fingerprints/session identifiers must not leak into outward-facing artifacts).
 
 - [ ] **Step 1: データファイルを作成する**
 
@@ -1014,7 +1016,7 @@ remote_lan_netmask = "255.255.255.0"
 
 `assets/examples/aruba-ikev2-vpn.j2`:
 ```jinja
-# Aruba(HPE)ブランチゲートウェイの拠点間IPsec VPN構築
+# Aruba(HPE)ブランチゲートウェイの拠点間IKEv2 IPsec VPN構築
 
 Aruba(HPE)ブランチゲートウェイ(ArubaOS)2台を使い、拠点間をIKEv2 IPsecトンネルで接続します。両拠点のパラメータを事前に突き合わせたうえで、片方ずつではなく対応するペアとして設定してください。
 
@@ -1546,6 +1548,8 @@ git commit -m "feat: add yamaha-ikev2-vpn IKEv2 multi-vendor interop template (#
 
 **Code-review update:** a deeper independent search during code review found a genuine `ikev2 nat-traversal [ keepalive SECOND ] [ force ] [ off ]` command that does exist on IX series devices, contradicting the "no command exists" framing above -- however, it was found in use only with the `ether-ip` L2 tunnel-mode variant, not the plain `ipsec-ikev2` variant this template uses, and other real-world `ipsec-ikev2` examples the reviewer checked also omit it, relying on auto-negotiation. The template's shipped behavior (no fabricated command) remains the empirically common and defensible choice for this tunnel mode; this note only corrects the overclaimed "no command exists at all" framing for future readers of this plan.
 
+**Second code-review update (final verification pass):** a fresh review flagged that `ikev2 sa-proposal enc/integrity/dh`, `ikev2 sa-lifetime`, `ikev2 child-proposal enc/integrity`, `ikev2 child-pfs`, `ikev2 child-lifetime` were placed directly under `interface Tunnel0.0` with an `ikev2 ` prefix, and questioned whether that's correct NEC syntax. Re-verified directly: `support.necplatforms.co.jp` remained blocked by the environment's outbound proxy policy (confirmed again via `$HTTPS_PROXY/__agentproxy/status`, a fresh `connect_rejected`/502 entry for that host), so this was checked via WebFetch against two sources on unblocked domains that show full, unedited worked examples: Oracle Cloud Infrastructure's own official "NEC IX Series" CPE configuration guide (docs.oracle.com/en-us/iaas/Content/Network/Reference/necixCPE.htm) and changineer.info's global-fixed-IP site-to-site walkthrough (changineer.info/network/nec_ix/nec_ix_ikev2_global.html). Both show `sa-proposal enc/integrity/dh`, `sa-lifetime`/`child-lifetime`, `child-proposal enc/integrity`, and `child-pfs` living *unprefixed* inside the `ikev2 default-profile` block, never repeated on the Tunnel interface with an `ikev2 ` prefix -- the Tunnel interface in both sources carries only `tunnel mode ipsec-ikev2`, the tunnel IP/unnumbered line, `ip tcp adjust-mss auto`, `ikev2 connect-type auto`, `ikev2 outgoing-interface`, `ikev2 peer ... authentication psk id ipv4 ...`, and `no shutdown`. This was a genuine structural defect in the original template (an earlier WebSearch summary had surfaced a conflicting claim that `ikev2 sa-proposal` was valid directly on the Tunnel interface, quoting an Oracle-CPE-guide-adjacent Qiita/docs.oracle.com snippet -- but fetching those exact pages directly showed the summary had misattributed context; the proposal commands were inside `default-profile` in the actual page content). Fixed: moved all six crypto-proposal/lifetime lines into `ikev2 default-profile` (unprefixed), leaving the Tunnel interface with only connectivity/peer settings. This also made the prior 注意事項 bullet about Tunnel-side settings "overriding" `default-profile` inaccurate (no override syntax was found in either source for this tunnel mode); replaced it with a note that `default-profile` settings are device-wide, plus a new bullet disclosing the same NAT-T primary-source gap noted above (the shared cross-vendor sentence promises "NAT-T自動検出有効" but, unlike the other 9 vendor templates, this one previously carried no in-body sentence addressing NAT-T at all -- inconsistent with the established per-vendor pattern of either showing the command or explaining why none is needed).
+
 - [ ] **Step 1: データファイルを作成する**
 
 `assets/examples/nec-ikev2-vpn.toml`:
@@ -1574,7 +1578,7 @@ IKEv2におけるIKE SA(鍵交換用、旧Phase1相当)とChild SA(データ暗�
 
 - **IKE SA / Child SA**: IKEv2では鍵交換そのものを行うIKE SAと、実データを暗号化するChild SA(IPsec SA)を区別して管理する。IKEv1のPhase1/Phase2に相当する
 - **tunnel mode ipsec-ikev2**: UNIVERGE IXではTunnelインターフェース上にIPsec設定を行い、`tunnel mode ipsec-ikev2`を指定することでIKEv1ではなくIKEv2であることを明示する
-- **ikev2 default-profile**: 装置全体で共有するIKEv2の既定パラメータ(DPD間隔や送信元インターフェースなど)を定義する設定単位。Tunnelインターフェース側の個別設定が優先される
+- **ikev2 default-profile**: 装置全体で共有するIKEv2の既定パラメータ(暗号アルゴリズム・DPD間隔・送信元インターフェースなど)をまとめて定義する設定単位。`sa-proposal`/`child-proposal`などの暗号関連パラメータはこのブロック配下で設定し、Tunnelインターフェース側には対向情報のみを設定する
 - **ikev2 peer**: Tunnelインターフェース上で対向機器のアドレスと認証方式を紐付ける設定。`authentication psk id ipv4`のようにID種別とPSK認証をあわせて指定する
 - **child-pfs**: Child SA確立・再鍵交換時にPFS(Perfect Forward Secrecy)を適用するDHグループを指定する設定。IKE SA用の`sa-proposal dh`とは別に指定が必要
 - **DPD(Dead Peer Detection)**: 対向機器の生死を監視する仕組み。`dpd interval`で送信間隔(秒)を指定する
@@ -1599,12 +1603,20 @@ show ip route
 
 ### 2. IKEv2認証とdefault-profileを設定する(自拠点側)
 
-グローバルコンフィグモードで対向拠点のPSK認証情報と、DPDなど装置共通のIKEv2既定パラメータを設定します。
+グローバルコンフィグモードで対向拠点のPSK認証情報と、暗号プロファイル(AES-256/SHA-256/DHグループ14)・DPDなど装置共通のIKEv2既定パラメータを設定します。
 
 ```bash
 ikev2 authentication psk id ipv4 {{ remote_wan_ip }} key char ********
 
 ikev2 default-profile
+ sa-proposal enc aes-cbc-256
+ sa-proposal integrity sha2-256
+ sa-proposal dh 2048-bit
+ sa-lifetime 28800
+ child-proposal enc aes-cbc-256
+ child-proposal integrity sha2-256
+ child-pfs 2048-bit
+ child-lifetime 3600
  dpd interval 10
  source-address GigaEthernet0.1
 ```
@@ -1613,21 +1625,13 @@ ikev2 default-profile
 
 ### 3. Tunnelインターフェースを設定する(自拠点側)
 
-Tunnel0.0にIKEv2/IPsecの暗号プロファイルと対向情報を設定します。対向拠点側では`{{ local_wan_ip }}`と`{{ remote_wan_ip }}`を入れ替えた設定を投入してもらいます。
+Tunnel0.0にIKEv2のトンネルモードと対向情報を設定します。暗号プロファイルは手順2の`ikev2 default-profile`で装置全体に対して既に定義済みのため、Tunnelインターフェース側では指定しません。対向拠点側では`{{ local_wan_ip }}`と`{{ remote_wan_ip }}`を入れ替えた設定を投入してもらいます。
 
 ```bash
 interface Tunnel0.0
  tunnel mode ipsec-ikev2
  ip unnumbered GigaEthernet0.1
  ip tcp adjust-mss auto
- ikev2 sa-proposal enc aes-cbc-256
- ikev2 sa-proposal integrity sha2-256
- ikev2 sa-proposal dh 2048-bit
- ikev2 sa-lifetime 28800
- ikev2 child-proposal enc aes-cbc-256
- ikev2 child-proposal integrity sha2-256
- ikev2 child-pfs 2048-bit
- ikev2 child-lifetime 3600
  ikev2 connect-type auto
  ikev2 outgoing-interface GigaEthernet0.1
  ikev2 peer {{ remote_wan_ip }} authentication psk id ipv4 {{ remote_wan_ip }}
@@ -1663,7 +1667,8 @@ ping {{ remote_lan_test_host }}
 
 - 事前共有鍵は両拠点で完全に一致していないとIKE SAが確立しない。コピー&ペーストではなく台帳の同一値を参照するなど、入力ミスを防ぐ運用にする。
 - 設定変更後は`save`を忘れると再起動時に設定が失われる。対向拠点側の担当者にも同様に`save`実施を依頼する。
-- `ikev2 default-profile`の値はTunnelインターフェース側の`ikev2 sa-proposal`/`ikev2 child-proposal`などの個別設定で上書きされる。装置全体の既定値のつもりで変更しても既存Tunnelには反映されない場合があるため、影響範囲を都度確認する。
+- `ikev2 default-profile`の設定は装置全体に適用される。複数のTunnelインターフェースを追加する構成では、個別のIKEv2プロファイルで上書きしない限り全トンネルが同じ暗号プロファイルを共有する点に注意する。
+- NAT-Tは「NATトラバーサル」としてIKEv2の対応機能に含まれるが、`tunnel mode ipsec-ikev2`構成での明示的な有効化コマンドの要否は一次情報(support.necplatforms.co.jp)が本環境のプロキシポリシーで到達不可のため確認できなかった。本テンプレートの両拠点固定グローバルIPアドレス構成では経路上にNAT機器を介さないためNAT-T自体が働く場面はない想定だが、NAT配下の拠点へ流用する場合は最新のコマンドリファレンスで確認すること。
 ```
 
 - [ ] **Step 3: `templates.ts` にエントリを追加する**
@@ -1722,7 +1727,7 @@ pre_shared_key_note = "事前共有鍵(PSK)は社内の鍵管理台帳(鍵ボー
 
 `assets/examples/alliedtelesis-ikev2-vpn.j2`:
 ```jinja
-# Allied Telesis(AlliedWare Plus)ルータの拠点間IPsec VPN構築
+# Allied Telesis(AlliedWare Plus)ルータの拠点間IKEv2 IPsec VPN構築
 
 Allied Telesis製ルータ/UTMファイアウォール(AlliedWare Plus OS)2台を使い、拠点間をIKEv2 IPsecトンネルで接続します。両拠点のパラメータを事前に突き合わせたうえで、片方ずつではなく対応するペアとして設定してください。
 
@@ -1842,7 +1847,7 @@ ping {{ remote_lan_test_host }}
 直前のタスクで追加した `nec-ikev2-vpn` エントリの直後に追加する:
 
 ```typescript
-  { id: "alliedtelesis-ikev2-vpn", name: "AlliedWare Plusの拠点間IPsec VPN構築", desc: "AlliedWare Plus搭載ルータ2拠点間でIKEv2 IPsecトンネルを構成し、相互疎通と経路を検証する手順書を生成。", category: "network", subCategory: "Allied Telesis", format: "toml", output: "markdown", updated: "2026-07-30", live: true },
+  { id: "alliedtelesis-ikev2-vpn", name: "AlliedWare Plusの拠点間IKEv2 IPsec VPN構築", desc: "AlliedWare Plus搭載ルータ2拠点間でIKEv2 IPsecトンネルを構成し、相互疎通と経路を検証する手順書を生成。", category: "network", subCategory: "Allied Telesis", format: "toml", output: "markdown", updated: "2026-07-30", live: true },
 ```
 
 - [ ] **Step 4: レンダリング確認**

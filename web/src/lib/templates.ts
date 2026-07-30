@@ -697,7 +697,7 @@ const META: Meta[] = [
   { id: "fortinet-ikev2-vpn", name: "FortiGate拠点間IKEv2 IPsec VPN構築", desc: "FortiGate/FortiOSでIKEv2 IPsecトンネルを構成し、拠点間の相互疎通と経路・ポリシーを検証する手順書を生成。", category: "network", subCategory: "Fortinet", format: "toml", output: "markdown", updated: "2026-07-30", live: true },
   { id: "yamaha-ikev2-vpn", name: "YAMAHAルータのIKEv2拠点間IPsec VPN構築", desc: "RTX系ルータ2拠点間でIKEv2 IPsecトンネルを構成し、暗号プロファイル固定と相互疎通を検証する手順書を生成。", category: "network", subCategory: "YAMAHA", format: "toml", output: "markdown", updated: "2026-07-30", live: true },
   { id: "nec-ikev2-vpn", name: "NEC IX拠点間IKEv2 IPsec VPN構築", desc: "UNIVERGE IXシリーズルータ2拠点間でIKEv2 IPsecトンネルを構成し、IKE SA/Child SAの確立と相互疎通を検証する手順書を生成。", category: "network", subCategory: "NEC", format: "toml", output: "markdown", updated: "2026-07-30", live: true },
-  { id: "alliedtelesis-ikev2-vpn", name: "AlliedWare Plusの拠点間IPsec VPN構築", desc: "AlliedWare Plus搭載ルータ2拠点間でIKEv2 IPsecトンネルを構成し、相互疎通と経路を検証する手順書を生成。", category: "network", subCategory: "Allied Telesis", format: "toml", output: "markdown", updated: "2026-07-30", live: true },
+  { id: "alliedtelesis-ikev2-vpn", name: "AlliedWare Plusの拠点間IKEv2 IPsec VPN構築", desc: "AlliedWare Plus搭載ルータ2拠点間でIKEv2 IPsecトンネルを構成し、相互疎通と経路を検証する手順書を生成。", category: "network", subCategory: "Allied Telesis", format: "toml", output: "markdown", updated: "2026-07-30", live: true },
 ];
 
 export const CGTemplates: Template[] = META.map((m) => ({
