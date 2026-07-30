@@ -1,0 +1,113 @@
+# Allied Telesis(AlliedWare Plus)ルータの拠点間IKEv2 IPsec VPN構築
+
+Allied Telesis製ルータ/UTMファイアウォール(AlliedWare Plus OS)2台を使い、拠点間をIKEv2 IPsecトンネルで接続します。両拠点のパラメータを事前に突き合わせたうえで、片方ずつではなく対応するペアとして設定してください。
+
+## 目的
+
+ISAKMP(IKEv2)プロファイルとIPsecプロファイルの役割分担を理解した上で、Virtual Tunnel Interface(VTI)を使った拠点間IPsecトンネルを構築し、拠点間の経路を整えて相互疎通を検証できるようになることを目指します。
+
+## 用語解説
+
+- **ISAKMPプロファイル(`crypto isakmp profile`)**: IKEフェーズ1のバージョン・暗号アルゴリズム・DHグループ・SAライフタイム・DPD間隔をまとめて定義する設定オブジェクト
+- **IPsecプロファイル(`crypto ipsec profile`)**: ESPの暗号アルゴリズム・PFSグループ・SAライフタイムをまとめて定義する設定オブジェクト。カスタムプロファイルを使うと、既定のデフォルトプロファイルが持つ選択肢群を完全に置き換える
+- **VTI(Virtual Tunnel Interface)**: `interface tunnel<番号>`として作成する仮想トンネルインターフェース。ルートベースVPNの終端点となり、`ip route`で対向LAN宛の経路を向けられる
+- **tunnel protection ipsec**: VTIに対してIPsecによる暗号化・認証を適用するインターフェースコマンド
+- **crypto isakmp peer**: 対向のWANアドレス(またはホスト名)とISAKMPプロファイルを紐付けるコマンド
+- **DPD(Dead Peer Detection)**: ISAKMPプロファイル単位で有効になる対向機器の生存確認機能。既定では30秒間隔で動作する
+- **NAT-T(NAT-Traversal)**: ISAKMP SA確立時に対向機器との間で自動検出され、経路上にNAPT機器がある場合のみESPをUDP4500にカプセル化する機能。明示的な有効化コマンドは不要
+
+## シナリオ設定
+
+自拠点WAN側アドレス `{{ local_wan_ip }}` と対向拠点WAN側アドレス `{{ remote_wan_ip }}` の間にIKEv2でIPsecトンネルを確立し、自拠点LAN `{{ local_lan }}` と対向拠点LAN `{{ remote_lan }}` を相互疎通させます。{{ pre_shared_key_note }}
+
+このテンプレートは、IKEv2マルチベンダー相互接続シリーズ(10ベンダー共通)の一つです。全テンプレートで暗号プロファイルを統一しており、このシリーズの他ベンダーのルータ/ファイアウォールとの間でも、以下の共通プロファイルに沿っていれば相互接続できます: IKEv2/IKE暗号AES-256(CBC)・ハッシュSHA-256・DHグループ14 / IPsec(ESP)暗号AES-256・認証SHA-256・PFSグループ14 / 認証方式PSK / IKE SAライフタイム28800秒・IPsec SAライフタイム3600秒 / NAT-T自動検出有効・DPD有効。
+
+## 手順
+
+### 1. 両拠点のパラメータを突き合わせる
+
+対向拠点の管理者と、WAN側アドレス・LANアドレス帯・事前共有鍵・暗号アルゴリズム(AES256/SHA256/DHグループ14)・SAライフタイム(IKE 28800秒・IPsec 3600秒)が食い違っていないか確認します。AlliedWare Plusの既定(デフォルト)プロファイルは幅広い候補を提示するため、この共通プロファイルに絞り込むには両拠点とも本手順のカスタムプロファイルを使う必要があります。
+
+```bash
+show running-config
+show ip interface brief
+```
+
+### 2. IKEv2/IPsecプロファイルとトンネルを設定する(自拠点側)
+
+Global Configuration modeでISAKMP(IKEv2)プロファイルとIPsecプロファイルをそれぞれ作成し、VTI(tunnel0)に適用します。対向拠点側では`{{ local_wan_ip }}`と`{{ remote_wan_ip }}`を入れ替えた設定を投入してもらいます。
+
+```bash
+configure terminal
+!
+! ISAKMP(IKEv2)プロファイル: Phase1 - AES256/SHA256/DHグループ14, SAライフタイム28800秒
+crypto isakmp profile ikev2-s2s
+ version 2
+ transform 1 integrity sha256 encryption aes256 group 14
+ lifetime 28800
+ dpd-interval 30
+!
+! IPsec(ESP)プロファイル: Phase2 - AES256/SHA256/PFSグループ14, SAライフタイム3600秒
+crypto ipsec profile ikev2-s2s
+ lifetime seconds 3600
+ pfs 14
+ transform 1 protocol esp integrity sha256 encryption aes256
+!
+! 事前共有鍵(PSK) ※値は台帳から参照し、コンソール入力時のみ入力する
+crypto isakmp key ******** address {{ remote_wan_ip }}
+!
+crypto isakmp peer address {{ remote_wan_ip }} profile ikev2-s2s
+!
+interface eth1
+ ip address {{ local_wan_ip }}/30
+!
+interface tunnel0
+ tunnel source {{ local_wan_ip }}
+ tunnel destination {{ remote_wan_ip }}
+ tunnel local selector 1 {{ local_lan }}
+ tunnel remote selector 1 {{ remote_lan }}
+ tunnel protection ipsec profile ikev2-s2s
+ tunnel mode ipsec ipv4
+ ip address 169.254.0.1/30
+!
+end
+```
+
+eth1のWAN側サブネットマスクは実際にISPから割り当てられた値に合わせて調整してください。VTIのアドレス(`169.254.0.1/30`)はトンネル内部のリンクローカルなポイントツーポイントアドレスで、対向拠点側は`169.254.0.2/30`とします。`interface eth1`の`ip address`変更は投入直後に反映されるため、リモートでこの手順を実施する場合は管理接続(SSH等)がWAN側経由になっていないか事前に確認し、可能であればコンソール接続で作業してください。
+
+### 3. 経路を設定する
+
+対向拠点LAN宛の経路をVTI(tunnel0)経由に向けます。
+
+```bash
+configure terminal
+ip route {{ remote_lan }} tunnel0
+end
+```
+
+### 4. 動作確認コマンドを実行する
+
+```bash
+show isakmp sa
+show ipsec sa
+show interface tunnel0
+```
+
+ISAKMP SA・IPsec SAがともに確立していることを確認したうえで、対向拠点LAN側の端末へpingを実行します。VTIのポイントツーポイントアドレス(`169.254.0.2`宛)へのpingは、トラフィックセレクタが`{{ local_lan }}`/`{{ remote_lan }}`にのみ限定されているため通過対象外となり、正常なトンネルでも失敗します。トンネル自体の疎通確認には使わないでください。
+
+```bash
+ping {{ remote_lan_test_host }}
+```
+
+## 動作確認
+
+- `show isakmp sa`でPeerが対向拠点WANアドレス`{{ remote_wan_ip }}`、Encryption/Integrity/Groupが`AES256`/`SHA256`/`14`、StateがEstablishedであること
+- `show ipsec sa`でProto`ESP`、Encryption/Integrityが`AES256`/`SHA256`、PFSが`14`のSAが確立していること
+- `show interface tunnel0`でトンネルのinput/outputパケットカウンタが増加しており、`tunnel protection via IPsec (profile "ikev2-s2s")`が表示されていること
+- 自拠点LAN`{{ local_lan }}`の端末から対向拠点LAN`{{ remote_lan }}`の端末へpingが成功すること
+
+## 注意事項
+
+- PSKの実際の値は鍵管理台帳から都度参照し、`show running-config`の出力やバックアップ設定ファイルに平文で残さないよう運用する。
+- 設定変更後は`copy running-config startup-config`を実行して起動設定に保存する。実行し忘れると再起動時に設定が失われる。対向拠点側の担当者にも同様の保存を依頼する。
+- カスタムISAKMP/IPsecプロファイルは既定のデフォルトプロファイルを完全に置き換えるため、片方の拠点だけカスタムプロファイルを適用すると提示する暗号候補が食い違い、SAが確立しないことがある。両拠点で同一のtransform構成になっているか必ず突き合わせる。

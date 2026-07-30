@@ -1,0 +1,155 @@
+# Fortinet(FortiGate/FortiOS)拠点間IKEv2 IPsec VPN構築
+
+FortiGate(FortiOS)2台を使い、route-basedのIPsecトンネルで拠点間を接続します。両拠点のパラメータを事前に突き合わせたうえで、片方ずつではなく対応するペアとして設定してください。
+
+## 目的
+
+IKEv2(鍵交換)とIPsecトンネルインターフェースの役割分担を理解した上で、拠点間IPsecトンネルを構築し、ファイアウォールポリシーと経路を整えて相互疎通を検証できるようになることを目指します。
+
+## 用語解説
+
+- **phase1-interface**: IKEゲートウェイ(Phase1)を定義するオブジェクト。対向IPやIKEバージョン、暗号proposal、認証方式をまとめて設定し、route-based VPNでは同名の仮想トンネルインターフェースが自動生成される
+- **phase2-interface**: Phase1に紐付くIPsecセレクタ(Phase2)を定義するオブジェクト。暗号proposal、PFS用DHグループ、対象サブネット(src-subnet/dst-subnet)を設定する
+- **proposal**: IKE/IPsecで提案する暗号アルゴリズムとハッシュ/整合性アルゴリズムの組み合わせ。例えば`aes256-sha256`はAES-256とSHA-256の組合せを表す
+- **dhgrp**: 鍵交換に使うDiffie-Hellman群番号。Phase1・Phase2(PFS)双方で指定し、両拠点で一致させる必要がある
+- **nattraversal**: 経路上にNAT機器が存在する場合でもIKE/ESPパケットを正しく通過させるNAT-T機能。有効化すると自動検出(auto-detect)で動作する
+- **dpd(Dead Peer Detection)**: 対向機器の生存を監視し、応答がなければIKE SAを再確立する仕組み
+- **トンネルインターフェース**: phase1-interfaceの名前と同名で自動生成される仮想インターフェース。ファイアウォールポリシーの送信元/宛先インターフェースや静的経路のデバイスとして指定する
+
+## シナリオ設定
+
+自拠点WAN側アドレス `{{ local_wan_ip }}` と対向拠点WAN側アドレス `{{ remote_wan_ip }}` の間にIKEv2でIPsecトンネルを確立し、自拠点LAN `{{ local_lan }}` と対向拠点LAN `{{ remote_lan }}` を相互疎通させます。{{ pre_shared_key_note }}
+
+このテンプレートは、IKEv2マルチベンダー相互接続シリーズ(10ベンダー共通)の一つです。全テンプレートで暗号プロファイルを統一しており、このシリーズの他ベンダーのルータ/ファイアウォールとの間でも、以下の共通プロファイルに沿っていれば相互接続できます: IKEv2/IKE暗号AES-256(CBC)・ハッシュSHA-256・DHグループ14 / IPsec(ESP)暗号AES-256・認証SHA-256・PFSグループ14 / 認証方式PSK / IKE SAライフタイム28800秒・IPsec SAライフタイム3600秒 / NAT-T自動検出有効・DPD有効。
+
+## 手順
+
+### 1. 両拠点のパラメータを突き合わせる
+
+対向拠点の管理者と、WAN側アドレス・LANアドレス帯・事前共有鍵・IKEバージョン(v2固定)が食い違っていないか確認します。片方だけ変更すると確立できません。
+
+```bash
+show vpn ipsec phase1-interface
+show vpn ipsec phase2-interface
+get router info routing-table static
+```
+
+### 2. IKEv2(Phase1)を設定する(自拠点側)
+
+外部インターフェース(例: wan1)上にroute-basedのIKEv2ゲートウェイを作成します。対向拠点側では`{{ local_wan_ip }}`と`{{ remote_wan_ip }}`を入れ替えた設定を投入してもらいます。
+
+```bash
+config vpn ipsec phase1-interface
+    edit "to-branch"
+        set type static
+        set interface "wan1"
+        set ike-version 2
+        set peertype any
+        set net-device disable
+        set proposal aes256-sha256
+        set dhgrp 14
+        set nattraversal enable
+        set dpd on-idle
+        set authmethod psk
+        set psksecret ********
+        set remote-gw {{ remote_wan_ip }}
+        set keylife 28800
+    next
+end
+```
+
+事前共有鍵の実際の値は、コンソール入力時のみ台帳(鍵管理システム)から参照し、設定表示や保存先には平文で残さないようにします。
+
+### 3. IPsec(Phase2)を設定する
+
+Phase1に紐付くセレクタを作成し、暗号proposalとPFS用DHグループ、対象サブネットを指定します。
+
+```bash
+config vpn ipsec phase2-interface
+    edit "to-branch-p2"
+        set phase1name "to-branch"
+        set proposal aes256-sha256
+        set dhgrp 14
+        set pfs enable
+        set keylifeseconds 3600
+        set src-subnet {{ local_lan.split('/')[0] }} {{ local_lan_netmask }}
+        set dst-subnet {{ remote_lan.split('/')[0] }} {{ remote_lan_netmask }}
+    next
+end
+```
+
+`src-subnet`/`dst-subnet`はCIDR表記ではなくアドレス+ダットデシマルマスクの2引数を取ります。`local_lan`/`remote_lan`のプレフィックス長を変更する場合は、`local_lan_netmask`/`remote_lan_netmask`も対応する値に必ず更新してください(次の手順の`subnet`/`dst`も同様です)。
+
+### 4. ファイアウォールポリシーと経路を設定する
+
+自動生成されたトンネルインターフェース`to-branch`を経由できるよう、アドレスオブジェクトとポリシーを作成し、対向拠点LAN宛の静的経路を追加します。
+
+```bash
+config firewall address
+    edit "LOCAL_LAN"
+        set subnet {{ local_lan.split('/')[0] }} {{ local_lan_netmask }}
+    next
+    edit "REMOTE_LAN"
+        set subnet {{ remote_lan.split('/')[0] }} {{ remote_lan_netmask }}
+    next
+end
+
+config firewall policy
+    edit 0
+        set name "lan-to-branch"
+        set srcintf "lan"
+        set dstintf "to-branch"
+        set srcaddr "LOCAL_LAN"
+        set dstaddr "REMOTE_LAN"
+        set action accept
+        set schedule "always"
+        set service "ALL"
+    next
+    edit 0
+        set name "branch-to-lan"
+        set srcintf "to-branch"
+        set dstintf "lan"
+        set srcaddr "REMOTE_LAN"
+        set dstaddr "LOCAL_LAN"
+        set action accept
+        set schedule "always"
+        set service "ALL"
+    next
+end
+
+config router static
+    edit 0
+        set dst {{ remote_lan.split('/')[0] }} {{ remote_lan_netmask }}
+        set device "to-branch"
+    next
+end
+```
+
+### 5. 動作確認コマンドを実行する
+
+```bash
+diagnose vpn ike gateway list
+diagnose vpn tunnel list
+get vpn ipsec tunnel summary
+```
+
+`diagnose vpn ike gateway list`でPhase1のSAが確立していること、`get vpn ipsec tunnel summary`でPhase2セレクタの送受信カウンタが増加していることを確認したうえで、対向拠点LAN側の端末へpingを実行します。
+
+```bash
+execute ping {{ remote_lan_test_host }}
+```
+
+FortiGate自身が発信する`ping`は自己トラフィックとして扱われ、`lan-to-branch`/`branch-to-lan`ファイアウォールポリシーを経由した検証にはならない場合があります。ポリシーの実効性まで確認するには、自拠点LAN`{{ local_lan }}`内の実機から対向拠点LAN側端末へpingしてください。
+
+## 動作確認
+
+- `diagnose vpn ike gateway list`で自拠点`{{ local_wan_ip }}`と対向拠点`{{ remote_wan_ip }}`間のPhase1が確立(`status=up`相当)していること
+- `diagnose vpn tunnel list`または`get vpn ipsec tunnel summary`でトンネル`to-branch`のPhase2セレクタが確立し、暗号アルゴリズムが意図通り(aes256-sha256、dhgrp 14)であること
+- 自拠点LAN`{{ local_lan }}`の端末から対向拠点LAN`{{ remote_lan }}`の端末へpingが成功すること
+- `get router info routing-table static`で対向拠点LAN宛の経路がトンネルインターフェース`to-branch`経由になっていること
+
+## 注意事項
+
+- 事前共有鍵は両拠点で完全に一致していないとIKEが確立しない。コピー&ペーストではなく台帳の同一値を参照するなど、入力ミスを防ぐ運用にする。
+- FortiOSでは`config`階層を抜けた時点で設定が即座に反映される。変更前に`execute backup config`などで設定バックアップを取得しておく。
+- ファイアウォールポリシーの`set service "ALL"`は検証用の暫定設定であり、本番投入前に必要なサービス/ポートへ絞り込むこと。全許可のまま放置すると意図しない通信を許してしまう。
