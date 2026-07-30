@@ -690,6 +690,7 @@ const META: Meta[] = [
   { id: "opa-server-deployment-hardening", name: "OPAサーバの本番配備とハードニング", desc: "opa runサーバをTLS・認証・最小権限で本番配備しヘルスチェックまで構成するOPA手順書を生成。", category: "ops", subCategory: "ポリシー統制", format: "yaml", output: "markdown", updated: "2026-07-17", live: true },
   { id: "rack-power-budget", name: "ラック電源容量設計（ブレーカーマージン計算）", desc: "電源系統ごとの消費電力を積算し、ブレーカー定格に対する80%ルールでマージンを検算する手順書を生成。", category: "facility", subCategory: "電源設計", format: "csv", output: "markdown", updated: "2026-07-30", live: true },
   { id: "rack-mount-layout", name: "ラックマウント搭載位置設計", desc: "荷重・エアフロー・保守性を考慮して42Uラックの搭載位置を設計し、U番号表として文書化する手順書を生成。", category: "facility", subCategory: "ラック設計", format: "csv", output: "markdown", updated: "2026-07-30", live: true },
+  { id: "dual-power-redundancy", name: "二重電源冗長化チェック（PDU系統分散）", desc: "冗長機器の各PSUがPDU A系・B系へ分散接続されているかを接続表から確認し、単一障害点を検出する手順書を生成。", category: "facility", subCategory: "電源設計", format: "csv", output: "markdown", updated: "2026-07-30", live: true },
 ];
 
 export const CGTemplates: Template[] = META.map((m) => ({
