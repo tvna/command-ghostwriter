@@ -42,7 +42,7 @@ const CAT_ORDER = CATS.map((c) => c.id);
 // their category (so same-category sub-categories stay adjacent, even in the
 // "すべて" view) and, within that, by first appearance; template order inside a
 // group is preserved.
-function groupBySubCategory(list: Template[]): { key: string; label: string; items: Template[] }[] {
+export function groupBySubCategory(list: Template[]): { key: string; label: string; items: Template[] }[] {
   const sorted = [...list].sort((a, b) => CAT_ORDER.indexOf(a.category) - CAT_ORDER.indexOf(b.category));
   const groups: { key: string; label: string; items: Template[] }[] = [];
   for (const t of sorted) {
@@ -58,6 +58,14 @@ function groupBySubCategory(list: Template[]): { key: string; label: string; ite
     g.items.push(t);
   }
   return groups;
+}
+
+export function countByCategory(list: Template[], id: TemplateCategory | 'all'): number {
+  return id === 'all' ? list.length : list.filter((t) => t.category === id).length;
+}
+
+export function countByActivity(list: Template[], id: TemplateActivity | 'all'): number {
+  return id === 'all' ? list.length : list.filter((t) => activityOf(t) === id).length;
 }
 
 function CatIcon({ name, size, color }: { name: string; size: number; color?: string }) {
@@ -122,8 +130,8 @@ export function Library({ onOpen, onClose }: LibraryProps) {
   // matches what the grid shows: category counts respect the active activity,
   // activity counts respect the active category.
   const byAct = act === 'all' ? all : all.filter((t) => activityOf(t) === act);
-  const count = (id: TemplateCategory | 'all') => (id === 'all' ? byAct.length : byAct.filter((t) => t.category === id).length);
-  const actCount = (id: TemplateActivity | 'all') => (id === 'all' ? byCat.length : byCat.filter((t) => activityOf(t) === id).length);
+  const count = (id: TemplateCategory | 'all') => countByCategory(byAct, id);
+  const actCount = (id: TemplateActivity | 'all') => countByActivity(byCat, id);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: 'var(--cg-bg)', fontFamily: 'var(--font-sans)', color: 'var(--cg-text)' }}>
