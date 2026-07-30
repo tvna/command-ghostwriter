@@ -693,6 +693,7 @@ const META: Meta[] = [
   { id: "paloalto-ikev2-vpn", name: "Palo Alto Networks拠点間IKEv2 IPsec VPN構築", desc: "PAN-OSファイアウォール2拠点間でIKEv2 IPsecトンネルを構成し、SA確立と相互疎通を検証する手順書を生成。", category: "network", subCategory: "Palo Alto Networks", format: "toml", output: "markdown", updated: "2026-07-30", live: true },
   { id: "sonicwall-ikev2-vpn", name: "SonicWallの拠点間IKEv2 IPsec VPN構築", desc: "SonicOS E-CLIでIKEv2 IPsecのVPNポリシーとプロポーザルを設定し、拠点間疎通を検証する手順書を生成。", category: "network", subCategory: "SonicWall", format: "toml", output: "markdown", updated: "2026-07-30", live: true },
   { id: "edgerouter-ikev2-vpn", name: "EdgeRouter(EdgeOS)の拠点間IKEv2 IPsec VPN構築", desc: "EdgeOSのike-group/esp-groupとVTIでIKEv2拠点間トンネルを構成し、経路と疎通を検証する手順書を生成。", category: "network", subCategory: "Ubiquiti", format: "toml", output: "markdown", updated: "2026-07-30", live: true },
+  { id: "aruba-ikev2-vpn", name: "Aruba拠点間IKEv2 IPsec VPN構築", desc: "ArubaOSブランチゲートウェイ2拠点間でIKEv2 IPsecトンネルを構成し、暗号プロファイルと疎通を検証する手順書を生成。", category: "network", subCategory: "Aruba", format: "toml", output: "markdown", updated: "2026-07-30", live: true },
 ];
 
 export const CGTemplates: Template[] = META.map((m) => ({

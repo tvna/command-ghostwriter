@@ -1,0 +1,110 @@
+# Aruba(HPE)ブランチゲートウェイの拠点間IPsec VPN構築
+
+Aruba(HPE)ブランチゲートウェイ(ArubaOS)2台を使い、拠点間をIKEv2 IPsecトンネルで接続します。両拠点のパラメータを事前に突き合わせたうえで、片方ずつではなく対応するペアとして設定してください。
+
+## 目的
+
+ArubaOSの`crypto isakmp policy`(IKE)と`crypto ipsec transform-set`/`crypto-local ipsec-map`(IPsec)の役割分担を理解した上で、拠点間IPsecトンネルを構築し、拠点間の経路を整えて相互疎通を検証できるようになることを目指します。
+
+## 用語解説
+
+- **crypto isakmp policy**: IKE(Phase1)の暗号方式・ハッシュ・DHグループ・IKEバージョン・SAライフタイムを定義するポリシー。優先度番号(priority)ごとに1つ定義する
+- **crypto ipsec transform-set**: IPsec(Phase2/ESP)の暗号方式と認証方式(ハッシュ)の組を定義するオブジェクト。IPsecマップから参照する
+- **crypto-local ipsec-map**: 対向ピアIP・保護対象ネットワーク(src-net/dst-net)・参照するIKEv2ポリシーとtransform-set・PFSグループ・SAライフタイムをまとめたトンネル本体の定義
+- **crypto-local isakmp key**: 対向ピアIPアドレスに紐づけて事前共有鍵(PSK)を設定するコマンド。ピアごとに個別の鍵を割り当てる
+- **PFS(Perfect Forward Secrecy)**: IPsec SAの鍵導出に新たなDH計算を追加し、IKE SAの鍵が漏えいしてもIPsec SAの鍵を復元できないようにする仕組み。`set pfs group14`で指定する
+- **DPD(Dead Peer Detection)**: IKEピアの生死をトラフィックパターンやIKEメッセージで確認する仕組み。ArubaOSでは拠点間VPNでデフォルト有効
+- **ip route ... ipsec**: 対向拠点LAN宛の経路をIPsecマップ経由に向ける静的経路コマンド。ネクストホップの代わりにIPsecマップ名を指定する
+
+## シナリオ設定
+
+自拠点WAN側アドレス `{{ local_wan_ip }}` と対向拠点WAN側アドレス `{{ remote_wan_ip }}` の間にIKEv2でIPsecトンネルを確立し、自拠点LAN `{{ local_lan }}` と対向拠点LAN `{{ remote_lan }}` を相互疎通させます。{{ pre_shared_key_note }}
+
+このテンプレートは、IKEv2マルチベンダー相互接続シリーズ(10ベンダー共通)の一つです。全テンプレートで暗号プロファイルを統一しており、このシリーズの他ベンダーのルータ/ファイアウォールとの間でも、以下の共通プロファイルに沿っていれば相互接続できます: IKEv2/IKE暗号AES-256(CBC)・ハッシュSHA-256・DHグループ14 / IPsec(ESP)暗号AES-256・認証SHA-256・PFSグループ14 / 認証方式PSK / IKE SAライフタイム28800秒・IPsec SAライフタイム3600秒 / NAT-T自動検出有効・DPD有効。
+
+## 手順
+
+### 1. 両拠点のパラメータを突き合わせる
+
+対向拠点の管理者と、WAN側アドレス・LANアドレス帯・事前共有鍵・IKEポリシー番号・transform-set名が食い違っていないか確認します。片方だけ変更すると確立できません。
+
+```bash
+show crypto-local ipsec-map
+show crypto isakmp policy
+```
+
+### 2. IKEv2/IPsecプロファイルとトンネルを設定する(自拠点側)
+
+configureモードでIKE(Phase1)ポリシー、事前共有鍵、DPD、IPsec(Phase2)のtransform-set、IPsecマップの順に設定します。対向拠点側では`{{ local_wan_ip }}`と`{{ remote_wan_ip }}`を入れ替えた設定を投入してもらいます。
+
+```bash
+configure terminal
+
+! IKEv2ポリシー(Phase1): AES-256 / SHA-256 / DHグループ14 / SAライフタイム28800秒
+crypto isakmp policy 10
+authentication pre-share
+encryption AES256
+hash sha2-256-128
+group 14
+version v2
+lifetime 28800
+exit
+
+! 事前共有鍵(対向ピアIPに対して設定、値は********でマスク)
+crypto-local isakmp key ******** address {{ remote_wan_ip }} netmask 255.255.255.255
+
+! DPD(Dead Peer Detection)を明示的に設定(拠点間VPNではデフォルト有効)
+crypto-local isakmp dpd idle-timeout 60 retry-timeout 5 retry-attempts 3
+
+! IPsec(Phase2/ESP)のtransform-set: AES-256 / SHA-256
+crypto ipsec transform-set ikev2-aes256-sha256 esp-aes256 esp-sha2-256-hmac
+
+! IPsecマップ: PFSグループ14 / IPsec SAライフタイム3600秒
+! NAT-Tは経路上のNAT有無をIKEv2が自動検出し、必要な場合のみUDPカプセル化する(明示設定不要)
+crypto-local ipsec-map s2s-branch-to-hq 100
+version v2
+set ikev2-policy 10
+peer-ip {{ remote_wan_ip }}
+src-net {{ local_lan.split('/')[0] }} {{ local_lan_netmask }}
+dst-net {{ remote_lan.split('/')[0] }} {{ remote_lan_netmask }}
+set transform-set ikev2-aes256-sha256
+set pfs group14
+set security-association lifetime seconds 3600
+trusted enable
+```
+
+### 3. 経路を設定する
+
+対向拠点LAN宛の経路を、作成したIPsecマップ経由に向けます。`ip route`もCIDR表記ではなくアドレス+ダットデシマルマスクの2引数を取るため、`remote_lan_netmask`を使います。
+
+```bash
+ip route {{ remote_lan.split('/')[0] }} {{ remote_lan_netmask }} ipsec s2s-branch-to-hq
+write memory
+```
+
+### 4. 動作確認コマンドを実行する
+
+```bash
+show crypto-local ipsec-map tag s2s-branch-to-hq
+show crypto isakmp sa
+show ip route
+```
+
+トンネルのIKE/IPsec両方が`UP`であることを確認したうえで、対向拠点LAN側の端末へpingを実行します。
+
+```bash
+ping {{ remote_lan_test_host }}
+```
+
+## 動作確認
+
+- `show crypto-local ipsec-map tag s2s-branch-to-hq`で、IKEv2ポリシー10・transform-set(`ikev2-aes256-sha256`)・PFSグループ14・SAライフタイム3600秒が意図通り反映され、トンネル状態(IKE/IPSEC)が`UP`であること
+- `show crypto isakmp sa`で自拠点`{{ local_wan_ip }}`と対向拠点`{{ remote_wan_ip }}`間のIKE SAが確立し、暗号AES-256・ハッシュSHA-256・グループ14で一致していること
+- `show ip route`で対向拠点LAN`{{ remote_lan }}`宛の経路がIPsecマップ`s2s-branch-to-hq`経由になっていること
+- 自拠点LAN`{{ local_lan }}`の端末から対向拠点LAN`{{ remote_lan }}`の端末へpingが成功すること
+
+## 注意事項
+
+- 事前共有鍵は両拠点で完全に一致していないとIKEが確立しない。`crypto-local isakmp key`はコピー&ペーストではなく台帳の同一値を参照するなど、入力ミスを防ぐ運用にする。
+- `write memory`を忘れると再起動時に設定が失われる。対向拠点側の担当者にも同様の保存実施を依頼する。
+- `crypto isakmp policy`や`crypto-local ipsec-map`をpriority/番号違いで重複投入すると、意図しないポリシーが選択されトンネルが確立しない、または弱い暗号方式にフォールバックする恐れがあるため、投入前に`show crypto isakmp policy`で既存定義と衝突がないか確認する。
