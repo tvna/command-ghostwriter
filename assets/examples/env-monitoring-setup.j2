@@ -60,6 +60,8 @@ snmpwalk -v2c -c public <センサーIP> 1.3.6.1.4.1.<ベンダーOID>
 
 ## 6. サーバ側温度センサーとの乖離を確認する
 
+IPMI経由でサーバのハードウェア温度センサーを取得します。
+
 ```bash
 ipmitool sdr type Temperature
 ```
