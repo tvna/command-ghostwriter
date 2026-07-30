@@ -388,6 +388,8 @@ EOF
 
 ### Task 4: dual-power-redundancy（二重電源冗長化チェック）
 
+> **Post-plan correction:** `features/config_parser.py` の `_infer_scalar` は、CSVセルが往復チェックを通る純粋な数値文字列(例: `"2"`)であれば `int`/`float` に自動推論する（`"007"`のような非往復ケースのみ文字列のまま）。このため、以下のテンプレート案の `r["psu_count"] == "2"` / `== "1"`（文字列比較）は実装時に **常に false** となり、Step2・Step3が空になる不具合があった（実装エージェントが検出・修正済み）。実装の正としては、`(r["psu_count"] | int) == 2` / `== 1`（`rack-mount-layout.j2`の`| int`と同じ慣例）を参照すること。CSVの他のテキスト系フィールド（`circuit`, `airflow`, `psu1_pdu`等）は非数値文字列のため往復チェックで文字列のまま保持され、この問題の対象外。
+
 **Files:**
 - Create: `assets/examples/dual-power-redundancy.csv`
 - Create: `assets/examples/dual-power-redundancy.j2`
