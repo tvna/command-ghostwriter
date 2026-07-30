@@ -1166,6 +1166,8 @@ git commit -m "feat: add aruba-ikev2-vpn IKEv2 multi-vendor interop template (#5
 
 **検証時の注記:** Confirmed via the FortiOS 6.2.1 CLI reference (fetched successfully with full parameter tables) that phase1-interface uses: ike-version, proposal, dhgrp, authmethod, psksecret, remote-gw, interface, keylife, nattraversal, dpd; and phase2-interface uses: phase1name, proposal, dhgrp, pfs, keylifeseconds, src-subnet, dst-subnet. These keyword names are stable across FortiOS 6.2-7.6 (cross-checked search hits for 7.0/7.6 CLI reference pages showing the same command paths/anchors), so I used them with FortiOS 7.6-era syntax. The docs.fortinet.com 7.6.x pages themselves are JS-rendered and WebFetch could only retrieve navigation/breadcrumb text, not the full parameter tables, for the newer version -- so the 7.6-specific confirmation is indirect (via the older 6.2.1 static page plus corroborating search-result snippets naming the same options for 7.x). One parameter I could not fully verify from a fetched primary source: the exact enum values for `set dpd` (I used `on-idle`, which matches my trained knowledge of FortiOS's default DPD mode; a WebFetch summary suggested `on-demand|periodic|disable` for the same field, which conflicts and I judge to be a low-confidence model summary rather than the actual doc text). Flagging this as the one soft gap: the reader should confirm `set dpd on-idle` against `get vpn ipsec phase1-interface` on their actual FortiOS build before applying. Everything else (proposal aes256-sha256, dhgrp 14, pfs enable, keylife 28800, keylifeseconds 3600, config router static dst/device, diagnose vpn ike gateway list / diagnose vpn tunnel list / get vpn ipsec tunnel summary) is standard, long-stable FortiOS CLI confirmed by primary or near-primary sources.
 
+**Code-review update (proactive, before generation):** `src-subnet`/`dst-subnet` (phase2-interface), `subnet` (firewall address), and `dst` (router static) were originally rendered using the raw local_lan/remote_lan CIDR strings. This is wrong: multiple independent worked FortiOS CLI examples (search-confirmed, e.g. `set src-subnet 192.168.10.0 255.255.255.0`, `set subnet 10.10.10.0 255.255.255.0`, `set dst 192.168.10.0 255.255.255.0`) show these fields always take dotted-decimal IP + dotted-decimal mask as two space-separated tokens, never CIDR notation -- the same class of gap already found and fixed for Cisco/SonicWall/Aruba in this batch. Fixed below using the same `local_lan_netmask`/`remote_lan_netmask` + `.split('/')[0]` pattern.
+
 - [ ] **Step 1: データファイルを作成する**
 
 `assets/examples/fortinet-ikev2-vpn.toml`:
@@ -1176,6 +1178,8 @@ local_lan = "192.168.10.0/24"
 remote_lan = "192.168.20.0/24"
 remote_lan_test_host = "192.168.20.10"
 pre_shared_key_note = "事前共有鍵の実値は社内の鍵管理台帳(Vault)で一元管理し、平文では保存せず、設定投入時にコンソールから直接入力します。"
+local_lan_netmask = "255.255.255.0"
+remote_lan_netmask = "255.255.255.0"
 ```
 
 - [ ] **Step 2: テンプレートを作成する**
@@ -1256,8 +1260,8 @@ config vpn ipsec phase2-interface
         set dhgrp 14
         set pfs enable
         set keylifeseconds 3600
-        set src-subnet {{ local_lan }}
-        set dst-subnet {{ remote_lan }}
+        set src-subnet {{ local_lan.split('/')[0] }} {{ local_lan_netmask }}
+        set dst-subnet {{ remote_lan.split('/')[0] }} {{ remote_lan_netmask }}
     next
 end
 ```
@@ -1269,10 +1273,10 @@ end
 ```bash
 config firewall address
     edit "LOCAL_LAN"
-        set subnet {{ local_lan }}
+        set subnet {{ local_lan.split('/')[0] }} {{ local_lan_netmask }}
     next
     edit "REMOTE_LAN"
-        set subnet {{ remote_lan }}
+        set subnet {{ remote_lan.split('/')[0] }} {{ remote_lan_netmask }}
     next
 end
 
@@ -1301,7 +1305,7 @@ end
 
 config router static
     edit 0
-        set dst {{ remote_lan }}
+        set dst {{ remote_lan.split('/')[0] }} {{ remote_lan_netmask }}
         set device "to-branch"
     next
 end
