@@ -994,7 +994,7 @@ git commit -m "feat: add edgerouter-ikev2-vpn IKEv2 multi-vendor interop templat
   - https://arubanetworking.hpe.com/techdocs/CLI-Bank/Content/aos8/crypt-ipsec.htm
   - (他5件、詳細はワークフロー記録を参照)
 
-**検証時の注記:** All CLI keywords are confirmed against official HPE Aruba Networking techdocs (CLI-Bank for ArubaOS 8, which is the CLI documentation set that applies to Aruba branch/SD-Branch gateways such as the 7000/9000 series). Confirmed: `crypto isakmp policy` (authentication pre-share, encryption AES256, hash sha2-256-128 [=SHA-256], group 14, version v2, lifetime 28800, range 300-86400); `crypto ipsec transform-set` with esp-aes256 esp-sha2-256-hmac (esp-sha2-256-hmac added in AOS 8.13.0.0 -- flagging that a customer on an older 8.x train would need to upgrade or fall back to esp-sha-hmac/SHA-1, which would violate the shared crypto profile, so the runbook assumes a build with this hash available); `crypto-local ipsec-map` with version v2, set ikev2-policy, peer-ip, src-net/dst-net, set transform-set, set pfs group14, set security-association lifetime seconds 3600 (range 300-86400); `crypto-local isakmp key ... address ... netmask`; `crypto-local isakmp dpd idle-timeout/retry-timeout/retry-attempts` (DPD is on by default for site-to-site VPN, command shown for explicit/auditable tuning); `ip route <dest> <mask> ipsec <name>`. One genuine gap: I could not find an official ArubaOS CLI toggle literally named "NAT-T auto-detect enable/disable" -- documentation confirms IKEv2 NAT-T detection and UDP encapsulation happen automatically per RFC 3947/4306 without a required CLI command, and the only related knob found (`udpencap-behind-natdevice`) forces always-on encapsulation rather than toggling auto-detection, so I described the automatic behavior in a comment instead of inventing a command. src-net/dst-net were rendered using the local_lan/remote_lan CIDR strings directly (e.g. "192.168.10.0/24") for template consistency with the existing yamaha-ipsec-vpn.j2 convention, even though the strict ArubaOS syntax documented is `src-net <address> <mask>` with a space-separated dotted mask rather than CIDR slash notation -- an operator would need to convert to dotted-mask form (or confirm their AOS version accepts CIDR) before pasting.
+**検証時の注記:** All CLI keywords are confirmed against official HPE Aruba Networking techdocs (CLI-Bank for ArubaOS 8, which is the CLI documentation set that applies to Aruba branch/SD-Branch gateways such as the 7000/9000 series). Confirmed: `crypto isakmp policy` (authentication pre-share, encryption AES256, hash sha2-256-128 [=SHA-256], group 14, version v2, lifetime 28800, range 300-86400); `crypto ipsec transform-set` with esp-aes256 esp-sha2-256-hmac (esp-sha2-256-hmac added in AOS 8.13.0.0 -- flagging that a customer on an older 8.x train would need to upgrade or fall back to esp-sha-hmac/SHA-1, which would violate the shared crypto profile, so the runbook assumes a build with this hash available); `crypto-local ipsec-map` with version v2, set ikev2-policy, peer-ip, src-net/dst-net, set transform-set, set pfs group14, set security-association lifetime seconds 3600 (range 300-86400); `crypto-local isakmp key ... address ... netmask`; `crypto-local isakmp dpd idle-timeout/retry-timeout/retry-attempts` (DPD is on by default for site-to-site VPN, command shown for explicit/auditable tuning); `ip route <dest> <mask> ipsec <name>`. One genuine gap: I could not find an official ArubaOS CLI toggle literally named "NAT-T auto-detect enable/disable" -- documentation confirms IKEv2 NAT-T detection and UDP encapsulation happen automatically per RFC 3947/4306 without a required CLI command, and the only related knob found (`udpencap-behind-natdevice`) forces always-on encapsulation rather than toggling auto-detection, so I described the automatic behavior in a comment instead of inventing a command. **Plan update:** the strict ArubaOS syntax documented is `src-net <address> <mask>` with a space-separated dotted mask, not CIDR slash notation. Rather than passing local_lan/remote_lan CIDR strings through directly (which would require the operator to manually convert before pasting), the template now uses explicit `local_lan_netmask`/`remote_lan_netmask` variables (dotted-decimal, same pattern as Task 1's Cisco `remote_lan_netmask`) and splits the network address out of the CIDR string with Jinja's `.split('/')[0]`.
 
 - [ ] **Step 1: データファイルを作成する**
 
@@ -1006,6 +1006,8 @@ local_lan = "192.168.10.0/24"
 remote_lan = "192.168.20.0/24"
 remote_lan_test_host = "192.168.20.10"
 pre_shared_key_note = "事前共有鍵の値は鍵管理台帳(社内Vault)で別途管理し、コンソール投入時にのみ参照する。設定ファイルや手順書への平文保存は行わない"
+local_lan_netmask = "255.255.255.0"
+remote_lan_netmask = "255.255.255.0"
 ```
 
 - [ ] **Step 2: テンプレートを作成する**
@@ -1079,8 +1081,8 @@ crypto-local ipsec-map s2s-branch-to-hq 100
 version v2
 set ikev2-policy 10
 peer-ip {{ remote_wan_ip }}
-src-net {{ local_lan }}
-dst-net {{ remote_lan }}
+src-net {{ local_lan.split('/')[0] }} {{ local_lan_netmask }}
+dst-net {{ remote_lan.split('/')[0] }} {{ remote_lan_netmask }}
 set transform-set ikev2-aes256-sha256
 set pfs group14
 set security-association lifetime seconds 3600
