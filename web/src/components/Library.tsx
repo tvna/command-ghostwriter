@@ -193,17 +193,18 @@ export interface LibraryProps {
 }
 
 export function Library({ onOpen, onClose }: LibraryProps) {
-  const [cat, setCat] = React.useState<TemplateCategory | 'all'>('all');
+  const [cat, setCat] = React.useState<string>('all');
   const [act, setAct] = React.useState<TemplateActivity | 'all'>('all');
   const all = CGTemplates;
-  const byCat = cat === 'all' ? all : all.filter((t) => t.category === cat);
+  const activeRail = RAIL.find((r) => r.id === cat) ?? RAIL[0];
+  const byCat = all.filter(activeRail.filter);
   const list = act === 'all' ? byCat : byCat.filter((t) => activityOf(t) === act);
   const groups = groupBySubCategory(list);
   // Both rails count within the OTHER axis's current selection, so each number
   // matches what the grid shows: category counts respect the active activity,
   // activity counts respect the active category.
   const byAct = act === 'all' ? all : all.filter((t) => activityOf(t) === act);
-  const count = (id: TemplateCategory | 'all') => countByCategory(byAct, id);
+  const count = (entry: RailEntry) => countByCategory(byAct, entry.filter);
   const actCount = (id: TemplateActivity | 'all') => countByActivity(byCat, id);
 
   return (
@@ -226,34 +227,50 @@ export function Library({ onOpen, onClose }: LibraryProps) {
         {/* left category rail */}
         <nav style={{ width: 220, flexShrink: 0, borderRight: '1px solid var(--cg-border)', background: 'var(--cg-bg-secondary)', padding: 'var(--space-4)' }}>
           <div style={{ fontSize: 'var(--text-2xs)', textTransform: 'uppercase', letterSpacing: '.06em', color: 'var(--cg-text-faint)', fontWeight: 700, padding: '4px 8px 10px' }}>カテゴリ</div>
-          {CATS.map((c) => {
-            const on = c.id === cat;
+          {RAIL.map((entry, i) => {
+            const on = entry.id === cat;
+            const showGroupHeading = entry.group !== undefined && entry.group !== RAIL[i - 1]?.group;
             return (
-              <button
-                key={c.id}
-                onClick={() => { setCat(c.id); setAct('all'); }}
-                style={{
-                  width: '100%',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 10,
-                  cursor: 'pointer',
-                  background: on ? 'rgba(255,75,75,.1)' : 'transparent',
-                  border: 'none',
-                  borderRadius: 'var(--radius-sm)',
-                  padding: '8px 9px',
-                  marginBottom: 2,
-                  color: on ? 'var(--cg-red-tint)' : 'var(--cg-text)',
-                  fontFamily: 'var(--font-sans)',
-                  fontSize: 'var(--text-sm)',
-                  fontWeight: on ? 600 : 400,
-                  textAlign: 'left',
-                }}
-              >
-                <CatIcon name={c.icon} size={16} color={on ? 'var(--cg-red)' : 'var(--cg-text-muted)'} />
-                <span style={{ flex: 1 }}>{c.label}</span>
-                <span style={{ fontSize: 11, color: 'var(--cg-text-faint)', fontFamily: 'var(--font-mono)' }}>{count(c.id)}</span>
-              </button>
+              <React.Fragment key={entry.id}>
+                {showGroupHeading && (
+                  <div
+                    style={{
+                      fontSize: 10,
+                      textTransform: 'uppercase',
+                      letterSpacing: '.04em',
+                      color: 'var(--cg-text-faint)',
+                      fontWeight: 700,
+                      padding: '10px 9px 2px',
+                    }}
+                  >
+                    {entry.group}
+                  </div>
+                )}
+                <button
+                  onClick={() => { setCat(entry.id); setAct('all'); }}
+                  style={{
+                    width: '100%',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 10,
+                    cursor: 'pointer',
+                    background: on ? 'rgba(255,75,75,.1)' : 'transparent',
+                    border: 'none',
+                    borderRadius: 'var(--radius-sm)',
+                    padding: '8px 9px',
+                    marginBottom: 2,
+                    color: on ? 'var(--cg-red-tint)' : 'var(--cg-text)',
+                    fontFamily: 'var(--font-sans)',
+                    fontSize: 'var(--text-sm)',
+                    fontWeight: on ? 600 : 400,
+                    textAlign: 'left',
+                  }}
+                >
+                  <CatIcon name={entry.icon} size={16} color={on ? 'var(--cg-red)' : 'var(--cg-text-muted)'} />
+                  <span style={{ flex: 1 }}>{entry.label}</span>
+                  <span style={{ fontSize: 11, color: 'var(--cg-text-faint)', fontFamily: 'var(--font-mono)' }}>{count(entry)}</span>
+                </button>
+              </React.Fragment>
             );
           })}
         </nav>
