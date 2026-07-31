@@ -27,7 +27,7 @@ UNIT: MarkDecorator = pytest.mark.unit
 
 TEMPLATES_TS: Final[Path] = Path(__file__).resolve().parents[2] / "web" / "src" / "lib" / "templates.ts"
 
-CATEGORIES: Final[frozenset[str]] = frozenset({"network", "server", "dns", "ai", "ops", "facility"})
+CATEGORIES: Final[frozenset[str]] = frozenset({"network", "server", "middleware", "ai", "ops", "facility"})
 ACTIVITIES: Final[frozenset[str]] = frozenset({"build", "troubleshoot", "security-response", "change", "routine", "drill"})
 OUTPUTS: Final[frozenset[str]] = frozenset({"cli", "config", "markdown"})
 FORMATS: Final[frozenset[str]] = frozenset({"toml", "yaml", "csv"})
@@ -65,7 +65,6 @@ ALLOWED_SUBCATEGORIES: Final[dict[str, frozenset[str]]] = {
             "パケット解析",
             "ファイアウォール",
             "ブリッジ",
-            "プロキシ / Web",
             "ポート確認",
             "ルーティング",
             "冗長化",
@@ -91,7 +90,6 @@ ALLOWED_SUBCATEGORIES: Final[dict[str, frozenset[str]]] = {
             "SIEM・HIDS",
             "SSH",
             "VPN",
-            "Webサーバ",
             "cron",
             "sudo",
             "systemd",
@@ -99,7 +97,6 @@ ALLOWED_SUBCATEGORIES: Final[dict[str, frozenset[str]]] = {
             "コンテナ",
             "シークレット管理",
             "ディスク管理",
-            "データベース",
             "ネットワーク設定",
             "バックアップ",
             "パッケージ管理",
@@ -107,8 +104,6 @@ ALLOWED_SUBCATEGORIES: Final[dict[str, frozenset[str]]] = {
             "パーミッション",
             "ファイル共有",
             "ブート・起動",
-            "プロキシ",
-            "メール",
             "ユーザー管理",
             "リリース・デプロイ",
             "ログ保全",
@@ -121,14 +116,13 @@ ALLOWED_SUBCATEGORIES: Final[dict[str, frozenset[str]]] = {
             "証明書",
             "認証",
             "負荷・性能",
-            "負荷分散",
             "資産・状態管理",
             "資産管理",
             "運用ツール",
             "適合性監査",
         }
     ),
-    "dns": frozenset(
+    "middleware": frozenset(
         {
             "BIND",
             "BIND冗長化",
@@ -138,6 +132,11 @@ ALLOWED_SUBCATEGORIES: Final[dict[str, frozenset[str]]] = {
             "PowerDNS",
             "Unbound",
             "dnsmasq",
+            "Webサーバ",
+            "データベース",
+            "プロキシ",
+            "メール",
+            "ロードバランサ",
             "レコード管理",
             "動的更新",
             "暗号化DNS",
