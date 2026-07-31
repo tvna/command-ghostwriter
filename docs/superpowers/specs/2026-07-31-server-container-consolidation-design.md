@@ -56,7 +56,7 @@ sub-category consolidation plus one new rail entry, not a new axis or type.
     genuinely AI/GPU-cluster hardware/scheduling topics (Slurm, NCCL, DCGM,
     NVLink, InfiniBand, power design), not container orchestration.
   - `ops` / `ポリシー統制`: `opa-kubernetes-admission` — one of a cohesive
-    14-member OPA/Rego policy series (`opa-rego-policy-authoring`,
+    15-member OPA/Rego policy series (`opa-rego-policy-authoring`,
     `opa-api-authorization`, `opa-terraform-iac-policy`,
     `opa-bundle-distribution`, `opa-decision-log-audit`,
     `opa-policy-test-cicd`, `opa-policy-conflict-triage`,
@@ -68,7 +68,7 @@ sub-category consolidation plus one new rail entry, not a new axis or type.
     confirmed during brainstorming): move it to `server`/`コンテナ` anyway,
     prioritizing "content is Kubernetes-admission-specific" over "stays with
     its OPA siblings for series cohesion" — an accepted trade-off, not an
-    oversight. The other 13 `ポリシー統制` members are unaffected and keep
+    oversight. The other 14 `ポリシー統制` members are unaffected and keep
     the sub-category populated in `ops`.
 - Templates considered and excluded from this migration:
   - `ai`: `qdrant-collection-setup`, `milvus-standalone-deploy` (ベクトルDB),
@@ -132,7 +132,7 @@ in both sections.
   miscategorization back, the same logic #615 used to prune `server`'s
   `プロキシ`/`メール`/`Webサーバ`/`データベース`). `"GPUクラスタ"` keeps its
   remaining 8 members, unchanged in the allow-list.
-- `ops`: `"ポリシー統制"` keeps its remaining 13 members, unchanged in the
+- `ops`: `"ポリシー統制"` keeps its remaining 14 members, unchanged in the
   allow-list.
 
 ## Migration mapping (15 templates end up in `server`/`コンテナ`; 14 field edits)
