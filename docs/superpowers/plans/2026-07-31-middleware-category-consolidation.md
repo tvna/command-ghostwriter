@@ -430,10 +430,16 @@ const CATEGORY_ICON: Record<TemplateCategory, string> = {
 };
 ```
 
-- [ ] **Step 4: Typecheck**
+- [ ] **Step 4: Typecheck, modulo known Task 5 scope**
 
 Run: `cd /home/user/command-ghostwriter/web && bunx tsc -b`
-Expected: no errors
+Expected: **exactly 1 error, in `web/src/components/Library.test.tsx` line 76** (`t.category === "dns"` — that assertion is Task 5's job, not this task's):
+
+```
+src/components/Library.test.tsx(76,41): error TS2367: This comparison appears to be unintentional because the types 'TemplateCategory' and '"dns"' have no overlap.
+```
+
+If you see any error in `Library.tsx` itself, or anywhere else, stop and report BLOCKED — that would mean Steps 1-3 have a real bug. If it's exactly that one Library.test.tsx error, proceed to Step 5.
 
 - [ ] **Step 5: Commit**
 
