@@ -31,6 +31,7 @@ const NETWORK_VENDORS: { id: string; label: string }[] = [
   { id: 'dell', label: 'Dell' },
   { id: 'hpe-aruba', label: 'HPE Aruba' },
   { id: 'alaxala', label: 'Alaxala' },
+  { id: 'opnsense', label: 'OPNsense' },
   { id: 'palo-alto', label: 'Palo Alto Networks' },
   { id: 'sonicwall', label: 'SonicWall' },
   { id: 'ubiquiti', label: 'Ubiquiti' },
