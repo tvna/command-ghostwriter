@@ -196,7 +196,7 @@ export function Library({ onOpen, onClose }: LibraryProps) {
   const [cat, setCat] = React.useState<string>('all');
   const [act, setAct] = React.useState<TemplateActivity | 'all'>('all');
   const all = CGTemplates;
-  const activeRail = RAIL.find((r) => r.id === cat) ?? RAIL[0];
+  const activeRail = RAIL.find((r) => r.id === cat) ?? RAIL.find((r) => r.id === 'all')!;
   const byCat = all.filter(activeRail.filter);
   const list = act === 'all' ? byCat : byCat.filter((t) => activityOf(t) === act);
   const groups = groupBySubCategory(list);
@@ -225,7 +225,7 @@ export function Library({ onOpen, onClose }: LibraryProps) {
 
       <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
         {/* left category rail */}
-        <nav style={{ width: 220, flexShrink: 0, borderRight: '1px solid var(--cg-border)', background: 'var(--cg-bg-secondary)', padding: 'var(--space-4)' }}>
+        <nav style={{ width: 220, flexShrink: 0, borderRight: '1px solid var(--cg-border)', background: 'var(--cg-bg-secondary)', padding: 'var(--space-4)', overflowY: 'auto' }}>
           <div style={{ fontSize: 'var(--text-2xs)', textTransform: 'uppercase', letterSpacing: '.06em', color: 'var(--cg-text-faint)', fontWeight: 700, padding: '4px 8px 10px' }}>カテゴリ</div>
           {RAIL.map((entry, i) => {
             const on = entry.id === cat;
