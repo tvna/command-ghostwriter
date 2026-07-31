@@ -39,7 +39,6 @@ ALLOWED_SUBCATEGORIES: Final[dict[str, frozenset[str]]] = {
             "Alaxala",
             "Allied Telesis",
             "Arista",
-            "Aruba",
             "Cisco",
             "Dell",
             "DHCP",

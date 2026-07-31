@@ -9,14 +9,78 @@ import logoMark from '../assets/brand/logo-mark.svg';
 // Library — template gallery. Left category rail + right card grid + 空から作成.
 // Picking a card calls onOpen(template); 空から作成 calls onOpen(null).
 
-const CATS: { id: TemplateCategory | 'all'; label: string; icon: string }[] = [
-  { id: 'all',      label: 'すべて',          icon: 'topology' },
-  { id: 'network',  label: 'ネットワーク機器', icon: 'router' },
-  { id: 'server',   label: 'サーバ / Linux',  icon: 'server' },
-  { id: 'dns',      label: 'DNS',            icon: 'ethernet-port' },
-  { id: 'ai',       label: 'AIインフラ',       icon: 'terminal' },
-  { id: 'ops',      label: '運用共通',         icon: 'config-file' },
-  { id: 'facility', label: '物理設備',        icon: 'server' },
+export interface RailEntry {
+  id: string;
+  label: string;
+  icon: string;
+  group?: string;
+  filter: (t: Template) => boolean;
+}
+
+// Vendor labels must match `subCategory` values in templates.ts exactly.
+// Explicit, reviewable list — not derived by scanning templates.ts at
+// runtime, same reasoning as the ACTS array below.
+const NETWORK_VENDORS: { id: string; label: string }[] = [
+  { id: 'cisco', label: 'Cisco' },
+  { id: 'yamaha', label: 'YAMAHA' },
+  { id: 'juniper', label: 'Juniper' },
+  { id: 'fortinet', label: 'Fortinet' },
+  { id: 'allied-telesis', label: 'Allied Telesis' },
+  { id: 'nec', label: 'NEC' },
+  { id: 'arista', label: 'Arista' },
+  { id: 'dell', label: 'Dell' },
+  { id: 'hpe-aruba', label: 'HPE Aruba' },
+  { id: 'alaxala', label: 'Alaxala' },
+  { id: 'palo-alto', label: 'Palo Alto Networks' },
+  { id: 'sonicwall', label: 'SonicWall' },
+  { id: 'ubiquiti', label: 'Ubiquiti' },
+];
+const NETWORK_VENDOR_LABELS = new Set(NETWORK_VENDORS.map((v) => v.label));
+const SERVER_DISTRO_LABELS = new Set(['Debian系', 'RHEL系']);
+
+export const RAIL: RailEntry[] = [
+  { id: 'all', label: 'すべて', icon: 'topology', filter: () => true },
+  ...NETWORK_VENDORS.map(
+    (v): RailEntry => ({
+      id: `network-${v.id}`,
+      label: v.label,
+      icon: 'router',
+      group: 'ネットワーク機器',
+      filter: (t) => t.category === 'network' && t.subCategory === v.label,
+    }),
+  ),
+  {
+    id: 'network-common',
+    label: 'ネットワーク機器 (共通)',
+    icon: 'router',
+    group: 'ネットワーク機器',
+    filter: (t) => t.category === 'network' && !NETWORK_VENDOR_LABELS.has(t.subCategory),
+  },
+  {
+    id: 'server-common',
+    label: 'サーバ (共通)',
+    icon: 'server',
+    group: 'サーバ',
+    filter: (t) => t.category === 'server' && !SERVER_DISTRO_LABELS.has(t.subCategory),
+  },
+  {
+    id: 'server-debian',
+    label: 'サーバ (Debian系)',
+    icon: 'server',
+    group: 'サーバ',
+    filter: (t) => t.category === 'server' && t.subCategory === 'Debian系',
+  },
+  {
+    id: 'server-rhel',
+    label: 'サーバ (RHEL系)',
+    icon: 'server',
+    group: 'サーバ',
+    filter: (t) => t.category === 'server' && t.subCategory === 'RHEL系',
+  },
+  { id: 'dns', label: 'DNS', icon: 'ethernet-port', group: 'その他', filter: (t) => t.category === 'dns' },
+  { id: 'ai', label: 'AIインフラ', icon: 'terminal', group: 'その他', filter: (t) => t.category === 'ai' },
+  { id: 'ops', label: '運用共通', icon: 'config-file', group: 'その他', filter: (t) => t.category === 'ops' },
+  { id: 'facility', label: '物理設備', icon: 'server', group: 'その他', filter: (t) => t.category === 'facility' },
 ];
 
 // Activity axis (orthogonal to the domain category). "すべて" clears the filter.
@@ -36,14 +100,14 @@ const activityOf = (t: Template): TemplateActivity => t.activity ?? 'build';
 const FMT_TONE: Record<Format, 'brand' | 'info' | 'warning'> = { toml: 'brand', yaml: 'info', csv: 'warning' };
 const OUT_LABEL: Record<TemplateOutput, string> = { cli: 'CLI', config: 'config', markdown: 'Markdown' };
 
-const CAT_ORDER = CATS.map((c) => c.id);
+const DOMAIN_ORDER: TemplateCategory[] = ['network', 'server', 'dns', 'ai', 'ops', 'facility'];
 
 // Group templates into ordered sub-category sections. Groups are ordered by
 // their category (so same-category sub-categories stay adjacent, even in the
 // "すべて" view) and, within that, by first appearance; template order inside a
 // group is preserved.
 export function groupBySubCategory(list: Template[]): { key: string; label: string; items: Template[] }[] {
-  const sorted = [...list].sort((a, b) => CAT_ORDER.indexOf(a.category) - CAT_ORDER.indexOf(b.category));
+  const sorted = [...list].sort((a, b) => DOMAIN_ORDER.indexOf(a.category) - DOMAIN_ORDER.indexOf(b.category));
   const groups: { key: string; label: string; items: Template[] }[] = [];
   for (const t of sorted) {
     // Group by (category, subCategory), not sub-category text alone: the same
@@ -60,8 +124,8 @@ export function groupBySubCategory(list: Template[]): { key: string; label: stri
   return groups;
 }
 
-export function countByCategory(list: Template[], id: TemplateCategory | 'all'): number {
-  return id === 'all' ? list.length : list.filter((t) => t.category === id).length;
+export function countByCategory(list: Template[], filter: (t: Template) => boolean): number {
+  return list.filter(filter).length;
 }
 
 export function countByActivity(list: Template[], id: TemplateActivity | 'all'): number {
@@ -71,6 +135,15 @@ export function countByActivity(list: Template[], id: TemplateActivity | 'all'):
 function CatIcon({ name, size, color }: { name: string; size: number; color?: string }) {
   return <Icon name={name} size={size} color={color} />;
 }
+
+const CATEGORY_ICON: Record<TemplateCategory, string> = {
+  network: 'router',
+  server: 'server',
+  dns: 'ethernet-port',
+  ai: 'terminal',
+  ops: 'config-file',
+  facility: 'server',
+};
 
 function TemplateCard({ tpl, onOpen }: { tpl: Template; onOpen: (tpl: Template) => void }) {
   const [hover, setHover] = React.useState(false);
@@ -97,7 +170,7 @@ function TemplateCard({ tpl, onOpen }: { tpl: Template; onOpen: (tpl: Template) 
     >
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <span style={{ width: 34, height: 34, borderRadius: 'var(--radius-sm)', background: 'var(--cg-bg)', border: '1px solid var(--cg-border)', display: 'grid', placeItems: 'center' }}>
-          <CatIcon name={CATS.find((c) => c.id === tpl.category)!.icon} size={18} color="var(--cg-red)" />
+          <CatIcon name={CATEGORY_ICON[tpl.category]} size={18} color="var(--cg-red)" />
         </span>
         {tpl.live && <Badge tone="success">ライブ</Badge>}
       </div>
@@ -120,17 +193,18 @@ export interface LibraryProps {
 }
 
 export function Library({ onOpen, onClose }: LibraryProps) {
-  const [cat, setCat] = React.useState<TemplateCategory | 'all'>('all');
+  const [cat, setCat] = React.useState<string>('all');
   const [act, setAct] = React.useState<TemplateActivity | 'all'>('all');
   const all = CGTemplates;
-  const byCat = cat === 'all' ? all : all.filter((t) => t.category === cat);
+  const activeRail = RAIL.find((r) => r.id === cat) ?? RAIL.find((r) => r.id === 'all')!;
+  const byCat = all.filter(activeRail.filter);
   const list = act === 'all' ? byCat : byCat.filter((t) => activityOf(t) === act);
   const groups = groupBySubCategory(list);
   // Both rails count within the OTHER axis's current selection, so each number
   // matches what the grid shows: category counts respect the active activity,
   // activity counts respect the active category.
   const byAct = act === 'all' ? all : all.filter((t) => activityOf(t) === act);
-  const count = (id: TemplateCategory | 'all') => countByCategory(byAct, id);
+  const count = (entry: RailEntry) => countByCategory(byAct, entry.filter);
   const actCount = (id: TemplateActivity | 'all') => countByActivity(byCat, id);
 
   return (
@@ -151,36 +225,52 @@ export function Library({ onOpen, onClose }: LibraryProps) {
 
       <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
         {/* left category rail */}
-        <nav style={{ width: 220, flexShrink: 0, borderRight: '1px solid var(--cg-border)', background: 'var(--cg-bg-secondary)', padding: 'var(--space-4)' }}>
+        <nav style={{ width: 220, flexShrink: 0, borderRight: '1px solid var(--cg-border)', background: 'var(--cg-bg-secondary)', padding: 'var(--space-4)', overflowY: 'auto' }}>
           <div style={{ fontSize: 'var(--text-2xs)', textTransform: 'uppercase', letterSpacing: '.06em', color: 'var(--cg-text-faint)', fontWeight: 700, padding: '4px 8px 10px' }}>カテゴリ</div>
-          {CATS.map((c) => {
-            const on = c.id === cat;
+          {RAIL.map((entry, i) => {
+            const on = entry.id === cat;
+            const showGroupHeading = entry.group !== undefined && entry.group !== RAIL[i - 1]?.group;
             return (
-              <button
-                key={c.id}
-                onClick={() => { setCat(c.id); setAct('all'); }}
-                style={{
-                  width: '100%',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 10,
-                  cursor: 'pointer',
-                  background: on ? 'rgba(255,75,75,.1)' : 'transparent',
-                  border: 'none',
-                  borderRadius: 'var(--radius-sm)',
-                  padding: '8px 9px',
-                  marginBottom: 2,
-                  color: on ? 'var(--cg-red-tint)' : 'var(--cg-text)',
-                  fontFamily: 'var(--font-sans)',
-                  fontSize: 'var(--text-sm)',
-                  fontWeight: on ? 600 : 400,
-                  textAlign: 'left',
-                }}
-              >
-                <CatIcon name={c.icon} size={16} color={on ? 'var(--cg-red)' : 'var(--cg-text-muted)'} />
-                <span style={{ flex: 1 }}>{c.label}</span>
-                <span style={{ fontSize: 11, color: 'var(--cg-text-faint)', fontFamily: 'var(--font-mono)' }}>{count(c.id)}</span>
-              </button>
+              <React.Fragment key={entry.id}>
+                {showGroupHeading && (
+                  <div
+                    style={{
+                      fontSize: 10,
+                      textTransform: 'uppercase',
+                      letterSpacing: '.04em',
+                      color: 'var(--cg-text-faint)',
+                      fontWeight: 700,
+                      padding: '10px 9px 2px',
+                    }}
+                  >
+                    {entry.group}
+                  </div>
+                )}
+                <button
+                  onClick={() => { setCat(entry.id); setAct('all'); }}
+                  style={{
+                    width: '100%',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 10,
+                    cursor: 'pointer',
+                    background: on ? 'rgba(255,75,75,.1)' : 'transparent',
+                    border: 'none',
+                    borderRadius: 'var(--radius-sm)',
+                    padding: '8px 9px',
+                    marginBottom: 2,
+                    color: on ? 'var(--cg-red-tint)' : 'var(--cg-text)',
+                    fontFamily: 'var(--font-sans)',
+                    fontSize: 'var(--text-sm)',
+                    fontWeight: on ? 600 : 400,
+                    textAlign: 'left',
+                  }}
+                >
+                  <CatIcon name={entry.icon} size={16} color={on ? 'var(--cg-red)' : 'var(--cg-text-muted)'} />
+                  <span style={{ flex: 1 }}>{entry.label}</span>
+                  <span style={{ fontSize: 11, color: 'var(--cg-text-faint)', fontFamily: 'var(--font-mono)' }}>{count(entry)}</span>
+                </button>
+              </React.Fragment>
             );
           })}
         </nav>
