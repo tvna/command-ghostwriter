@@ -134,19 +134,19 @@ describe("RAIL predicate exclusivity and exhaustiveness", () => {
 
 describe("RAIL counts against real template data", () => {
   const EXPECTED: Record<string, number> = {
-    all: 719,
+    all: 794,
     "network-cisco": 11,
     "network-yamaha": 9,
     "network-juniper": 4,
-    "network-fortinet": 4,
+    "network-fortinet": 29,
     "network-allied-telesis": 4,
     "network-nec": 4,
     "network-arista": 3,
     "network-dell": 3,
     "network-hpe-aruba": 4,
     "network-alaxala": 3,
-    "network-palo-alto": 1,
-    "network-sonicwall": 1,
+    "network-palo-alto": 26,
+    "network-sonicwall": 26,
     "network-ubiquiti": 1,
     "network-common": 148,
     "server-common": 227,
