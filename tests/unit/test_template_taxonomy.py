@@ -51,6 +51,7 @@ ALLOWED_SUBCATEGORIES: Final[dict[str, frozenset[str]]] = {
             "L1/L2リンク",
             "NEC",
             "NIC",
+            "OPNsense",
             "Palo Alto Networks",
             "SonicWall",
             "Ubiquiti",
