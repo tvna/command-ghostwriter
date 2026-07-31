@@ -1,0 +1,901 @@
+{
+  "items": [
+    {
+      "id": "opnsense-default-deny-wan",
+      "problem": "WAN側を暗黙拒否とし必要最小限の許可ルールのみ登録する"
+    },
+    {
+      "id": "opnsense-lan-segment-isolation",
+      "problem": "部門VLAN間の通信を既定拒否とし業務に必要な通信のみ許可する"
+    },
+    {
+      "id": "opnsense-alias-driven-rules",
+      "problem": "ホスト・ネットワーク・ポートのエイリアスでルールを集約管理する"
+    },
+    {
+      "id": "opnsense-nat-port-forward-dmz",
+      "problem": "WANからDMZ内公開サーバへのポートフォワードを最小公開ポートで構成する"
+    },
+    {
+      "id": "opnsense-outbound-nat-policy",
+      "problem": "自動アウトバウンドNATからハイブリッドモードへ移行し送信元固定NATを追加する"
+    },
+    {
+      "id": "opnsense-geoip-country-block",
+      "problem": "GeoIPで特定国からのWAN着信を遮断する"
+    },
+    {
+      "id": "opnsense-schedule-based-access",
+      "problem": "スケジュール機能で業務時間外の外部アクセスを自動遮断する"
+    },
+    {
+      "id": "opnsense-mgmt-plane-lockdown",
+      "problem": "GUI/SSH管理アクセスを管理セグメントのみに限定する"
+    },
+    {
+      "id": "opnsense-wireguard-instance",
+      "problem": "拠点接続用のWireGuardインスタンスとピアを構成する"
+    },
+    {
+      "id": "opnsense-ha-carp-setup",
+      "problem": "二台構成の冗長化(仮想IP+状態同期)を構築しフェイルオーバーを検証する"
+    },
+    {
+      "id": "opnsense-captive-portal-guest",
+      "problem": "ゲスト用セグメントにキャプティブポータル認証を導入し社内網への到達を遮断する"
+    },
+    {
+      "id": "opnsense-ips-inline-enable",
+      "problem": "侵入防止機能をIDSモードで観察後にインラインIPSへ昇格する"
+    },
+    {
+      "id": "opnsense-unbound-dot-forwarding",
+      "problem": "DNSをDoT転送に切り替え平文DNSの直抜けを遮断する"
+    },
+    {
+      "id": "opnsense-api-automation-basics",
+      "problem": "最小権限APIキーでのルール照会・追加・適用を自動化する基盤を整備する"
+    },
+    {
+      "id": "opnsense-config-backup-restore",
+      "problem": "設定バックアップを定期取得し復元・世代管理を定型運用化する"
+    },
+    {
+      "id": "opnsense-firmware-update-window",
+      "problem": "事前バックアップと変更告知を伴うファームウェア更新をメンテナンス窓内で行う"
+    },
+    {
+      "id": "opnsense-rule-hygiene-audit",
+      "problem": "未使用・重複・過剰許可ルールを洗い出し段階的に無効化する定期監査を行う"
+    },
+    {
+      "id": "opnsense-emergency-ip-block",
+      "problem": "攻撃検知時に攻撃元IPを即時遮断し記録・解除基準を定める"
+    },
+    {
+      "id": "opnsense-compromised-host-quarantine",
+      "problem": "侵害疑いの内部ホストを検疫し調査用通信のみ許可して封じ込める"
+    },
+    {
+      "id": "opnsense-staged-rule-change",
+      "problem": "ルール変更をログ観察→有効化→事後確認の段階で適用し切り戻し条件を事前定義する"
+    },
+    {
+      "id": "opnsense-blocked-traffic-triage",
+      "problem": "通信不可申告に対しライブログ・ステート・NATの順で原因ルールを特定する"
+    },
+    {
+      "id": "opnsense-state-table-exhaustion",
+      "problem": "ステートテーブル使用率急騰時に原因ホストを特定し上限調整で再発を防ぐ"
+    },
+    {
+      "id": "opnsense-carp-failover-drill",
+      "problem": "CARP冗長構成の計画切替訓練を実施し切替時間とセッション維持を測定する"
+    },
+    {
+      "id": "opnsense-port-forward-triage",
+      "problem": "外部から公開サーバへ届かない事象をNAT・ルール・戻り経路の順に切り分ける"
+    },
+    {
+      "id": "opnsense-log-noise-reduction",
+      "problem": "ブロードキャスト等の定常ノイズをログ抑制し意味のある遮断ログのみ残す"
+    }
+  ],
+  "results": [
+    {
+      "vendor": "Fortinet (FortiOS / FortiGate)",
+      "key": "fortinet",
+      "researched": {
+        "vendor": "Fortinet (FortiOS / FortiGate)",
+        "mappings": [
+          {
+            "opnsense_id": "opnsense-default-deny-wan",
+            "vendor_equivalent_feature": "Firewall Policy with implicit deny (bottom-of-list default deny) plus explicit allow policies",
+            "native_terminology": "Policy & Objects > Firewall Policy; implicit deny (policy ID 0); config firewall policy",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.fortinet.com/document/fortigate/7.6.5/administration-guide/656084/firewall-policy",
+            "notes_ja": "FortiGateは全ファイアウォールポリシーがトップダウンで評価され、どれにもマッチしない通信は末尾の暗黙deny(policy ID 0)で拒否される。WAN向けは許可ポリシーのみ明示追加する設計は標準動作そのもの。confirmed。"
+          },
+          {
+            "opnsense_id": "opnsense-lan-segment-isolation",
+            "vendor_equivalent_feature": "Firewall Policy between VLAN/zone interface pairs (implicit deny by default)",
+            "native_terminology": "Policy & Objects > Firewall Policy (source/destination interface = VLAN interfaces); Interface-based zones",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.fortinet.com/document/fortigate/7.6.5/administration-guide/656084/firewall-policy",
+            "notes_ja": "部門VLAN間もFirewall Policyのsrc/dst interfaceにVLANを指定するだけで、明示許可以外は暗黙denyとなる。OPNsenseのVLAN間既定拒否と同じ仕組み。confirmed。"
+          },
+          {
+            "opnsense_id": "opnsense-alias-driven-rules",
+            "vendor_equivalent_feature": "Firewall Address objects/groups and Service objects/groups",
+            "native_terminology": "Policy & Objects > Addresses (config firewall address / addrgrp); Policy & Objects > Services (config firewall service custom / group)",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.fortinet.com/document/fortigate/8.0.0/administration-guide/214805/address-objects",
+            "notes_ja": "OPNsenseのエイリアス(ホスト/ネットワーク/ポート)に相当するのはFortiOSのAddress/Address Group(ホスト・ネットワーク)とService/Service Group(ポート)。ポリシーはこれらオブジェクトを参照する形で集約管理される。confirmed。"
+          },
+          {
+            "opnsense_id": "opnsense-nat-port-forward-dmz",
+            "vendor_equivalent_feature": "Virtual IP (VIP) with port forwarding, referenced as destination in a firewall policy",
+            "native_terminology": "Policy & Objects > Virtual IPs; VIP > Port Forwarding enabled (external service port / mapped IP port); config firewall vip",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.fortinet.com/document/fortigate/8.0.0/administration-guide/155333/virtual-ips-with-port-forwarding",
+            "notes_ja": "DMZ公開サーバへの最小公開ポートでのポートフォワードは、VIPでexternal service portとmapped IP/portを限定し、そのVIPを宛先にしたポリシーでNATなし(VIPが宛先NATを行う)構成が公式手順。confirmed。"
+          },
+          {
+            "opnsense_id": "opnsense-outbound-nat-policy",
+            "vendor_equivalent_feature": "Central SNAT policy (central-snat-map) combined with IP Pools for fixed/static source NAT",
+            "native_terminology": "Policy & Objects > Central SNAT (config firewall central-snat-map); IP Pools (config firewall ippool, fixed-port)",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.fortinet.com/document/fortigate/7.6.6/administration-guide/421028/central-snat",
+            "notes_ja": "既定のポリシー単位アウトバウンドNATから、Central SNAT機能を有効化するとNATテーブルで送信元アドレスごとに使用するIPプールを細かく制御できる(ハイブリッド運用に相当)。IP Poolでfixed portを指定すれば送信元固定NATも可能。confirmed。"
+          },
+          {
+            "opnsense_id": "opnsense-geoip-country-block",
+            "vendor_equivalent_feature": "Geography-based firewall address (GeoIP database) used in a deny policy",
+            "native_terminology": "Policy & Objects > Addresses > type Geography; config firewall address set type geography / set country; diagnose firewall ipgeo",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.fortinet.com/document/fortigate/7.6.6/administration-guide/286826/geography-based-addresses",
+            "notes_ja": "国別アドレスオブジェクト(type geography)を作成し、それを送信元とするdenyポリシーをWAN着信に適用することでGeoIP国別遮断を実現。confirmed。"
+          },
+          {
+            "opnsense_id": "opnsense-schedule-based-access",
+            "vendor_equivalent_feature": "Firewall Schedule (recurring or one-time) attached to a firewall policy",
+            "native_terminology": "Policy & Objects > Schedules; config firewall schedule recurring / onetime; policy 'schedule' field",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.fortinet.com/document/fortigate/7.6.6/cli-reference/161573977/config-firewall-schedule-recurring",
+            "notes_ja": "曜日・時間帯を指定したrecurringスケジュールをポリシーに割り当てることで、業務時間外のみ通信を遮断/許可できる。OPNsenseのスケジュール機能と同一の運用課題を解く。confirmed。"
+          },
+          {
+            "opnsense_id": "opnsense-mgmt-plane-lockdown",
+            "vendor_equivalent_feature": "Administrator Trusted Hosts restriction combined with a dedicated management interface/local-in policy",
+            "native_terminology": "System > Administrators > 'Restrict login to trusted hosts'; config system admin set trusthost1-10; Local-in Policy",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.fortinet.com/document/fortigate/6.4.0/hardening-your-fortigate/582009/system-administrator-best-practices",
+            "notes_ja": "管理者アカウントにTrusted Hostsを設定すると、HTTPS/SSH/SNMP等の管理アクセスが許可IPからのみ受理される。加えてLocal-in Policyで管理インターフェース宛のアクセスを絞ることも可能。confirmed。"
+          },
+          {
+            "opnsense_id": "opnsense-wireguard-instance",
+            "vendor_equivalent_feature": "IPsec VPN (site-to-site tunnel, IKEv1/IKEv2) as the native encrypted tunnel mechanism — no native WireGuard",
+            "native_terminology": "VPN > IPsec Wizard > Site to Site template; config vpn ipsec phase1-interface / phase2-interface",
+            "confidence": "adapted",
+            "primary_source_url": "https://docs.fortinet.com/document/fortigate/7.6.6/administration-guide/913287/basic-site-to-site-vpn-with-pre-shared-key",
+            "notes_ja": "FortiOSにネイティブのWireGuard実装は存在しない(コミュニティでも要望止まりで未実装、かつWireGuardはアプリケーション制御でhigh-riskとして既定ブロックされる)。同じ「拠点間暗号化トンネル」という運用課題は、IPsec VPN(IKEv1/IKEv2、事前共有鍵または証明書)のSite-to-Siteウィザードで解決するのがFortinetネイティブな方法。テンプレート文言は「拠点接続用のIPsecトンネル(フェーズ1/フェーズ2)を構成する」に置換すべき。参考: https://community.fortinet.com/t5/Support-Forum/Fortigate-Wireguard-Support/td-p/46735 (WireGuard非対応の確認)。"
+          },
+          {
+            "opnsense_id": "opnsense-ha-carp-setup",
+            "vendor_equivalent_feature": "FGCP (FortiGate Clustering Protocol) Active-Passive HA with virtual MAC and heartbeat-based session sync",
+            "native_terminology": "System > HA; config system ha (mode a-p, hbdev, group-id); virtual MAC address; heartbeat interface",
+            "confidence": "adapted",
+            "primary_source_url": "https://docs.fortinet.com/document/fortigate/6.4.0/best-practices/050165/fgcp-high-availability",
+            "notes_ja": "CARP(仮想IP+pfsync)そのものはFortiOSに存在しないが、同じ「2台冗長化+仮想MAC+状態同期+フェイルオーバー」という課題はFGCP Active-Passive HAが解く。仮想IPの代わりに仮想MACアドレスをprimary機のインターフェースへ引き継ぐ方式。プロトコルが異なるためadapted。"
+          },
+          {
+            "opnsense_id": "opnsense-captive-portal-guest",
+            "vendor_equivalent_feature": "Captive Portal authentication (interface-based or policy-based) restricting guest segment access",
+            "native_terminology": "Policy & Objects > Authentication Rules / Interface Security Mode = Captive Portal; config firewall interface-policy / config system interface set security-mode captive-portal",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.fortinet.com/document/fortigate/7.6.6/administration-guide/934626/captive-portals",
+            "notes_ja": "ゲスト用VLAN/SSIDインターフェースにCaptive Portalを設定し、認証成功後のみ許可ポリシー(社内網は許可しない)を適用する構成が公式にサポートされる。confirmed。"
+          },
+          {
+            "opnsense_id": "opnsense-ips-inline-enable",
+            "vendor_equivalent_feature": "IPS profile per-signature action (monitor vs block); one-arm sniffer deployment for pure IDS observation before inline enforcement",
+            "native_terminology": "Security Profiles > Intrusion Prevention; IPS sensor entries set action pass/block, set default-action; interface Sniffer mode (one-arm sniffer)",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.fortinet.com/document/fortigate/8.0.0/administration-guide/648831/one-arm-sniffer",
+            "notes_ja": "監視のみで導入する段階はIPSセンサーのシグネチャアクションを「Monitor」(もしくは物理的にSPANポートに繋いだOne-arm Sniffer)にし、検証後にブロックアクション/インライン展開へ切替える運用がFortiOSの標準的な移行パス。confirmed。"
+          },
+          {
+            "opnsense_id": "opnsense-unbound-dot-forwarding",
+            "vendor_equivalent_feature": "DNS over TLS (DoT) for FortiGuard/upstream DNS servers, combined with a policy blocking direct outbound plaintext DNS (port 53)",
+            "native_terminology": "System > Feature Visibility > DNS; config system dns set protocol dot / set server-hostname; DNS Filter profile",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.fortinet.com/document/fortigate/7.6.5/administration-guide/42181/dns-over-tls-and-https",
+            "notes_ja": "FortiOSはFortiGuard DNSサーバへのDNS over TLSをネイティブサポート(デフォルトでも使用)。平文DNSの直抜け遮断は、DNS ProfileでDoTを強制しつつ、LAN発の宛先53/UDP直接通信を拒否するポリシーを別途組み合わせる。confirmed。"
+          },
+          {
+            "opnsense_id": "opnsense-api-automation-basics",
+            "vendor_equivalent_feature": "REST API Administrator with API token authentication and a least-privilege custom Admin Profile",
+            "native_terminology": "System > Administrators > REST API Admin; config system api-user; custom Administrator Profile (config system accprofile)",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.fortinet.com/document/fortigate/7.6.6/administration-guide/399023/rest-api-administrator",
+            "notes_ja": "REST API Administratorにトークン認証を使い、super_admin等の汎用プロファイルではなく用途別のカスタムAdmin Profileを割り当てることが公式に推奨されている。ルール照会・追加・適用はREST API(/api/v2/cmdb/firewall/policy等)で自動化可能。confirmed。"
+          },
+          {
+            "opnsense_id": "opnsense-config-backup-restore",
+            "vendor_equivalent_feature": "Scheduled Automation Stitch with 'Backup Config' system action, plus native Configuration Revision history for restore/generation management",
+            "native_terminology": "Security Fabric > Automation > Schedule trigger + Backup Config (Disk/FTP/SFTP) action; execute backup config; Configuration Revisions (top-right menu > Configuration > Revisions)",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.fortinet.com/document/fortigate/7.6.4/administration-guide/453129/schedule-trigger",
+            "notes_ja": "Automation StitchのSchedule trigger(daily/weekly/monthly/onceなど)にBackup Config Disk/FTP/SFTP/TFTPアクションを紐付けることで定期バックアップを自動化でき、加えてConfiguration Revisions機能が変更ごとの世代を保持しdiff比較・復元ができる。両者の組み合わせでOPNsenseの定期取得・復元・世代管理の運用に相当。confirmed。"
+          },
+          {
+            "opnsense_id": "opnsense-firmware-update-window",
+            "vendor_equivalent_feature": "Firmware upgrade procedure with automatic pre-upgrade configuration backup, release-notes review, and change management practice",
+            "native_terminology": "System > Firmware; Firmware Change Management best practice; config backup performed automatically before upgrade",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.fortinet.com/document/fortigate/7.6.0/best-practices/338667/firmware-change-management",
+            "notes_ja": "FortiOSはGUIからのファームウェア更新時に自動で設定バックアップをダウンロードし、リリースノート確認・ラボ検証・ロールバック基準の策定を含む変更管理ベストプラクティスが公式文書化されている。confirmed。"
+          },
+          {
+            "opnsense_id": "opnsense-rule-hygiene-audit",
+            "vendor_equivalent_feature": "Firewall Policy Hit Count (7-day rolling counter) to identify unused/rarely-hit policies for periodic audit",
+            "native_terminology": "Policy & Objects > Firewall Policy > Hit Count column; get firewall policy (hit count); Seven-day rolling counter for policy hit counters",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.fortinet.com/document/fortigate/7.4.0/administration-guide/290923/seven-day-rolling-counter-for-policy-hit-counters",
+            "notes_ja": "FortiGate自体のGUIにポリシー一覧のHit Count列があり、直近7日間+当日のヒット数を保持する。これを使い未使用/低頻度ポリシーを洗い出し、段階的無効化(status disable)する定期監査が可能。confirmed。"
+          },
+          {
+            "opnsense_id": "opnsense-emergency-ip-block",
+            "vendor_equivalent_feature": "IP Ban (manual via FortiView 'Ban IP' / Quarantine Monitor, or automatic via IPS/security-profile quarantine action with quarantine-expiry)",
+            "native_terminology": "Monitor > Quarantine Monitor; FortiView > Sources > right-click > Ban IP; diagnose user banned-ip {list|add|delete|clear}; IPS sensor set quarantine attacker / quarantine-expiry",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.fortinet.com/document/fortigate/8.0.0/administration-guide/49251/ip-ban-using-security-profiles",
+            "notes_ja": "攻撃元IPの即時遮断はFortiViewから手動でBan IP、またはIPS/security profileのquarantine=attacker設定でquarantine-expiry(分単位)を付けて自動遮断できる。記録・解除はdiagnose user banned-ip list/delete、またはMonitor > Quarantine MonitorのGUIで行う。confirmed。"
+          },
+          {
+            "opnsense_id": "opnsense-compromised-host-quarantine",
+            "vendor_equivalent_feature": "Security Fabric automation 'Quarantine on FortiSwitch/FortiAP' (NAC quarantine VLAN) or FortiClient EMS quarantine, triggered manually or by a 'Compromised Host' automation stitch",
+            "native_terminology": "Security Fabric > Physical/Logical Topology > 'Quarantine Host'; config automation-stitch (trigger 'compromised-host', action 'quarantine'); FortiSwitch quarantine-by-VLAN",
+            "confidence": "adapted",
+            "primary_source_url": "https://docs.fortinet.com/document/fortigate/7.0.0/administration-guide/188426/fortinac-quarantine-action",
+            "notes_ja": "疑わしい内部ホストをSecurity Fabricのquarantine機能(FortiSwitch/FortiAPのquarantine VLANまたはFortiClient EMS経由)で隔離できるが、これは既定で通信を全遮断する仕組みであり、OPNsenseの要件「調査用通信のみ許可」を満たすには、隔離VLAN専用のFirewall Policyでフォレンジック/管理セグメント宛のみ明示許可する追加設計が必要。プロトコル/粒度が異なるためadapted。テンプレート文言は「検疫VLANへの動的移動+調査用通信のみを許可する専用ポリシー」とすべき。"
+          },
+          {
+            "opnsense_id": "opnsense-staged-rule-change",
+            "vendor_equivalent_feature": "Configuration Revisions (per-change generation with diff compare and revert) combined with policy enable/disable status toggle and traffic logging for observation",
+            "native_terminology": "top-right user menu > Configuration > Revisions (Diff/compare, Revert); Firewall Policy 'Status' enable/disable; 'Log Allowed Traffic'",
+            "confidence": "adapted",
+            "primary_source_url": "https://community.fortinet.com/t5/FortiGate/Technical-Tip-Using-the-Revision-option-to-revert-to-a-previous/ta-p/194312",
+            "notes_ja": "FortiOSには「ログ観察→有効化→事後確認」を一体化した専用のステージング機能はない(IPSのmonitorアクションのような「ログのみ」モードはfirewall policyには存在しない)。実務上は、ポリシーをstatus=disableで作成しログのみ確認→enableへ切替→Configuration Revisionsで変更前後をdiff比較し、問題があれば前リビジョンへrevertする、という運用の組み合わせで代替する。単一機能ではなく組み合わせのためadapted。公式admin guideの該当ページ(https://docs.fortinet.com/document/fortigate/7.6.6/administration-guide/324674/backing-up-the-configuration )はJS描画のため本文取得はできなかったが、Fortinet公式コミュニティのTechnical TipでConfiguration RevisionsのDiff/Revert機能が確認できた。"
+          },
+          {
+            "opnsense_id": "opnsense-blocked-traffic-triage",
+            "vendor_equivalent_feature": "FortiView (Sessions/Forward Traffic, live) plus 'diagnose sys session list' (state) and VIP/Central SNAT policy inspection (NAT), in the same log-state-NAT triage order",
+            "native_terminology": "FortiView > All Sessions / Forward Traffic log; diagnose sys session list; Policy & Objects > Virtual IPs / Central SNAT",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.fortinet.com/document/fortigate/8.0.0/administration-guide/863511/fortiview-sessions",
+            "notes_ja": "通信不可申告のトリアージは、FortiView(ライブセッション/Forward Trafficログ)で該当通信の有無を確認→diagnose sys session listでステート確認→VIP/Central SNATのNAT設定確認、という順序がFortinetの標準的なトラブルシューティング手順として文書化されている。confirmed。"
+          },
+          {
+            "opnsense_id": "opnsense-state-table-exhaustion",
+            "vendor_equivalent_feature": "'diagnose sys session stat/full-stat' (and FortiView Sessions sorted by count) to identify the top session-consuming host, then a Per-IP traffic shaper with max-concurrent-session to cap and prevent recurrence",
+            "native_terminology": "diagnose sys session stat / diagnose sys session full-stat; Policy & Objects > Traffic Shaping > Per-IP Shaper; config firewall shaper per-ip-shaper set max-concurrent-session",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.fortinet.com/document/fortigate/8.0.0/administration-guide/885253/per-ip-traffic-shaper",
+            "notes_ja": "diagnose sys session stat/full-statでセッションテーブルの使用率と枯渇兆候を確認し、原因ホストをFortiView等で特定した上で、Per-IP Traffic Shaperのmax-concurrent-session(0-2097000、IPごとの同時セッション数上限)を適用して再発防止する、という一連の流れがFortiOSネイティブ機能で完結する。confirmed。"
+          },
+          {
+            "opnsense_id": "opnsense-carp-failover-drill",
+            "vendor_equivalent_feature": "'Force HA failover for testing and demonstrations' (manual FGCP failover trigger) to measure failover time and session persistence",
+            "native_terminology": "execute ha failover unset <serial>; get system ha status; session-pickup (config system ha set session-pickup enable)",
+            "confidence": "adapted",
+            "primary_source_url": "https://docs.fortinet.com/document/fortigate/7.6.4/administration-guide/684039/force-ha-failover-for-testing-and-demonstrations",
+            "notes_ja": "OPNsenseのCARP計画切替訓練に相当する機能として、FortiOSは「execute ha failover unset」コマンドで手動フェイルオーバーを強制発生させ、get system ha statusで新primaryを確認し、session-pickup設定でセッション維持状況を測定できる。CARPではなくFGCPというプロトコル差異があるためadapted。"
+          },
+          {
+            "opnsense_id": "opnsense-port-forward-triage",
+            "vendor_equivalent_feature": "Packet-flow debugging (diagnose debug flow) combined with VIP/NAT configuration check, firewall policy match check, and return-route verification",
+            "native_terminology": "diagnose debug flow trace/filter; Policy & Objects > Virtual IPs; get router info routing-table all; diagnose sys session list",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.fortinet.com/document/fortigate/8.0.0/administration-guide/54688/debugging-the-packet-flow",
+            "notes_ja": "外部から公開サーバへ届かない事象の切り分けは、まずVIP(宛先NAT)設定とポリシーのVIP参照有無を確認し、次にdiagnose debug flowでパケット処理経路を追跡し、最後に戻り経路(ルーティング/送信元NAT)を確認する、という順序がFortinet公式コミュニティ含む標準手順として案内されている。confirmed。"
+          },
+          {
+            "opnsense_id": "opnsense-log-noise-reduction",
+            "vendor_equivalent_feature": "Local-in policy / log setting controls to suppress broadcast and other routine local-in deny noise while keeping meaningful deny logs",
+            "native_terminology": "Log & Report > Log Settings > Local traffic logging; config log setting set local-in-deny-broadcast disable / local-in-deny-unicast; Policy & Objects > Local-In Policy (per-policy logging)",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.fortinet.com/document/fortigate/7.6.0/new-features/231789/logging-local-traffic-per-local-in-policy",
+            "notes_ja": "config log settingのlocal-in-deny-broadcastオプションでブロードキャスト宛denyログの記録有無を制御でき、Local-In Policy単位でもLog violation trafficを個別にon/off可能。ブロードキャスト等の定常ノイズを抑制しつつ意味のある遮断ログのみ残す運用が実現できる。confirmed。"
+          }
+        ]
+      },
+      "verified": {
+        "vendor": "Fortinet (FortiOS / FortiGate)",
+        "corrected_mappings": [
+          {
+            "opnsense_id": "opnsense-wireguard-instance",
+            "vendor_equivalent_feature": "IPsec VPN (site-to-site tunnel, IKEv1/IKEv2) as the native encrypted tunnel mechanism — no native WireGuard",
+            "native_terminology": "VPN > IPsec Wizard > Site to Site template; config vpn ipsec phase1-interface / phase2-interface",
+            "confidence": "adapted",
+            "primary_source_url": "https://docs.fortinet.com/document/fortigate/7.6.6/administration-guide/913287/basic-site-to-site-vpn-with-pre-shared-key",
+            "notes_ja": "FortiOSにネイティブのWireGuard実装は存在しない(Fortinetコミュニティで2021年から継続的に要望が上がっているが、2026年7月時点でもFortinet公式のロードマップ表明は確認できず未実装。https://community.fortinet.com/t5/Support-Forum/Fortigate-Wireguard-Support/td-p/46735 )。同じ「拠点間暗号化トンネル」という運用課題は、IPsec VPN(IKEv1/IKEv2、事前共有鍵または証明書)のSite-to-Siteウィザードで解決するのがFortinetネイティブな方法(実際に「FortiGateのSite-to-Site VPNは複雑なので単純な代替機器でWireGuardを使っている」という利用者の声も同スレッド内にあり、当該機能の実在を裏付ける)。ただし元の調査メモにあった「WireGuardはアプリケーション制御でhigh-riskとして既定ブロックされる」という記述は不正確: Fortinet公式のFortiGuardシグネチャページ(ID 46495, https://www.fortiguard.com/appcontrol/46495 )ではWireGuardのRisk Levelは3/5(Medium)、カテゴリはProxy、動作はTunnelingであり、high-risk(4-5)ではない。既定でブロックされるかはApplication Controlプロファイル設定に依存し、シグネチャページ自体は既定アクションを明記していないため「既定ブロック」は言い過ぎ。テンプレート文言は「拠点接続用のIPsecトンネル(フェーズ1/フェーズ2)を構成する」のままで問題ない。",
+            "changed_from_research": true
+          },
+          {
+            "opnsense_id": "opnsense-ha-carp-setup",
+            "vendor_equivalent_feature": "FGCP (FortiGate Clustering Protocol) Active-Passive HA with virtual MAC and heartbeat-based session sync",
+            "native_terminology": "System > HA; config system ha (set mode a-p; set group-id <id>; set group-name <name>; set password ***; set hbdev <if1> <priority1> <if2> <priority2>); Cluster virtual MAC addresses",
+            "confidence": "adapted",
+            "primary_source_url": "https://docs.fortinet.com/document/fortigate/7.6.6/administration-guide/900885/ha-active-passive-cluster-setup",
+            "notes_ja": "CARP(仮想IP+pfsync)そのものはFortiOSに存在しないが、同じ「2台冗長化+仮想MAC+状態同期+フェイルオーバー」という課題はFGCP(FortiGate Clustering Protocol)のActive-Passiveクラスタが解く。公式Administration Guide『HA active-passive cluster setup』に実際のCLI例が掲載されており、`config system ha` → `set mode a-p` / `set group-id <id>` / `set group-name <name>` / `set password ***` / `set hbdev <if1> <priority1> <if2> <priority2>` という構成でハートビートインターフェースを指定する。仮想IPの代わりに、フェイルオーバー時も同じMACアドレスを新primary機のインターフェースへ引き継ぐ『Cluster virtual MAC addresses』機構(vcluster ID・group ID・物理indexから自動採番、または手動設定も可)がCARPの仮想IP的役割を担う。プロトコルが異なるためadapted。元メモが引用していた6.4.0のbest-practices記事は情報として古いため、7.6.6の管理者ガイドの該当ページに差し替えた。",
+            "changed_from_research": true
+          },
+          {
+            "opnsense_id": "opnsense-compromised-host-quarantine",
+            "vendor_equivalent_feature": "Security Fabric default automation stitch 'Compromised Host Quarantine' — quarantines a host at the access layer via FortiSwitch/FortiAP (quarantine VLAN) and/or FortiClient EMS, triggered by an IOC (indicator-of-compromise) event; the separate FortiNAC product is NOT required for this default mechanism",
+            "native_terminology": "Security Fabric > Automation > 'Compromised Host Quarantine' (default stitch); config system automation-trigger (event-type ioc; ioc-level high/medium/low; GUI trigger name 'Compromised Host - High' etc.); config system automation-action (action-type quarantine = access-layer FortiSwitch/FortiAP quarantine VLAN; action-type quarantine-forticlient = FortiClient EMS); quarantine-by-VLAN + Firewall Policy on the quarantine VLAN interface",
+            "confidence": "adapted",
+            "primary_source_url": "https://docs.fortinet.com/document/fortigate/7.2.0/administration-guide/881990/default-automation-stitches",
+            "notes_ja": "疑わしい内部ホストの隔離は、Security Fabricの既定自動化スティッチ『Compromised Host Quarantine』(Security Fabric > Automation)で実現できる。トリガーはCLI上`config system automation-trigger`のevent-type `ioc`(ioc-level high/medium/low、GUI表示名は『Compromised Host - High』等)であり、元メモにあった trigger 'compromised-host' という値は実在しないため誤り。アクションはCLI上`config system automation-action`のaction-type `quarantine`(FortiSwitch/FortiAPのアクセス層でMACアドレスを検疫VLANへ移動)と`quarantine-forticlient`(FortiClient EMS経由の端末検疫)の組み合わせで、別製品のFortiNAC(action-type `quarantine-fortinac`)は不要。検疫VLANに移動した端末がどこまで通信できるかは、検疫VLANインターフェース向けに設定したFirewall Policyに依存するため、OPNsenseの要件『調査用通信のみ許可』を満たすには、隔離VLAN専用のFirewall Policyでフォレンジック/管理セグメント宛のみ明示許可する追加設計が必要(既定では検疫ポータルの承認まで実質全遮断)。プロトコル/粒度が異なるためadapted。元メモのprimary_source_urlはFortiNAC連携専用ページ(action-type quarantine-fortinac、別製品が必要)を指しており誤解を招くため、実際に使う内蔵機能(quarantine / quarantine-forticlient)を説明する『Default automation stitches』ページに差し替えた。テンプレート文言は「検疫VLANへの動的移動+調査用通信のみを許可する専用ポリシー」のままで問題ない。",
+            "changed_from_research": true
+          },
+          {
+            "opnsense_id": "opnsense-staged-rule-change",
+            "vendor_equivalent_feature": "Configuration Revisions (per-change generation with diff compare and revert) combined with policy enable/disable status toggle and traffic logging for observation",
+            "native_terminology": "top-right user menu > Configuration > Revisions (Diff/compare, Revert); CLI equivalent: execute restore config flash <Revision_ID>; Firewall Policy 'Status' enable/disable; 'Log Allowed Traffic'",
+            "confidence": "adapted",
+            "primary_source_url": "https://community.fortinet.com/t5/FortiGate/Technical-Tip-Using-the-Revision-option-to-revert-to-a-previous/ta-p/194312",
+            "notes_ja": "FortiOSには「ログ観察→有効化→事後確認」を一体化した専用のステージング機能はない(IPSのmonitorアクションのような「ログのみ」モードはfirewall policyには存在しない)。実務上は、ポリシーをstatus=disableで作成しログのみ確認→enableへ切替→Configuration Revisionsで変更前後をdiff比較し、問題があれば前リビジョンへrevertする、という運用の組み合わせで代替する。単一機能ではなく組み合わせのためadapted。Configuration RevisionsのDiff/Revert機能はFortinet公式コミュニティのTechnical Tip(本文取得・引用確認済み)で、GUI操作(admin名メニュー右上 > Configuration > Revisions、2つのリビジョンを選択してDiff、または選択してRevert)とCLI等価コマンド`execute restore config flash <Revision_ID>`の両方が確認できた。docs.fortinet.com側の公式Administration Guideページは名称がバージョンにより変わっており(7.6.6時点は『Backing up the configuration』、8.0.0では『Configuration backups and reset』)、かつJS描画のため本文取得ができなかったため、実際に内容を検証できたコミュニティのTechnical Tipをprimary_source_urlとした。",
+            "changed_from_research": true
+          },
+          {
+            "opnsense_id": "opnsense-carp-failover-drill",
+            "vendor_equivalent_feature": "'Force HA failover for testing and demonstrations' (manual FGCP failover trigger) to measure failover time and session persistence",
+            "native_terminology": "execute ha failover set [vcluster]; execute ha failover unset [vcluster] (optional virtual-cluster ID argument, e.g. 'execute ha failover set 1'; NOT a serial number); get system ha status; session-pickup (config system ha; set session-pickup enable)",
+            "confidence": "adapted",
+            "primary_source_url": "https://docs.fortinet.com/document/fortigate/7.6.6/administration-guide/684039/force-ha-failover-for-testing-and-demonstrations",
+            "notes_ja": "OPNsenseのCARP計画切替訓練に相当する機能として、FortiOSは`execute ha failover set [vcluster]`で対象仮想クラスタ(省略時は全仮想クラスタ)を強制的にsecondaryへ切り替えてフェイルオーバーを発生させ、`execute ha failover unset [vcluster]`で強制フェイルオーバー状態を解除できる。元メモにあった引数`<serial>`(シリアル番号)は誤りで、正しい引数は仮想クラスタID `[vcluster]`(省略可。例: `execute ha failover set 1`)である。切り替え後は`get system ha status`で新primaryを確認し、`config system ha` > `set session-pickup enable`のセッション維持設定と組み合わせてセッション持続状況を測定できる。Fortinet公式コミュニティのTechnical Tip『Different options to trigger an HA failover (FGCP)』(https://community.fortinet.com/fortigate-3/technical-tip-different-options-to-trigger-an-ha-failover-fgcp-144672 、本文取得・引用確認済み)で実際のコマンド例(`execute ha failover set 1` / `execute ha failover unset 1` / `get sys ha status`)を確認した。CARPではなくFGCPというプロトコル差異があるためadapted。",
+            "changed_from_research": true
+          }
+        ]
+      }
+    },
+    {
+      "vendor": "Palo Alto Networks (PAN-OS)",
+      "key": "paloalto",
+      "researched": {
+        "mappings": [
+          {
+            "opnsense_id": "opnsense-default-deny-wan",
+            "vendor_equivalent_feature": "Default Security Policy Rules (interzone-default deny) + explicit allow rulebase",
+            "native_terminology": "interzone-default rule; Policies > Security rulebase",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.paloaltonetworks.com/pan-os/11-1/pan-os-admin/policy/security-policy",
+            "notes_ja": "PAN-OSはゾーン間通信をinterzone-defaultルールで暗黙拒否し、Policies > Securityに許可ルールのみを明示登録する運用がそのままWAN既定拒否に対応する。インタフェース単位ではなくゾーン単位(untrust等)で暗黙拒否が働く点が設計上の違い。"
+          },
+          {
+            "opnsense_id": "opnsense-lan-segment-isolation",
+            "vendor_equivalent_feature": "Zone-based Security Policy rules between VLAN security zones (interzone-default deny + explicit allow)",
+            "native_terminology": "Security Zones (Network > Zones) + Security Policy Rules, interzone-default",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.paloaltonetworks.com/pan-os/10-1/pan-os-web-interface-help/network/network-zones/security-zone-overview",
+            "notes_ja": "部門VLANごとにセキュリティゾーンを割り当て、ゾーン間はinterzone-defaultで既定拒否、業務通信のみをApp-ID/ユーザー/サービスで限定したルールで許可する。VLAN=ゾーンの1:1対応が前提。"
+          },
+          {
+            "opnsense_id": "opnsense-alias-driven-rules",
+            "vendor_equivalent_feature": "Address Objects / Address Groups, Service Objects / Service Groups, Tags",
+            "native_terminology": "Objects > Addresses, Objects > Address Groups, Objects > Services, Objects > Service Groups",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.paloaltonetworks.com/pan-os/11-1/pan-os-admin/policy/use-address-object-to-represent-ip-addresses/address-objects",
+            "notes_ja": "OPNsenseのエイリアスに相当。ホスト/ネットワークはAddress Object、ポート/プロトコルはService Object、これらをGroupでまとめてルールに参照させる集約管理が可能。Dynamic Address GroupsはOPNsenseに直接の対応物がない拡張機能。"
+          },
+          {
+            "opnsense_id": "opnsense-nat-port-forward-dmz",
+            "vendor_equivalent_feature": "Destination NAT policy rule (one-to-one mapping)",
+            "native_terminology": "Policies > NAT, Destination NAT",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.paloaltonetworks.com/pan-os/11-0/pan-os-networking-admin/nat/nat-configuration-examples/destination-nat-exampleone-to-one-mapping",
+            "notes_ja": "WANの公開IP:ポートをDMZ内サーバの実IP:ポートへ変換するDestination NATルールを最小ポートのみ作成する。NATとSecurity Policyは独立ルールベースなので、対応する許可ルールも別途必要。"
+          },
+          {
+            "opnsense_id": "opnsense-outbound-nat-policy",
+            "vendor_equivalent_feature": "Source NAT policy rules — Dynamic IP and Port (DIPP) for general egress, Static IP for fixed-source hosts",
+            "native_terminology": "Policies > NAT, Source NAT translation types: Dynamic IP and Port / Dynamic IP / Static IP",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.paloaltonetworks.com/ngfw/networking/nat/source-nat",
+            "notes_ja": "OPNsenseの自動(全ホストPAT)からハイブリッド(自動+送信元固定)への移行に相当。既定のDIPPルールに加え、特定ホスト/ネットワークをより優先度の高いStatic IP NATルールで上書きする構成で同じ運用モデルを実現できる。"
+          },
+          {
+            "opnsense_id": "opnsense-geoip-country-block",
+            "vendor_equivalent_feature": "Region objects used as Source in Security Policy deny rules",
+            "native_terminology": "Objects > Regions; Security Policy Rule Source/Destination \"Region\"",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.paloaltonetworks.com/network-security/security-policy/administration/objects/regions",
+            "notes_ja": "国コードにマッピングされたRegionオブジェクトをSecurity PolicyのSource Regionに指定し、Action=DenyでWAN着信を国単位遮断できる。GeoIPデータベースはPalo Alto Networks管理の内部データベースに基づく。"
+          },
+          {
+            "opnsense_id": "opnsense-schedule-based-access",
+            "vendor_equivalent_feature": "Schedule objects applied to Security Policy rules",
+            "native_terminology": "Objects > Schedules; Security Policy Rule \"Schedule\" field",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.paloaltonetworks.com/network-security/security-policy/administration/objects/schedules",
+            "notes_ja": "固定日時または曜日/時間帯の繰り返しスケジュールを定義し、業務時間外は許可ルールを無効化する形でルールに適用する。既存セッションはスケジュール変更の影響を受けない点に注意。"
+          },
+          {
+            "opnsense_id": "opnsense-mgmt-plane-lockdown",
+            "vendor_equivalent_feature": "Permitted IP Addresses on the Management interface + Interface Management Profiles on data-plane interfaces",
+            "native_terminology": "Device > Setup > Management > \"Permitted IP Addresses\"; Network > Network Profiles > Interface Mgmt",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.paloaltonetworks.com/pan-os/10-1/pan-os-networking-admin/configure-interfaces/use-interface-management-profiles-to-restrict-access",
+            "notes_ja": "MGTインタフェースはPermitted IP Addressesで許可元IPを限定、データプレーン側インタフェースはInterface Management Profileでサービス(HTTPS/SSH等)と許可IPを絞り込む。空欄は「全許可」を意味するため明示設定が必須。"
+          },
+          {
+            "opnsense_id": "opnsense-wireguard-instance",
+            "vendor_equivalent_feature": "IPsec site-to-site VPN tunnel (route-based, IKE Gateway + IPsec Tunnel + Tunnel Interface)",
+            "native_terminology": "Network > IPSec Tunnels, Network > IKE Gateways, Tunnel Interface",
+            "confidence": "adapted",
+            "primary_source_url": "https://docs.paloaltonetworks.com/network-security/ipsec-vpn/administration/set-up-site-to-site-vpn",
+            "notes_ja": "PAN-OSはWireGuardを製品としてサポートしていない(公式ドキュメントに記載なし)。拠点間の暗号化トンネルという同一課題は、ルートベースのIPsecサイト間VPN(IKE Gateway+IPSecトンネル+トンネルインタフェース+ルーティング)で解決するのがPAN-OSネイティブな方法。テンプレート上の問題文は「拠点接続用のIPsecサイト間トンネルとIKEゲートウェイを構成する」に置き換えるべき。個人端末のリモートアクセス用途ならGlobalProtectが対応する。"
+          },
+          {
+            "opnsense_id": "opnsense-ha-carp-setup",
+            "vendor_equivalent_feature": "HA Active/Passive (or Active/Active) with HA1/HA2 links, configuration+session synchronization, and failover",
+            "native_terminology": "Device > High Availability; HA1(control)/HA2(data・セッション同期); Active/Passive HA; Active/ActiveのFloating IP",
+            "confidence": "adapted",
+            "primary_source_url": "https://docs.paloaltonetworks.com/pan-os/10-2/pan-os-admin/high-availability/set-up-activepassive-ha/configure-activepassive-ha",
+            "notes_ja": "PAN-OSにCARPプロトコルは存在しない。冗長化はHA(基本はActive/Passive、Active/Activeでは明示的なFloating IPも利用可能)で実現し、HA2リンクでセッション状態を同期する。CARPのVIP切替に相当する挙動は、Active/PassiveではGARPによるMACアドレス移行、Active/ActiveではFloating IP割当変更で得られる。"
+          },
+          {
+            "opnsense_id": "opnsense-captive-portal-guest",
+            "vendor_equivalent_feature": "Authentication Portal (旧称Captive Portal) + Authentication Policy、社内網ゾーンへのSecurity Policy既定拒否と組み合わせ",
+            "native_terminology": "Device > User Identification > Authentication Portal Settings; Policies > Authentication",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.paloaltonetworks.com/pan-os/11-1/pan-os-admin/user-id/user-id-concepts/user-mapping/authentication-policy-and-captive-portal",
+            "notes_ja": "PAN-OS 9.1以降「Captive Portal」は「Authentication Portal」に呼称変更されているが同一系譜の機能。ゲストVLANからのWebアクセスをAuthentication Policyでリダイレクトし認証させ、社内網ゾーンへはSecurity Policyのinterzone-defaultで別途遮断する組み合わせが必要(認証自体は到達遮断を意味しないため)。"
+          },
+          {
+            "opnsense_id": "opnsense-ips-inline-enable",
+            "vendor_equivalent_feature": "Vulnerability Protection Profile / Anti-Spyware Profile適用、シグネチャアクションをAlertからDrop/Resetへ段階的に変更",
+            "native_terminology": "Objects > Security Profiles > Vulnerability Protection; ルールアクション \"alert\" → \"drop\"/\"reset-both\"",
+            "confidence": "adapted",
+            "primary_source_url": "https://docs.paloaltonetworks.com/network-security/security-policy/administration/security-profiles/security-profile-vulnerability-protection",
+            "notes_ja": "PAN-OSはNGFWとして常にインライン(経路上)動作するため、Suricataのようなタップ配置の「IDS専用モード」自体が存在しない。「まず観察、後で遮断に昇格」という同じ運用課題は、脅威防御プロファイルのシグネチャアクションをAlert(検知のみ、ログ記録)からDrop/Reset(遮断)へ段階的に変更する公式ベストプラクティスワークフローで解決する。"
+          },
+          {
+            "opnsense_id": "opnsense-unbound-dot-forwarding",
+            "vendor_equivalent_feature": "DNS Proxy object with Encrypted DNS forwarding (DoT)",
+            "native_terminology": "Network > DNS Proxy > Encrypted DNS tab, Connection Type = \"DoT\" (port 853)",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.paloaltonetworks.com/pan-os/10-2/pan-os-networking-admin/dns/configure-a-dns-proxy-object",
+            "notes_ja": "DNS ProxyオブジェクトのEncrypted DNSタブでDoT(ポート853)を明示的にサポート(DoHも選択可、公式ドキュメントで確認済み)。クライアントの平文DNS直抜けは、DNS Proxyを経由させた上でSecurity Policyで外部向けDNS(UDP/TCP 53)を遮断することで防止する。"
+          },
+          {
+            "opnsense_id": "opnsense-api-automation-basics",
+            "vendor_equivalent_feature": "PAN-OS XML API / REST API with API key (keygen) と最小権限のRole-Based Administrator",
+            "native_terminology": "type=keygen (API key generation), X-PAN-KEY header, Device > Admin Roles",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.paloaltonetworks.com/ngfw/api/api-authentication-and-security/pan-os-api-authentication",
+            "notes_ja": "管理者認証情報からAPIキーを生成(type=keygen)し、X-PAN-KEYヘッダで以降のXML/REST API呼び出しを認証する。最小権限は組み込みのSuperuser等ではなくカスタムAdmin Role Profileを作成しXML API/REST APIの許可対象を絞ることで実現する。"
+          },
+          {
+            "opnsense_id": "opnsense-config-backup-restore",
+            "vendor_equivalent_feature": "Save/Export Firewall Configurations(ファイアウォール単体の名前付きスナップショット+コミット履歴)、定期自動バックアップはPanoramaのScheduled Config Export",
+            "native_terminology": "Device > Setup > Operations (\"Export named configuration snapshot\"); Panorama > Scheduled Config Export",
+            "confidence": "adapted",
+            "primary_source_url": "https://docs.paloaltonetworks.com/pan-os/11-1/pan-os-admin/firewall-administration/manage-configuration-backups/save-and-export-firewall-configurations",
+            "notes_ja": "スタンドアロンのPAN-OSファイアウォール単体では、コミット毎の内部バージョン履歴と手動/CLI(scp export)によるオンデマンドエクスポートが基本機能で、OPNsenseのような「定期自動取得」をファイアウォール単体がネイティブにスケジュール実行する機能は見当たらない。真に定型化された定期バックアップ+世代管理はPanoramaのScheduled Config Export、またはcron+XML/REST APIによる外部自動化が必要。テンプレート設計ではPanorama管理下か否かで採用方式を分岐させるべき。"
+          },
+          {
+            "opnsense_id": "opnsense-firmware-update-window",
+            "vendor_equivalent_feature": "PAN-OS Software upgrade workflow(アップグレード前設定バックアップ+HA考慮のメンテナンス手順)",
+            "native_terminology": "Device > Software; PAN-OS Upgrade Checklist; Upgrade/Downgrade Considerations",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.paloaltonetworks.com/pan-os/10-2/pan-os-upgrade/upgrade-pan-os/pan-os-upgrade-checklist",
+            "notes_ja": "アップグレード前の設定エクスポート(外部保管推奨)、リリースノート確認、HA構成時はパッシブ機優先での適用、といった手順が公式チェックリストとして提供されている。変更告知そのものはPAN-OS機能ではなく組織の変更管理プロセスに委ねられる。"
+          },
+          {
+            "opnsense_id": "opnsense-rule-hygiene-audit",
+            "vendor_equivalent_feature": "Policy Optimizer(未使用ルール・未使用アプリケーション・過剰許可\"any\"ルールの検出)",
+            "native_terminology": "Policies > Security > Policy Optimizer (No App Specified / Unused Apps / Rule Usage)",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.paloaltonetworks.com/pan-os/11-0/pan-os-admin/app-id/security-policy-rule-optimization/policy-optimizer-concepts",
+            "notes_ja": "Policy Optimizerが「作成後15日以上経過しSource/Destination/Applicationにanyを含む」過剰許可ルールや、ヒットしていないアプリケーション/未使用ルールを自動検出する。段階的無効化はルールのDisableチェックとRule Usageのヒットカウントで運用する。"
+          },
+          {
+            "opnsense_id": "opnsense-emergency-ip-block",
+            "vendor_equivalent_feature": "Dynamic IP-Tag registration(XML API/CLI)によるDynamic Address Groupへの即時登録+それを参照する最優先Security Policy拒否ルール",
+            "native_terminology": "Register IP Addresses and Tags Dynamically (XML API); Dynamic Address Group; CLI tag登録コマンド",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.paloaltonetworks.com/pan-os/11-1/pan-os-admin/policy/register-ip-addresses-and-tags-dynamically",
+            "notes_ja": "攻撃元IPをXML APIまたはCLIで即座にタグ登録すると、そのタグをメンバー条件とするDynamic Address Groupへコミット不要で即時反映され、これを参照する拒否ルールで遮断できる。恒久リストとして残す場合は静的Address Group/External Dynamic Listへの追記+コミットで運用する。解除基準はタグの有効期限またはunregisterで管理できる。"
+          },
+          {
+            "opnsense_id": "opnsense-compromised-host-quarantine",
+            "vendor_equivalent_feature": "Quarantine Device Lists(Auto-Tag Actions → Dynamic Address Group)による調査用通信限定の隔離",
+            "native_terminology": "Objects > Quarantine Device Lists; Auto-Tag Actions; Dynamic Address Group",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.paloaltonetworks.com/network-security/security-policy/administration/objects/quarantine-device-lists",
+            "notes_ja": "侵害疑いホストを手動または自動タグ付けでQuarantine Device List/Dynamic Address Groupに登録し、そのグループを送信元とする専用Security Policy(調査用の限定通信のみ許可、他は拒否)で封じ込める。IP単位ではなくホスト/デバイス単位の隔離という点でOPNsenseのIP検疫と設計思想が一致する。"
+          },
+          {
+            "opnsense_id": "opnsense-staged-rule-change",
+            "vendor_equivalent_feature": "Candidate configuration + Commit/Validate/Preview Changesワークフロー、ルールDisableトグル、Policy Optimizer Rule Usageによる事後確認、named configuration snapshotによる切り戻し",
+            "native_terminology": "Commit, Validate Commit, Preview Changes; Security Policy Rule \"Disable\"; Rule Usage; Load Named Configuration Snapshot",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.paloaltonetworks.com/pan-os/11-1/pan-os-admin/firewall-administration/use-the-web-interface/commit-validate-and-preview-firewall-configuration-changes",
+            "notes_ja": "PAN-OSは全変更がまずcandidate configに保持され、Preview Changes(running設定との差分表示)/Validateでコミット前検証、コミット後はRule Usageのヒットカウントで事後確認、問題があれば過去のnamed configuration snapshotをロードして切り戻す、という一連の流れがネイティブに揃っている。「ログ観察のみで未適用」という段階自体は無いため、新規ルールはDisableチェックを入れてコミットし試験、有効化はチェック解除で行う運用になる。"
+          },
+          {
+            "opnsense_id": "opnsense-blocked-traffic-triage",
+            "vendor_equivalent_feature": "Traffic log(自動更新)→ Session Browser → Device > TroubleshootingのNAT/Security Policy Matchツール、の順で原因ルールを特定",
+            "native_terminology": "Monitor > Logs > Traffic; Monitor > Session Browser; Device > Troubleshooting (NAT Policy Match / Security Policy Match)",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.paloaltonetworks.com/pan-os/11-0/pan-os-web-interface-help/monitor/monitor-session-browser",
+            "notes_ja": "OPNsenseの「ライブログ→ステート→NAT」の切り分け手順は、PAN-OSでは「Traffic log(自動更新)→Session Browser(現行セッション確認)→Device>TroubleshootingのSecurity/NAT Policy Matchツールでどのルールに一致するか机上テスト」という順序にそのまま対応する。"
+          },
+          {
+            "opnsense_id": "opnsense-state-table-exhaustion",
+            "vendor_equivalent_feature": "show session infoでの使用率確認 → Session Browser/ACCで原因ホスト特定 → Classified DoS Protection Profileの送信元別最大同時セッション数上限で再発防止",
+            "native_terminology": "show session info; Monitor > Session Browser; Objects > Security Profiles > DoS Protection (Classified, Resources Protection > Max Concurrent Sessions)",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.paloaltonetworks.com/pan-os/11-0/pan-os-admin/zone-protection-and-dos-protection/zone-defense/dos-protection-profiles-and-policy-rules/dos-protection-profiles",
+            "notes_ja": "セッションテーブル使用率はshow session infoで即時確認でき、原因ホストはSession Browser/ACCのトップトーカー分析で特定する。恒久対策として、Classified(送信元単位)DoS Protection Profileの「Resources Protection」で送信元ごとの最大同時セッション数を上限設定し、単一ホストによる再発を防止する。"
+          },
+          {
+            "opnsense_id": "opnsense-carp-failover-drill",
+            "vendor_equivalent_feature": "HA計画的フェイルオーバー(Suspend local device / Make local device functional操作コマンド)によるドリルとVerify Failover手順での測定",
+            "native_terminology": "Device > High Availability > Operational Commands > \"Suspend local device\" / \"Make local device functional\"",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.paloaltonetworks.com/ngfw/administration/high-availability/set-up-activepassive-ha/verify-failover/verify-failover-pan-os",
+            "notes_ja": "Active機で「Suspend local device」を実行して計画的にフェイルオーバーさせ、Passive機がActive化することを確認、切り戻しは「Make local device functional」で行う。切替時間・セッション維持状況はHA2によるセッション同期の完全性を含めてVerify Failover手順に沿って測定する。"
+          },
+          {
+            "opnsense_id": "opnsense-port-forward-triage",
+            "vendor_equivalent_feature": "Device > TroubleshootingのNAT Policy Matchツール → Security Policy Matchツール → Traffic log/戻り経路確認、の順で切り分け",
+            "native_terminology": "Device > Troubleshooting > NAT Policy Match; Security Policy Match; Monitor > Logs > Traffic; 仮想ルーターのルートルックアップ",
+            "confidence": "confirmed",
+            "primary_source_url": "https://docs.paloaltonetworks.com/pan-os/11-1/pan-os-web-interface-help/device/device-troubleshooting/nat-policy-match",
+            "notes_ja": "「NAT→ルール→戻り経路」の切り分けは、Device>TroubleshootingのNAT Policy Matchツールで宛先変換が意図通り一致するかを机上検証し、続けてSecurity Policy Matchで許可判定を検証、最後にTraffic logと仮想ルーターの経路(戻りパケットのルックアップ)を確認する、という順序でそのまま対応付けられる。"
+          },
+          {
+            "opnsense_id": "opnsense-log-noise-reduction",
+            "vendor_equivalent_feature": "ルール単位のログ出力制御(Log at Session Start/Endのオフ)によるノイズ源トラフィックの明示的抑制+Log Forwarding Profileフィルタでの転送時除外",
+            "native_terminology": "Security Policy Rule \"Log at Session Start\" / \"Log at Session End\" チェックボックス; Objects > Log Forwarding Profile フィルタ",
+            "confidence": "adapted",
+            "primary_source_url": "https://docs.paloaltonetworks.com/network-security/security-policy/administration/security-rules/session-logging-considerations",
+            "notes_ja": "PAN-OSにはブロードキャスト等を自動識別してログ抑制する専用機能は公式ドキュメント上見当たらない。同等の運用は、ノイズ源となるトラフィック(ブロードキャスト/マルチキャスト宛など)を明示的にマッチさせるルールを作成しログ出力をオフ(またはセッション終了時のみ)に設定し、加えてLog Forwarding Profileのフィルタで外部転送時に除外する、という2段構えの代替策になる。テンプレートの問題文は「既知の低価値トラフィックに対するルール単位のログ抑制+ログ転送フィルタで意味のある遮断ログのみ外部転送する」に置き換えるのが実態に即している。"
+          }
+        ],
+        "vendor": "Palo Alto Networks (PAN-OS)"
+      },
+      "verified": {
+        "vendor": "Palo Alto Networks (PAN-OS)",
+        "corrected_mappings": [
+          {
+            "opnsense_id": "opnsense-wireguard-instance",
+            "vendor_equivalent_feature": "IPsec site-to-site VPN tunnel (route-based, IKE Gateway + IPsec Tunnel + Tunnel Interface)",
+            "native_terminology": "Network > IPSec Tunnels, Network > IKE Gateways, Tunnel Interface",
+            "confidence": "adapted",
+            "primary_source_url": "https://docs.paloaltonetworks.com/network-security/ipsec-vpn/administration/set-up-site-to-site-vpn",
+            "notes_ja": "検証済み(公式ドキュメント確認: docs.paloaltonetworks.com/network-security/ipsec-vpn/... および set-up-an-ike-gateway)。PAN-OSはWireGuardをプロトコルとして製品サポートしていない(公式ドキュメントに記載なし)。拠点間の暗号化トンネルという同一課題は、ルートベースのIPsecサイト間VPN(IKE Gateway+IPSecトンネル+トンネルインタフェース+ルーティング)で解決するのがPAN-OSネイティブな方法。テンプレート上の問題文は「拠点接続用のIPsecサイト間トンネルとIKEゲートウェイを構成する」に置き換えるべき。個人端末のリモートアクセス用途ならGlobalProtectが対応する。",
+            "changed_from_research": false
+          },
+          {
+            "opnsense_id": "opnsense-ha-carp-setup",
+            "vendor_equivalent_feature": "HA Active/Passive (or Active/Active) with HA1/HA2 links, configuration+session synchronization, and failover",
+            "native_terminology": "Device > High Availability; HA1(control)/HA2(data・セッション同期); Active/Passive HA; Active/ActiveのFloating IP",
+            "confidence": "adapted",
+            "primary_source_url": "https://docs.paloaltonetworks.com/pan-os/10-2/pan-os-admin/high-availability/set-up-activepassive-ha/configure-activepassive-ha",
+            "notes_ja": "検証済み(公式ドキュメント+PANW LIVEcommunityの技術記事で確認)。PAN-OSにCARPプロトコルは存在しない。冗長化はHA(基本はActive/Passive、Active/Activeでは明示的なFloating IPも利用可能)で実現し、HA2リンクでセッション状態を同期する。CARPのVIP切替に相当する挙動は、Active/Passiveでは新Active機が各インタフェースからGARP(Gratuitous ARP)を送信して接続スイッチのMACテーブルを更新することで実現し、Active/ActiveでもGARP送信+ARP load-sharing(仮想MACのハッシュ/モジュロ選択)でFloating IPの応答元を切り替える。",
+            "changed_from_research": false
+          },
+          {
+            "opnsense_id": "opnsense-ips-inline-enable",
+            "vendor_equivalent_feature": "Threat Prevention(Vulnerability Protection / Anti-Spyware)プロファイルのシグネチャアクションを、公式ベストプラクティス『Transition ... Safely to Best Practices』の手順に沿ってAlert(検知のみ)からDrop/Reset-Both(遮断)へ段階移行する運用",
+            "native_terminology": "Objects > Security Profiles > Vulnerability Protection / Anti-Spyware Profile; ルールアクション \"alert\" → \"drop\"/\"reset-both\"; Best Practices > Transition Vulnerability Protection(/Anti-Spyware) Profiles Safely to Best Practices; (参考) Network > Interfaces の Tap Interface は完全受動的な可視化専用でブロック不可",
+            "confidence": "adapted",
+            "primary_source_url": "https://docs.paloaltonetworks.com/best-practices/internet-gateway-best-practices/best-practice-internet-gateway-security-policy/transition-safely-to-best-practice-security-profiles/transition-vulnerability-protection-profiles-safely-to-best-practices",
+            "notes_ja": "元の記述を修正。PAN-OSにはOPNsense/Suricataの「IPSモード有効化」に相当する単一のオン/オフ切替は無いが、公式ベストプラクティス文書『Transition Vulnerability Protection(/Anti-Spyware) Profiles Safely to Best Practices』が、シグネチャアクションをAlert(検知・Threatログ記録のみ)からDrop/Reset-Both(遮断)へ、重要度別・段階的に移行する運用手順を明記しており、「まず観察、後で遮断に昇格」という運用課題と直接一致する公式ワークフローである。なお、元の注記が『タップ配置のIDS専用モード自体が存在しない』としていた点は不正確: PAN-OSにも完全に受動的な可視化のみを行う『Tap Interface』(docs: pan-os-web-interface-help/network/network-interfaces/tap-interface、「You can use a tap interface to monitor traffic on a port」でトラフィックをブロックできない)が存在し、IDS専用モードに近い。ただしTap Interfaceは物理/論理トポロジをミラーポート接続に変更する別機能であり、OPNsenseのIPSトグルのように「既にインラインの装置がソフトウェア的に検知→遮断へ切り替わる」動作に対応するのは、上記のプロファイルアクション段階移行の方である。テンプレートの問題文は「脅威防御プロファイルをAlertモードで導入し、Threatログでfalse positiveがないことを確認した後、Drop/Reset-Bothへ段階移行する」に置き換えるのが公式ベストプラクティスに即している。",
+            "changed_from_research": true
+          },
+          {
+            "opnsense_id": "opnsense-config-backup-restore",
+            "vendor_equivalent_feature": "Save/Export Firewall Configurations(ファイアウォール単体の名前付きスナップショット+コミット履歴)、定期自動バックアップはPanoramaのScheduled Config Export",
+            "native_terminology": "Device > Setup > Operations (\"Export named configuration snapshot\" / \"Export configuration version\" / \"Export device state\"); Panorama > Scheduled Config Export",
+            "confidence": "adapted",
+            "primary_source_url": "https://docs.paloaltonetworks.com/pan-os/11-1/pan-os-admin/firewall-administration/manage-configuration-backups/save-and-export-firewall-configurations",
+            "notes_ja": "検証済み(公式ドキュメント確認)。同ページは明記: \"The firewall does not automatically save the candidate configuration to persistent storage. You must manually save the candidate configuration...\"。スタンドアロンのPAN-OSファイアウォール単体では、コミット毎の内部バージョン履歴と手動/CLI(scp export)によるオンデマンドエクスポート(Export named configuration snapshot / Export configuration version / Export device state)が基本機能で、OPNsenseのような「定期自動取得」をファイアウォール単体がネイティブにスケジュール実行する機能は確認できなかった(なお、ログについてはDevice > Scheduled Log Exportという定期スケジュール機能がファイアウォール単体にも存在するが、これはコンフィグではなくログの定期エクスポート機能であり対象が異なる)。真に定型化された定期バックアップ+世代管理はPanoramaのScheduled Config Export(Panorama > Scheduled Config Export)、またはcron+XML/REST APIによる外部自動化が必要。テンプレート設計ではPanorama管理下か否かで採用方式を分岐させるべき。",
+            "changed_from_research": false
+          },
+          {
+            "opnsense_id": "opnsense-log-noise-reduction",
+            "vendor_equivalent_feature": "ルール単位のログ出力制御(Log at Session Start/Endのオフ)によるノイズ源トラフィックの明示的抑制+Log Forwarding Profileフィルタでの転送時除外",
+            "native_terminology": "Security Policy Rule \"Log at Session Start\" / \"Log at Session End\" チェックボックス; Objects > Log Forwarding Profile フィルタ(Filter Builder)",
+            "confidence": "adapted",
+            "primary_source_url": "https://docs.paloaltonetworks.com/network-security/security-policy/administration/security-rules/session-logging-considerations",
+            "notes_ja": "検証済み(公式ドキュメント確認、当該ページに自動ノイズ抑制機能への言及なし)。PAN-OSにはブロードキャスト等を自動識別してログ抑制する専用機能は公式ドキュメント上見当たらない。同等の運用は、ノイズ源となるトラフィック(ブロードキャスト/マルチキャスト宛など)を明示的にマッチさせるルールを作成しログ出力をオフ(または既定推奨のLog At Session Endのみ)に設定し、加えてLog Forwarding Profileのフィルタ(Filter Builder)で外部転送時に除外する、という2段構えの代替策になる。テンプレートの問題文は「既知の低価値トラフィックに対するルール単位のログ抑制+ログ転送フィルタで意味のある遮断ログのみ外部転送する」に置き換えるのが実態に即している。",
+            "changed_from_research": false
+          }
+        ]
+      }
+    },
+    {
+      "vendor": "SonicWall (SonicOS)",
+      "key": "sonicwall",
+      "researched": {
+        "vendor": "SonicWall (SonicOS)",
+        "mappings": [
+          {
+            "opnsense_id": "opnsense-default-deny-wan",
+            "vendor_equivalent_feature": "Access Rules default-deny from WAN/DMZ zones",
+            "native_terminology": "POLICY | Rules and Policies > Access Rules (From WAN To LAN/DMZ/WLAN matrix); default rule set denies all WAN/DMZ-originated sessions to LAN/WLAN",
+            "confidence": "confirmed",
+            "primary_source_url": "https://www.sonicwall.com/support/technical-documentation/docs/sonicos-7-1-rules_policies_global/Content/Access_Rules/access-rules-stateful-packet-inspection.htm",
+            "notes_ja": "SonicOSはデフォルトでWAN/DMZ→LAN/WLANの全セッションを暗黙拒否し、管理者がAccess Rulesで最小限のAllowルールを追加する運用になる。OPNsenseの既定拒否+最小許可と同一の運用モデル。"
+          },
+          {
+            "opnsense_id": "opnsense-lan-segment-isolation",
+            "vendor_equivalent_feature": "Zones + inter-zone Access Rules(VLANごとにZoneを分離)",
+            "native_terminology": "MATCH OBJECTS | Zones (Add Zone), POLICY | Access Rules (zone-pair matrix)",
+            "confidence": "confirmed",
+            "primary_source_url": "https://www.sonicwall.com/support/knowledge-base/how-do-zones-work-in-sonicos/170503731702241/",
+            "notes_ja": "SonicOSはインターフェース(VLANサブインターフェース含む)を必ず1つのZoneに割り当て、Zone間トラフィックはAccess Rulesで制御する。部門VLANごとに専用Zoneを作成し、Zone作成時の自動ルール生成を無効化した上で必要な通信のみAllowルールを書く運用がOPNsenseの部門間既定拒否に相当する。"
+          },
+          {
+            "opnsense_id": "opnsense-alias-driven-rules",
+            "vendor_equivalent_feature": "Address Objects/Address Groups と Service Objects/Service Groups",
+            "native_terminology": "MATCH OBJECTS | Addresses (Address Object / Address Group), MATCH OBJECTS | Services (Service Object / Service Group)",
+            "confidence": "confirmed",
+            "primary_source_url": "https://www.sonicwall.com/support/technical-documentation/docs/sonicos-7-1-objects/Content/Match_Objects/Addresses/adding-address-object.htm",
+            "notes_ja": "OPNsenseのエイリアス(Host/Network/Port)に相当する一級オブジェクトで、Access Rules・NAT Policy・VPN SA・DHCP設定など複数箇所から再利用できる。命名・用途ともほぼ同一概念。"
+          },
+          {
+            "opnsense_id": "opnsense-nat-port-forward-dmz",
+            "vendor_equivalent_feature": "NAT Policy(Inbound port forward)+ 対応するAccess Rule",
+            "native_terminology": "POLICY | Rules and Policies > NAT Rules(One-to-One / Port Address Translation NAT Policy), Access Rules",
+            "confidence": "confirmed",
+            "primary_source_url": "https://www.sonicwall.com/support/technical-documentation/docs/sonicos-7-1-rules_policies_policy/Content/NAT_Rules/nat-rules-nat-policies-create-examples-inbound-traffic.htm",
+            "notes_ja": "WAN公開IP:ポート→DMZ内サーバの変換はNAT Policyで、通過許可は別途Access Ruleで行う二段構成。最小公開ポートのみNAT PolicyとAccess Ruleをペアで作成することで実現でき、OPNsenseのポートフォワード構成と同一原理。"
+          },
+          {
+            "opnsense_id": "opnsense-outbound-nat-policy",
+            "vendor_equivalent_feature": "既定の自動生成Many-to-One NAT PolicyへのカスタムNAT Policy追加(特定送信元の固定変換)",
+            "native_terminology": "NAT Rules > NAT Policy(Many-to-One / One-to-One static outbound NAT)",
+            "confidence": "adapted",
+            "primary_source_url": "https://www.sonicwall.com/support/technical-documentation/docs/sonicos-7-1-rules_policies_policy/Content/NAT_Rules/nat-rules-nat-policies-create-examples-many2one-nat-policy.htm",
+            "notes_ja": "SonicOSにはOPNsenseのような『自動/ハイブリッド/手動』という明示的アウトバウンドNATモード切替は存在しない。既定でLAN/DMZ/WLAN→WANのMany-to-One NAT Policyが自動生成されており、これと共存する形で特定ホスト用の個別NAT Policy(固定送信元変換)を追加することで同じ運用目的(既定の自動NATを維持しつつ例外だけ固定送信元IPにする)を達成する。問題文は『自動→ハイブリッドへの切替』ではなく『既定ポリシーに個別ポリシーを追加』と読み替えるのが適切。"
+          },
+          {
+            "opnsense_id": "opnsense-geoip-country-block",
+            "vendor_equivalent_feature": "Geo-IP Filter",
+            "native_terminology": "POLICY | Security Services > Geo-IP Filter(Countries タブ、Block connections to/from countries)",
+            "confidence": "confirmed",
+            "primary_source_url": "https://www.sonicwall.com/support/technical-documentation/docs/sonicos-7-1-security_services/Content/Geo_IP_Filter/geo_ip.htm",
+            "notes_ja": "国別チェックボックスでWAN着信(および発信)を国単位でブロックできる。Geo-IP Exclusion Objectで除外リストも設定可能。OPNsenseのGeoIPブロックと機能・名称ともほぼ同一。"
+          },
+          {
+            "opnsense_id": "opnsense-schedule-based-access",
+            "vendor_equivalent_feature": "Schedule Objects を適用した Access Rule",
+            "native_terminology": "System/Objects > Schedules(Schedule Object)、Access Rule の Schedule フィールド",
+            "confidence": "confirmed",
+            "primary_source_url": "https://www.sonicwall.com/support/knowledge-base/configuring-schedules-in-gen7-sonicos/220630034438303",
+            "notes_ja": "Access Rule作成時にSchedule Object(例: Work Hours)を選択することで、業務時間外のみ有効/無効なルールを構成できる。OPNsenseのスケジュール機能と同一概念。"
+          },
+          {
+            "opnsense_id": "opnsense-mgmt-plane-lockdown",
+            "vendor_equivalent_feature": "管理インターフェースのTrusted Hosts限定(Address Objectで送信元を絞ったAccess Rule)+ WAN管理サービスの無効化",
+            "native_terminology": "Network | System > Interfaces(HTTP/HTTPS/SSH Management チェックボックス)、Access Rules の Source Address 制限",
+            "confidence": "confirmed",
+            "primary_source_url": "https://www.sonicwall.com/support/knowledge-base/how-can-i-restrict-sonicwall-management-access-for-specific-ip-address-es-only/kA1VN0000000JM30AM",
+            "notes_ja": "各インターフェースでHTTP/HTTPS/SSH管理サービスの有効/無効を個別設定でき、さらに管理用Address Object/GroupをSource AddressとしたAccess Ruleを既定のWeb/SSH管理ルールに適用することで管理セグメントのみに限定できる。"
+          },
+          {
+            "opnsense_id": "opnsense-wireguard-instance",
+            "vendor_equivalent_feature": "IPsec Site-to-Site VPN Policy(拠点間)/ SSL VPN(NetExtender)またはGlobal VPN Client(リモートアクセス)",
+            "native_terminology": "NETWORK | IPSec VPN > Rules and Settings(Site-to-Site VPN Policy, Tunnel Interface VPN); SSL VPN(NetExtender)",
+            "confidence": "adapted",
+            "primary_source_url": "https://www.sonicwall.com/support/technical-documentation/docs/sonicos-7-0-0-0-ipsec_vpn/Content/site-to-site-vpns-policies-create.htm",
+            "notes_ja": "SonicOS本体(ファイアウォール製品ライン)はWireGuardをネイティブサポートしない。WireGuardはSMA100(リモートアクセス専用アプライアンス、別製品)にのみ実装されており、SonicOSのSite-to-Site VPNとは別物。拠点接続という同じ運用ニーズはIPsec Site-to-Site VPN Policy(Main/Aggressive Mode, Tunnel Interface, Hub&Spoke対応)で満たす。テンプレートはWireGuard固有構文を持ち込まず、IKE/IPsecパラメータで代替すべき。"
+          },
+          {
+            "opnsense_id": "opnsense-ha-carp-setup",
+            "vendor_equivalent_feature": "Active/Standby High Availability(仮想IP相当のLAN/WAN共有IP + Stateful Synchronization)",
+            "native_terminology": "DEVICE | High Availability > Settings(Active/Standby HA, Stateful Synchronization)",
+            "confidence": "confirmed",
+            "primary_source_url": "https://www.sonicwall.com/support/technical-documentation/docs/sonicos-7-1-high_availability/Content/Topics/High_Availability/About_Stateful_Synchronization/working.htm",
+            "notes_ja": "CARPのような仮想IPプロトコルではなく、Primary/SecondaryがLAN/WAN IPを共有するActive/Standby HAモデル。Stateful Synchronizationがセッション状態を同期し、フェイルオーバー時のコネクション維持を実現する。仕組みは異なるが解決する運用課題(冗長化+状態同期+フェイルオーバー)は同一。"
+          },
+          {
+            "opnsense_id": "opnsense-captive-portal-guest",
+            "vendor_equivalent_feature": "Guest Services(ゾーンのGuest Access設定、キャプティブポータル相当)",
+            "native_terminology": "MATCH OBJECTS | Zones(Guest Services タブ)、Users | Guest Accounts",
+            "confidence": "confirmed",
+            "primary_source_url": "https://www.sonicwall.com/support/knowledge-base/configuring-guest-services-on-the-lan-dmz-zone/170505669285912/",
+            "notes_ja": "LAN/DMZ/WLANゾーンでGuest Servicesを有効化すると、利用規約同意画面などのキャプティブポータル認証を経てインターネットのみアクセス可能にし、保護ネットワークへの到達を遮断できる。OPNsenseのキャプティブポータル+ゲストセグメント構成と同一目的。"
+          },
+          {
+            "opnsense_id": "opnsense-ips-inline-enable",
+            "vendor_equivalent_feature": "Intrusion Prevention Service(IPS)のシグネチャグループをDetect AllからPrevent Allへ昇格",
+            "native_terminology": "POLICY | Security Services > Intrusion Prevention(Signature Groups: DETECT ALL / PREVENT ALL)",
+            "confidence": "confirmed",
+            "primary_source_url": "https://www.sonicwall.com/support/technical-documentation/docs/sonicos-7-1-security_services/Content/Intrusion_Prevention/intrusion-protection-enabling.htm",
+            "notes_ja": "シグネチャグループ単位でDetect(検知のみ)とPrevent(遮断・リセット)を切り替えられ、IPS Exclusion Listで除外も可能。IDSモードで観察後にインラインIPSへ昇格するOPNsenseの運用と同じ手順が踏める。"
+          },
+          {
+            "opnsense_id": "opnsense-unbound-dot-forwarding",
+            "vendor_equivalent_feature": "DNS Proxy強制(Enforce DNS Proxy for All DNS Requests)+ 外部DNS(53番ポート)へのAccess Rule遮断 + DNS Security(Neustar連携のカテゴリ/脅威フィルタ)",
+            "native_terminology": "NETWORK | DNS > DNS Proxy(Enforce DNS Proxy for All DNS Requests)、POLICY | Security Services > DNS Security",
+            "confidence": "adapted",
+            "primary_source_url": "https://www.sonicwall.com/support/technical-documentation/docs/sonicos-7-0-0-0-dns/Content/DNS_Proxy/dns-proxy-configuring-settings.htm",
+            "notes_ja": "SonicOSにはUnboundのDNS-over-TLS転送に相当する、DNSクライアント自体を暗号化アップストリームに切り替えるネイティブ機能は確認できなかった(コミュニティフォーラムでも『DoTへの切替方法はない』との回答)。ただし『平文DNSの直抜けを遮断する』という核心の運用課題は、Enforce DNS Proxy for All DNS Requestsで全クライアントのDNSをファイアウォール経由に強制し、外部DNS宛の53番ポートをAccess Ruleで遮断し、DNS Security(Neustar連携)で不正ドメインをフィルタする組み合わせで達成できる。テンプレートの問題文は『DNSをDoT転送に切替』ではなく『DNSプロキシ強制+外部DNS直抜け遮断+ドメイン脅威フィルタ』に読み替えるべきで、上流のTLS暗号化自体は非対応と明記する必要がある。"
+          },
+          {
+            "opnsense_id": "opnsense-api-automation-basics",
+            "vendor_equivalent_feature": "SonicOS RESTful API(ただしフル管理者権限が必須で、OPNsenseのような最小権限専用APIキーは非対応)",
+            "native_terminology": "SonicOS API(SonicOS/X API Reference Guide)、DEVICE | Settings > Administration(SonicOS API Enable)",
+            "confidence": "adapted",
+            "primary_source_url": "https://www.sonicwall.com/support/knowledge-base/introduction-to-sonicos-api/kA1VN0000000FGr0AM",
+            "notes_ja": "SonicOS APIはAddress/Service Object、NAT Policy、Access Ruleの作成・照会・commitをJSON経由で自動化できるが、公式情報では『フル管理者権限を持つユーザーのみAPIにアクセス可能』『同時に許可されるAPIセッションは1つ』とされ、OPNsenseのような最小権限(読み取り専用/特定操作のみ)APIキーを発行する仕組みは確認できなかった。自動化基盤を組む場合はAPI用の専用フル管理者アカウントを用意し、監査ログとセッション排他制御で運用リスクを補う設計が必要。"
+          },
+          {
+            "opnsense_id": "opnsense-config-backup-restore",
+            "vendor_equivalent_feature": "Firmware & Backups の設定バックアップ(Local/Cloud Backup)とImport/Export Configuration、スケジュールされたCloud Backup",
+            "native_terminology": "DEVICE | Settings > Firmware and Backups(Create Backup, Import/Export Configuration, Scheduled Backup)",
+            "confidence": "confirmed",
+            "primary_source_url": "https://www.sonicwall.com/support/technical-documentation/docs/sonicos-7-1-device_settings/Content/Storage/storage-configuration-backup.htm",
+            "notes_ja": "Create Backupでシステム状態のスナップショットを取得、Import/Export Configurationで.EXPファイルとして外部保存でき、MySonicWall.com経由でクラウドへの定期スケジュールバックアップ(曜日指定)も可能。世代管理を伴う定期バックアップ運用をネイティブにサポート。"
+          },
+          {
+            "opnsense_id": "opnsense-firmware-update-window",
+            "vendor_equivalent_feature": "Firmware & Backups でのバックアップ取得後のファームウェアアップロード・現行設定を保持したブート",
+            "native_terminology": "DEVICE | Settings > Firmware and Backups(Upload New Firmware, Boot Uploaded Firmware With Current Configuration)",
+            "confidence": "confirmed",
+            "primary_source_url": "https://www.sonicwall.com/support/knowledge-base/how-can-i-upgrade-sonicos-firmware/kA1VN0000000IwY0AU",
+            "notes_ja": "公式手順として、アップグレード前にLocal Backup作成とConfiguration Exportを実施し、Firmware & Backupsページで新ファームウェアをアップロード後『Boot with Current Configuration』を選ぶ。アップロード直後は本番稼働に影響がなく、事前バックアップを伴うメンテナンス窓内更新の運用と一致する。変更告知自体は運用手順(SonicOS機能外)。"
+          },
+          {
+            "opnsense_id": "opnsense-rule-hygiene-audit",
+            "vendor_equivalent_feature": "Access Rules のトラフィック統計(Rx/Tx ヒットカウント)を用いた手動監査",
+            "native_terminology": "POLICY | Rules and Policies > Access Rules(Traffic Statistics: Rx/Tx)",
+            "confidence": "adapted",
+            "primary_source_url": "https://www.sonicwall.com/support/technical-documentation/docs/sonicos-7-0-0-0-rules_and_policies/Content/access-rules-display-traffic-statistics.htm/",
+            "notes_ja": "各Access RuleのRx/Tx通信量を表示する機能はあるが、未使用/重複/過剰許可ルールを自動検出・レポートするネイティブ機能は確認できなかった(OPNsense同様、ここも手動監査が前提)。ヒットカウントを定期的に確認し、ゼロヒットのルールを段階的に無効化する運用で代替する。"
+          },
+          {
+            "opnsense_id": "opnsense-emergency-ip-block",
+            "vendor_equivalent_feature": "攻撃元IP用Address Objectを作成し最優先のDeny Access Ruleを追加(恒常的な脅威にはBotnet Filterも併用)",
+            "native_terminology": "MATCH OBJECTS | Addresses(Address Object 追加)、POLICY | Access Rules(Deny)、POLICY | Security Services > Botnet Filter",
+            "confidence": "confirmed",
+            "primary_source_url": "https://www.sonicwall.com/support/knowledge-base/how-can-i-block-an-ip-address-using-access-rules/170505635390198/",
+            "notes_ja": "攻撃元IPのAddress Objectを作成し、WAN→保護ゾーンのDenyルールとして最優先(最上位)に追加することで即時遮断できる。既知のC2サーバ等はBotnet Filterが自動的に遮断・記録する。記録(ロギング有効化)と解除基準(ルール削除/無効化条件)は運用手順として別途定義が必要。"
+          },
+          {
+            "opnsense_id": "opnsense-compromised-host-quarantine",
+            "vendor_equivalent_feature": "Isolated Zone(専用ゾーンへの移動+Access Ruleで調査用通信のみ許可)。エンドポイント側の自動隔離はCapture Client Network Quarantine(別製品/ライセンス)",
+            "native_terminology": "MATCH OBJECTS | Zones(Add Zone → Isolated Zone)、POLICY | Access Rules、(別製品)Capture Client: Network Quarantine",
+            "confidence": "adapted",
+            "primary_source_url": "https://www.sonicwall.com/support/knowledge-base/how-can-i-configure-isolated-zone/221027150119323/",
+            "notes_ja": "SonicOS単体には『検疫して調査用通信のみ許可』という専用ワークフロー機能はなく、Isolated Zoneに疑わしいホストを移すか、Zones+Access Rulesの組み合わせで内部到達を遮断しつつ調査用ホスト/ポートのみ許可するルールを個別に書く運用になる(OPNsenseの検疫VLANと同じ原理をZone単位で実装)。より自動化された封じ込め(脅威検知トリガーでの自動隔離)が必要な場合はエンドポイント製品Capture Client(EDR)のNetwork Quarantine機能が該当するが、これはSonicOS本体の機能ではなく別ライセンスの追加製品である点に注意。"
+          },
+          {
+            "opnsense_id": "opnsense-staged-rule-change",
+            "vendor_equivalent_feature": "Access RuleのEnable/Disableトグル + per-rule Logging(Enable Logging/Enable Packet Monitor)+ Investigate Logsでの事後確認、および7.3.3以降のPending Changesバナーによる変更のコミット前レビュー",
+            "native_terminology": "Access Rule の Enable チェックボックス、Logging タブ(Enable Logging, Enable Packet Monitor)、DEVICE | Investigate | Logs、Pending Changes(config commit前のUI表示)",
+            "confidence": "adapted",
+            "primary_source_url": "https://www.sonicwall.com/support/knowledge-base/how-to-capture-traffic-using-access-rules/kA1VN0000000OLk0AM",
+            "notes_ja": "OPNsenseのような『ログ観察→有効化→事後確認』を単一機能として自動化する専用ステージング機能はSonicOSにネイティブでは存在しない。ルールをロギング有効な状態で作成・確認してから本適用する、有効/無効チェックボックスで切り戻す、Investigate LogsやPacket Monitorで事後確認する、という手順を組み合わせて代替する運用となる。なお7.3.3以降のGUIには変更内容をコミット前に表示するPending Changesバナーがあるが、これは設定保存の可視化であり段階的なルール適用そのものではない。"
+          },
+          {
+            "opnsense_id": "opnsense-blocked-traffic-triage",
+            "vendor_equivalent_feature": "Packet Monitor / Event Logs(ライブログ相当)→ Connections Monitor(ステート相当)→ NAT Policy診断、の順で原因切り分け",
+            "native_terminology": "Investigate | Packet Monitor、Investigate | Logs | Event Logs、Investigate | Logs | Connection Logs(Connections Monitor)、NAT Policy",
+            "confidence": "confirmed",
+            "primary_source_url": "https://www.sonicwall.com/support/knowledge-base/how-can-i-setup-and-utilize-the-packet-monitor-feature-for-troubleshooting/170513143911627",
+            "notes_ja": "SonicWall公式KBはPacket Monitor/Event Logsでドロップ要因を特定し、Connections Monitorで現在の接続状態を確認する切り分け手順を推奨しており、OPNsenseのライブログ→ステート→NATという三段階の切り分けフローと対応関係が明確。"
+          },
+          {
+            "opnsense_id": "opnsense-state-table-exhaustion",
+            "vendor_equivalent_feature": "Connections Monitorで送信元別コネクション数を特定 + Connection Limiting(v2)/Flood Protection(SYN Flood等)のしきい値調整",
+            "native_terminology": "Investigate | Logs | Connection Logs(Connections Monitor)、Access Rules の Connection Limiting、NETWORK/FIREWALL SETTINGS | Flood Protection(SYN/UDP/ICMP Flood, Maximum Connections)",
+            "confidence": "confirmed",
+            "primary_source_url": "https://www.sonicwall.com/support/knowledge-base/connection-limiting-v2-feature-using-access-rules-in-sonicos-enhanced/170505655289381/",
+            "notes_ja": "Connections MonitorでIP別のコネクション数を確認して原因ホストを特定し、Access RuleのConnection Limiting(送信元/サービス/方向別)やFlood Protectionのしきい値(SYN Attack Threshold等)を調整することで、ステートテーブル圧迫の再発を防止できる。"
+          },
+          {
+            "opnsense_id": "opnsense-carp-failover-drill",
+            "vendor_equivalent_feature": "Active/Standby HAの計画的フェイルオーバーテスト(Force Active/Standby Failover)",
+            "native_terminology": "DEVICE | High Availability > Settings(Force Active/Standby Failover ボタン)",
+            "confidence": "confirmed",
+            "primary_source_url": "https://www.sonicwall.com/support/knowledge-base/configuring-advanced-high-availability-settings-on-sonicos-x-7/220202130234173/",
+            "notes_ja": "『Force Active/Standby Failover』ボタンでPrimaryからSecondaryへの計画的フェイルオーバーをその場でテストでき、Stateful Synchronizationによりセッション維持状況を確認できる。CARPの計画切替訓練と同じ目的を果たすネイティブ機能。"
+          },
+          {
+            "opnsense_id": "opnsense-port-forward-triage",
+            "vendor_equivalent_feature": "NAT Policy診断(変換確認)→ Access Rules(許可確認)→ Packet Monitor/Connections(戻り経路確認)の順の切り分け",
+            "native_terminology": "NAT Rules(NAT Policy)、Access Rules、Investigate | Packet Monitor、Investigate | Logs | Connection Logs",
+            "confidence": "confirmed",
+            "primary_source_url": "https://www.sonicwall.com/support/knowledge-base/common-mistakes-with-port-forwarding/kA1VN0000000GD40AM",
+            "notes_ja": "公式KB『Common mistakes with port forwarding』はNAT Policyの変換設定ミス、対応するAccess Ruleの不足、非対称経路(戻りトラフィック)という典型的な原因を挙げており、OPNsenseのNAT→ルール→戻り経路の切り分け順序とほぼ同じ考え方に対応する。"
+          },
+          {
+            "opnsense_id": "opnsense-log-noise-reduction",
+            "vendor_equivalent_feature": "Log Redundancy Filter(同一イベントの集約)+ Log Settingsのカテゴリ選択(Base Setup)による対象イベントの絞り込み",
+            "native_terminology": "DEVICE | Log > Settings(Log Redundancy Filter/Syslog Event Redundancy Rate、カテゴリ別ログ有効/無効チェックボックス)",
+            "confidence": "confirmed",
+            "primary_source_url": "https://www.sonicwall.com/support/knowledge-base/how-to-change-global-logging-redundancy-level/210617231916960/",
+            "notes_ja": "Log Redundancy Filter(既定60秒)により同一イベントの反復記録を集約し、件数のみをまとめて記録できる。加えてLog Settings > Base Setupでブロードキャスト等特定カテゴリのログ記録自体を無効化でき、意味のある遮断ログのみを残す運用に対応する。"
+          }
+        ]
+      },
+      "verified": {
+        "vendor": "SonicWall (SonicOS)",
+        "corrected_mappings": [
+          {
+            "opnsense_id": "opnsense-outbound-nat-policy",
+            "vendor_equivalent_feature": "既定の自動生成Many-to-One NAT PolicyへのカスタムNAT Policy追加(特定送信元の固定変換)",
+            "native_terminology": "NAT Rules > NAT Policy(Many-to-One / One-to-One static outbound NAT)",
+            "confidence": "adapted",
+            "primary_source_url": "https://www.sonicwall.com/support/technical-documentation/docs/sonicos-7-1-rules_policies_policy/Content/NAT_Rules/nat-rules-nat-policies-create-examples-many2one-nat-policy.htm",
+            "notes_ja": "再検証で内容を確認: SonicOS公式ドキュメント(Creating a Many-to-One NAT Policy)およびSonicWall→OPNsense移行ガイド類でも、SonicOSにはOPNsenseのAutomatic/Hybrid/Manualのようなアウトバウンドモード切替概念は存在せず、POLICY | Rules and Policies > NATページで既定生成されるMany-to-One NAT Policyと共存する形で個別のNAT Policyを追加する運用になることが裏付けられた。元の記述は妥当であり、修正不要と判断。",
+            "changed_from_research": false
+          },
+          {
+            "opnsense_id": "opnsense-wireguard-instance",
+            "vendor_equivalent_feature": "IPsec Site-to-Site VPN Policy(拠点間)/ SSL VPN(NetExtender)またはGlobal VPN Client(リモートアクセス)",
+            "native_terminology": "NETWORK | IPSec VPN > Rules and Settings(Site-to-Site VPN Policy, Tunnel Interface VPN); SSL VPN(NetExtender)",
+            "confidence": "adapted",
+            "primary_source_url": "https://www.sonicwall.com/support/technical-documentation/docs/sonicos-7-0-0-0-ipsec_vpn/Content/site-to-site-vpns-policies-create.htm",
+            "notes_ja": "SonicOS本体(ファイアウォール製品ライン)はWireGuardをネイティブサポートしない。WireGuardはSMA100(リモートアクセス専用アプライアンス、別製品)にのみ実装されており、SonicOSのSite-to-Site VPNとは別物。拠点接続という同じ運用ニーズはIPsec Site-to-Site VPN Policy(Main/Aggressive Mode, Tunnel Interface, Hub&Spoke対応)で満たす。テンプレートはWireGuard固有構文を持ち込まず、IKE/IPsecパラメータで代替すべき。[追加確認] SonicOS 8(Gen8ファイアウォール、2025年以降)にはCloud Secure Edge(CSE)Connectorという機能があり、これはWireGuardプロトコルでSonicWall自社のZTNA/SASEクラウド(Global Edge Network / CSE POP)へダイヤルアウトのトンネルを張る。ただしこれは管理者が任意のピア(公開鍵/エンドポイントIP)を指定して拠点間やリモートアクセスVPNを構築するOPNsenseのwireguard-instanceとは根本的に異なり、SonicWall自社クラウドへの固定接続専用でありインバウンドポート開放も不要な設計。したがって『WireGuardの一般的なVPNインスタンス』としての代替にはならず、拠点間VPNの代替は引き続きIPsec Site-to-Site VPN Policyとするのが正しい。confidence=adaptedの結論は変わらないが、SonicOS 8以降を対象にする場合はCSE ConnectorとWireGuard VPNインスタンスを混同しないよう注記が必要。",
+            "changed_from_research": true
+          },
+          {
+            "opnsense_id": "opnsense-unbound-dot-forwarding",
+            "vendor_equivalent_feature": "DNS Proxy強制(Enforce DNS Proxy for All DNS Requests)+ 外部DNS(53番ポート)へのAccess Rule遮断 + DNS Security(Neustar連携のカテゴリ/脅威フィルタ)",
+            "native_terminology": "NETWORK | DNS > DNS Proxy(Enforce DNS Proxy for All DNS Requests)、POLICY | Security Services > DNS Security",
+            "confidence": "adapted",
+            "primary_source_url": "https://www.sonicwall.com/support/technical-documentation/docs/sonicos-7-0-0-0-dns/Content/DNS_Proxy/dns-proxy-configuring-settings.htm",
+            "notes_ja": "SonicOSにはUnboundのDNS-over-TLS転送に相当する、DNSクライアント自体を暗号化アップストリームに切り替えるネイティブ機能は確認できなかった(コミュニティフォーラム『DNS Proxy over TLS?』でもSonicWall側から『DNSクライアントの動作を変更する方法はなく、別ISP・サードパーティDNS(Umbrella)・SASE・DoT対応オンプレDNSサーバーのいずれかで対応するしかない』という趣旨の回答が確認できた)。ただし『平文DNSの直抜けを遮断する』という核心の運用課題は、Enforce DNS Proxy for All DNS Requestsで全クライアントのDNSをファイアウォール経由に強制し、外部DNS宛の53番ポートをAccess Ruleで遮断し、DNS Security(Neustarとの連携、19カテゴリ×4アクション)で不正/カテゴリドメインをフィルタする組み合わせで達成できることも公式ドキュメントで確認済み。テンプレートの問題文は『DNSをDoT転送に切替』ではなく『DNSプロキシ強制+外部DNS直抜け遮断+ドメイン脅威フィルタ』に読み替えるべきで、上流のTLS暗号化自体は非対応と明記する必要がある。再検証でも結論は変わらない。",
+            "changed_from_research": false
+          },
+          {
+            "opnsense_id": "opnsense-api-automation-basics",
+            "vendor_equivalent_feature": "SonicOS RESTful API(ただしフル管理者権限が必須で、OPNsenseのような最小権限専用APIキーは非対応)",
+            "native_terminology": "SonicOS API(SonicOS/X API Reference Guide)、DEVICE | Settings > Administration(SonicOS API Enable)",
+            "confidence": "adapted",
+            "primary_source_url": "https://www.sonicwall.com/support/knowledge-base/introduction-to-sonicos-api/kA1VN0000000FGr0AM",
+            "notes_ja": "SonicOS APIはAddress/Service Object、NAT Policy、Access Ruleの作成・照会・commitをJSON経由で自動化できるが、公式情報では『フル管理者権限を持つユーザーのみAPIにアクセス可能』『同時に許可されるSonicOS APIセッションは1つ』『Web管理UI/CLI/GMS/APIのいずれから接続していても設定変更できる管理者は常に1名のみ』とされ、OPNsenseのような最小権限(読み取り専用/特定操作のみ)APIキーを発行する仕組みは確認できなかった。[追加確認] SonicWallの別クラウド製品であるCloud Secure Edge(CSE)のAPI Keys機能は Admin/ServiceAuthor/PolicyAuthor/EventWriter/ReadOnly等のスコープ付きAPIキーを発行でき、またNSM(Network Security Manager)には変更の承認ワークフロー(Full/Partial承認、承認者ロール)が存在する。しかしこれらはSonicOS機器本体(オンボックス)のRESTful APIとは別物であり、ファイアウォール単体のSonicOS APIには依然として最小権限専用APIキー機構は存在しない。自動化基盤を組む場合はAPI用の専用フル管理者アカウントを用意し、監査ログとセッション排他制御(または上位管理基盤としてNSM/CSEの導入)で運用リスクを補う設計が必要、という結論は変わらない。",
+            "changed_from_research": true
+          },
+          {
+            "opnsense_id": "opnsense-rule-hygiene-audit",
+            "vendor_equivalent_feature": "Access Rules のトラフィック統計(Rx/Tx ヒットカウント)を用いた手動監査、および(Gen7限定・既知の不具合あり)Used/Unused Rulesフィルタ",
+            "native_terminology": "POLICY | Rules and Policies > Access Rules(Traffic Statistics: Rx/Tx、Display Options > Used Rules/Unused Rulesフィルタ)",
+            "confidence": "adapted",
+            "primary_source_url": "https://www.sonicwall.com/support/technical-documentation/docs/sonicos-7-0-0-0-rules_and_policies/Content/access-rules-display-traffic-statistics.htm/",
+            "notes_ja": "各Access RuleのRx/Tx通信量を表示する機能はあるが、未使用/重複/過剰許可ルールを自動検出・レポートするネイティブ機能は確認できなかった(OPNsense同様、ここも手動監査が前提)。ヒットカウントを定期的に確認し、ゼロヒットのルールを段階的に無効化する運用で代替する。[追加確認] SonicWall Communityの投稿によれば、Gen7デバイスのAccess Rulesページには『Used Rules』『Unused Rules』で絞り込むフィルタ(例: Since: Last 1 hour等の期間指定)が存在し、一見OPNsenseにない自動識別機能に近いものが実装されている。ただし同コミュニティの複数報告では『on all tested Gen7 devices, this filter does not work as expected and does not filter anything』(検証した全Gen7機で機能せず何もフィルタしない)という既知の不具合が指摘されており、2026年7月時点でも実運用ではRx/Txヒットカウントの目視確認による手動監査が現実的な代替手段である。したがってconfidence=adaptedの結論は変わらないが、native_terminologyにUsed/Unused Rulesフィルタの存在(および既知の不具合)を明記した。",
+            "changed_from_research": true
+          },
+          {
+            "opnsense_id": "opnsense-compromised-host-quarantine",
+            "vendor_equivalent_feature": "Isolated Zone(専用ゾーンへの移動+Access Ruleで調査用通信のみ許可)。エンドポイント側の自動隔離はCapture Client Network Quarantine(別製品/ライセンス、公式ドキュメントで存在確認済み)",
+            "native_terminology": "MATCH OBJECTS | Zones(Add Zone → Isolated Zone)、POLICY | Access Rules、(別製品)Capture Client: Network Quarantine(Network-Control > Configurable Network Quarantine)",
+            "confidence": "adapted",
+            "primary_source_url": "https://www.sonicwall.com/support/knowledge-base/how-can-i-configure-isolated-zone/221027150119323/",
+            "notes_ja": "SonicOS単体には『検疫して調査用通信のみ許可』という専用ワークフロー機能はなく、Isolated Zoneに疑わしいホストを移すか、Zones+Access Rulesの組み合わせで内部到達を遮断しつつ調査用ホスト/ポートのみ許可するルールを個別に書く運用になる(OPNsenseの検疫VLANと同じ原理をZone単位で実装)。公式KB(How can I configure Isolated Zone)でも、Isolated Zoneに配置されたホストはインターネットのみアクセス可能で他インターフェース(例: X0サブネット)にはアクセスできないと明記されており、疑わしいホストの隔離用途に使えることが確認できた。より自動化された封じ込め(脅威検知トリガーでの自動隔離)が必要な場合はエンドポイント製品Capture Client(EDR)のNetwork Quarantine機能が該当するが、これはSonicOS本体の機能ではなく別ライセンスの追加製品である点に注意。[追加確認] Capture Client Premier Administration Guide(Network-Control > Configurable Network Quarantine)で『Network Quarantine』が正式な機能名として存在し、感染エンドポイントをネットワークからDisconnectして隔離する機能であることを公式ドキュメントで確認できた。結論(confidence=adapted)は変わらない。",
+            "changed_from_research": true
+          },
+          {
+            "opnsense_id": "opnsense-staged-rule-change",
+            "vendor_equivalent_feature": "Access RuleのEnable/Disableトグル + per-rule Logging(Enable Logging/Enable Packet Monitor)+ Investigate Logsでの事後確認、およびSave/Edit Configuration Banner(未保存の変更をコミット前に表示、7.3.3でUI再設計)",
+            "native_terminology": "Access Rule の Enable チェックボックス、Logging タブ(Enable Logging, Enable Packet Monitor)、DEVICE | Investigate | Logs、Save/Edit Configuration Banner(config commit前のUI表示)",
+            "confidence": "adapted",
+            "primary_source_url": "https://www.sonicwall.com/support/knowledge-base/sonicos-7-3-3-faq/kA1VN000001S1DV0A0",
+            "notes_ja": "OPNsenseのような『ログ観察→有効化→事後確認』を単一機能として自動化する専用ステージング機能はSonicOSにネイティブでは存在しない。ルールをロギング有効な状態で作成・確認してから本適用する、有効/無効チェックボックスで切り戻す、Investigate LogsやPacket Monitorで事後確認する、という手順を組み合わせて代替する運用となる。[修正] 元の記述は『7.3.3以降のGUIには変更内容をコミット前に表示するPending Changesバナーがある』としていたが、これは不正確。公式のSonicOS 7.3.3 FAQには『The Save/Edit configuration banner ... has been redesigned to be less visually cluttered ... There are no functional changes to configuration save or edit behaviour; this is a layout and clarity improvement only.』と明記されており、このバナー自体は7.3.3で新規導入されたのではなく、それ以前のSonicOS 7.xから存在する『未保存の変更をコミット前に表示する』UI要素(Save/Edit Configuration Banner)であり、7.3.3ではその視認性(プライマリアクションの強調、状態表示の分かりやすさ)が再設計されたに過ぎない。正しい名称は『Save/Edit Configuration Banner』であり、7.3.3は導入バージョンではなくUI改善バージョンとして記載を訂正した。これも設定保存の可視化であり、OPNsenseのような段階的ルール適用そのものではない点(結論)は変わらない。",
+            "changed_from_research": true
+          }
+        ]
+      }
+    }
+  ]
+}
