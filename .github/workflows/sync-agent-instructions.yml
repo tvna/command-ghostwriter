@@ -4,12 +4,21 @@
 #
 # 目的 (Purpose):
 # ---------------
-# エージェント指示を上流から追従させる2つの独立したジョブを持つ。
+# エージェント指示を上流から追従させる3つの独立したジョブを持つ。
 #  - sync-claude-md: 正本リポジトリ tvna/claude-md の CLAUDE.md を取得し、
 #    本リポジトリの CLAUDE.md (コミット済み実ファイル) へ追従させる。
 #  - sync-apm-skills: apm.yml にピン留めした obra/superpowers /
 #    tvna/clairvoyance の上流コミットを検知し、pin 更新・再デプロイ・
 #    マニフェスト再生成を行う。
+#  - sync-rulesets: 正本リポジトリ tvna/claude-md の
+#    .github/rulesets/all-branches.json (全ブランチforce-push禁止、汎用的)
+#    のみを取得し、本リポジトリへ追従させる。取得後、command-ghostwriter
+#    固有のローカル追加 (refs/heads/chore/sync-* の除外——本ワークフロー自身の
+#    sync-*ジョブがPRブランチ更新のたびに強制更新するため、force-push禁止rule
+#    から除外する必要がある) を毎回自動で再適用する (#503)。人間の記憶に頼らず
+#    上流ドリフトで消えないようにするため、コピー後に決定的に付け直す。
+#    main.json はcommand-ghostwriter固有のrequired_status_checksを含む
+#    ローカル正本のため同期対象外 (構造が変わった場合は人間が見て判断する)。
 # いずれも差分があれば PR を作成/更新する (レビュー必須・自動マージしない)。
 #
 # 方式の根拠 (Rationale):
@@ -18,14 +27,23 @@
 #   に含まれない) ため、CLAUDE.md はコミット済み実ファイルとして同期する。
 # - PR は GITHUB_TOKEN ではなく GitHub App トークン (actions/create-github-app-token)
 #   で作成する。GITHUB_TOKEN で作った PR は on: pull_request を発火させず必須CIが
-#   永久 pending となり `mergeable_state: blocked` に陥る (PR #510)。App トークンなら
-#   App bot 名義の Verified コミットとなり、下流 CI も発火する。上流 tvna/claude-md と
-#   同じ方式・同じ GitHub App を用いる (Issue #511)。
+#   永久 pending となり `mergeable_state: blocked` に陥る (PR #464, #510)。App トークン
+#   なら App bot 名義の Verified コミットとなり、下流 CI も発火する。上流
+#   tvna/claude-md と同じ方式・同じ GitHub App を用いる (Issue #511)。3ジョブ
+#   (sync-claude-md, sync-apm-skills, sync-rulesets) 全てが同じPR作成パターンを
+#   使うため、同じバグクラスを抱える。3ジョブとも同時にApp token化する。
 # - secret `AUTOMATION_APP_ID` / `AUTOMATION_APP_PRIVATE_KEY` に上流と同じ App の
 #   App ID / PEM 秘密鍵を登録し、App を本リポジトリにインストールしておくこと
 #   (権限: Contents=write, Pull requests=write, Issues=write)。
 # - create-pull-request の sign-commits: true により、ローカル git commit ではなく
 #   GitHub API 経由でコミットを作成し、App トークンで Verified 署名済みコミットとする。
+# - PR は develop へ向ける (base: develop)。dependabot (4エコシステム全て
+#   target-branch: develop) や通常のfeature/fix PR (claude/* ブランチ) と揃え、
+#   develop で進行中の作業に指示・skill更新・ruleset更新を即座に反映するため。
+#   main は develop→main のバージョンゲート付きリリース昇格時にのみ追従する
+#   (Issue #518)。schedule/workflow_dispatch トリガーの既定checkoutは default
+#   branch (main) になるため、checkout に明示的な `ref: develop` が必須 (これが
+#   ないと diff/commit の基準ブランチが main のままずれる)。
 # - sync-apm-skills は上流の既定ブランチ最新コミットを REST API やフル checkout
 #   ではなく `git ls-remote <url> HEAD` で取得する (GitHub API のレート制限を回避)。
 # - apm.yml の2依存が同時に更新されていても PR は1本にまとめる
@@ -37,6 +55,7 @@
 # 関連 (Reference):
 # -----------------
 # - Issue #427, #467 (CLAUDE.md 同期), #480 (apm スキル上流追従), #446 (apm バージョンアップ, 別スコープ)
+# - Issue #503 (main保護ruleset整備), #511 (App tokenへの移行), #518 (PR ターゲットを develop へ変更)
 # - 設計書 docs/superpowers/specs/2026-06-13-claude-md-master-sync-design.md
 # - 設計書 docs/superpowers/specs/2026-07-02-sync-apm-skills-upstream-update-design.md
 # ============================================================
@@ -65,15 +84,17 @@ jobs:
       pull-requests: write
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: audit
 
       - name: Check out this repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: develop
 
       - name: Check out master CLAUDE.md
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: tvna/claude-md
           ref: main
@@ -98,7 +119,7 @@ jobs:
         with:
           token: ${{ steps.app-token.outputs.token }}
           sign-commits: true
-          base: main
+          base: develop
           branch: chore/sync-claude-md
           delete-branch: true
           commit-message: "chore: sync CLAUDE.md from tvna/claude-md (#427)"
@@ -127,12 +148,14 @@ jobs:
       APM_SHA256: a0b896e8cbdd10441125e989aa19d180c62052eda7c8aa850feb367805d1256f
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: audit
 
       - name: Check out this repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: develop
 
       - name: Detect upstream apm dependency updates
         id: detect
@@ -213,7 +236,7 @@ jobs:
         with:
           token: ${{ steps.app-token.outputs.token }}
           sign-commits: true
-          base: main
+          base: develop
           branch: chore/sync-apm-skills
           delete-branch: true
           commit-message: "chore: sync apm skill dependency pins from upstream (#480)"
@@ -226,3 +249,88 @@ jobs:
             Review required; do not auto-merge.
 
             Refs #480
+
+  sync-rulesets:
+    name: Sync all-branches ruleset from tvna/claude-md
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Check out this repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: develop
+
+      - name: Check out upstream all-branches.json
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: tvna/claude-md
+          ref: main
+          sparse-checkout: .github/rulesets/all-branches.json
+          sparse-checkout-cone-mode: false
+          path: .upstream-claude-md
+
+      - name: Copy upstream all-branches.json and reapply local exclude
+        run: |
+          set -euo pipefail
+          python3 -c "
+          import json
+
+          with open('.upstream-claude-md/.github/rulesets/all-branches.json', encoding='utf-8') as fp:
+              ruleset = json.load(fp)
+
+          # Local addition, not present upstream: command-ghostwriter's own
+          # sync-* jobs (this workflow) force-update their PR branch on every
+          # run via peter-evans/create-pull-request, which the upstream
+          # non_fast_forward rule would otherwise block. Re-apply it after
+          # every upstream copy so it survives drift (#503).
+          exclude = ruleset['conditions']['ref_name']['exclude']
+          pattern = 'refs/heads/chore/sync-*'
+          if pattern not in exclude:
+              exclude.append(pattern)
+
+          with open('.github/rulesets/all-branches.json', 'w', encoding='utf-8') as fp:
+              json.dump(ruleset, fp, indent=4, sort_keys=True)
+              fp.write('\n')
+          "
+          rm -rf .upstream-claude-md
+
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.AUTOMATION_APP_ID }}
+          private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
+
+      - name: Create or update pull request
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          sign-commits: true
+          base: develop
+          branch: chore/sync-rulesets
+          delete-branch: true
+          commit-message: "chore: sync all-branches ruleset from tvna/claude-md (#503)"
+          title: "chore: sync all-branches ruleset from tvna/claude-md"
+          body: |
+            Automated sync of `.github/rulesets/all-branches.json` from the
+            master repository [`tvna/claude-md`](https://github.com/tvna/claude-md) (`main`).
+
+            The local exclude pattern `refs/heads/chore/sync-*` (needed so this
+            workflow's own sync-* PR branches aren't blocked by the force-push
+            ban) is re-applied automatically after copying from upstream; it
+            should be present in the diff below. If it is missing, the
+            re-apply step has a bug and this PR should not be merged as-is.
+
+            `.github/rulesets/main.json` is intentionally NOT synced here: it
+            carries command-ghostwriter-specific `required_status_checks` and
+            is a local source of truth. Review required; do not auto-merge.
+
+            Refs #503
