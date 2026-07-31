@@ -110,9 +110,9 @@ describe("RAIL predicate exclusivity and exhaustiveness", () => {
   const NETWORK_RAIL = RAIL.filter((r) => r.id.startsWith("network-"));
   const SERVER_RAIL = RAIL.filter((r) => r.id.startsWith("server-"));
 
-  it("has exactly 15 network entries and 3 server entries", () => {
+  it("has exactly 15 network entries and 4 server entries", () => {
     expect(NETWORK_RAIL).toHaveLength(15);
-    expect(SERVER_RAIL).toHaveLength(3);
+    expect(SERVER_RAIL).toHaveLength(4);
   });
 
   it("every network template matches exactly one network rail entry", () => {
@@ -150,12 +150,13 @@ describe("RAIL counts against real template data", () => {
     "network-sonicwall": 26,
     "network-ubiquiti": 1,
     "network-common": 123,
-    "server-common": 227,
+    "server-common": 216,
     "server-debian": 18,
     "server-rhel": 5,
+    "server-container": 15,
     middleware: 88,
-    ai: 117,
-    ops: 44,
+    ai: 114,
+    ops: 43,
     facility: 20,
   };
 

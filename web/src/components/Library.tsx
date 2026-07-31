@@ -37,7 +37,7 @@ const NETWORK_VENDORS: { id: string; label: string }[] = [
   { id: 'ubiquiti', label: 'Ubiquiti' },
 ];
 const NETWORK_VENDOR_LABELS = new Set(NETWORK_VENDORS.map((v) => v.label));
-const SERVER_DISTRO_LABELS = new Set(['Debian系', 'RHEL系']);
+const SERVER_SPLIT_LABELS = new Set(['Debian系', 'RHEL系', 'コンテナ']);
 
 export const RAIL: RailEntry[] = [
   { id: 'all', label: 'すべて', icon: 'topology', filter: () => true },
@@ -62,7 +62,7 @@ export const RAIL: RailEntry[] = [
     label: 'サーバ (共通)',
     icon: 'server',
     group: 'サーバ',
-    filter: (t) => t.category === 'server' && !SERVER_DISTRO_LABELS.has(t.subCategory),
+    filter: (t) => t.category === 'server' && !SERVER_SPLIT_LABELS.has(t.subCategory),
   },
   {
     id: 'server-debian',
@@ -77,6 +77,13 @@ export const RAIL: RailEntry[] = [
     icon: 'server',
     group: 'サーバ',
     filter: (t) => t.category === 'server' && t.subCategory === 'RHEL系',
+  },
+  {
+    id: 'server-container',
+    label: 'サーバ (コンテナ)',
+    icon: 'server',
+    group: 'サーバ',
+    filter: (t) => t.category === 'server' && t.subCategory === 'コンテナ',
   },
   { id: 'middleware', label: 'ミドルウェア', icon: 'ethernet-port', group: 'その他', filter: (t) => t.category === 'middleware' },
   { id: 'ai', label: 'AIインフラ', icon: 'terminal', group: 'その他', filter: (t) => t.category === 'ai' },
