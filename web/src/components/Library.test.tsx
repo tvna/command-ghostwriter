@@ -73,7 +73,7 @@ describe("countByCategory", () => {
   it("counts only templates matching the given predicate", () => {
     expect(countByCategory(list, (t) => t.category === "server")).toBe(2);
     expect(countByCategory(list, (t) => t.category === "network")).toBe(1);
-    expect(countByCategory(list, (t) => t.category === "dns")).toBe(0);
+    expect(countByCategory(list, (t) => t.category === "middleware")).toBe(0);
   });
 
   it("supports predicates finer than raw category equality", () => {
@@ -148,11 +148,11 @@ describe("RAIL counts against real template data", () => {
     "network-palo-alto": 1,
     "network-sonicwall": 1,
     "network-ubiquiti": 1,
-    "network-common": 169,
-    "server-common": 239,
-    "server-debian": 22,
+    "network-common": 148,
+    "server-common": 227,
+    "server-debian": 18,
     "server-rhel": 5,
-    dns: 51,
+    middleware: 88,
     ai: 117,
     ops: 44,
     facility: 20,
