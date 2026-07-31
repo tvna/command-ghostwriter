@@ -1,0 +1,5 @@
+rule_no,name,from_zone,to_zone,source,destination,application,proto_num,std_port,test_src,action,description
+1,ALLOW-HTTPS-DMZ,untrust,dmz,any,203.0.113.10/32,ssl,6,443,198.51.100.50,allow,公開WebサーバーへのHTTPS着信を許可
+2,ALLOW-DNS-DMZ,untrust,dmz,any,203.0.113.11/32,dns-base,17,53,198.51.100.51,allow,公開DNSサーバーへの名前解決要求を許可
+3,ALLOW-SSH-JUMP,untrust,dmz,198.51.100.0/28,203.0.113.12/32,ssh,6,22,198.51.100.5,allow,保守セグメントからジャンプホストへのSSHを許可
+4,interzone-default,any,any,any,any,any,-,-,-,deny,既定のinterzone-default(全interzone通信を拒否・読み取り専用のため新規作成しない)

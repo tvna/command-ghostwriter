@@ -1,0 +1,5 @@
+entry_no,attacker_ip,tag_name,severity,detection_source,description,release_criteria
+1,198.51.100.23/32,incident-block,critical,IPSシグネチャ91816(Log4Shell exploit attempt),外部公開Webサーバーへの侵害試行を複数回検知,攻撃停止を24時間監視で確認しSOC責任者の承認を得て解除
+2,203.0.113.77/32,incident-block,high,WAF: SQLインジェクション試行をブロック,注文フォームへの不審なパラメータ注入を継続検知,誤検知の可能性を精査し問題なければ48時間後に解除
+3,192.0.2.15/32,incident-block,high,SOC監視: SSHへのブルートフォース試行,踏み台経由と思われる連続ログイン失敗を検知,契約先ISPへの通報後に攻撃停止を確認して解除
+4,203.0.113.0/28,incident-block,critical,脅威インテリジェンス: 既知C2アドレス帯,フィード更新により該当サブネット全体がC2として指定,フィードの指定解除を確認しSOC承認を得て解除

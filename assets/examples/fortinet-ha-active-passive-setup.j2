@@ -1,0 +1,226 @@
+# FortiGate FGCPによるActive-Passiveクラスタ構築とフェイルオーバー検証
+
+FortiGate(FortiOS)2台を使い、FGCP(FortiGate Clustering Protocol)のActive-Passive
+(A-P)構成でHAクラスタを構築します。GUI(`System > HA`)とCLI(`config system ha`)
+の両方の設定手順を示したうえで、`get system ha status`によるクラスタ同期状態の
+確認、そして`execute ha failover set/unset`による意図的なフェイルオーバー試験と
+復旧までを、計画メンテナンス枠({{ maintenance_window }})の中で実施します。
+
+## 目的
+
+2台のFortiGateにFGCP Active-Passive HAを構成し、Group ID `{{ group_id }}`・
+Group name `{{ group_name }}`・Heartbeat interfaces({{ heartbeat_interfaces | length }}
+系統)を両機で一致させたクラスタを確立できるようになることを目指します。あわせて、
+`get system ha status`のConfiguration Statusが両ノードとも`in-sync`であることを
+確認し、`execute ha failover`コマンドで意図的なフェイルオーバーを発生させて
+Primary/Secondaryの役割交代を検証したうえで、必ずフェイルオーバー状態を解除して
+通常運用に復旧できるようになることを目指します。
+
+OPNsenseはこの課題(二台構成のActive-Passive冗長化と状態同期・フェイルオーバー
+検証)をCARP(Common Address Redundancy Protocol)とpfsyncという別の機構で解決
+しますが、Fortinet (FortiOS / FortiGate)には同名の機構はなく、FGCP (FortiGate
+Clustering Protocol) Active-Passive HA with virtual MAC and heartbeat-based
+session syncという独自の仕組みで同じ課題を解決します。
+
+## 用語解説
+
+- **FGCP(FortiGate Clustering Protocol)**: FortiGate同士でHAクラスタを構成する
+  Fortinet独自のプロトコル。Active-Passive(A-P)モードでは1台のみがPrimaryとして
+  通信を処理し、残りはSecondaryとして待機する
+- **Group ID**: `config system ha`の`set group-id`で設定する、クラスタを識別する
+  番号。クラスタを構成する全メンバーで一致させる必要があり、インターフェースの
+  仮想MACアドレス(virtual MAC)の決定にも影響する
+- **Heartbeat interface(hbdev)**: `set hbdev <インターフェース1> <優先度1>
+  <インターフェース2> <優先度2>`の形式で指定する、クラスタメンバー間のハート
+  ビート通信専用インターフェース
+- **Configuration Status**: `get system ha status`の出力に含まれる、メンバー
+  ごとの設定同期状態。`in-sync`(同期済み)または`out-of-sync`(未同期)の
+  いずれかで表示される
+- **execute ha failover set/unset**: Primary機を強制的にフェイルオーバー
+  (Secondary)状態へ固定する/解除するコマンド。テスト・トラブルシューティング・
+  保守・デモ目的専用であり、`unset`するまで手動での解除以外に元へ戻す方法がない
+
+## シナリオ設定
+
+| 項目 | 値 |
+|---|---|
+| Group ID | {{ group_id }} |
+| Group name | {{ group_name }} |
+| Primary機ホスト名 | {{ primary_hostname }} |
+| Primary機のDevice priority | {{ primary_device_priority }}(128以上) |
+| Secondary機ホスト名 | {{ secondary_hostname }} |
+| フェイルオーバー試験のcluster_id | {{ failover_cluster_id }} |
+| 試験実施の計画メンテナンス枠 | {{ maintenance_window }} |
+
+Heartbeat interfaces({{ heartbeat_interfaces | length }}系統、両機で一致させる):
+
+| # | インターフェース | 優先度 |
+|---|------------------|--------|
+{% for hb in heartbeat_interfaces %}| {{ loop.index }} | {{ hb.interface }} | {{ hb.priority }} |
+{% endfor %}
+
+HAパスワードについて: {{ ha_password_note }}
+
+## 手順
+
+### 1. 物理接続とホスト名を確認する
+
+トポロジ図のとおり、両機のHeartbeat interfaces
+({% for hb in heartbeat_interfaces %}{{ hb.interface }}{% if not loop.last %}・{% endif %}{% endfor %})
+が接続されていることを確認します。クラスタ形成後は個々の筐体を区別しにくくなる
+ため、設定投入前にホスト名を設定しておきます(クラスタ運用時に各ユニットを識別
+しやすくするための操作です)。
+
+```bash
+config system global
+    set hostname {{ primary_hostname }}
+end
+```
+
+対向機では、同じ要領で `{{ secondary_hostname }}` を設定します。
+
+### 2. Primary機でFGCP Active-Passive HAを有効化する(GUI)
+
+Primary機のGUIで `System > HA` を開き、次の値を入力します。
+
+| 項目 | 値 |
+|---|---|
+| Mode | Active-Passive |
+| Device priority | {{ primary_device_priority }} |
+| Group ID | {{ group_id }} |
+| Group name | {{ group_name }} |
+| Password | ******** |
+| Heartbeat interfaces | {% for hb in heartbeat_interfaces %}{{ hb.interface }}{% if not loop.last %} と {% endif %}{% endfor %} |
+
+Device priority以外の項目は、クラスタを構成する全メンバーで一致させる必要が
+あります。残りの設定項目は既定値のままにし(クラスタ稼働後にも変更可能)、
+`OK`をクリックします。クラスタネゴシエーション中はFGCPがインターフェースの
+MACアドレスを切り替えるため、一時的に接続が途切れることがあります。
+
+### 3. 同じ内容をCLIで設定する場合
+
+```bash
+config system ha
+    set mode a-p
+    set group-id {{ group_id }}
+    set group-name {{ group_name }}
+    set password ********
+    set hbdev {% for hb in heartbeat_interfaces %}{{ hb.interface }} {{ hb.priority }}{% if not loop.last %} {% endif %}{% endfor %}
+end
+```
+
+このCLI手順にはDevice priorityに相当するコマンドは含まれません。特定の機体を
+優先的にPrimaryにしたい場合は、手順2のGUIの`System > HA`で`Device priority`を
+設定してください。CLIのみで構成した場合、Primaryの選定は既定の条件
+(uptimeなど)に委ねられます。
+
+### 4. Secondary機を初期化してクラスタに参加させる
+
+GUIで構成する場合は、対向機を工場出荷状態に戻してGUIアクセスできる状態にした
+うえで、`Device priority`の設定を**省略**した状態で手順2と同じ値(Mode/Group ID/
+Group name/Password/Heartbeat interfaces)を入力します。
+
+CLIで構成する場合は、手順3と同じ`config system ha`ブロックを、ホスト名のみ
+`{{ secondary_hostname }}`という固有の値にして投入します。
+
+```bash
+config system global
+    set hostname {{ secondary_hostname }}
+end
+config system ha
+    set mode a-p
+    set group-id {{ group_id }}
+    set group-name {{ group_name }}
+    set password ********
+    set hbdev {% for hb in heartbeat_interfaces %}{{ hb.interface }} {{ hb.priority }}{% if not loop.last %} {% endif %}{% endfor %}
+end
+```
+
+投入後、両機はHeartbeat interfaces経由でネゴシエーションし、単一のクラスタ
+として動作を始めます。
+
+### 5. クラスタの同期状態とPrimary/Secondaryの役割をCLIで確認する
+
+いずれかの機体にログインし、次のコマンドでクラスタ全体の状態を確認します。
+
+```bash
+get system ha status
+```
+
+出力の`Configuration Status`欄で、両ユニットとも`in-sync`と表示されていること
+を確認します(各行はユニットのシリアル番号ごとに表示されます)。出力末尾の
+`Primary` / `Secondary`欄では、ホスト名`{{ primary_hostname }}`/
+`{{ secondary_hostname }}`に対応する機体がそれぞれPrimary/Secondaryとして
+正しく表示されていることも確認します。GUIから確認する場合は、Dashboardの
+`HA Status`ウィジェット、または`System > HA`ページでも同期状況(同期済みは
+緑のチェックマーク、未同期は赤アイコン)を確認できます。
+
+### 6. 計画メンテナンス枠内でフェイルオーバーを試験する
+
+**この手順の`execute ha failover`コマンドはテスト・保守目的専用のため、計画
+メンテナンス枠({{ maintenance_window }})の中でのみ実施してください。** 本番
+トラフィックが流れている時間帯には実行しないでください。
+
+Primary機で次のコマンドを実行し、確認プロンプトに`y`で応答します。
+
+```bash
+execute ha failover set {{ failover_cluster_id }}
+```
+
+フェイルオーバーが強制されている間は、次のコマンドで状態を確認できます。
+
+```bash
+execute ha failover status
+```
+
+`get system ha status`を再度実行し、元Secondary機がPrimaryとして昇格して
+いること、元Primary機側のPrimary選定理由の欄に`EXE_FAIL_OVER flag is set`
+という記述が現れることを確認します。
+
+### 7. 強制フェイルオーバーを解除し、通常運用に復旧する
+
+強制フェイルオーバー状態は手動で解除するまで維持されるため、試験終了後は
+必ず次のコマンドで解除します。
+
+```bash
+execute ha failover unset {{ failover_cluster_id }}
+```
+
+確認プロンプトに`y`で応答した後、`get system ha status`を再度実行し、
+Primary選定理由が通常の条件(override priorityやuptimeの比較など)に戻って
+いること、両機とも`in-sync`のままであることを確認します。
+
+## 動作確認
+
+- `get system ha status`のConfiguration Statusで、両ユニットとも`in-sync`と
+  表示されること
+- 出力末尾のPrimary/Secondary欄で、`{{ primary_hostname }}`がPrimary、
+  `{{ secondary_hostname }}`がSecondaryとして表示されること(手順7完了後の
+  通常運用時点)
+- `System > HA`ページ、またはDashboardの`HA Status`ウィジェットで両機が
+  同期済み(緑のチェックマーク)と表示されること
+- 手順6実施後、`execute ha failover status`が`failover status: set`を返し、
+  `get system ha status`で元Secondary機がPrimaryへ昇格していること
+- 手順7実施後、`get system ha status`のPrimary選定理由がEXE_FAIL_OVER以外の
+  通常条件に戻っており、Configuration Statusが両機とも`in-sync`のままである
+  こと
+
+## 注意事項
+
+- **`execute ha failover set/unset`は計画メンテナンス枠でのみ実行すること。**
+  Fortinet公式ドキュメントでも、テスト・トラブルシューティング・保守・デモ
+  目的専用であり、計画メンテナンス枠の外の本番環境では使用しないよう明記
+  されています。強制フェイルオーバー状態は手動で`unset`するまで解除されない
+  ため、手順6を実施したセッションでは必ず手順7まで完了させてください。
+- **Group ID・Group name・Password・Heartbeat interfacesは両機で完全に一致
+  させること。** 一致しない場合クラスタが形成されません。Device priorityは
+  唯一、両機で異なる値を設定してよい項目です(GUIでのみ設定可能。値が大きい
+  ほどPrimaryになりやすい)。
+- **初回クラスタ形成時は一時的に接続が切れることを想定すること。** FGCPが
+  クラスタネゴシエーション中にインターフェースのMACアドレスを、Group ID
+  `{{ group_id }}`に基づく仮想MACアドレスへ切り替えるため、その間に短時間の
+  疎通断が発生する場合があります。
+- HAパスワードについて: {{ ha_password_note }} 設定ファイルや本手順書に平文の
+  実値を記載しないでください。
+- FortiGate A-P HAクラスタでは、2台分のFortiGuardサービスライセンスを1本に
+  共有できます。ライセンス費用の見積もり時にはこの点も考慮してください。

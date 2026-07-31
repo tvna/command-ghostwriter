@@ -1,0 +1,7 @@
+kind,name,group,type,value,tag,src_ref,dst_ref,svc_ref,action,description
+address,db-host-01,grp-db-servers,IP Netmask,10.10.20.11/32,tag-backup-target,-,-,-,-,DBサーバ1(主系)
+address,db-host-02,grp-db-servers,IP Netmask,10.10.20.12/32,tag-backup-target,-,-,-,-,DBサーバ2(副系)
+address,net-backup-lan,-,IP Netmask,10.10.30.0/24,tag-backup-source,-,-,-,-,バックアップ用LANセグメント全体
+service,svc-mysql-repl,grp-backup-services,TCP,3306,-,-,-,-,-,MySQLレプリケーション/バックアップ通信
+service,svc-backup-agent,grp-backup-services,TCP,10000,-,-,-,-,-,バックアップエージェント通信
+rule,allow-backup-lan-to-db,-,universal,-,tag-backup-source,net-backup-lan,grp-db-servers,grp-backup-services,Allow,バックアップLANからDBサーバ群へのレプリケーション/バックアップ許可

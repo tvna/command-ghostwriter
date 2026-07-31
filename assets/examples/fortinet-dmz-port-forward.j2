@@ -1,0 +1,251 @@
+# FortiGateのDMZ公開サーバーポートフォワード構成
+
+FortiGate (FortiOS) の Virtual IP (VIP) に Port Forwarding を設定し、WAN側の
+外部IPアドレス`{{ external_ip }}`のポート`{{ external_port }}`宛の通信のみを、
+DMZ内サーバー`{{ mapped_ip }}`のポート`{{ mapped_port }}`へ転送します。VIP
+オブジェクト自体は宛先アドレス変換(DNAT)を定義するだけで通信そのものを許可
+しないため、作成したVIP(`{{ vip_name }}`)をFirewall Policyの宛先
+(Destination)に指定し、Serviceを公開ポートに一致するカスタムサービス
+(`{{ service_name }}`)に絞ることで、最小公開ポートでの構成とします。GUIと
+CLIの両方の手順を併記し、最後に外部からの到達性を検証します。
+
+## 目的
+
+WAN側で受け付ける公開ポートをVIPのPort Forwardingで1つの外部ポートから1つの
+内部ポートへ限定し、そのVIPをFirewall PolicyのDestinationとして参照すること
+で、DMZサーバーを最小公開ポートで安全に公開できるようになることを目指します。
+あわせて、VIPの作成だけでは通信が許可されないというFortiOSの仕組みを理解し、
+GUI・CLIのどちらからでも同じ構成を再現し、外部からの到達性を検証できるように
+なることを目指します。
+
+## 用語解説
+
+- **Virtual IP (VIP)**: 外部IPアドレスを内部IPアドレスにマッピングする、
+  FortiGateの宛先アドレス変換(DNAT)の仕組み。GUIでは
+  `Policy & Objects > Virtual IPs` の `Virtual IP` タブ、CLIでは
+  `config firewall vip` で作成する。「Virtual IPs can be configured for
+  IPv4 and IPv6. After creating the VIP, add it to a firewall policy.」と
+  説明されており、VIPを作成しただけでは通信は許可されない
+- **Port Forwarding (portforward)**: VIPのオプション機能。内部サーバーの
+  ポート番号を外部から隠したり、複数の内部サーバーを同じ公開IPアドレスの
+  異なるポートにマッピングしたりするために使う。GUIの `Port Forwarding` を
+  有効にすると、`Protocol` / `External Service Port` / `Map to IPv4 port`
+  の各フィールドが表示される。CLIでは `set portforward enable` に加えて、
+  `set protocol`(小文字の `tcp`/`udp` 等)、`set extport`(外部ポート)、
+  `set mappedport`(マッピング先ポート)を設定する
+- **Static NAT (VIPのType)**: 外部IPアドレスまたはアドレス範囲を使う、最も
+  基本的なVIPの種類。今回のシナリオはこのTypeを前提とする
+- **Destination NAT (DNAT)**: 宛先アドレス/ポートを変換する仕組み。
+  「Where DNAT is configured by creating virtual IPs and selecting the
+  VIPs in firewall policies, central NAT is not configured in the
+  firewall policy.」と説明されており、VIPをFirewall Policyの `Destination`
+  (CLIでは `dstaddr`)に指定することでDNATが有効になる
+- **config firewall policy**: FortiOS CLIでFirewall Policyを作成するブロッ
+  ク構文。`edit <policyid>` で個々のポリシーを選択し、`set srcintf` /
+  `set dstintf` / `set srcaddr` / `set dstaddr` / `set action` /
+  `set schedule` / `set service` / `set nat`(`enable`/`disable`)等を
+  セットし、`next` で次のポリシーへ、`end` でブロックを抜ける
+- **NAT(Firewall Policyの`nat`オプション)**: このポリシー自身が送信元
+  アドレスを変換(SNAT)するかどうかの設定。VIPの `External IP address/range`
+  の説明には「The external IP address is also used to perform SNAT for
+  the mapped server when the server outbound traffic with a destination
+  interface that matches the external interface. The firewall policy
+  must also have NAT enabled.」とあり、これはDMZサーバー自身が同じ外部
+  インターフェース経由で発信通信を行う場合の話であって、本手順の「WANから
+  DMZへの着信のみを転送する」用途では必須ではない
+- **config firewall service custom**: Firewall Policyの`service`に指定する
+  サービスオブジェクトをCLIで作成するブロック。`set protocol`(大文字の
+  `TCP`/`UDP`/`UDP-Lite`/`SCTP` 等)と、対応する`set tcp-portrange`/
+  `set udp-portrange`でポート範囲を指定する
+
+## シナリオ設定
+
+今回、WANからDMZへ公開するポートフォワードの設定値は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| WAN側インターフェース(wan_interface) | `{{ wan_interface }}` |
+| DMZ側インターフェース(dmz_interface) | `{{ dmz_interface }}` |
+| VIPオブジェクト名(vip_name) | `{{ vip_name }}` |
+| 外部IPアドレス(external_ip / extip) | `{{ external_ip }}` |
+| マッピング先の内部IPアドレス(mapped_ip / mappedip) | `{{ mapped_ip }}` |
+| プロトコル(protocol) | `{{ protocol }}` |
+| 外部公開ポート(external_port / extport) | {{ external_port }} |
+| マッピング先ポート(mapped_port / mappedport) | {{ mapped_port }} |
+| Firewall Serviceオブジェクト名(service_name) | `{{ service_name }}` |
+| Firewall Policy名(policy_name) | `{{ policy_name }}` |
+| Firewall PolicyのID(policy_id) | {{ policy_id }} |
+| 許可する送信元(allowed_source / srcaddr) | `{{ allowed_source }}` |
+
+`allowed_source` が `all` の場合、インターネット側の任意の送信元から
+`{{ external_ip }}:{{ external_port }}` 宛の通信が対象になります。特定の
+送信元だけに絞りたい場合は、事前に `Policy & Objects > Addresses` へ
+アドレスオブジェクトを登録し、その名前を `allowed_source` に指定してくだ
+さい(アドレスオブジェクト自体の作成は本手順書の対象外です)。
+
+## 手順
+
+### 1. 現状のVIP一覧とFirewall Policy一覧を確認する(変更前の基準を取る)
+
+新しいVIPやFirewall Policyを1件も追加する前に、現状を確認します。
+
+- `Policy & Objects > Virtual IPs` を開き、`{{ vip_name }}` と同名のVIPが
+  存在しないことを確認します。FortiOSはVIP同士の重複(同じ外部インター
+  フェース・外部IPアドレス)を自動検知しないため、既存VIPと外部IP/ポートが
+  重複していないことも目視で確認してください。
+- `Policy & Objects > Firewall Policy` を開き、既存ポリシーの並び順(評価順)
+  と、`{{ policy_id }}` 番のポリシーIDが未使用であることを確認します。
+
+### 2. VIPをGUIで作成する
+
+1. `Policy & Objects > Virtual IPs` を開き、`Virtual IP` タブを選択します。
+2. `Create New` をクリックします。
+3. `Name` に `{{ vip_name }}` を入力します。
+4. `Network` セクションを設定します。
+   - `Interface` を `{{ wan_interface }}` に設定します。
+   - `External IP Address/Range` を `{{ external_ip }}` に設定します。
+   - `Map to` の `IPv4 address/range` を `{{ mapped_ip }}` に設定します。
+5. `Optional Filters` は無効のままにします(このシナリオでは送信元アドレス
+   やサービスによるVIP自体のフィルタは使用しません)。
+6. `Port Forwarding` を有効にし、フィールドを設定します。
+   - `Protocol` を `{{ protocol | upper }}` に設定します。
+   - `External service port` を `{{ external_port }}` に設定します。
+   - `Map to IPv4 port` を `{{ mapped_port }}` に設定します。
+7. `OK` をクリックして保存します。
+
+### 3. 同じVIPをCLIでも作成する
+
+GUIと同じ内容を、`config firewall vip` でも登録します。
+
+```bash
+config firewall vip
+    edit "{{ vip_name }}"
+        set extip {{ external_ip }}
+        set extintf "{{ wan_interface }}"
+        set mappedip "{{ mapped_ip }}"
+        set portforward enable
+        set protocol {{ protocol }}
+        set extport {{ external_port }}
+        set mappedport {{ mapped_port }}
+    next
+end
+```
+
+この時点ではVIP(宛先アドレス変換の定義)を作成しただけで、通信そのものは
+まだ許可されていません。手順5でFirewall Policyの `Destination` に指定する
+まで、`{{ external_ip }}:{{ external_port }}` 宛の通信はFortiGateへ到達
+しても転送されません。
+
+### 4. 公開ポートに対応するFirewall Serviceオブジェクトを作成する
+
+最小公開ポートで構成するため、Firewall Policyの `Service` にはビルトインの
+`ALL` を使わず、外部公開ポート(`{{ external_port }}`)に一致するカスタム
+サービスを作成します。
+
+```bash
+config firewall service custom
+    edit "{{ service_name }}"
+{% if protocol | upper == "TCP" %}        set protocol TCP
+        set tcp-portrange {{ external_port }}
+{% elif protocol | upper == "UDP" %}        set protocol UDP
+        set udp-portrange {{ external_port }}
+{% endif %}    next
+end
+```
+
+GUIから作成する場合は `Policy & Objects > Services > Create New` を開き、
+`Name` に `{{ service_name }}`、Category を `TCP/UDP/SCTP` にした上で、
+`{{ protocol | upper }} Port` セクションの `Destination Port` に
+`{{ external_port }}` を入力して `OK` をクリックします。
+
+### 5. Firewall PolicyをGUI/CLIで作成し、DestinationにVIPを指定する
+
+GUI:
+
+1. `Policy & Objects > Firewall Policy` を開き、`Create New` をクリック
+   します。
+2. `Name` に `{{ policy_name }}` を入力します。
+3. `Incoming Interface` を `{{ wan_interface }}` に設定します。
+4. `Outgoing Interface` を `{{ dmz_interface }}` に設定します。
+5. `Source` を `{{ allowed_source }}` に設定します。
+6. `Destination` に、手順2/3で作成したVIP `{{ vip_name }}` を指定します。
+7. `Schedule` を `always` のままにします。
+8. `Service` に、手順4で作成した `{{ service_name }}` を指定します(既定の
+   `ALL` は使用しません)。
+9. `Action` が `ACCEPT` になっていることを確認します。
+10. `NAT` は無効のままにします(送信元アドレスは変換せず、DMZサーバー側で
+    接続元の送信元IPアドレスをそのまま確認できるようにします)。
+11. `OK` をクリックして保存します。
+
+CLI:
+
+```bash
+config firewall policy
+    edit {{ policy_id }}
+        set name "{{ policy_name }}"
+        set srcintf "{{ wan_interface }}"
+        set dstintf "{{ dmz_interface }}"
+        set srcaddr "{{ allowed_source }}"
+        set dstaddr "{{ vip_name }}"
+        set action accept
+        set schedule "always"
+        set service "{{ service_name }}"
+        set nat disable
+    next
+end
+```
+
+### 6. 外部からの到達性を検証する
+
+DMZセグメントの外(WAN側、またはWAN側に見立てた別セグメント)にある端末から、
+`{{ external_ip }}` の `{{ external_port }}` 番ポートへ接続します。
+
+```bash
+curl -k -m 5 -o /dev/null -w "HTTP %{http_code}\n" https://{{ external_ip }}:{{ external_port }}/
+```
+
+対象がHTTP以外のサービスの場合は、`curl` の代わりに
+`nc -zv {{ external_ip }} {{ external_port }}` 等、実際のサービスに応じた
+疎通確認コマンドに読み替えてください。
+
+## 動作確認
+
+- `{{ external_ip }}:{{ external_port }}` への接続が成功し、応答が
+  `{{ mapped_ip }}:{{ mapped_port }}` で稼働するサービスから返っていること
+  (サービス側のバナーやレスポンス内容で確認する)
+- `Policy & Objects > Virtual IPs` の一覧に `{{ vip_name }}` が表示され、
+  `Interface` / `External IP` / `Map to` / `Port Forwarding` の設定値が
+  シナリオ設定と一致していること
+- `Policy & Objects > Firewall Policy` の一覧に `{{ policy_name }}`
+  (ID `{{ policy_id }}`)が表示され、`Destination` が `{{ vip_name }}`、
+  `Service` が `{{ service_name }}` になっていること
+- `{{ mapped_ip }}:{{ mapped_port }}` 以外の内部ポート、および
+  `{{ external_port }}` 以外の外部ポートへは、この設定変更後もWAN側から
+  到達できないこと(最小公開ポートが維持されていること)
+- 手順1で確認した既存のVIP・Firewall Policyの並び順・内容が、意図せず変更
+  されていないこと
+
+## 注意事項
+
+- **VIPの作成だけでは通信は許可されません。** VIPはあくまで宛先アドレス
+  変換(DNAT)の定義であり、実際に通信を許可するのは手順5のFirewall Policy
+  です。手順3までしか実施しないまま「設定した」と判断しないでください。
+- **FortiOSはVIP同士の外部IP/ポートの重複を自動検知しません。** 既存VIPと
+  意図せず同じ `External IP Address/Range` を使ってしまうと、想定外の
+  ポート転送が発生する可能性があります。手順1で必ず既存VIPを確認し、必要
+  であればSecurity Fabricのセキュリティレーティングレポートで重複の有無を
+  確認してください。
+- **最小公開ポートを維持すること。** Firewall Policyの `Service` は既定の
+  `ALL` ではなく、手順4で作成した外部公開ポート(`{{ external_port }}`)に
+  一致するカスタムサービスのみを指定してください。`ALL` のまま運用すると、
+  VIPで定義した以外のポートに対しても意図せず広く到達性を与えるおそれが
+  あります。
+- `NAT` オプションを有効化すべきかどうかは通信の向きによって異なります。
+  今回のようにWANからDMZへの着信のみを転送する場合は無効のままで構いません
+  が、DMZサーバー自身が同じ外部インターフェース経由で発信通信を行い、その
+  送信元をVIPの外部IPアドレスに変換したい場合は、一次情報の説明のとおり
+  `NAT` を有効にする必要があります。
+- CLI/GUIへのログインに使う管理者パスワードやAPIトークンは、本手順書や
+  チケット、ログに平文で残さないでください。記録が必要な場合は
+  `********` のようにマスクし、秘密管理ツール等で別途安全に保管してくだ
+  さい。

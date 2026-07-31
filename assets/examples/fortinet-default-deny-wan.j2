@@ -1,0 +1,195 @@
+# FortiGateのWANデフォルト拒否ポリシー構築
+
+FortiGate (FortiOS) の Firewall Policy を用いて、WAN側を暗黙拒否(implicit deny)
+前提とし、CSV で定義した{{ csv_rows | length }}件のうち action が accept の行
+のみを最小許可ポリシーとして登録します。GUI での登録手順と、同内容を投入する
+CLI(`config firewall policy`)手順を併記し、最後に Policy match ツールで実際
+にどのポリシーへ一致するかを検証します。ポリシーは一覧に表示される順序で評価
+されるため、明示的デフォルト拒否ポリシーは必ず許可ポリシーより後ろに登録します。
+
+## 目的
+
+WAN側のFirewall Policyを「登録したどのポリシーにも一致しない通信はすべて拒否
+される」という既定動作(implicit deny)の上に成り立たせ、業務上必要な通信のみ
+を最小限のacceptポリシーとして明示的に登録できるようになることを目指します。
+あわせて、Policy matchツールで許可・拒否それぞれの通信がどのポリシーに一致す
+るかを検証し、ポリシーの並び順(評価順)を安全に管理できるようになることを
+目指します。
+
+## 用語解説
+
+- **Firewall Policy**: FortiGateでトラフィックを通過させるために必須の設定
+  単位。GUIでは `Policy & Objects > Firewall Policy` から作成する。設定した
+  各ポリシーの条件(Incoming interface(s) / Outgoing interface(s) / Source
+  address(es) / Destination address(es) / Service(s) / Schedule 等)に一致
+  しない通信は拒否される
+- **暗黙拒否 (implicit deny)**: 設定したFirewall Policyのいずれの条件にも
+  一致しなかった通信を、最終的に拒否(ドロップ)する既定動作。「If no IPv4
+  policy matches the traffic, then it will match the implicit deny policy
+  and will be dropped.」と説明される
+- **config firewall policy**: FortiOS CLIでFirewall Policyを作成するブロッ
+  ク構文。`edit <policy ID>` で個々のポリシーを選択し、`set srcintf` /
+  `set dstintf` / `set srcaddr` / `set dstaddr` / `set action` /
+  `set schedule` / `set service` 等をセットし、`next` で次のポリシーへ、
+  `end` でブロックを抜ける
+- **config firewall service custom**: Firewall Policyの`service`に指定する
+  サービスオブジェクトをCLIで作成するブロック。`set protocol`(TCP/UDP/
+  UDP-Lite/SCTP)と、対応する`set tcp-portrange`/`set udp-portrange`等で
+  ポート範囲を指定する
+- **By Sequence(ポリシー一覧のビュー)**: `Policy & Objects` のポリシー一覧
+  には Interface Pair View / Sequence Grouping View / By Sequence の3つの
+  表示形式があり、いずれも「通信の一致判定に使われる順序」でポリシーを表示
+  する。並び順を変更するには、対象ポリシーを選択して `More > Move by ID` か
+  ら移動方向(Above/Below)と Destination policy ID を指定する
+- **Policy match(Policy Lookup)ツール**: ポリシー一覧画面から実行できる検証
+  ツール。送信元インターフェース・プロトコル・送信元アドレス・宛先アドレス・
+  送信元ポート・宛先ポートを入力すると、その通信がどのFirewall Policyに一致
+  するかを判定し、一致したポリシーを一覧画面上でハイライト表示する
+
+## シナリオ設定
+
+今回 WAN(`wan1`)からDMZ(`dmz`)方向に登録する最小許可ポリシーと明示的デフォ
+ルト拒否ポリシーは、次の{{ csv_rows | length }}件です。`rule_no` の昇順が
+そのままポリシーの並び順(評価順)になります。
+
+| rule_no | srcintf | dstintf | name | action | srcaddr | dstaddr | service | proto | port | description |
+|---------|---------|---------|------|--------|---------|---------|---------|-------|------|--------------|
+{% for r in csv_rows %}| {{ r["rule_no"] }} | {{ r["srcintf"] }} | {{ r["dstintf"] }} | {{ r["name"] }} | {{ r["action"] }} | {{ r["srcaddr"] }} | {{ r["dstaddr"] }} | {{ r["service"] }} | {{ r["proto"] }} | {{ r["port"] }} | {{ r["description"] }} |
+{% endfor %}
+`srcaddr`/`dstaddr` 列のアドレスオブジェクト(`dmz-web-server` 等)は、
+`Policy & Objects > Addresses` に事前登録済みであることを前提とします。
+proto/portが `-` の行(action が deny の行)は既定サービス `ALL` を使用する
+ため、専用のサービスオブジェクトを作成しません。
+
+## 手順
+
+### 1. 現状のFirewall Policy一覧と対象オブジェクトを確認する(変更前の基準を取る)
+
+新しいポリシーを1件も追加する前に、現状を確認します。
+
+- `Policy & Objects > Firewall Policy` を開き、既存ポリシーの並び順(評価順)
+  と、現在許可されている通信の内容を確認し、記録します。
+- シナリオ設定の `srcaddr`/`dstaddr` 列にあるアドレスオブジェクトが
+  `Policy & Objects > Addresses` に存在することを確認します(アドレスオブ
+  ジェクト自体の作成は本手順書の対象外です)。
+
+### 2. 必要なサービスオブジェクトをCLIで作成する(action が accept の行)
+
+シナリオ設定の `service`/`proto`/`port` に対応するカスタムサービスを、
+`config firewall service custom` で作成します。
+
+```bash
+{% for r in csv_rows %}{% if r["action"] == "accept" %}config firewall service custom
+    edit "{{ r["service"] }}"
+{% if r["proto"] == "TCP" %}        set protocol TCP
+        set tcp-portrange {{ r["port"] }}
+{% elif r["proto"] == "UDP" %}        set protocol UDP
+        set udp-portrange {{ r["port"] }}
+{% endif %}    next
+end
+{% endif %}{% endfor %}```
+
+### 3. 最小許可ポリシーをGUIで登録する(action が accept の行)
+
+`Policy & Objects > Firewall Policy > Create New` から、シナリオ設定の
+`action` が `accept` の行を `rule_no` の昇順で登録します。各行につき、次の
+フィールドを表の値のまま入力します: Name / Incoming Interface / Outgoing
+Interface / Source / Destination / Service / Schedule(`always`固定) /
+Action(`ACCEPT`固定)。
+
+{% for r in csv_rows %}{% if r["action"] == "accept" %}- rule_no {{ r["rule_no"] }}: Name=`{{ r["name"] }}` / Incoming Interface=`{{ r["srcintf"] }}` / Outgoing Interface=`{{ r["dstintf"] }}` / Source=`{{ r["srcaddr"] }}` / Destination=`{{ r["dstaddr"] }}` / Service=`{{ r["service"] }}`
+{% endif %}{% endfor %}
+入力後は `OK` で保存します。
+
+### 4. 同じポリシーをCLIでも登録する
+
+GUIと同じ内容を、`config firewall policy` でも登録します。`edit` に続く
+ポリシーIDは `rule_no` の値をそのまま使用します。
+
+```bash
+{% for r in csv_rows %}{% if r["action"] == "accept" %}config firewall policy
+    edit {{ r["rule_no"] }}
+        set name "{{ r["name"] }}"
+        set srcintf "{{ r["srcintf"] }}"
+        set dstintf "{{ r["dstintf"] }}"
+        set srcaddr "{{ r["srcaddr"] }}"
+        set dstaddr "{{ r["dstaddr"] }}"
+        set action accept
+        set schedule "always"
+        set service "{{ r["service"] }}"
+        set logtraffic all
+        set nat enable
+    next
+end
+{% endif %}{% endfor %}```
+
+### 5. 明示的デフォルト拒否ポリシーを最後尾に登録する
+
+action が `deny` の行は、暗黙拒否と同じ効果をログに残すためのポリシーです。
+手順3・4で登録した `accept` ポリシーより**必ず後ろ**(評価順で最後)に置いて
+ください。ポリシーは一覧に表示される順序で評価されるため、先に `deny` を
+置くと後続の `accept` ポリシーが一致する前に拒否されてしまいます。
+
+```bash
+{% for r in csv_rows %}{% if r["action"] == "deny" %}config firewall policy
+    edit {{ r["rule_no"] }}
+        set name "{{ r["name"] }}"
+        set srcintf "{{ r["srcintf"] }}"
+        set dstintf "{{ r["dstintf"] }}"
+        set srcaddr "{{ r["srcaddr"] }}"
+        set dstaddr "{{ r["dstaddr"] }}"
+        set action deny
+        set schedule "always"
+        set service "{{ r["service"] }}"
+        set logtraffic all
+    next
+end
+{% endif %}{% endfor %}```
+
+`Policy & Objects > Firewall Policy` の一覧(`By Sequence`表示)で並び順を
+確認し、意図した順序と異なる場合は対象ポリシーを選択して `More > Move by ID`
+から `Above`/`Below` と Destination policy ID を指定して修正してください。
+
+### 6. Policy matchツールで一致するポリシーを検証する
+
+`Policy & Objects` のポリシー一覧画面で `Policy match` を開き、通信条件
+(送信元インターフェース・プロトコル・送信元アドレス・宛先アドレス・送信元
+ポート・宛先ポート)を入力して `Find matching policy` をクリックします。
+
+1. シナリオ設定の `accept` 行それぞれについて、対応する通信条件を入力し、
+   一致したポリシーが同じ `name`(手順3・4で登録した名前)であることを確認
+   します。
+2. シナリオ設定に無い通信(未許可の宛先ポート等)の条件を入力し、一致した
+   ポリシーが手順5の明示的デフォルト拒否ポリシー
+   ({% for r in csv_rows %}{% if r["action"] == "deny" %}`{{ r["name"] }}`{% endif %}{% endfor %})
+   であることを確認します。
+
+## 動作確認
+
+- Policy matchで、シナリオ設定の `accept` 行に対応する通信が、それぞれ意図
+  した `name` のポリシーに一致すること
+- Policy matchで、シナリオ設定に無い通信(未許可のポート等)が、明示的デフォ
+  ルト拒否ポリシーに一致すること
+- `Policy & Objects > Firewall Policy` の一覧(`By Sequence`)で、`accept`
+  ポリシーが `deny` ポリシーより上位(評価順で先)に並んでいること
+- 手順1で記録した既存ポリシーの並び順・内容が、意図せず変更されていないこと
+
+## 注意事項
+
+- **並び順を厳守すること。** ポリシーは一覧に表示される順序で評価されるた
+  め、`accept` ポリシーと `deny` ポリシーの並び順を誤ると、意図しない拒否・
+  許可が発生します。並び順は `More > Move by ID` でいつでも修正できます。
+- **一致する条件が1つもない通信は、この手順で作成した明示的デフォルト拒否
+  ポリシーの有無にかかわらず、既定で拒否されます(暗黙拒否)。** 今回の
+  `deny` ポリシーは、この既定動作をログに残すために明示化するものです。
+- Firewall Policyの変更がFortiGate自身の管理アクセス(GUI/SSHログイン)を
+  経由するインターフェースに影響する場合、手順3・4の `accept` ポリシーの
+  登録と手順6の検証が完了するまで、既存の広めの許可ポリシーを無効化・削除
+  しないでください。
+- カスタムサービス(`config firewall service custom`)の `protocol` には
+  TCP/UDP/UDP-Lite/SCTPのいずれかを指定し、対応するポート範囲
+  (`set tcp-portrange`/`set udp-portrange`等)を設定してください。組み合わ
+  せを誤ると、意図したポートで一致しないサービスオブジェクトになります。
+- CLI/GUIへのログインに使う管理者パスワードやAPIトークンは、本手順書や
+  ログに平文で残さないでください。値を記録する場合は `********` のように
+  マスクし、秘密管理ツール等で別途安全に保管してください。

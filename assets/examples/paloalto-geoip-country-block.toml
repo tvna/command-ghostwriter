@@ -1,0 +1,29 @@
+vsys = "vsys1"
+source_zone = "untrust"
+destination_zone = "dmz"
+local_wan_ip = "203.0.113.10"
+rule_name = "DENY-GEOIP-BLOCKED-COUNTRIES"
+allow_exception_rule_name = "ALLOW-GEOIP-EXCEPTION"
+
+[[target_countries]]
+country_name = "China"
+region_object_name = "GEOBLOCK-CN"
+reason = "自社に拠点・取引先がなく、スキャン系の不審アクセスが継続しているため"
+
+[[target_countries]]
+country_name = "Russia"
+region_object_name = "GEOBLOCK-RU"
+reason = "自社に拠点・取引先がなく、不審なログイン試行が継続しているため"
+
+[[target_countries]]
+country_name = "Iran"
+region_object_name = "GEOBLOCK-IR"
+reason = "自社に拠点・取引先がなく、不審なアクセスが継続しているため"
+
+[[exception_hosts]]
+ip = "198.51.100.20"
+description = "香港リージョンでホストされている外部SaaSベンダーのWebhook送信元(業務上必須)"
+
+[[exception_hosts]]
+ip = "198.51.100.44"
+description = "台湾拠点パートナー企業のVPNゲートウェイ"

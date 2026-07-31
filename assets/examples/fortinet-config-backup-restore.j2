@@ -1,0 +1,330 @@
+# FortiGateの設定バックアップ定期取得・復元・世代管理
+
+FortiGate (FortiOS) の `Security Fabric > Automation` にある Schedule trigger
+(`{{ backup_trigger_name }}`)と、設定バックアップ専用の system action
+`Backup Config Disk` を組み合わせた Automation Stitch(`{{ backup_stitch_name }}`)
+で、頻度`{{ trigger_frequency }}`・{{ trigger_hour }}時{{ trigger_minute }}分に
+設定バックアップを自動取得します。取得結果はFortiGate自身が保持する
+Configuration Revisions(`execute revision list config`)に世代として記録され
+るため、GUI・CLIの両方から任意の世代への復元手順を確認します。あわせて、機体
+のフラッシュ容量に依存しないオフボックス保管として、CLI Script action から
+`execute backup config {{ offsite_protocol }}` を呼び出す Stitch
+(`{{ offsite_stitch_name }}`)を任意手順として構成し、認証情報を手順書内に
+平文で残さない運用を徹底します。
+
+## 目的
+
+Schedule trigger と `Backup Config Disk` system action を組み合わせた
+Automation Stitch により、FortiGateの設定バックアップを`{{ trigger_frequency }}`
+の頻度で自動化し、Configuration Revisionsに記録された世代からGUI・CLIの両方で
+復元できるようになることを目指します。あわせて、ローカルディスクの容量に依存
+しないオフボックス保管の選択肢と、それに伴う認証情報の安全な取り扱い、復元経路
+上の制約(`execute restore config` の転送元一覧に `sftp` が含まれない、等)を
+理解します。
+
+## 用語解説
+
+- **Automation Stitch**: Trigger(発火条件)と1つ以上のAction(実行内容)を結び
+  付けたFortiOSの自動化機構。CLIでは`config system automation-stitch`の
+  `config actions`配下に、`config system automation-action`で定義したActionを
+  名前で参照して登録する
+- **Schedule trigger**: `config system automation-trigger`で
+  `set trigger-type scheduled`としたトリガー。
+  `trigger-frequency {hourly | daily | weekly | monthly | once}`で頻度を
+  指定し、`daily`/`weekly`/`monthly`では`trigger-hour`/`trigger-minute`
+  (`weekly`はさらに`trigger-weekday`、`monthly`はさらに`trigger-day`)で
+  時刻を、`once`では`trigger-datetime`(`YYYY-MM-DD HH:MM:SS`)で日時を指定する
+- **System Action > Backup Config Disk**: FortiOSに既定で用意されている
+  static action(Actionの一覧から選択でき、削除は不可。編集は可能だが、名前を
+  変更できるかどうかは一次情報のこのページには明記されていないため、実機で
+  事前に確認すること)。`set action-type system-actions` /
+  `set system-action backup-config`で、Automation Stitchから設定バックアップ
+  をFortiGate自身のディスクへ実行する。実行結果はConfiguration Revisionsに
+  「Autod backup config by stitch: `<stitch名>`」というコメント付きの世代
+  として記録される
+- **Configuration Revisions**: 画面右上のユーザー名メニューの
+  `Configuration > Revisions`(GUI)、または`execute revision list config`
+  (CLI)で参照できる、ローカルディスクに保存された設定バックアップの世代
+  一覧。512MB以上のフラッシュメモリを搭載したモデルで利用可能。世代の保持
+  件数を直接指定するCLIパラメータは一次情報のこのページ内には見当たらない
+  ため、実際に何世代保持されるかは`execute revision list config`の出力で
+  機種ごとに確認すること
+- **CLI Script action**: `config system automation-action`で
+  `set action-type cli-script`としたAction。`set script`に指定したCLI
+  コマンド列をStitch発火時に実行する。`set execute-security-fabric enable`
+  にするとSecurity Fabric配下の全デバイスで同じスクリプトが実行されるため、
+  一次情報は`execute backup config ftp`のように転送先を持つコマンドを複数
+  デバイスで同時実行すると転送先サーバ上のファイルが上書きされ得ると明記
+  している(既定の`disable`のままなら発火元の1台のみで実行される)
+- **execute backup config / execute restore config**: 手動または CLI Script
+  action から呼び出せるバックアップ・復元コマンド。`execute backup config`
+  の転送先は`flash | ftp | management-station | sftp | tftp | usb | usb-mode`
+  だが、`execute restore config`の転送元(一次情報に列挙されているもの)は
+  `flash | ftp | management-station | tftp | usb | usb-mode`で、**sftpは
+  含まれていない**。sftpへバックアップした場合の復元経路には注意が必要
+  (手順5参照)
+
+## シナリオ設定
+
+今回、定期バックアップ・復元・世代管理の対象となるFortiGateと、Schedule
+trigger・Automation Stitchの設定値は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| 対象FortiGate(fw_hostname) | `{{ fw_hostname }}` |
+| Schedule trigger名(backup_trigger_name) | `{{ backup_trigger_name }}` |
+| ディスクバックアップStitch名(backup_stitch_name) | `{{ backup_stitch_name }}` |
+| 実行頻度(trigger_frequency) | `{{ trigger_frequency }}` |
+| 実行時刻(trigger_hour:trigger_minute) | {{ trigger_hour }}時{{ trigger_minute }}分 |
+| ログアウト時にもリビジョンを追加するか(revision_backup_on_logout) | {{ revision_backup_on_logout }} |
+| オフボックスStitch名(offsite_stitch_name) | `{{ offsite_stitch_name }}` |
+| オフボックスAction名(offsite_action_name) | `{{ offsite_action_name }}` |
+| オフボックス転送プロトコル(offsite_protocol) | `{{ offsite_protocol }}` |
+| オフボックス転送先サーバ(offsite_server) | `{{ offsite_server }}` |
+| オフボックス転送先ポート(offsite_port) | {{ offsite_port }} |
+| オフボックス接続ユーザー(offsite_user) | `{{ offsite_user }}` |
+| 復元手順で例示する世代ID(verify_revision_id) | {{ verify_revision_id }} |
+
+{{ credential_handling_note }}
+
+## 手順
+
+### 1. 現状のリビジョンと既存の自動化設定を確認する(変更前の基準を取る)
+
+新しいTrigger/Stitchを1件も追加する前に、現状を確認します。
+
+- GUI: 画面右上のユーザー名をクリックし、`Configuration > Revisions`を開いて
+  既存の世代一覧を確認します。行の`+`をクリックすると詳細が展開されます。
+- CLI:
+
+  ```bash
+  execute revision list config
+  ```
+
+- `Security Fabric > Automation`の`Trigger`タブ・`Stitch`タブを開き、
+  `{{ backup_trigger_name }}` / `{{ backup_stitch_name }}`と同名の設定が
+  既に存在しないことを確認します。存在する場合は、重複作成せず既存設定の
+  目的を先に確認してください。
+
+### 2. Schedule triggerを作成する
+
+GUI:
+
+1. `Security Fabric > Automation`を開き、`Trigger`タブで`Create New`を
+   クリックします。
+2. `Miscellaneous`セクションの`Schedule`をクリックします。
+3. `Name`フィールドに`{{ backup_trigger_name }}`を入力します。
+4. `Frequency`ドロップダウンリストで、CLIの`trigger-frequency
+   {{ trigger_frequency }}`に対応する項目を選択します。一次情報のGUI手順例は
+   `Once`選択時の`Date/Time`フィールドのみを示しており、`{{ trigger_frequency }}`
+   選択時に表示される時刻入力欄のラベルはページ内に明示されていません。実機
+   の画面表示に従い、下記CLIの`trigger-hour`/`trigger-minute`に相当する時刻
+   を入力してください。
+5. `OK`をクリックします。
+
+CLI:
+
+```bash
+config system automation-trigger
+    edit "{{ backup_trigger_name }}"
+        set trigger-type scheduled
+        set trigger-frequency {{ trigger_frequency }}
+        set trigger-hour {{ trigger_hour }}
+        set trigger-minute {{ trigger_minute }}
+    next
+end
+```
+
+{% if revision_backup_on_logout %}バックアップ取得に加えて、ログアウトのたび
+にもリビジョンを積み増したい場合は、次の設定もあわせて有効にします(世代管理
+を厚くする任意設定)。
+
+```bash
+config system global
+    set revision-backup-on-logout enable
+end
+```
+{% endif %}
+
+### 3. Automation Stitch(Backup Config Disk)を作成する
+
+GUI:
+
+1. `Security Fabric > Automation`の`Stitch`タブで`Create New`をクリックします。
+2. `Name`に`{{ backup_stitch_name }}`を入力します。
+3. `Add Trigger`をクリックし、`{{ backup_trigger_name }}`を選択して`Apply`
+   をクリックします。
+4. `Add Action`をクリックし、`Backup Config Disk`を選択して`Apply`を
+   クリックします。
+5. `OK`をクリックします。
+
+CLI:
+
+```bash
+config system automation-action
+    edit "Backup Config Disk"
+        set description "Backup the configuration on disk."
+        set action-type system-actions
+        set system-action backup-config
+    next
+end
+
+config system automation-stitch
+    edit "{{ backup_stitch_name }}"
+        set trigger "{{ backup_trigger_name }}"
+        config actions
+            edit 1
+                set action "Backup Config Disk"
+                set required enable
+            next
+        end
+    next
+end
+```
+
+`Backup Config Disk`はFortiOSに既定で用意されているActionの名前です。編集や
+名前変更の可否・方法は一次情報のこのページには明記されていないため、名前を
+変更する場合は`set action`側の参照文字列も整合させ、事前に実機で挙動を確認
+してください。
+
+### 4.(任意)オフボックス保管用のCLI Script ActionとStitchを作成する
+
+ローカルディスクのConfiguration Revisionsはフラッシュ容量に依存するため、
+機体の故障やフラッシュ枯渇に備えて`{{ offsite_server }}`(`{{ offsite_protocol }}`)
+へも定期的にコピーを退避します。同じ`{{ backup_trigger_name }}`を使い回し、
+Actionのみを差し替えます。
+
+```bash
+config system automation-action
+    edit "{{ offsite_action_name }}"
+        set action-type cli-script
+        set minimum-interval 3600
+{% if offsite_protocol == "sftp" %}        set script "execute backup config sftp {{ fw_hostname }}-config-backup.conf {{ offsite_server }}:{{ offsite_port }} {{ offsite_user }} ********"
+{% else %}        set script "execute backup config ftp {{ fw_hostname }}-config-backup.conf {{ offsite_server }}:{{ offsite_port }} {{ offsite_user }} ********"
+{% endif %}    next
+end
+
+config system automation-stitch
+    edit "{{ offsite_stitch_name }}"
+        set trigger "{{ backup_trigger_name }}"
+        config actions
+            edit 1
+                set action "{{ offsite_action_name }}"
+                set required enable
+            next
+        end
+    next
+end
+```
+
+`set script`内の`********`は`{{ offsite_user }}`のログインパスワードのマスク
+表記です。実際の値は本手順書やチケット、構成管理システムに平文で記載せず、
+FortiGateのCLIコンソールへ設定投入時にのみ直接入力してください(この手順書
+の内容をそのままコピー&ペーストして投入しないこと)。`set execute-security-fabric`
+は既定の`disable`(発火元の1台のみで実行)のままにし、有効化する場合は
+「注意事項」を必ず確認してください。
+
+### 5. 復元手順を確認する
+
+復元(`execute restore config`・GUIの`Restore`)はFortiGateの設定読み込み後の
+再起動を伴います。本番機での復元は必ずメンテナンスウィンドウ内で実施して
+ください。
+
+GUI(ローカルに保存済みの設定ファイルから復元する場合):
+
+1. 画面右上のユーザー名をクリックし、`Configuration > Restore`を開きます。
+2. 復元元として`Local PC`または`USB Disk`を選択します。
+3. `Upload`をクリックして設定ファイルを選択し、`Open`をクリックします。
+4. 暗号化されたファイルの場合はパスワードを入力します。
+5. `OK`をクリックします。
+
+CLI(ローカルディスクのリビジョンから復元する場合。`{{ verify_revision_id }}`
+は`execute revision list config`で確認した実際の世代IDに読み替える):
+
+```bash
+execute revision list config
+execute restore config flash {{ verify_revision_id }}
+```
+
+{% if offsite_protocol == "sftp" %}手順4で`{{ offsite_protocol }}`へ退避した
+ファイルを復元する場合の注意: 一次情報の`execute restore config`が列挙する
+転送元は`flash | ftp | management-station | tftp | usb | usb-mode`で、
+**sftpは含まれていません**。`{{ offsite_server }}`へ退避したファイルを復元
+するには、いったんSFTPクライアントで手元にファイルをダウンロードし、GUIの
+`Configuration > Restore`(`Local PC`)から復元してください。
+{% else %}手順4で`{{ offsite_protocol }}`へ退避したファイルは、同じ
+`{{ offsite_protocol }}`指定のまま復元できます。
+
+```bash
+execute restore config ftp {{ fw_hostname }}-config-backup.conf {{ offsite_server }}:{{ offsite_port }} {{ offsite_user }} ********
+```
+{% endif %}
+
+### 6. 世代管理を検証する
+
+```bash
+execute revision list config
+diagnose test application autod 3
+```
+
+`execute revision list config`の出力に、コメント`Autod backup config by
+stitch: {{ backup_stitch_name }}`を伴う新しい世代が、`{{ trigger_frequency }}`
+のスケジュール通り追加されていることを確認します。`diagnose test application
+autod 3`では、対象Stitchの`done`カウントが発火のたびに増加していることを
+確認します。
+
+## 動作確認
+
+- `Security Fabric > Automation`の`Trigger`/`Stitch`一覧に`{{ backup_trigger_name }}`
+  / `{{ backup_stitch_name }}`(オフボックス保管を設定した場合は
+  `{{ offsite_stitch_name }}`も)が表示され、`Last Triggered`が更新されている
+  こと
+- `execute revision list config`に、コメント`Autod backup config by stitch:
+  {{ backup_stitch_name }}`を伴う世代が、想定した`{{ trigger_frequency }}`の
+  頻度で増え続けていること
+- `diagnose test application autod 3`で、`{{ backup_stitch_name }}`
+  (オフボックス保管を設定した場合は`{{ offsite_stitch_name }}`も)の`done`
+  カウントが発火のたびに1ずつ増加していること
+- (オフボックス保管を設定した場合)`{{ offsite_server }}`側に、想定した頻度
+  で新しいバックアップファイルが届いていること
+- メンテナンスウィンドウ内で復元手順(`execute restore config flash
+  <revision ID>`またはGUI復元)を実施し、再起動後にFortiGateが復元対象の
+  世代と同じ設定で起動していること
+
+## 注意事項
+
+- **復元(`execute restore config`・GUIの`Restore`)はFortiGateの再起動を
+  伴います。** 本番機での復元は必ずメンテナンスウィンドウ内で実施し、対象
+  の世代IDが正しいことを`execute revision list config`で事前に再確認して
+  ください。
+- バックアップの実行には、管理者プロファイルの`System`権限が`Read/Write`
+  である必要があります(`Read`のみではGUI・CLIともにバックアップを実行
+  できません)。より細かく制御したい場合は`System`を`Custom`にし、GUI
+  バックアップ可否は`Administrator Users`、CLIバックアップ可否は
+  `Configuration`フィールドで個別に制御できます。
+- `execute backup config`の転送先(`flash | ftp | management-station |
+  sftp | tftp | usb | usb-mode`)と、`execute restore config`の転送元
+  (`flash | ftp | management-station | tftp | usb | usb-mode`)は一致して
+  いません。**sftpはバックアップの送信先としては使えますが、一次情報の
+  `execute restore config`の転送元一覧には含まれていません。** sftpへ退避
+  した世代を復元する際は手順5の代替経路(手元へダウンロードしてからGUIで
+  Local PC復元)に従ってください。
+- CLI Script actionで`set execute-security-fabric enable`にすると、
+  Security Fabric配下の全デバイスで同じスクリプトが実行されます。
+  `execute backup config ftp`のように転送先を持つコマンドを複数デバイスで
+  同時実行すると、ファイル名が重複した場合に転送先サーバ上のファイルが
+  上書きされ得ると一次情報に明記されています。既定の`disable`(発火元の
+  1台のみで実行)のまま運用するか、有効化する場合はデバイスごとに異なる
+  ファイル名になるようスクリプトを分けてください。
+- ローカルディスクのConfiguration Revisionsが実際に何世代まで保持される
+  かは、一次情報のこのページ内には具体的な件数の記載がありません。機種の
+  フラッシュ容量によって上限が異なるため、想定世代数を`execute revision
+  list config`の実際の出力件数で確認し、長期保存が必要な世代は手順4の
+  オフボックス保管を正式な保存先として扱ってください。
+- `{{ offsite_action_name }}`の`set script`内のパスワードは`********`の
+  マスク表記であり、実値をこの手順書や構成管理システム、チケットへ平文で
+  記載しないでください。設定投入時にFortiGateのCLIコンソールへ直接入力し、
+  必要であれば秘密管理ツールで別途安全に保管してください。
+- GUIバックアップで`Encryption`を有効にした場合、復元時に同じパスワードが
+  必要です。パスワードを紛失すると当該バックアップファイルは復元できなく
+  なるため、本手順書とは別に組織の秘密管理ツールで保管してください。

@@ -1,0 +1,124 @@
+# Palo Alto Networks(PAN-OS)のGeoIP国別WAN着信遮断構成
+
+`Objects > Regions`で定義した{{ target_countries | length }}か国分のRegionオブジェクトを、WAN側ゾーン(`{{ source_zone }}`)から`{{ destination_zone }}`ゾーンへのSecurity Policy拒否ルールのSourceとして登録し、特定国からの着信を遮断します。誤遮断を防ぐため、業務上必須の{{ exception_hosts | length }}件の例外送信元を拒否ルールより評価順で先に許可したうえで、`test security-policy-match`とTraffic logで許可・拒否双方の挙動を検証します。
+
+## 目的
+
+PAN-OSのRegionオブジェクトが、緯度・経度や国名の指定によって地理的な範囲をSource/Destinationとして扱えるオブジェクトであることを理解した上で、WAN側からの着信のうち特定国からの通信のみをSecurity Policyで明示的に拒否できるようになることを目指します。あわせて、業務上必須の送信元を例外として先に許可し、`test security-policy-match`とTraffic logで許可・拒否双方の挙動、特に誤遮断の有無を検証できるようになることを目指します。
+
+## 用語解説
+
+- **Regionオブジェクト(`Objects > Regions`)**: 地理的な範囲を1つのオブジェクトとして定義する機能。緯度・経度(`Geo Location`欄、`xxx.xxxxxx`形式で直接指定)、または`Geo Location`欄に文字を入力して絞り込む標準の国名候補リストからの選択、およびIPアドレス・範囲・サブネット(`Addresses`欄、`x.x.x.x`/`x.x.x.x-y.y.y.y`/`x.x.x.x/n`のいずれかの形式)によって定義する
+- **Security Policy RuleのSource/Destinationにおける`Region`**: Security Policy・Decryption Policy・DoS Policyのソース/宛先指定において、通常のアドレスオブジェクトと同様にRegionオブジェクトを指定できるという、PAN-OSの機能
+- **仮想システム(vsys)**: PAN-OSでファイアウォールのオブジェクトやポリシーを分離する論理区画。本手順のRegionオブジェクトとSecurity Policyルールはいずれも`{{ vsys }}`配下に作成する
+- **interzone-default rule**: PAN-OSがあらかじめ用意する既定のSecurity Policyルール。ゾーンをまたぐ通信のうち他のどのルールにも一致しなかったものをすべて拒否する、ルールベース最下部の読み取り専用ルール
+- **評価順(先勝ち)**: Security Policyルールベースは上から順に評価され、最初に一致したルールが適用されるとそれ以降のルールは評価されない。誤遮断を避けるには、例外許可ルールをGeoIP拒否ルールより上位(先)に置く必要がある
+- **commit**: PAN-OSはcandidate configとrunning configを分離する二段階構成モデルを採る。GUIで`OK`したルールもcommitするまで実機の動作には反映されない
+- **test security-policy-match**: 指定した送信元/宛先/アプリケーションなどの組み合わせが、実際にどのSecurity Policyルールに一致するかをCLIから確認できるテストコマンド
+
+## シナリオ設定
+
+仮想システム`{{ vsys }}`において、WAN側ゾーン`{{ source_zone }}`から`{{ destination_zone }}`ゾーン(自組織の公開アドレス`{{ local_wan_ip }}`を含む)への着信のうち、次の{{ target_countries | length }}か国からの通信をSecurity Policyで拒否します。
+
+| region_object_name | Geo Locationへの入力値(country_name) | 遮断理由 |
+|---|---|---|
+{% for tc in target_countries %}| {{ tc.region_object_name }} | {{ tc.country_name }} | {{ tc.reason }} |
+{% endfor %}
+
+業務上、遮断対象国に所在していても継続的に許可が必要な送信元は次の{{ exception_hosts | length }}件です。これらはGeoIP拒否ルールより評価順で先に許可し、誤遮断を防ぎます。
+
+| ip | 用途 |
+|---|---|
+{% for eh in exception_hosts %}| {{ eh.ip }} | {{ eh.description }} |
+{% endfor %}
+
+拒否ルール名は`{{ rule_name }}`、例外許可ルール名は`{{ allow_exception_rule_name }}`です。`{{ source_zone }}`は自組織のWAN(インターネット)側インターフェースが所属する前提のゾーン名、`{{ destination_zone }}`は着信を受ける公開サーバー群が所属する前提のゾーン名です。実際の環境に存在するゾーン名に読み替えてください。
+
+## 手順
+
+### 1. 現状のSecurity Policyルールベースを確認する(変更前の基準を取る)
+
+新しいルールを1件も登録する前に、`Policies > Security`を開き、既存の明示ルールと、ルールベース最下部に表示される`interzone-default`の現在のAction・Log設定を確認します。あわせて、遮断対象国からの通信が現時点でどのルールに一致しているか(既存の広い許可ルールに一致していないか)を把握しておきます。
+
+### 2. 遮断対象国ごとにRegionオブジェクトを作成する
+
+`Objects > Regions`を開き、`Add`を選びます。シナリオ設定の各行について、次のフィールドを入力します。
+
+- `Name`欄: シナリオ設定の`region_object_name`の値をそのまま入力する
+- `Geo Location`欄: `country_name`の値を入力し、絞り込まれた標準の国名候補リストから該当する国を選択する(緯度・経度を手入力する必要はない)
+- `Addresses`欄: 空欄のままにする(IPアドレスによる追加指定は行わない)
+
+{% for tc in target_countries %}- Name={{ tc.region_object_name }} / Geo Locationに入力する検索文字列: {{ tc.country_name }}
+{% endfor %}
+入力後は`OK`を選びます。国名候補リストの表示文言(英語表記か日本語表記か、地域区分の粒度)はGUIの言語設定やPAN-OSのバージョンによって異なる場合があるため、`country_name`と完全一致する候補が見当たらない場合は、実際にリストへ表示されている名称の中から該当する国を選択してください。この時点ではまだ`Commit`は実行しません。
+
+### 3. 例外送信元を許可するルールをGeoIP拒否ルールより先に登録する
+
+`Policies > Security`で`Add`を選び、ルール名`{{ allow_exception_rule_name }}`で例外許可ルールを作成します。次のタブへ値を入力します。
+
+- General タブ: `Name`に`{{ allow_exception_rule_name }}`を入力する
+- Source タブ: `Source Zone`に`{{ source_zone }}`を設定し、`Source Address`にシナリオ設定の`exception_hosts`各行の`ip`をすべて追加する
+- Destination タブ: `Destination Zone`に`{{ destination_zone }}`を設定し、`Destination Address`は`any`のままにする
+- Applications タブ: `Application`は`any`のままにする
+- Service/URL Category タブ: `Service`は`application-default`のままにする
+- Actions タブ: `Action`を`Allow`にし、`Log at Session End`を有効にする
+
+{% for eh in exception_hosts %}- Source Addressに追加する送信元: {{ eh.ip }}({{ eh.description }})
+{% endfor %}
+入力後は`OK`を選びます。この段階ではまだGeoIP拒否ルールを作成していないため、このルールを追加しても通信の遮断・許可状況は変化しません。
+
+### 4. GeoIP拒否ルールを作成し、例外許可ルールより後ろ(評価順で下位)に配置する
+
+`Policies > Security`で`Add`を選び、ルール名`{{ rule_name }}`でGeoIP拒否ルールを作成します。
+
+- General タブ: `Name`に`{{ rule_name }}`を入力する
+- Source タブ: `Source Zone`に`{{ source_zone }}`を設定し、`Source Address`に手順2で作成した各Regionオブジェクト({% for tc in target_countries %}{{ tc.region_object_name }}{% if not loop.last %}, {% endif %}{% endfor %})をすべて追加する
+- Destination タブ: `Destination Zone`に`{{ destination_zone }}`を設定し、`Destination Address`は`any`のままにする
+- Applications タブ: `Application`は`any`のままにする
+- Service/URL Category タブ: `Service`は`any`のままにする(拒否ルールのため、遮断対象国からのあらゆるポート宛の通信を対象にする)
+- Actions タブ: `Action`を`Deny`にし、`Log at Session Start`を有効にする(拒否された通信も含めて記録するため)
+
+入力後`OK`を選んだら、`Policies > Security`のルール一覧で`{{ rule_name }}`が`{{ allow_exception_rule_name }}`より下(評価順で後)に並んでいることを確認します。並び順が逆になっていると、例外送信元からの通信が先にGeoIP拒否ルールへ一致し、誤遮断が発生します。
+
+### 5. 変更を確定する(commit)
+
+`Commit`を実行し、candidate configをrunning configへ反映します。commitが完了するまで、手順2〜4で入力した内容は実機の動作に反映されません。
+
+### 6. test security-policy-matchで例外送信元とGeoIP拒否の一致を検証する
+
+CLIから`test security-policy-match`を実行し、例外送信元がGeoIP拒否ルールではなく`{{ allow_exception_rule_name }}`に一致することを確認します。
+
+```bash
+{% for eh in exception_hosts %}test security-policy-match application any source {{ eh.ip }} destination {{ local_wan_ip }} destination-port 443 protocol 6
+{% endfor %}```
+
+出力に一致したルール名として`{{ allow_exception_rule_name }}`が表示され、Actionが`allow`になっていることを確認します。
+
+続けて、遮断対象国内であることを別途確認済みの送信元IPアドレスを使い、GeoIP拒否ルールへの一致も確認します。
+
+```bash
+test security-policy-match application any source <遮断対象国内であることを確認済みの送信元IP> destination {{ local_wan_ip }} destination-port 443 protocol 6
+```
+
+出力に一致したルール名として`{{ rule_name }}`が表示され、Actionが`deny`になっていることを確認します。
+
+### 7. Traffic logで実際の通信への影響を検証する
+
+`Monitor > Logs`を開いてTrafficログ種別を選び、フィルタ欄に`( rule eq '{{ allow_exception_rule_name }}' )`と入力して`Apply Filter`を実行し、例外送信元からの通信が引き続きAllowとして記録されていることを確認します。続けてフィルタを`( rule eq '{{ rule_name }}' )`に変更し、遮断対象国からの通信がDenyとして記録されていること、および例外送信元のIPアドレスがこのログに含まれていないことを確認します。
+
+## 動作確認
+
+- `Policies > Security`のルール一覧で、`{{ allow_exception_rule_name }}`が`{{ rule_name }}`より評価順で上位(先)に並んでいること
+- `test security-policy-match`で、シナリオ設定の`exception_hosts`各行の送信元がすべて`{{ allow_exception_rule_name }}`に一致し、Actionが`allow`であること
+- `test security-policy-match`で、遮断対象国内の送信元が`{{ rule_name }}`に一致し、Actionが`deny`であること
+- Traffic logのフィルタ`( rule eq '{{ rule_name }}' )`で拒否された通信の中に、`exception_hosts`のIPアドレスが1件も含まれていないこと(誤遮断が発生していないこと)
+- Traffic logのフィルタ`( rule eq '{{ allow_exception_rule_name }}' )`で、例外送信元からの通信が引き続きAllowとして記録されていること
+
+## 注意事項
+
+- **例外許可ルールを先に、GeoIP拒否ルールを後に登録すること。** Security Policyルールベースは上から順に評価され最初に一致したルールのみが適用されるため、並び順を誤ると業務上必須の例外送信元からの通信までGeoIP拒否ルールに一致し、誤遮断が発生します。
+- Regionオブジェクトの`Geo Location`欄で選択する国名候補の表示文言は、GUIの言語設定やPAN-OSのバージョンによって異なる場合があります。シナリオ設定の`country_name`はあくまで検索・絞り込みのための入力値であり、実際に一覧へ表示された候補の中から該当する国を選択してください。
+- GeoIPによる国判定は、IPアドレスと地理的位置の対応関係を管理するデータベースに基づく推定であり、常に実際の通信元の所在地と一致するとは限りません。VPNやクラウド経由の通信は発信元と異なる国として判定される場合があるため、本手順は完全な遮断を保証するものではなく、他の対策と組み合わせた多層防御の一部として運用してください。
+- `Commit`を実行するまでcandidate configはrunning configに反映されません。手順2〜4で入力した内容は、手順5のcommitまで実機の動作に影響しません。
+- `{{ source_zone }}`/`{{ destination_zone }}`はこの手順書内の仮称であり、実際の環境に存在するゾーン名に読み替えてください。
+- 遮断対象国・例外送信元の一覧は業務要件の変化に応じて見直しが必要です。追加・削除の際も、例外許可ルールがGeoIP拒否ルールより評価順で先に置かれていることを都度確認してください。

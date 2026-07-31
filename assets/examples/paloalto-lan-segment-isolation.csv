@@ -1,0 +1,6 @@
+zone_no,zone_name,vlan_id,interface,allow_to_zone,rule_name,service_kind,service_name,protocol,dst_port,description
+1,VLAN-SALES,10,ethernet1/2.10,VLAN-FILESRV,ALLOW-SALES-TO-FILESRV,custom,SERVICE-SMB-445,tcp,445,営業部門VLAN。ファイルサーバVLANへのSMB(445/tcp)のみ許可する
+2,VLAN-HR,20,ethernet1/2.20,VLAN-FILESRV,ALLOW-HR-TO-FILESRV,custom,SERVICE-SMB-445,tcp,445,人事部門VLAN。ファイルサーバVLANへのSMB(445/tcp)のみ許可する
+3,VLAN-DEV,30,ethernet1/2.30,VLAN-PORTAL,ALLOW-DEV-TO-PORTAL,predefined,service-https,tcp,443,開発部門VLAN。社内ポータルVLANへのHTTPS(443/tcp)のみ許可する
+4,VLAN-FILESRV,40,ethernet1/2.40,-,-,-,-,-,-,共有ファイルサーバが属するVLAN。他部門からの個別許可のみを受信し自らは他VLANへ通信を開始しない
+5,VLAN-PORTAL,50,ethernet1/2.50,-,-,-,-,-,-,社内ポータルが属するVLAN。開発部門からのHTTPS許可のみを受信する

@@ -1,0 +1,21 @@
+wan_interface = "wan1"
+service_dstintf = "dmz"
+protected_service_name = "public-web-vpn"
+partner_allow_policy_id = 210
+partner_allow_addr_name = "partner-tokyo-branch"
+partner_allow_note = "海外パートナー拠点の固定送信元。GeoIP判定で遮断対象国に該当する場合でも、業務上必須の通信のため、遮断ポリシーより評価順で先に置く個別の許可ポリシーで通信を維持する。"
+
+[[blocked_countries]]
+policy_id = 211
+code = "RU"
+name = "Russia"
+
+[[blocked_countries]]
+policy_id = 212
+code = "KP"
+name = "North Korea"
+
+[[blocked_countries]]
+policy_id = 213
+code = "IR"
+name = "Iran"

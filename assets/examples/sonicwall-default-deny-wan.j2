@@ -1,0 +1,202 @@
+# SonicWall (SonicOS) WANデフォルト拒否ポリシー構築
+
+SonicOS の Access Rules は、WAN・DMZ ゾーンから発信されたセッションを LAN・
+WLAN ゾーンへ既定で拒否する Stateful Packet Inspection の既定動作を持ちます。
+本手順書は、この既定動作にはいっさい手を加えず、CSV で定義した
+{{ csv_rows | length }} 件のうち `action` が `Allow` の行のみを最小許可
+Access Rule として `POLICY | Rules and Policies > Access Rules` に登録し、
+`Zone Matrix Selector` と Access Rule の Traffic Statistics(Rx/Tx
+Bytes・Packets)で許可・拒否双方の挙動を検証します。最後に `action` が
+`Deny` の行を、既定の拒否動作を可視化するための明示的なログ用ルールとして
+登録します。
+
+## 目的
+
+WAN・DMZ ゾーンからの通信を、SonicOS が既定で持つ Stateful Packet
+Inspection の拒否動作の上に成り立たせたまま、業務上必要な通信のみを最小限の
+Allow ルールとして `Access Rules` に明示的に登録できるようになることを目指
+します。あわせて `Zone Matrix Selector` と Traffic Statistics を用いて、
+許可・拒否それぞれの通信が意図したとおりに扱われていることを検証し、
+既定の拒否ルール(the Any rule)を誤って弱めない適用手順を身につけます。
+
+## 用語解説
+
+- **POLICY | Rules and Policies > Access Rules**: Access Rule を作成・編集
+  するための管理画面ナビゲーションパス。このページから Access Rule の一覧
+  表示、`+Add` によるルール追加、Traffic Statistics の確認などをすべて行う
+- **Stateful Packet Inspection の既定 Access Rule 動作**: SonicOS の一次
+  情報で次のとおり説明される、ユーザーが何も設定しなくても有効な既定動作
+  - "Allow all sessions originating from the LAN, WLAN to the WAN, or DMZ
+    (except when the destination WAN IP address is the WAN interface of the
+    firewall itself)."
+  - "Allow all sessions originating from the DMZ to the WAN."
+  - "Deny all sessions originating from the WAN to the DMZ."
+  - "Deny all sessions originating from the WAN and DMZ to the LAN or
+    WLAN."
+  本手順書はこのうち後半2つ(WAN/DMZ発信セッションに対する既定拒否)を変更
+  せず、必要な通信だけを Allow ルールで明示的に穴あけする
+- **Zone Matrix / Zone Matrix Selector**: Access Rules ページ上部の
+  Zone Matrix アイコンから開く選択ダイアログ(Zone Matrix Selector)。
+  ゾーンペア(From Zone / To Zone)を選ぶと、そのペア専用の Access Rule
+  テーブルを表示できる。Access Rule はゾーンペアごとに個別のテーブルへ
+  分類されて管理される
+- **the Any rule**: 各ゾーンペアの Access Rule テーブル最下段に存在する
+  既定ルール。テーブルは最も限定的なルールが上、限定度の低いルールほど下
+  に並び、`Any` ルールが最後尾になる。ここまでに作成したどの Allow/Deny
+  ルールにも一致しなかった通信は、最終的にこの Any ルール(および前述の
+  既定拒否動作)によって扱われる
+- **Adding Rule ダイアログ**: Access Rules テーブル下部の `+Add` から開く
+  ルール追加ダイアログ。`My Rule Name` / `Description` / `Action`
+  (`Allow` / `Deny` / `Discard` のいずれか) / `IP Version`
+  (`IPv4` / `IPv6`) / `Priority`(`Auto Prioritize` / `Insert at the End`
+  / `Manual`) / `Schedule` を設定したうえで `Enable` を有効にし、`Save`
+  で保存する
+- **Source/Destination タブ**: 同ダイアログ内のタブ。`Source Zone/
+  Interface` と `Destination Zone/Interface` のドロップダウンでゾーンを
+  指定し(`Any` も選択可能)、送信元・宛先それぞれの `Address` ドロップ
+  ダウンで事前登録済みの network address object を選ぶ。`Port/Services`
+  では事前登録済みの Service Object または Service Group を選ぶ
+- **Traffic Statistics**: `POLICY | Rules and Policies > Access Rules`
+  ページで各ルール行左側の右矢印アイコンをクリックすると表示される、
+  そのルールに一致した通信量(`Rx Bytes` / `Rx Packets` / `Tx Bytes` /
+  `Tx Packets`)。テーブル上部の Clear アイコンでカウンタをリセットできる
+
+## シナリオ設定
+
+今回 `POLICY | Rules and Policies > Access Rules` に登録する最小許可ルール
+と、既定拒否動作を明示化する Deny ルールは、次の {{ csv_rows | length }}
+件です。
+
+| rule_no | from_zone | to_zone | rule_name | action | source_addr | dest_addr | service | priority | description |
+|---------|-----------|---------|-----------|--------|--------------|-----------|---------|----------|--------------|
+{% for r in csv_rows %}| {{ r["rule_no"] }} | {{ r["from_zone"] }} | {{ r["to_zone"] }} | {{ r["rule_name"] }} | {{ r["action"] }} | {{ r["source_addr"] }} | {{ r["dest_addr"] }} | {{ r["service"] }} | {{ r["priority"] }} | {{ r["description"] }} |
+{% endfor %}
+
+`source_addr` / `dest_addr` 列のうち `Any` 以外の値(`dmz-web-server` 等)
+は network address object の名称、`service` 列のうち `Any` 以外の値
+(`HTTPS` 等)は Service Object / Service Group の名称です。いずれも
+`POLICY | Rules and Policies > Access Rules` の `Address` / `Port/Services`
+ドロップダウンで選択する既存オブジェクトを前提とし、これらオブジェクト
+自体の新規作成は本手順書の対象外です。
+
+## 手順
+
+### 1. 現状の Access Rules とゾーンペアを確認する(変更前の基準を取る)
+
+新しい Access Rule を1件も追加する前に、現状を確認します。
+
+- `POLICY | Rules and Policies > Access Rules` を開きます。
+- Zone Matrix アイコンから `Zone Matrix Selector` を開き、シナリオ設定に
+  登場する `From WAN To DMZ` / `From WAN To LAN` / `From WAN To WLAN` の
+  それぞれのゾーンペアを選択し、対応する Access Rule テーブルを表示し
+  ます。
+- 各テーブル最下段に `Any` ルールが存在し、既存の Allow/Deny ルールが
+  シナリオ設定と重複していないことを確認します。この時点でのルール構成
+  をメモまたはスクリーンショットとして記録します。
+
+### 2. 最小許可ルールを登録する(action が Allow の行)
+
+シナリオ設定の `action` が `Allow` の行を、`rule_no` の昇順で1件ずつ
+`Access Rules` テーブル下部の `+Add` から登録します。`Adding Rule`
+ダイアログで、各行につき次のフィールドを表の値のまま設定します。
+
+- `My Rule Name`: `rule_name`
+- `Description`: `description`
+- `Action`: `Allow`
+- `IP Version`: `IPv4`
+- `Priority`: `priority`(`Auto Prioritize`)
+- `Schedule`: `Always`
+- Source/Destination タブの `Source Zone/Interface`: `from_zone`
+- Source/Destination タブの `Destination Zone/Interface`: `to_zone`
+- Source/Destination タブの Source `Address`: `source_addr`
+- Source/Destination タブの Destination `Address`: `dest_addr`
+- Source/Destination タブの `Port/Services`: `service`
+
+{% for r in csv_rows %}{% if r["action"] == "Allow" %}- rule_no {{ r["rule_no"] }}: `{{ r["rule_name"] }}` / From {{ r["from_zone"] }} To {{ r["to_zone"] }} / Source={{ r["source_addr"] }} / Destination={{ r["dest_addr"] }} / Service={{ r["service"] }}({{ r["description"] }})
+{% endif %}{% endfor %}
+
+`Logging` タブは既定の有効状態(チェック済み)のまま変更しません。すべて
+の項目を設定したら `Enable` を有効にし、`Save` をクリックして保存します。
+
+### 3. 既定拒否動作を明示化する Deny ルールを最後尾に登録する
+
+シナリオ設定の `action` が `Deny` の行は、既定の Stateful Packet
+Inspection 拒否動作および `Any` ルールと同じ効果を、ログとして可視化する
+ためのルールです。手順2で登録した `Allow` ルールより**必ず後ろ**(評価順
+で最後)に置く必要があるため、`Priority` は `Insert at the End` を選択し
+ます。
+
+{% for r in csv_rows %}{% if r["action"] == "Deny" %}- rule_no {{ r["rule_no"] }}: `{{ r["rule_name"] }}` / From {{ r["from_zone"] }} To {{ r["to_zone"] }} / Action=Deny / Priority={{ r["priority"] }}({{ r["description"] }})
+{% endif %}{% endfor %}
+
+`My Rule Name` / `Description` / `Action`(`Deny`) / `IP Version`
+(`IPv4`) / `Schedule`(`Always`)を設定し、Source/Destination タブの
+`Source Zone/Interface` / `Destination Zone/Interface` / `Address` /
+`Port/Services` は表の `source_addr` / `dest_addr` / `service` の値
+(いずれも `Any`)のまま設定します。`Logging` タブは既定の有効状態を維持
+し、`Enable` を有効にしてから `Save` をクリックします。
+
+### 4. Zone Matrix でルールの並び順を再確認する
+
+手順1と同じ手順で `Zone Matrix Selector` から各ゾーンペアのテーブルを
+再度開き、次の2点を確認します。
+
+1. `From WAN To DMZ` / `From WAN To LAN` / `From WAN To WLAN` それぞれの
+   テーブルで、手順2の `Allow` ルールが `Any` ルールより上位(評価順で
+   先)に並んでいること
+2. `From WAN To WLAN` テーブルで、手順3の `Deny` ルールが `Any` ルールの
+   直前に並んでいること
+
+並び順が意図と異なる場合は、対象ルールの `Priority` 設定を見直して修正
+してください。
+
+### 5. Traffic Statistics で許可・拒否の挙動を検証する
+
+シナリオ設定の各ルールに対応する通信を実際に発生させたうえで、
+`POLICY | Rules and Policies > Access Rules` に戻り、各ルール行左側の
+右矢印アイコンをクリックして Traffic Statistics(`Rx Bytes` / `Rx
+Packets` / `Tx Bytes` / `Tx Packets`)を確認します。
+
+1. シナリオ設定の `Allow` 行それぞれについて、対応する通信を発生させた
+   後に該当ルールの `Rx Packets` が増加していることを確認します。
+2. シナリオ設定に無い通信(未許可の宛先ポート等)を `From WAN To WLAN`
+   ゾーンへ発生させ、手順3で登録した `Deny` ルールの `Rx Packets` が
+   増加していることを確認します。
+3. 検証が終わったら、テーブル上部の Clear アイコンでカウンタをリセット
+   し、通常運用時の計測に影響を残さないようにします。
+
+## 動作確認
+
+- `POLICY | Rules and Policies > Access Rules` の `Zone Matrix Selector`
+  で、`From WAN To DMZ` / `From WAN To LAN` / `From WAN To WLAN` の各
+  テーブルに `Allow` ルールが存在し、`Any` ルールより上位に並んでいる
+  こと
+- `From WAN To WLAN` テーブルに手順3の `Deny` ルールが存在し、`Any`
+  ルールの直前に並んでいること
+- 各 `Allow` ルールの Traffic Statistics(`Rx Packets`)が、対応する
+  許可対象の通信発生後に増加すること
+- 手順3の `Deny` ルールの Traffic Statistics(`Rx Packets`)が、未許可
+  の通信発生後に増加すること
+- 手順1で記録した既存の Access Rule 構成が、シナリオ設定にない部分では
+  変更されていないこと
+
+## 注意事項
+
+- **各ゾーンペアの `Any` ルールを削除・編集しないこと。** `Any` ルール
+  は WAN・DMZ 発信セッションに対する既定拒否動作を最終的に担保する砦
+  であり、本手順のいずれの段階でも変更しません。
+- **`Priority` の設定を誤らないこと。** `Allow` ルールより先に評価される
+  位置へ `Deny` ルールを置くと、後続の `Allow` ルールが一致する前に通信
+  が拒否されるおそれがあります。手順4のZone Matrix確認で並び順を必ず
+  再確認してください。
+- 本手順書は一次情報(SonicOS 技術ドキュメントの Access Rules セクション)
+  で確認できた GUI 操作のみを扱います。SonicOS CLI やスクリプトによる
+  同等の投入方法は本ページでは確認できなかったため記載していません。
+  CLI で投入する場合は、別途 SonicOS の CLI リファレンスで構文を確認
+  してから実施してください。
+- `source_addr` / `dest_addr` / `service` に指定した network address
+  object・Service Object・Service Group は事前登録済みであることを前提
+  とします。これらオブジェクトの新規作成手順は本手順書には含まれません。
+- 管理者パスワードや API キーなど認証情報は、本手順書やログに平文で残さ
+  ないでください。記録が必要な場合は `********` のようにマスクし、秘密
+  管理ツール等で別途安全に保管してください。

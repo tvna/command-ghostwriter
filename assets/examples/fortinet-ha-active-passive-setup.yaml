@@ -1,0 +1,13 @@
+group_id: 10
+group_name: "edge-ha-cluster"
+primary_hostname: "FGT-EDGE-01"
+secondary_hostname: "FGT-EDGE-02"
+primary_device_priority: 200
+heartbeat_interfaces:
+  - interface: ha1
+    priority: 10
+  - interface: ha2
+    priority: 20
+ha_password_note: "HAパスワードの実値は社内の鍵管理台帳(Vault)で一元管理し、平文では保存せず、GUI/コンソールから直接入力します。"
+failover_cluster_id: 1
+maintenance_window: "2026-08-02 02:00-03:00 JST"

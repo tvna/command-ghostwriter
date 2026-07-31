@@ -1,0 +1,33 @@
+sensor_name: "staged-ips-sensor"
+vdom: "root"
+sniffer_interface: "port3"
+sniffer_snmp_index: 31
+sniffer_policy_id: 1
+inline_policy_id: 5
+inline_srcintf: "lan"
+inline_dstintf: "wan1"
+inline_srcaddr: "all"
+inline_dstaddr: "all"
+observation_days: 14
+entries:
+  - entry_id: 1
+    description: "重大度critical/highでベンダー既定動作がblockのシグネチャを一括選択"
+    selector: "default-action"
+    selector_value: "block"
+    initial_action: "pass"
+    final_action: "block"
+    promote_ready: true
+  - entry_id: 2
+    description: "特定CVE対応の個別シグネチャ(社内Webアプリの既知脆弱性向け)"
+    selector: "rule"
+    selector_value: "12345, 23456"
+    initial_action: "pass"
+    final_action: "reset"
+    promote_ready: true
+  - entry_id: 3
+    description: "レガシー業務アプリ関連の重大度criticalシグネチャ(誤検知報告あり、観察継続中)"
+    selector: "default-action"
+    selector_value: "block"
+    initial_action: "pass"
+    final_action: "block"
+    promote_ready: false

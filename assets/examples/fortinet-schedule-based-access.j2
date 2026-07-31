@@ -1,0 +1,233 @@
+# FortiGateのスケジュールベース外部アクセス制御構築
+
+FortiGate (FortiOS) の Firewall Schedule 機能(`config firewall schedule
+recurring` / `config firewall schedule onetime`)を用いて、CSV で定義した
+{{ csv_rows | length }}件の Firewall Policy に業務時間外の自動遮断スケジュールを
+適用します。曜日・時刻を繰り返し指定する recurring 型と、単発の日時のみを
+指定する onetime 型を使い分け、各ポリシーの `schedule-timeout` 設定によっ
+て「スケジュール終了時に既存セッションを強制切断するか、非アクティブタイ
+ムアウトまで存続させるか」を選択します。最後に `diagnose sys session` と
+Policy match ツールを用いて、切替時刻をまたいだ実際の遮断・許可の挙動を検
+証します。
+
+## 目的
+
+Firewall Schedule 機能(recurring/onetime)を使って、業務時間外の外部アク
+セスを Firewall Policy レベルで自動的に遮断できるようになることを目指し
+ます。あわせて、スケジュールの切替時刻に着目し、`schedule-timeout` の設定
+によって既存セッションの扱い(強制切断か、自然終了までの猶予か)が変わる
+ことを理解し、実際の切替の前後で意図した挙動になっていることを
+`diagnose sys session` や Policy match ツールで検証できるようになることを
+目指します。
+
+## 用語解説
+
+- **Firewall Schedule**: Firewall Policy の `schedule` フィールドに指定する
+  時間条件オブジェクト。GUIでは `Policy & Objects > Schedules` から作成
+  する。`config firewall schedule recurring`(繰り返しスケジュール)と
+  `config firewall schedule onetime`(単発スケジュール)の2種類があり、
+  ポリシーはスケジュールが有効な時間帯にのみ新規セッションを許可する
+- **config firewall schedule recurring**: 一次情報の構文は次のとおり。
+  `edit <name>` の下で `set day <曜日を空白区切りで1つ以上>`
+  (`sunday`/`monday`/`tuesday`/`wednesday`/`thursday`/`friday`/`saturday`、
+  既定は `none`)、`set start <hh:mm>`、`set end <hh:mm>` を指定する
+- **config firewall schedule onetime**: 一次情報の構文は次のとおり。
+  `edit <name>` の下で `set start <hh:mm yyyy/mm/dd>`、
+  `set end <hh:mm yyyy/mm/dd>` を指定する(`start-utc`/`end-utc` で
+  epoch形式の指定も可能)。`expiration-days`(既定3)で、期限切れの
+  この日数前にイベントログを残せる
+- **schedule(Firewall Policyのフィールド)**: `config firewall policy` の
+  `set schedule {string}` で、上記スケジュールオブジェクトの名前を指定する
+  フィールド。GUIでの表示名も `Schedule` で、「The time frame that is
+  applied to the policy. ... a time range that the sessions are allowed to
+  start」と説明される、**セッションの開始が許可される時間帯**を表す
+- **schedule-timeout**: `config firewall policy` の
+  `set schedule-timeout [enable|disable]`(既定 `disable`)フィールド。
+  一次情報には「Enable to force current sessions to end when the schedule
+  object times out. Disable allows them to end from inactivity.」と説明
+  される。スケジュールの終了時刻(切替時刻)に、確立済みセッションを即座
+  に切断するか、非アクティブタイムアウトまで存続させるかを制御する
+- **By Sequence(ポリシー一覧のビュー)**: `Policy & Objects` のポリシー
+  一覧で、通信の一致判定に使われる順序のままポリシーを表示するビュー。
+  「Traffic parameters are checked against the configured policies for a
+  match. If the parameters do not match any configured policies, the
+  traffic is denied.」とあり、有効なスケジュールを持つポリシーが1件も
+  一致しない通信は、既定で拒否される(暗黙拒否)
+- **diagnose sys session filter / list**: 確立済みセッションを絞り込んで
+  一覧表示する診断コマンド。`diagnose sys session filter policy <policy
+  ID>` でポリシーID単位に絞り込んだ後、`diagnose sys session list` を
+  実行すると、そのポリシーに一致した現在のセッションが表示される
+
+## シナリオ設定
+
+今回スケジュールを適用する Firewall Policy(内部セグメント `internal` から
+`wan1` 方向、送信元アドレスはいずれも `all`)は次の{{ csv_rows | length }}件
+です。`policy_id` の昇順がそのままポリシーの並び順(評価順)になります。
+
+| policy_id | name | dstaddr | service | schedule_name | schedule_type | day | start | end | schedule_timeout | description |
+|-----------|------|---------|---------|----------------|----------------|-----|-------|-----|-------------------|--------------|
+{% for r in csv_rows %}| {{ r["policy_id"] }} | {{ r["name"] }} | {{ r["dstaddr"] }} | {{ r["service"] }} | {{ r["schedule_name"] }} | {{ r["schedule_type"] }} | {{ r["day"] }} | {{ r["start"] }} | {{ r["end"] }} | {{ r["schedule_timeout"] }} | {{ r["description"] }} |
+{% endfor %}
+
+`schedule_type` が `recurring` の行の `day`/`start`/`end` は、それぞれ
+`config firewall schedule recurring` の `day`(曜日、空白区切り)/
+`start`/`end`(`hh:mm`形式)に対応します。`onetime` の行では `day` 列は
+対象外(`-`)とし、`start`/`end` は `config firewall schedule onetime` の
+`hh:mm yyyy/mm/dd` 形式で指定します。`dstaddr`/`service` 列のオブジェクト
+は `Policy & Objects > Addresses` / `Policy & Objects > Services` に事前
+登録済みであることを前提とします(作成手順は本手順書の対象外です)。
+
+## 手順
+
+### 1. 現状のポリシー一覧とFortiGate自身の時刻設定を確認する(変更前の基準を取る)
+
+新しいスケジュールやポリシーを1件も追加する前に、現状を確認します。
+Firewall Schedule はFortiGate自身が保持する時刻(操作者の腕時計やPCの時計
+ではない)を基準に判定されるため、切替時刻の挙動を正しく検証するには、
+まずFortiGate自身の時刻が正しいことの確認が欠かせません。
+
+- `Policy & Objects > Firewall Policy` を開き、既存ポリシーの並び順
+  (評価順)と、`internal` → `wan1` 方向に現在許可されている通信の内容を
+  確認し、記録します。
+- `Dashboard > Status` の `System Information` ウィジェットで `System Time`
+  を確認するか、CLIで次のコマンドを実行し、現在の日時・タイムゾーン・
+  NTP同期状況を確認します。
+
+  ```bash
+  execute date
+  execute time
+  ```
+
+  `execute time` の出力にある `last ntp sync` が古い、またはタイムゾーン
+  が意図した値と異なる場合、スケジュールの `start`/`end` が想定した時刻
+  からずれて評価されるため、`System > Settings` の `System Time` セクシ
+  ョンでNTP同期・タイムゾーンを先に是正してください。
+
+### 2. スケジュールオブジェクトをCLIで作成する
+
+シナリオ設定の `schedule_type` に応じて、`config firewall schedule
+recurring` または `config firewall schedule onetime` でスケジュールオブ
+ジェクトを作成します。
+
+```bash
+{% for r in csv_rows %}{% if r["schedule_type"] == "recurring" %}config firewall schedule recurring
+    edit "{{ r["schedule_name"] }}"
+        set day {{ r["day"] }}
+        set start {{ r["start"] }}
+        set end {{ r["end"] }}
+    next
+end
+{% elif r["schedule_type"] == "onetime" %}config firewall schedule onetime
+    edit "{{ r["schedule_name"] }}"
+        set start {{ r["start"] }}
+        set end {{ r["end"] }}
+    next
+end
+{% endif %}{% endfor %}```
+
+GUIから登録する場合は `Policy & Objects > Schedules > Create New` から、
+`schedule_type` に応じて種別(recurring/onetime)を選び、同じ曜日・開始/
+終了時刻を入力してください。個々のフィールドの並びや名称は、お使いの
+FortiOSビルドの実際のGUI画面で確認してください。
+
+### 3. Firewall Policyを作成し、Schedule と schedule-timeout を設定する
+
+`Policy & Objects > Firewall Policy > Create New` から、シナリオ設定の各
+行を `policy_id` の昇順で登録します。GUIでは `Schedule` フィールドに手順
+2で作成したスケジュール名を選択し、`Destination`/`Service` は表の
+`dstaddr`/`service` 列の値を選びます。
+
+CLIでは次のとおりです。
+
+```bash
+{% for r in csv_rows %}config firewall policy
+    edit {{ r["policy_id"] }}
+        set name "{{ r["name"] }}"
+        set srcintf "internal"
+        set dstintf "wan1"
+        set srcaddr "all"
+        set dstaddr "{{ r["dstaddr"] }}"
+        set action accept
+        set schedule "{{ r["schedule_name"] }}"
+        set schedule-timeout {{ r["schedule_timeout"] }}
+        set service "{{ r["service"] }}"
+        set logtraffic all
+    next
+end
+{% endfor %}```
+
+`Policy & Objects > Firewall Policy` の一覧(`By Sequence` 表示)を開き、
+`policy_id` の昇順で並んでいることを確認してください。既存の広い許可ポリ
+シーがこれらより先に一致すると、スケジュールによる遮断が機能しないため、
+必要に応じて `More > Move by ID` で並び順を調整します。
+
+### 4. スケジュール有効時間内に通信を発生させ、セッションを確立する
+
+各ポリシーの `start`〜`end` の時間帯(recurring)、または `onetime` の日
+時範囲の内側で、内部セグメントの端末から `dstaddr`/`service` に対応する
+通信を実際に発生させます(例: `service` が `HTTPS` ならブラウザで宛先へ
+アクセスする)。
+
+通信後、対象ポリシーIDでセッションが確立していることを確認します。
+
+```bash
+{% for r in csv_rows %}diagnose sys session filter policy {{ r["policy_id"] }}
+diagnose sys session list
+{% endfor %}```
+
+### 5. 切替時刻(スケジュール終了)をまたいで、既存セッションの挙動を検証する
+
+`end`(recurring)または `onetime` の終了日時に達した直後、手順4で確立し
+たセッションが `schedule_timeout` の設定どおりに扱われることを確認しま
+す。
+
+{% for r in csv_rows %}- `policy_id` {{ r["policy_id"] }}(`{{ r["schedule_name"] }}`、schedule_timeout={{ r["schedule_timeout"] }}): {% if r["schedule_timeout"] == "enable" %}終了時刻の直後に `diagnose sys session filter policy {{ r["policy_id"] }}` / `diagnose sys session list` を再実行し、手順4のセッションが一覧から消えている(強制切断された)ことを確認します。{% else %}終了時刻の直後に同じセッションがまだ一覧に残っていること(強制切断されず、非アクティブタイムアウトまで存続すること)を確認します。{% endif %}
+{% endfor %}
+いずれの場合も、終了時刻以降に**新規に**同じ通信を発生させると、
+`Policy & Objects` の Policy match ツールで対象ポリシーに一致しなくなり
+(既存の広い許可ポリシーが無ければ暗黙拒否に一致し)、新規セッションが確
+立できないことを確認してください。
+
+## 動作確認
+
+- 手順1で記録した `execute time` の `last ntp sync` が直近であり、タイム
+  ゾーンが意図した値であること
+- `Policy & Objects > Firewall Policy` の一覧(`By Sequence`)で、
+  `policy_id` の昇順にポリシーが並び、既存の広い許可ポリシーより先に評価
+  されること
+- 手順4で、各ポリシーの有効時間内に確立したセッションが
+  `diagnose sys session list` に表示されること
+- 手順5で、`schedule_timeout=enable` の各ポリシーについて、終了時刻直後に
+  既存セッションが一覧から消えていること
+- 手順5で、`schedule_timeout=disable` の各ポリシーについて、終了時刻直後
+  も既存セッションが一覧に残っていること(強制切断されていないこと)
+- 終了時刻以降の新規通信が、Policy matchでいずれの対象ポリシーにも一致し
+  ないこと
+
+## 注意事項
+
+- **Firewall Scheduleの `start`/`end` はFortiGate自身の時計を基準に評価
+  されます。** 操作者の腕時計やPCの時計とFortiGateのタイムゾーン・NTP同
+  期がずれていると、意図した時刻に切り替わらない、または検証結果を誤解
+  するおそれがあります。手順1で必ず `execute time` の `last ntp sync` を
+  確認してください。
+- **`schedule` フィールドは「セッションの開始が許可される時間帯」を表し
+  ます。** 一次情報にも「a time range that the sessions are allowed to
+  start」とあるとおりで、既存セッションをスケジュール終了時にどう扱うか
+  は `schedule` 自体ではなく `schedule-timeout` が制御します。両者を混同
+  しないでください。
+- **`schedule-timeout` を `enable` にすると、スケジュール終了時に該当ポ
+  リシーの既存セッションが強制的に終了します。** 長時間の通信(大容量ダ
+  ウンロードや保守作業のリモートセッション等)を業務時間終了時に中断して
+  よいかを、事前に利用者・運用者と合意してから設定してください。
+- 明示的な遮断ポリシーを別途登録していない場合、スケジュール終了後の通信
+  は既存の他ポリシーに一致しない限り暗黙拒否で処理されます。想定外の広い
+  許可ポリシーが後続にあると、スケジュールでの遮断が効かないため、手順3で
+  必ずポリシーの並び順(評価順)を確認してください。
+- FortiGate自身の管理アクセス(GUI/SSHログイン)を経由するインターフェー
+  スにこの手順のポリシーを適用しないでください。管理プレーンにスケジュ
+  ールを適用すると、スケジュール外の時間帯に管理者自身がロックアウトさ
+  れるおそれがあります。
+- CLI/GUIへのログインに使う管理者パスワードやAPIトークンは、本手順書や
+  ログに平文で残さないでください。値を記録する場合は `********` のよう
+  にマスクし、秘密管理ツール等で別途安全に保管してください。

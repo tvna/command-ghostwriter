@@ -1,0 +1,5 @@
+rule_no,srcintf,dstintf,name,action,srcaddr,dstaddr,service,proto,port,description
+1,wan1,dmz,allow-dmz-https,accept,all,dmz-web-server,svc-dmz-https,TCP,443,DMZ Webサーバへの HTTPS 着信を許可
+2,wan1,dmz,allow-vpn-udp,accept,all,vpn-gateway,svc-vpn-wireguard,UDP,51820,拠点間VPNトンネル終端への着信を許可
+3,wan1,dmz,allow-jump-ssh,accept,maint-segment,jump-host,svc-jump-ssh,TCP,22,保守セグメントからのSSHジャンプホストアクセスを許可
+4,wan1,dmz,explicit-default-deny,deny,all,all,ALL,-,-,明示的デフォルト拒否(暗黙拒否と同じ効果をログに残す)

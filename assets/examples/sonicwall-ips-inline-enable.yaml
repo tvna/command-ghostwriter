@@ -1,0 +1,15 @@
+firewall_name: "SonicWall TZ670 (拠点FW-01)"
+management_ip: "10.1.0.1"
+observation_days: 14
+signature_categories:
+  - name: "High Priority Attacks"
+    promote_now: true
+  - name: "Medium Priority Attacks"
+    promote_now: true
+  - name: "Low Priority Attacks"
+    promote_now: false
+false_positive_signatures:
+  - id: "15027"
+    note: "夜間バッチのバックアップ通信を誤検知していた"
+  - id: "18432"
+    note: "社内業務システムAPIのUser-Agentパターンを誤検知していた"

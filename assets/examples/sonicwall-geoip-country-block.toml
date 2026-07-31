@@ -1,0 +1,19 @@
+blocked_countries = ["China", "Russian Federation", "North Korea"]
+block_all_unknown_countries = true
+enable_logging = true
+exclusion_object_name = "GeoIP-Trusted-WAN-Exceptions"
+
+[[trusted_wan_hosts]]
+name = "tokyo-partner-vpn-peer"
+ip = "203.0.113.50"
+reason = "海外拠点との既存IPsecサイト間VPNピアIP"
+
+[[trusted_wan_hosts]]
+name = "saas-vendor-webhook-source"
+ip = "198.51.100.20"
+reason = "契約中SaaSベンダーのWebhook送信元IP"
+
+[[trusted_wan_hosts]]
+name = "regional-cdn-health-check"
+ip = "192.0.2.15"
+reason = "CDNベンダーの死活監視送信元IP"

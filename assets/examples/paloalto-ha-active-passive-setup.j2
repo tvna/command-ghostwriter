@@ -1,0 +1,110 @@
+# Palo Alto Networks(PAN-OS)のHA Active/Passive冗長化構築とフェイルオーバー検証
+
+{{ pair_name }}を構成する2台のPAN-OSファイアウォールに、`Device > High Availability` からActive/Passive HAを設定します。HA1(control link)で制御情報とコンフィグ同期を、HA2(data link)でセッションテーブルの同期を行い、両機のHA状態をDashboardのHigh Availabilityウィジェットで確認したうえで、計画メンテナンス枠内でOperational Commandsによる強制フェイルオーバーを実施し、セッションが維持されることを検証します。HA1関連の設定は両機で自動同期されない項目のため、対向機の値と取り違えないよう、シナリオ設定の表を都度参照しながら両方のGUIで個別に入力してください。
+
+## 目的
+
+二台のPAN-OSファイアウォールをActive/Passive HAペアとして構成し、HA1(control link)・HA2(data link)それぞれの役割を理解した上で、コンフィグ同期とセッション同期が機能する状態を作ることを目指します。あわせて、計画的な強制フェイルオーバーを安全な手順(メンテナンス枠内での実施、事前のHA状態確認、確実な復旧)で実行し、フェイルオーバー前後でセッションが維持されることを検証できるようになることを目指します。
+
+OPNsenseのCARP(仮想IP+pfsync)による二台冗長化とは異なり、Palo Alto Networks (PAN-OS)には同名の機構は存在しません。同じ「二台構成の冗長化+状態同期+フェイルオーバー」という運用課題は、HA Active/Passive (or Active/Active) with HA1/HA2 links, configuration+session synchronization, and failoverによって解決します。
+
+## 用語解説
+
+- **Device > High Availability**: PAN-OS GUIでHAペアを構成するメニューの正式名称。General/HA Communications/Election Settings等のタブから設定する
+- **HA1 (Control Link)**: ハートビート・ヘルス監視・コンフィグ同期に使う制御専用リンク。対向機のアドレスは`Peer HA1 IP Address`に指定する。HA1自体の設定(暗号化含む)は両機で自動同期されない
+- **HA2 (Data Link・セッション同期)**: セッションテーブル・ARP/MACテーブル・ルーティング情報などのランタイム状態を同期するデータリンク。`Enable Session Synchronization`で有効化する
+- **Active/Passive HA**: 常に一方のみがActive(通信処理)、他方がPassive(待機)として動作するHAモード。本テンプレートで構成する対象。Active/Active HAでは両機が同時に処理を行い、代わりに明示的なFloating IPを両機で分担する
+- **Device Priority**: HA選挙(election)で使う優先度の数値。値が小さいほど優先度が高く、Activeになりやすい
+- **Preemptive**: 優先度の高い機器が後から復旧・起動した際に、稼働中のActiveから制御を奪い返す(preempt)かどうかの設定。両機で同じ値に揃える
+- **Passive Link State**: `Active/Passive Settings`タブにある、Passive側のデータプレーンインタフェースのリンク状態(shutdown/auto)を制御する設定
+- **Operational Commands (Suspend local device / Make local device functional)**: `Device > High Availability > Operational Commands`から手動でローカル機を一時停止・復帰させる操作。計画的なフェイルオーバー試験に使う
+
+## シナリオ設定
+
+{{ pair_name }}は、Group ID {{ ha_group_id }}(Group Name: `{{ ha_group_name }}`)のHAペアとして構成する次の2台です。
+
+| role | hostname | mgmt_ip | ha1_ip | ha2_ip | device_priority |
+|------|----------|---------|--------|--------|------------------|
+{% for m in ha_members %}| {{ m.role }} | {{ m.hostname }} | {{ m.mgmt_ip }} | {{ m.ha1_ip }} | {{ m.ha2_ip }} | {{ m.device_priority }} |
+{% endfor %}
+
+Preemptive: {{ preemptive }} / Heartbeat Backup: {{ heartbeat_backup }} / HA Timer Profile: {{ ha_timer_profile }} / Passive Link State: {{ passive_link_state }} / HA1リンクの暗号化: {{ ha1_encryption_enabled }}
+
+フェイルオーバー試験は、{{ maintenance_window }}の間に実施します。セッション維持の確認には、Active側経由で継続通信させる検証対象ホスト`{{ session_sync_verify_host }}`を使用します。
+
+## 手順
+
+### 1. 前提を確認する(物理接続とManagement Ping許可)
+
+両機のGUIに個別にログインし、次を確認します。
+
+- `Device > Setup > Interfaces > Management`で、`Ping`が許可サービスに含まれていることを確認する(HA状態確認・疎通確認で使うため)
+- 専用HAポートを持たない機体では、`Network > Interfaces`で使用予定のデータポートの`Interface Type`を`HA`に変更し、`Link Speed`/`Duplex`を対向機と一致させる
+- HA1ポート同士・HA2ポート同士を物理的に接続する(スイッチを介さず直結する場合はクロスケーブルを使用する)
+
+この時点ではまだ`Device > High Availability`のHA自体は有効化しません。
+
+### 2. General設定でHAを有効化する(両機で個別に実施)
+
+{% for m in ha_members %}`{{ m.hostname }}`({{ m.mgmt_ip }})のGUIで`Device > High Availability > General`を開き、`Enable HA`をチェックし、`Group ID`={{ ha_group_id }}、Mode=`Active Passive`、`Enable Config Sync`を有効にします。`Peer HA1 IP Address`には対向機のHA1アドレス`{{ m.peer_ha1_ip }}`を、`Backup HA1 IP Address`には対向機のバックアップHA1アドレス`{{ m.peer_ha1_backup_ip }}`を入力します。
+{% endfor %}
+`Peer HA1 IP Address`/`Backup HA1 IP Address`はいずれも「対向機」のアドレスを入力する項目である点を取り違えないよう、シナリオ設定の表と照合してください。
+
+### 3. Control Link(HA1)とData Link(HA2)を設定する(両機で個別に実施)
+
+同じ`Device > High Availability`画面の`HA Communications`タブで、各機とも自機のアドレスを設定します。
+
+{% for m in ha_members %}`{{ m.hostname }}`:
+- `Control Link (HA1)`: PortにHA1用の物理ポートを選択し、IPv4 Addressに`{{ m.ha1_ip }}`を設定する
+- `Control Link (HA1 Backup)`: Portにバックアップ用ポートを選択し、IPv4 Addressに`{{ m.ha1_backup_ip }}`を設定する
+- `Data Link (HA2)`: PortにHA2用の物理ポートを選択し、IPv4 Addressに`{{ m.ha2_ip }}`を設定した上で、`Enable Session Synchronization`をチェックする
+{% endfor %}
+
+### 4. Election SettingsとActive/Passive Settingsを設定する(両機で個別に実施)
+
+`General`タブの`Election Settings`セクションで、次を設定します。
+
+{% for m in ha_members %}- `{{ m.hostname }}`: `Device Priority`={{ m.device_priority }}
+{% endfor %}
+両機共通で、`Preemptive`={{ preemptive }}、`Heartbeat Backup`={{ heartbeat_backup }}、`HA Timer Profile`={{ ha_timer_profile }}を設定します。`Preemptive`は両機で必ず同じ値に揃えてください。`Active/Passive Settings`タブでは、`Passive Link State`={{ passive_link_state }}を設定します。
+
+{% if preemptive %}Preemptiveが有効なため、`Device Priority`が最も低い`{{ ha_members[0].hostname }}`(={{ ha_members[0].device_priority }})が、両機とも稼働可能な状態では常にActiveとなります。
+{% endif %}
+### 5. HA1リンクの暗号化を設定する
+
+{% if ha1_encryption_enabled %}HA1リンクを暗号化するため、各機の`Device > Certificate Management > Certificates`で自機のHA keyをエクスポートし、対向機の`Import HA key`から相互にインポートします(host key typeは既定でRSA 2048、変更する場合はECDSA 256/384/521またはRSA 3072/4096から選択できます)。インポート完了後、各機の`Control Link (HA1)`で`Enable Encryption`をチェックします。
+
+HA1関連の設定は両機で自動同期されないため、この手順は必ず両機それぞれのGUIで個別に実施してください。エクスポートしたHA keyファイルは対向機の秘密情報に相当するため、安全な経路でのみ受け渡し、作業端末のダウンロードフォルダやリポジトリ、ログに平文のまま残さないでください。
+{% else %}このシナリオではHA1リンクの暗号化(ha1_encryption_enabled={{ ha1_encryption_enabled }})を行いません。HA1リンクがスイッチ/ルータ経由で対向機と接続されている場合は、暗号化なしで制御通信が中継区間を通過する点を踏まえてネットワーク経路の管理を行ってください。
+{% endif %}
+
+### 6. Commitし、両機のHA状態を確認する
+
+各機の画面右上の`Commit`から、それぞれの機体で個別にコミットします。片方だけコミットして作業を終えないよう、両機とも完了したことを確認します。
+
+コミット後、両機の`Dashboard`にある`High Availability`ウィジェットを開き、一方が`active`、他方が`passive`と表示され、両機とも実行中の設定が同期(synchronized)済みと表示されることを確認します。ここまでの確認が取れるまで、次のフェイルオーバー試験には進みません。
+
+### 7. 計画メンテナンス枠内で強制フェイルオーバーを実施し、セッション維持を検証する
+
+{{ maintenance_window }}に入ってから実施します。まず、現在Activeとなっている機体のGUIで、`Device > High Availability > Operational Commands`を開き、`Suspend local device`のリンクをクリックします。
+
+`Suspend local device`実行後、両機の`Dashboard`の`High Availability`ウィジェットを再度開き、これまでPassiveだった機体が`active`へ切り替わったことを確認します。切り替わり前後を通して、検証対象ホスト`{{ session_sync_verify_host }}`への継続通信(ping等)が大きな瞬断なく継続していることも確認します。
+
+確認が完了したら、Suspendした機体の`Operational Commands`から`Make local device functional`のリンクをクリックして復旧させ、両機の`Dashboard`で再度HA状態を確認します。
+
+## 動作確認
+
+- 両機の`Dashboard > High Availability`ウィジェットで、一方が`active`、他方が`passive`と表示され、実行中の設定が同期(synchronized)済みと表示されること
+{% if preemptive %}- 通常時は`Device Priority`が最も低い`{{ ha_members[0].hostname }}`がActiveとして動作していること(Preemptive={{ preemptive }}のため)
+{% endif %}- `Suspend local device`実行後、対向機(それまでPassiveだった機体)が`active`へ切り替わり、両機の`Dashboard`表示が入れ替わること
+- フェイルオーバー前後を通して、検証対象ホスト`{{ session_sync_verify_host }}`宛の継続通信が大きな瞬断なく維持されること(HA2セッション同期の効果)
+- `Make local device functional`で復旧後、両機とも`Dashboard`のHA状態表示が正常(同期済み)に戻ること
+
+## 注意事項
+
+- `Preemptive`を両機で異なる値に設定すると、意図しないフェイルオーバーの繰り返し(フラッピング)が起きうる。必ず両機で同じ値に揃える
+- `Device Priority`は値が小さいほど優先度が高い(Activeになりやすい)。逆の認識で設定すると意図しない機体がActiveになる
+- HA1関連の設定(`Peer HA1 IP Address`、`Control Link`のアドレス、暗号化の有効化等)は両機で自動同期されない設定項目のため、必ず両機それぞれのGUIで個別に入力し、両機ともCommitする
+{% if ha1_encryption_enabled %}- エクスポートしたHA keyファイルは対向機の秘密情報を含む。安全な経路でのみ受け渡し、リポジトリやログ、共有フォルダに平文のまま残さない
+{% endif %}- フェイルオーバー試験(`Suspend local device`)は本番トラフィックへ影響するため、必ず{{ maintenance_window }}のような計画メンテナンス枠内で実施する
+- `Suspend local device`を実行したまま放置せず、検証完了後は必ず`Make local device functional`で復旧させ、両機の`Dashboard`でHA状態が正常に戻ったことまで確認してから作業を終える

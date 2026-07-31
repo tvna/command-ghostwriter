@@ -1,0 +1,253 @@
+# FortiGate/FortiOSファームウェア更新のメンテナンス窓運用
+
+Fortinet公式の「Firmware change management」ベストプラクティスに沿って、
+{{ device_name }}({{ model }})を {{ current_firmware }} から
+{{ target_firmware }} へアップグレードします。事前のバージョン確認・
+リリースノート精査・関係者告知・設定バックアップ取得から、メンテナンス窓
+({{ maintenance_window_start }} 〜 {{ maintenance_window_end }})内での
+実施、ロールバック判断期限({{ rollback_deadline }})までの動作検証、
+事後の記録・継続監視までを一連の手順として整理します。GUIの詳細な操作
+項目名やCLIコマンドの完全な引数構文のうち、今回参照した一次情報で確認
+できなかった細部は記載していません。実施前に必ず対象バージョンの公式
+ドキュメントで最新の操作手順を確認してください。
+
+## 目的
+
+Fortinetが公式に定める「Firmware change management」のベストプラクティス
+(新バージョンの理解、アップグレード理由の明確化、包括的なアップグレード
+計画の策定、計画に基づく実施、事後監視)に沿って、FortiGateのファームウェア
+更新をメンテナンス窓内で安全に完了できるようになることを目指します。あわ
+せて、ロールバック基準をあらかじめ定義し、判断期限までに基準を満たさない
+場合は計画通りに切り戻す規律を身につけます。
+
+## 用語解説
+
+- **Firmware change management**: Fortinet公式ベストプラクティスガイドが
+  定める、ファームウェア更新を「新バージョンの理解」「アップグレード理由
+  の明確化」「包括的な計画策定」「計画の実施」「事後監視」の段階で運用
+  する変更管理の考え方。「Do not upgrade to a version you do not fully
+  understand or have not tested.」(十分理解・検証していないバージョン
+  にはアップグレードしないこと)がCautionとして明記されている
+- **アップグレードパス (upgrade path)**: 現在稼働中のファームウェア
+  バージョンから目的のバージョンへ、サポートされた経路で安全に更新できる
+  こと。公式ベストプラクティスは「Confirm supported hardware models and
+  upgrade paths」(サポートされるハードウェアモデルとアップグレードパス
+  の確認)を計画段階の必須項目としている
+- **ロールバック基準・ロールバック計画**: 公式ベストプラクティスが計画
+  段階で定義を求める、「Define test cases and rollback criteria, and
+  establish a rollback plan with clear triggers」(テストケースとロール
+  バック基準を定義し、明確なトリガーを伴うロールバック計画を確立する)
+  こと
+- **`get system status`**: 現在のFortiOSバージョンを含むシステム状態を
+  表示するCLIコマンド。GUIでは `Dashboard > Status` の System Information
+  ウィジェットでも同じバージョンを確認できる
+- **`execute backup config`**: 設定のバックアップを取得するCLIコマンド。
+  転送先プロトコルとして `flash | ftp | management-station | sftp | tftp
+  | usb | usb-mode` を指定できる(この引数構文は本プロジェクトの既存手順
+  書 `fortinet-config-backup-restore` で確認済みの内容を踏襲している)
+- **`execute restore image`**: ファームウェアイメージを復元(ロールバック)
+  するCLIコマンド。今回参照した一次情報ではコマンド名の存在のみ確認でき、
+  転送元プロトコルなど完全な引数構文までは確認できなかったため、実施時は
+  対象バージョンの公式CLIリファレンスで確認すること
+- **auto-patch**: FortiOS 7.6.1以降で既定で有効化されている、パッチ
+  バージョンの自動適用オプション。適用タイミングはローカルで調整可能と
+  一次情報に記載されている
+- **EOES (End of Engineering Support)**: FortiOS 7.4.8 / 7.6.4以降、
+  サポート契約が無効、またはファームウェアがEOESに達したデバイスに
+  アップグレードが必須となる基準
+
+## シナリオ設定
+
+今回アップグレード対象とするデバイスと、メンテナンス窓の設定は次のとおり
+です。
+
+| 項目 | 値 |
+|------|-----|
+| デバイス名(device_name) | {{ device_name }} |
+| モデル(model) | {{ model }} |
+| 現行バージョン(current_firmware) | {{ current_firmware }} |
+| 目標バージョン(target_firmware) | {{ target_firmware }} |
+| リリースノートURL(release_notes_url) | {{ release_notes_url }} |
+| 変更チケット(change_ticket) | {{ change_ticket }} |
+| 承認者(approver) | {{ approver }} |
+| メンテナンス窓開始(maintenance_window_start) | {{ maintenance_window_start }} |
+| メンテナンス窓終了(maintenance_window_end) | {{ maintenance_window_end }} |
+| ロールバック判断期限(rollback_deadline) | {{ rollback_deadline }} |
+| バックアップ転送プロトコル(backup_protocol) | {{ backup_protocol }} |
+| バックアップ転送先サーバ(backup_server) | {{ backup_server }} |
+| バックアップ転送先ポート(backup_port) | {{ backup_port }} |
+| バックアップ接続ユーザー(backup_user) | {{ backup_user }} |
+| バックアップ保管先(backup_destination) | {{ backup_destination }} |
+
+告知先(notification_recipients、{{ notification_recipients | length }} 件):
+
+| # | 宛先 |
+|---|------|
+{% for r in notification_recipients %}| {{ loop.index }} | {{ r }} |
+{% endfor %}
+
+ロールバック基準(rollback_criteria、{{ rollback_criteria | length }} 件。
+いずれか1件でも該当したら手順6でロールバックを実施します):
+
+{% for c in rollback_criteria %}{{ loop.index }}. {{ c }}
+{% endfor %}
+
+## 手順
+
+### 1. 現状のバージョンとアップグレードパスを確認する(変更前の基準を取る)
+
+アップグレードを開始する前に、現状を確認します。
+
+- CLI:
+
+  ```bash
+  get system status
+  ```
+
+  出力のバージョンが {{ current_firmware }} と一致することを確認します。
+- GUI: `Dashboard > Status` を開き、System Information ウィジェットで
+  同じバージョン表示を確認します。
+- {{ current_firmware }} から {{ target_firmware }} へのアップグレード
+  パスが、モデル {{ model }} でサポートされていることを、公式のアップ
+  グレードパス確認手段(サポートポータルのツール、または対象バージョン
+  のリリースノート)で確認します。サポート外の中間バージョンを飛ばす
+  アップグレードは行いません。
+- {{ release_notes_url }} のリリースノートを精査し、差分・影響・制限
+  事項・ライセンスへの影響を理解します。十分理解できない、または検証
+  していないバージョンにはアップグレードしません。
+
+### 2. 変更内容を関係者に告知し、承認を得る
+
+- 変更チケット {{ change_ticket }} に、対象デバイス
+  ({{ device_name }} / {{ model }})、現行バージョン、目標バージョン、
+  メンテナンス窓({{ maintenance_window_start }} 〜
+  {{ maintenance_window_end }})、ロールバック判断期限
+  ({{ rollback_deadline }})を記載します。
+- 承認者 {{ approver }} の事前承認を得ます。業務への影響が大きい時間帯
+  を避け、メンテナンス窓が業務優先度と整合していることを確認します。
+- メンテナンス窓の開始前に、告知先へ通知します。
+
+{% for r in notification_recipients %}- {{ r }} へ通知
+{% endfor %}
+
+### 3. アップグレード前に設定バックアップを取得する
+
+メンテナンス窓の開始後、実際のアップグレード操作に入る前に、設定と
+ファームウェアイメージのバックアップを取得します。
+
+- CLI:
+
+  ```bash
+  execute backup config {{ backup_protocol }} {{ device_name }}-preupgrade-{{ current_firmware }}.conf {{ backup_server }}:{{ backup_port }} {{ backup_user }} ********
+  ```
+
+  `********` は {{ backup_user }} の認証情報のマスク表記です。実際の値は
+  本手順書や変更チケットに平文で記載せず、投入時にコンソールへ直接入力
+  してください。
+- 取得したバックアップは {{ backup_destination }} に保管し、現行
+  ({{ current_firmware }})・目標({{ target_firmware }})双方の
+  ファームウェアイメージ(サポートポータルから取得した .out ファイル
+  等)も、合わせてオフラインで保管します。
+
+### 4. ロールバック基準を確認し、アップグレードを実施する
+
+- 手順1で確認したロールバック基準(シナリオ設定を参照)を、実施者間で
+  再確認します。基準に該当した場合は判断に迷わず即座に手順6の
+  ロールバックへ進めるよう、あらかじめ合意しておきます。
+- アップグレード操作(ファームウェアイメージのアップロードと適用)は、
+  対象デバイスのFortiOSバージョンに対応する公式ファームウェア
+  アップグレード手順に従って実施します。今回参照した一次情報では
+  GUIのボタン名・チェックボックス名やCLIアップグレードコマンドの完全な
+  引数構文までは確認できなかったため、本手順書には記載していません。
+  実施直前に、対象バージョンの公式ドキュメントで正確な操作手順を
+  確認してください。
+- 計画外の判断は行わず、あらかじめ定めた手順のみを実施します。
+
+### 5. アップグレード後のバージョンとシステム状態を検証する
+
+- CLI:
+
+  ```bash
+  get system status
+  ```
+
+  出力のバージョンが {{ target_firmware }} に更新されていることを
+  確認します。
+- GUI: `Dashboard > Status` の System Information ウィジェットでも
+  同じバージョンを確認します。
+- 主要なインターフェース・ルーティング・Firewall Policy・IPsecなど、
+  業務上重要なコンポーネントの状態を継続的に監視します。
+- ロールバック判断期限({{ rollback_deadline }})までに、シナリオ設定の
+  ロールバック基準がいずれも該当しないことを確認します。
+
+{% for c in rollback_criteria %}{{ loop.index }}. {{ c }} に該当しないこと
+{% endfor %}
+
+いずれか1件でも該当した場合は、判断期限を待たず直ちに手順6へ進みます。
+
+### 6. 結果を記録し、事後監視へ移行する(該当時はロールバックを実施)
+
+- ロールバック判断期限({{ rollback_deadline }})までに手順5の確認が
+  すべて完了した場合は、変更チケット {{ change_ticket }} に実施結果を
+  記録し、告知先へ完了を通知します。
+- ロールバック基準に該当した場合は、CLI:
+
+  ```bash
+  execute restore image
+  ```
+
+  で手順3で保管した {{ current_firmware }} のイメージへ復元します。
+  転送元プロトコルなど完全な引数構文は、対象バージョンの公式CLI
+  リファレンスで確認したうえで実行してください(今回参照した一次情報
+  ではコマンド名の存在のみ確認できています)。ロールバック実施後も
+  変更チケットに経緯を記録します。
+- アップグレード後は、公式ベストプラクティスの推奨どおり、最低でも
+  1完全業務サイクルの間システムを継続的に監視します。
+
+## 動作確認
+
+- CLI `get system status` の出力バージョンが {{ target_firmware }}
+  (ロールバック時は {{ current_firmware }})と一致すること
+- GUI `Dashboard > Status` の System Information ウィジェットでも同じ
+  バージョンが表示されること
+- シナリオ設定のロールバック基準にいずれも該当していないこと
+- 手順3で取得した設定バックアップ、および現行・目標双方のファームウェア
+  イメージが {{ backup_destination }} から参照可能であること
+- 変更チケット {{ change_ticket }} に実施結果(完了またはロールバック)
+  が記録され、告知先({{ notification_recipients | length }} 件)へ結果
+  が通知されていること
+
+## 注意事項
+
+- **理解・検証していないバージョンへはアップグレードしないこと。** 公式
+  ベストプラクティスは「Do not upgrade to a version you do not fully
+  understand or have not tested.」と明記しています。リリースノートを
+  精査し、可能な限り非本番環境で事前検証したバージョンにのみアップ
+  グレードしてください。
+- **本手順書は、GUIの詳細操作(ボタン名・チェックボックス名)やファーム
+  ウェアアップグレード自体のCLIコマンドの完全な構文をあえて記載して
+  いません。** 今回参照した一次情報(下記URL)はファームウェア変更管理
+  のベストプラクティス(計画・実施・事後監視のフレームワーク)を示す
+  ものであり、GUI操作の詳細な項目名やCLIコマンドの完全な構文までは
+  確認できませんでした。実施前に必ず対象デバイスのFortiOSバージョンに
+  対応する公式ドキュメントで最新の操作手順を確認してください。
+  一次情報:
+  https://docs.fortinet.com/document/fortigate/7.6.0/best-practices/338667/firmware-change-management
+- **ロールバック判断期限を過ぎてから判断しないこと。** 公式ベスト
+  プラクティスは「Adhere strictly to the predefined plan; avoid making
+  ad-hoc decisions under pressure.」(計画を厳守し、プレッシャー下での
+  場当たり的な判断を避ける)としています。期限
+  ({{ rollback_deadline }})までに基準を満たさない場合は速やかに
+  ロールバックへ進みます。
+- **FortiOS 7.6.1以降はauto-patchが既定で有効です。** 対象バージョンが
+  7.6.1以降の場合、パッチバージョンが自動適用される場合があることを
+  踏まえ、メンテナンス窓外の予期しないパッチ適用がないか事前に確認して
+  ください。
+- **FortiOS 7.4.8 / 7.6.4以降では、ライセンス無効またはEOES到達時に
+  アップグレードが必須化されます。** 対象デバイスがこの基準に該当する
+  場合、通常のベストプラクティス判断(業務優先度に基づく延期)が効かない
+  ことに注意してください。
+- 管理者認証情報(SSH/GUIログインパスワード、バックアップ転送用
+  アカウントのパスワード等)は本手順書や変更チケットに平文で記載せず、
+  マスク表記(`********`)で扱い、秘密管理ツール経由で参照してください。
+  この手順書の内容をそのままコピー&ペーストして投入しないこと。

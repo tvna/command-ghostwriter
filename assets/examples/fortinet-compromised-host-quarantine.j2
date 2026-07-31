@@ -1,0 +1,333 @@
+# FortiGate Security Fabricによる侵害疑いホストの隔離と調査用通信限定 — {{ compromised_hostname }}
+
+侵害の疑いがある内部ホスト `{{ compromised_hostname }}`(`{{ compromised_ip }}` /
+`{{ compromised_mac }}`)を、FortiGate (FortiOS) の Security Fabric に既定で
+搭載されている Automation Stitch『Compromised Host Quarantine』とquarantine
+VLANインターフェースのFirewall Policyで封じ込めます。既定Stitchはアクセス層
+(FortiSwitch/FortiAPのquarantine VLAN)およびFortiClient EMS経由でホストを
+隔離しますが、**既定値では無効(`status disable`)**で提供されるため、有効化・
+quarantine VLANとFirewall Policyの準備・対象ホストの隔離・調査担当チーム
+(`{{ ir_vlan_interface }}`)向け通信のみの許可・状態確認までを順に行います。
+
+## 目的
+
+FortiGateのSecurity Fabricに既定で搭載されているAutomation Stitch
+『Compromised Host Quarantine』を有効化し、IOC(侵害指標)イベント(既定
+Trigger『Compromised Host - High』)を起点にホストをアクセス層で隔離できる
+状態にしたうえで、疑わしいホスト`{{ compromised_hostname }}`を今すぐ手動で
+検疫し、quarantine VLANインターフェースのFirewall Policyで調査担当チームの
+通信のみを許可することで、通常業務への影響を抑えながら侵害拡大を封じ込め
+られるようになることを目指します。
+
+OPNsenseの検疫(quarantine)エイリアス + Floating Rulesによる手動隔離ルール
+構成とは異なり、Fortinet (FortiOS / FortiGate) では Security Fabric の既定
+automation stitch『Compromised Host Quarantine』——IOC(indicator-of-compromise)
+イベントをトリガーに、アクセス層(FortiSwitch/FortiAP の quarantine VLAN)
+および/またはFortiClient EMS経由でホストを隔離する仕組みで、この既定機構の
+利用に別売りのFortiNAC製品は必要ありません——によって同じ課題を解決します。
+
+## 用語解説
+
+- **Security Fabric > Automation**: GUIでAutomation Stitch/Trigger/Actionを
+  一覧・編集する画面。`Stitch` / `Trigger` / `Action` の3タブがあり、
+  `Stitch`タブが既定表示。新規作成はいずれのタブでも`Create New`から行う
+- **Automation Stitch**: Trigger(発火条件)と1つ以上のAction(実行内容)を
+  結び付ける仕組み。CLIでは`config system automation-stitch`の
+  `config actions`配下に、`config system automation-action`で定義したAction
+  を名前で参照して登録する
+- **既定Stitch『Compromised Host Quarantine』**: FortiOSに標準搭載される
+  既定Stitchの1つ。「Default automation stitch to quarantine a high
+  severity compromised host on FortiAPs, FortiSwitches, and FortiClient
+  EMS.」と説明され、Trigger『Compromised Host - High』と、Action
+  『Quarantine on FortiSwitch + FortiAP』『Quarantine FortiClient EMS
+  Endpoint』の2つを紐づけた状態で用意されている。**ただし既定値は
+  `status disable`(無効)であり、利用するには明示的な有効化が必要**
+- **既定Trigger『Compromised Host - High』**: 「Default automation trigger
+  configuration for when a high severity compromised host is detected.」
+  と説明される既定Trigger。高深刻度と判定された侵害ホストの検知をきっかけ
+  に発火する
+- **IOC(Indicators of Compromise)サービス**: FortiAnalyzer側の機能で、
+  FortiGuardのIndicators of Compromiseライセンスを要する。感染サイトへの
+  アクセス履歴等をもとに侵害ホストを判定し、Compromised Hostsモニタへ反映
+  する
+- **既定Action『Quarantine on FortiSwitch + FortiAP』**: 「Default
+  automation action configuration for quarantining a MAC address on
+  FortiSwitches and FortiAPs.」と説明される、`action-type quarantine`の
+  Action。アクセス層(FortiSwitch/FortiAPのポート)でMACアドレス単位の検疫
+  を行う。**FortiNAC製品は不要**
+- **既定Action『Quarantine FortiClient EMS Endpoint』**: 「Default
+  automation action configuration for quarantining a FortiClient EMS
+  endpoint device.」と説明される、`action-type quarantine-forticlient`の
+  Action。FortiClient EMS管理下のエンドポイントをEMS側で検疫する
+- **quarantine VLANインターフェース**: FortiSwitch検疫対象デバイスの収容先
+  VLANに対応する`config system interface`のエントリ。`set
+  switch-controller-access-vlan enable`でFortiSwitch検疫VLAN用インター
+  フェースであることを示し、`set switch-controller-traffic-policy`で帯域
+  制御ポリシー(`config switch-controller traffic-policy`)を紐づける。
+  検疫されたデバイスが実際にアクセスできる範囲は、このインターフェースに
+  設定したFirewall Policyで決まる
+- **Test Automation Stitch / `diagnose automation test`**: Stitchを手動発火
+  してActionを実際に実行させる機能。GUIではStitchを右クリックして選択、
+  CLIでは`diagnose automation test "<stitch名>"`。一次情報にはStitch単位で
+  発火する手段としか記載がなく、対象ホストを指定する引数についての記載は
+  ないため、特定ホストの即時検疫にはこの手段を使わず、手順5の個別検疫操作
+  を用います
+- **Compromised Hostsモニタ**: `Security Operations Center > Compromised
+  Hosts`で確認できる、User Information / Topology View / Verdict View
+  (Malware / Detected Method / Security Action)の3ペイン構成の画面
+
+## シナリオ設定
+
+| 項目 | 値 |
+|------|-----|
+| インシデントチケット(incident_ticket) | {{ incident_ticket }} |
+| 対象ホスト名(compromised_hostname) | `{{ compromised_hostname }}` |
+| 対象ホストIP(compromised_ip) | {{ compromised_ip }} |
+| 対象ホストMAC(compromised_mac) | `{{ compromised_mac }}` |
+| FortiClient EMS管理下か(forticlient_ems_in_use) | {{ forticlient_ems_in_use }} |
+| quarantine VLANインターフェース(quarantine_vlan_interface) | `{{ quarantine_vlan_interface }}` |
+| quarantine VLAN収容先物理/集約インターフェース(quarantine_parent_interface) | `{{ quarantine_parent_interface }}` |
+| quarantine VLAN ID(quarantine_vlanid) | {{ quarantine_vlanid }} |
+| quarantine VLAN IP/ネットマスク | {{ quarantine_vlan_ip }} {{ quarantine_vlan_netmask }} |
+| 帯域制御ポリシー名(quarantine_traffic_policy) | `{{ quarantine_traffic_policy }}` |
+| 調査担当チームのインターフェース(ir_vlan_interface) | `{{ ir_vlan_interface }}` |
+| 調査担当チームのアドレスオブジェクト(ir_address_object) | `{{ ir_address_object }}` |
+| 調査担当チームのネットワーク(ir_network、参考) | {{ ir_network }} |
+| 調査用許可サービス(ir_service_name / proto / port) | `{{ ir_service_name }}` / {{ ir_service_proto }} / {{ ir_service_port }} |
+| 通報・エスカレーション先(soc_contact) | {{ soc_contact }} |
+
+`{{ ir_address_object }}` は `Policy & Objects > Addresses` に、
+`{{ ir_vlan_interface }}` は調査担当チームが実際に接続するVLANインター
+フェースとして、それぞれ事前登録済みであることを前提とします(これらの
+作成自体は本手順の対象外です)。
+
+`{{ compromised_hostname }}` について、次のIOC根拠が既に確認されています。
+
+{% for e in ioc_evidence %}- {{ e }}
+{% endfor %}
+
+## 手順
+
+### 1. 現状を確認する(変更前の基準を取る)
+
+新しい設定を投入する前に、まず現状を確認します。
+
+- `Security Fabric > Automation` の `Stitch` / `Trigger` / `Action` 各
+  タブを開き、`Compromised Host Quarantine` / `Compromised Host - High` /
+  `Quarantine on FortiSwitch + FortiAP` / `Quarantine FortiClient EMS
+  Endpoint` が既定のまま存在することを確認します。CLIでも参照できます。
+
+  ```bash
+  show system automation-stitch "Compromised Host Quarantine"
+  show system automation-trigger "Compromised Host - High"
+  ```
+
+- `Security Operations Center > Compromised Hosts` を開き、
+  `{{ compromised_hostname }}`(`{{ compromised_ip }}`)がまだ検疫アクション
+  未実施の状態であることを確認します。Verdict Viewで、上記IOC根拠に対応
+  する Malware / Detected Method の記録を確認してください。
+{% if forticlient_ems_in_use %}- `{{ compromised_hostname }}` はFortiClient
+  EMS管理下の端末であるため、EMS側のFabricコネクタが接続済み(Connected)
+  であることもあわせて確認します。
+{% endif %}
+
+### 2. 既定Stitchを有効化する(今後のIOC検知に備える)
+
+既定Stitchは `status disable` で提供されているため、まず有効化します。
+
+```bash
+config system automation-stitch
+    edit "Compromised Host Quarantine"
+        set status enable
+    next
+end
+```
+
+GUIでの有効化操作(一覧上の状態切り替えの具体的なUI要素名)は、一次情報の
+このページ内ではスクリーンショットのみで示され、テキストとしては明記されて
+いません。実機の`Stitch`タブで対象行を開き、無効(disable)のままであれば
+編集画面から有効化してください。
+
+### 3. quarantine VLANインターフェースと帯域制御ポリシーを準備する(未構築の場合)
+
+FortiSwitch検疫VLAN用のインターフェースが未構築の場合は作成します。既に
+構築済みの環境ではこの手順を飛ばし、手順4へ進んでください。
+
+```bash
+config switch-controller traffic-policy
+    edit "{{ quarantine_traffic_policy }}"
+        set description "Rate control for quarantined traffic"
+        set guaranteed-bandwidth 163840
+        set guaranteed-burst 8192
+        set maximum-burst 163840
+        set cos-queue 0
+    next
+end
+
+config system interface
+    edit "{{ quarantine_vlan_interface }}"
+        set vdom "root"
+        set ip {{ quarantine_vlan_ip }} {{ quarantine_vlan_netmask }}
+        set description "Quarantine VLAN"
+        set security-mode captive-portal
+        set device-identification enable
+        set switch-controller-access-vlan enable
+        set switch-controller-traffic-policy "{{ quarantine_traffic_policy }}"
+        set interface "{{ quarantine_parent_interface }}"
+        set vlanid {{ quarantine_vlanid }}
+    next
+end
+```
+
+`set security-mode captive-portal` により、既定ではこのVLANに収容された
+デバイスはQuarantine Portalの内容を確認するまでネットワークの他の部分へ
+アクセスできません(手順4のFirewall Policyで例外を明示的に許可します)。
+一次情報の同じ設定例には`replacemsg-override-group` / `snmp-index` /
+`color`等のフィールドも含まれていますが、検疫VLANの到達性制御に直接関わる
+フィールドのみをここでは示しています。帯域制御の数値(`guaranteed-bandwidth`
+等)は一次情報の例をそのまま示しているため、実際の環境に合わせて調整して
+ください。
+
+### 4. Firewall Policyで調査担当チーム向け通信のみを許可する(隔離より先に用意する)
+
+対象ホストを検疫する前に、調査担当チームからのアクセス経路を先に用意して
+おきます。検疫後に許可経路が無い状態を作らないための予防措置です。
+
+```bash
+config firewall service custom
+    edit "{{ ir_service_name }}"
+{% if ir_service_proto == "UDP" %}        set protocol UDP
+        set udp-portrange {{ ir_service_port }}
+{% else %}        set protocol TCP
+        set tcp-portrange {{ ir_service_port }}
+{% endif %}    next
+end
+
+config firewall policy
+    edit 0
+        set name "{{ quarantine_policy_name }}"
+        set srcintf "{{ ir_vlan_interface }}"
+        set dstintf "{{ quarantine_vlan_interface }}"
+        set srcaddr "{{ ir_address_object }}"
+        set dstaddr "all"
+        set action accept
+        set schedule "always"
+        set service "{{ ir_service_name }}"
+        set logtraffic all
+    next
+end
+```
+
+続けて、quarantine VLANから他所への通信を明示的に遮断し、ログへ記録する
+ポリシーを最後尾に登録します。既定でも許可ポリシーに一致しない通信は暗黙
+拒否されますが、封じ込め状況をログで可視化するために明示化します。
+
+```bash
+config firewall policy
+    edit 0
+        set name "{{ quarantine_block_policy_name }}"
+        set srcintf "{{ quarantine_vlan_interface }}"
+        set dstintf "any"
+        set srcaddr "all"
+        set dstaddr "all"
+        set action deny
+        set schedule "always"
+        set service "ALL"
+        set logtraffic all
+    next
+end
+```
+
+`Policy & Objects > Firewall Policy` の一覧(`By Sequence`表示)を開き、
+`{{ quarantine_policy_name }}` が `{{ quarantine_block_policy_name }}` より
+上位(評価順で先)に並んでいることを確認します。順序が逆の場合は対象
+ポリシーを選択して `More > Move by ID` から並び替えてください。
+
+### 5. 対象ホストを今すぐ手動で検疫する
+
+`Compromised Host - High` の発火(FortiAnalyzerのIOC検知サイクル)を待たず
+に、`{{ compromised_hostname }}` を今すぐアクセス層で検疫します。
+
+1. `Security Fabric > Physical Topology`(または `Logical Topology`)を
+   開きます。
+2. `{{ compromised_hostname }}`(`{{ compromised_ip }}` /
+   `{{ compromised_mac }}`)のバブルにマウスオーバーし、右クリックメニュー
+   から `Quarantine Host` を選択します。
+3. `Quarantine Host` ダイアログで `OK` をクリックし、検疫を確定します。
+
+この検疫操作の一次情報は今回参照した7.2.0の自動化ステッチのページには
+掲載がなく、FortiOS 6.2.0 Cookbookの『Quarantine』ページで確認したもの
+です。7.2.0での画面名・挙動が同一かは未確認のため、実機で表示内容を確認
+しながら操作してください。
+
+### 6. Stitchのテスト発火で、今後の自動対応の経路を確認する(任意)
+
+手順2で有効化したStitchが、今後の別インシデントでも正しくActionを実行
+できることを確認します。このテストはStitch単位の発火であり、対象ホスト
+を指定するものではありません(用語解説を参照)。
+
+GUI: `Security Fabric > Automation` でStitch `Compromised Host Quarantine`
+を右クリックし、`Test Automation Stitch` を選択します。
+
+CLI:
+
+```bash
+diagnose automation test "Compromised Host Quarantine"
+```
+
+一次情報にはこのテストが実際にActionを実行する(疑似実行ではない)と読める
+記載しかなく、擬似実行かどうかの明記はありません。本番環境の他のホストへ
+意図せず影響しないよう、可能であれば検証用のFortiSwitch/FortiAP配下や
+ラボ環境で先に挙動を把握してから実施してください。
+
+## 動作確認
+
+- `Security Fabric > Automation` の `Stitch` タブで `Compromised Host
+  Quarantine` の状態が有効(enabled)になっていること
+- `Security Operations Center > Compromised Hosts` で `{{ compromised_hostname }}`
+  のVerdict Viewに、検疫(quarantine)に対応するSecurity Actionが記録されて
+  いること
+- `Policy & Objects > Firewall Policy` の一覧(`By Sequence`)で、
+  `{{ quarantine_policy_name }}` が `{{ quarantine_block_policy_name }}`
+  より上位に並んでいること
+- `{{ ir_vlan_interface }}` 側の調査担当端末から `{{ compromised_ip }}` へ
+  `{{ ir_service_name }}`({{ ir_service_proto }}/{{ ir_service_port }}) で
+  到達でき、Forward Traffic logに `{{ quarantine_policy_name }}` への一致
+  として記録されること
+- `{{ ir_vlan_interface }}` 以外からの `{{ compromised_ip }}` 宛て通信、
+  および `{{ compromised_ip }}` から外部への新規通信が、いずれも
+  `{{ quarantine_block_policy_name }}` への一致(拒否・ログ記録)として
+  Forward Traffic logに残ること
+
+## 注意事項
+
+- **既定Stitchは`status disable`(無効)で提供されます。** 手順2で有効化
+  しない限り、今後IOCが検知されても自動では隔離されません。
+- **`diagnose automation test` / `Test Automation Stitch` は対象ホストを
+  指定する手段として一次情報に記載がありません。** `{{ compromised_hostname }}`
+  の即時検疫には、必ず手順5の個別検疫操作(または同等のCLI操作)を用いて
+  ください。テスト発火の結果をもって特定ホストが検疫されたと判断しないで
+  ください。
+- **手順4のFirewall Policy(調査担当チーム向け許可)は、手順5の検疫実行
+  より先に投入してください。** 順序を逆にすると、検疫直後に調査担当
+  チームが対象ホストへ到達できない時間帯が生じます。
+- 隔離解除は、(1) フォレンジック調査でマルウェアの除去・侵害範囲の特定が
+  完了していること、(2) 隔離解除後の疎通試験で不審な外部通信が再発しない
+  こと、(3) 資産管理・セキュリティ責任者の承認が得られていること、の3点を
+  満たすまで行わないでください。解除操作自体(`Security Fabric > Physical
+  Topology`からの解除、または`Monitor > Quarantine Monitor`)の具体的な
+  画面名は、今回参照した7.2.0の一次情報ページには掲載がなく、6.2.0
+  Cookbookでのみ確認できたため、実機で名称・挙動を確認してから実施して
+  ください。
+{% if forticlient_ems_in_use %}- FortiClient EMSコンソール側での個別
+  エンドポイント検疫・解除操作は本手順の対象外です。EMS管理者と連携して
+  ください。
+{% endif %}- FortiClient EMSのFabricコネクタ認証情報など、本手順で扱う
+  認証情報はいずれも平文で手順書やチケット、ログに残さないでください。
+  値を記録する場合は`********`のようにマスクし、秘密管理ツール等で別途
+  安全に保管してください。
+- 隔離開始の日時、対象ホストの識別情報(`{{ compromised_hostname }}` /
+  `{{ compromised_ip }}` / `{{ compromised_mac }}`)、投入したFirewall
+  Policy名、Forward Traffic logの抜粋を対応記録として保存し、
+  `{{ soc_contact }}` への報告とインシデントチケット
+  `{{ incident_ticket }}` に添付してください。

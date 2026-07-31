@@ -1,0 +1,174 @@
+# SonicWall (SonicOS) Geo-IP Filterによる国別WAN着信遮断
+
+`POLICY | Security Services > Geo-IP Filter` の `Countries` タブで {{ blocked_countries | length }}
+か国({{ blocked_countries | join(', ') }})を遮断対象に指定し、`Settings` タブの
+`Block connections to/from countries selected in the Countries tab` を有効化して、指定国
+からの(および指定国への)WAN通信を遮断します。誤遮断を防ぐため、海外拠点・SaaS連携元など
+業務上必須の通信元は `Geo-IP Exclusion Object` へ先に登録してから遮断を有効化し、`Diagnostics`
+タブの `Check GEO Location Server Lookup` と `MONITOR | Logs > System Logs` で遮断・非遮断
+双方の挙動を検証します。
+
+## 目的
+
+`POLICY | Security Services > Geo-IP Filter` の `Settings` タブ・`Countries` タブそれぞれの
+役割を理解し、特定国からのWAN着信を実際に遮断できるようになることを目指します。あわせて、
+`Geo-IP Exclusion Object` による例外登録を遮断有効化より**先に**行う適用順序を身につけ、
+業務上必要な海外の通信元を誤って遮断しない安全な運用を実践します。
+
+## 用語解説
+
+- **POLICY | Security Services > Geo-IP Filter**: Geo-IP Filter を設定する管理画面の
+  ナビゲーションパス。`Settings` / `Countries` / `Diagnostics` の各タブで構成される
+- **Block connections to/from countries selected in the Countries tab**: `Settings` タブの
+  チェックボックス。有効にすると、`Countries` タブで選択した国からの(および国への)接続を
+  実際に遮断する。このチェックボックス自体を有効にするまでは、`Countries` タブで国を選択
+  していても遮断は発生しない
+- **All Connections / Firewall Rule-based Connections**: `Settings` タブのラジオボタン。
+  `All Connections` は選択した国に対する遮断をファイアウォール全体へ一律適用し、
+  `Firewall Rule-based Connections` は個々の Access Rule 側でGeo-IP Filterの適用有無を
+  制御する方式。本手順書は前者(`All Connections`)を用いる
+- **Enable Logging**: `Settings` タブのチェックボックス。有効にするとGeo-IP Filterによる
+  遮断イベントがログに記録される
+- **Geo-IP Exclusion Object**: `Settings` タブの項目。既存のAddress ObjectまたはAddress
+  Groupを1つ選択し、選択した国に該当する通信元/宛先であっても遮断対象から除外する
+- **Blocked Country テーブル**: `Countries` タブに並ぶ国別チェックボックスの一覧。チェック
+  した国が遮断対象になる
+- **Block All Unknown Countries**: `Countries` タブのチェックボックス。送信元IPの国判定が
+  できなかった(Unknown)通信もあわせて遮断する
+- **Diagnostics タブ / Check GEO Location Server Lookup**: `POLICY | Security Services >
+  Geo-IP Filter` の `Diagnostics` タブにある機能の1つ。`Lookup IP` 欄にIPアドレスを入力
+  すると、Geo-IPデータベース上でそのIPが属すると判定されている国を確認できる
+
+## シナリオ設定
+
+| 項目 | 値 |
+|------|-----|
+| Geo-IP Exclusion Object(既存のAddress Group) | {{ exclusion_object_name }} |
+| Block All Unknown Countries | {% if block_all_unknown_countries %}有効{% else %}無効{% endif %} |
+| Enable Logging | {% if enable_logging %}有効{% else %}無効{% endif %} |
+
+遮断対象国(blocked_countries、{{ blocked_countries | length }} か国):
+
+| # | 国名 |
+|---|------|
+{% for c in blocked_countries %}| {{ loop.index }} | {{ c }} |
+{% endfor %}
+
+`Geo-IP Exclusion Object`(`{{ exclusion_object_name }}`)に含まれる、業務上遮断してはならない
+WAN側通信元(trusted_wan_hosts、{{ trusted_wan_hosts | length }} 件、いずれも `MATCH OBJECTS |
+Addresses` 配下にAddress Objectとして事前登録済みで、それらをまとめたAddress Groupが
+`{{ exclusion_object_name }}` です。Address Object/Group自体の新規作成は本手順書の対象外です):
+
+| 名称 | IPアドレス | 用途 |
+|------|-----------|------|
+{% for h in trusted_wan_hosts %}| {{ h.name }} | {{ h.ip }} | {{ h.reason }} |
+{% endfor %}
+
+## 手順
+
+### 1. 現状を確認する(変更前の基準を取る)
+
+`POLICY | Security Services > Geo-IP Filter` を開き、次を確認します。
+
+- ページ上部のGeo-IPデータベースのステータスが green(ダウンロード済み)であること。yellow
+  の場合はデータベース取得に失敗しており、この後の手順で国を選択しても正しく判定されない
+  おそれがあるため、green になるまでこの先の手順を進めないでください。
+- `Settings` タブで `Block connections to/from countries selected in the Countries tab`
+  が現時点でどう設定されているかを記録します(すでに有効な既存運用に対する追加変更である
+  場合は、既存の選択国・除外オブジェクトの設定内容も記録しておきます)。
+
+### 2. Geo-IP Exclusion Objectを先に選択する(遮断を有効化する前に行う)
+
+`Settings` タブで `Geo-IP Exclusion Object` のドロップダウンから、シナリオ設定に挙げた
+`{{ exclusion_object_name }}` を選択します。まだ `Accept` は押さず、次の手順3・4と合わせて
+一度に保存します。この時点ではまだ `Block connections to/from countries selected in the
+Countries tab` を有効にしないでください。
+
+### 3. 遮断対象国を選択する
+
+`Countries` タブを開き、Blocked Countryテーブルで次の {{ blocked_countries | length }} か国
+のチェックボックスをオンにします。
+
+{% for c in blocked_countries %}- {{ c }}
+{% endfor %}
+{% if block_all_unknown_countries %}あわせて `Block All Unknown Countries` もチェックし、国判定
+ができなかった通信もあわせて遮断対象とします。
+{% else %}`Block All Unknown Countries` はチェックしないままにします。国判定ができなかった通信は
+このシナリオでは遮断対象に含めません。
+{% endif %}
+### 4. Enable Loggingを設定し、最後に遮断を有効化する
+
+`Settings` タブに戻ります。
+
+{% if enable_logging %}`Enable Logging` をチェックし、以降のGeo-IP Filterによる遮断イベントが
+ログに記録されるようにします。
+{% else %}`Enable Logging` はチェックしないままにします。
+{% endif %}`All Connections` / `Firewall Rule-based Connections` のラジオボタンは
+`All Connections` を選択します。手順2で選択した `Geo-IP Exclusion Object`
+(`{{ exclusion_object_name }}`)と手順3で選択した対象国が両方とも反映されていることを
+再確認したうえで、最後に `Block connections to/from countries selected in the Countries tab`
+をチェックし、`Accept` をクリックして保存します。
+
+### 5. Diagnosticsで判定結果を確認する
+
+`Diagnostics` タブを開き、`Check GEO Location Server Lookup` の `Lookup IP` 欄を使って
+判定結果を確認します。
+
+{% for h in trusted_wan_hosts %}- `{{ h.ip }}`({{ h.name }})を入力してlookupし、遮断対象国
+  ({{ blocked_countries | join(', ') }})のいずれにも判定されていないことを確認します。
+{% endfor %}
+遮断対象国に実際に所在する既知のIPアドレスがあれば、同様に `Lookup IP` へ入力し、遮断対象国の
+いずれかとして判定されることも確認してください(手元にそのようなIPアドレスがない場合は、
+手順6のログ確認のみで代替できます)。
+
+### 6. ログで遮断・非遮断双方の挙動を検証する
+
+`MONITOR | Logs > System Logs` を開き、手順4の保存以降のログを確認します。
+
+- シナリオ設定の `trusted_wan_hosts`({{ trusted_wan_hosts | length }} 件)からの通信が、
+  引き続き遮断されずに通過していることを確認します。
+{% for h in trusted_wan_hosts %}  - {{ h.name }}(`{{ h.ip }}`)
+{% endfor %}
+- 遮断対象国({{ blocked_countries | join(', ') }})からのWAN着信があれば、Geo-IP Filterに
+  よる遮断としてログに記録されていることを確認します。
+
+この2点をどちらも確認できるまで、既存の一時的な広めの許可設定は解除しないでください。
+
+## 動作確認
+
+- Geo-IPデータベースのステータスが green であること
+- `Countries` タブのBlocked Countryテーブルで、{{ blocked_countries | join(', ') }} が
+  すべてチェックされていること
+- `Block All Unknown Countries` が{% if block_all_unknown_countries %}チェックされている
+  こと{% else %}チェックされていないこと{% endif %}
+- `Settings` タブの `Geo-IP Exclusion Object` に `{{ exclusion_object_name }}` が選択されて
+  いること
+- `Enable Logging` が{% if enable_logging %}チェックされていること{% else %}チェックされて
+  いないこと{% endif %}
+- `Block connections to/from countries selected in the Countries tab` がチェックされている
+  こと
+- 手順5の `Check GEO Location Server Lookup` で、`trusted_wan_hosts` の各IPが遮断対象国の
+  いずれにも判定されていないこと
+- 手順6の `MONITOR | Logs > System Logs` で、`trusted_wan_hosts` からの通信が遮断されて
+  いないこと、および遮断対象国からの着信があれば遮断ログとして記録されていること
+
+## 注意事項
+
+- **`Geo-IP Exclusion Object` と遮断対象国の選択を終えてから、最後に `Block connections
+  to/from countries selected in the Countries tab` を有効化すること。** 順序を逆にすると、
+  除外設定が反映される前の短時間であっても、業務上必要な通信元が遮断される窓が生じます。
+- `Block connections to/from countries selected in the Countries tab` を有効にすると、
+  選択した国への発信方向の通信もあわせて遮断されます。WAN着信の遮断のみを意図している場合
+  でも、影響範囲が発信方向にも及ぶことを踏まえて対象国を選定してください。
+- `{{ exclusion_object_name }}` および `trusted_wan_hosts` に列挙したAddress Objectは、
+  いずれも事前に `MATCH OBJECTS | Addresses` で登録済みであることを前提とします。これら
+  オブジェクト自体の新規作成手順は本手順書には含まれません。
+- Geo-IPデータベースのステータスが yellow(ダウンロード未完了)のまま遮断を有効化すると、
+  意図した国が正しく遮断されない、または判定自体が機能しないおそれがあります。手順1で
+  必ず green であることを確認してください。
+- ロールバックする場合は、`Settings` タブの `Block connections to/from countries selected
+  in the Countries tab` のチェックを外すだけで、選択済みの対象国・除外オブジェクトの設定を
+  保持したまま遮断のみを即座に無効化できます。
+- 管理者パスワードやAPIキーなど認証情報は、本手順書やログに平文で残さないでください。
+  記録が必要な場合は `********` のようにマスクし、秘密管理ツール等で別途安全に保管して
+  ください。

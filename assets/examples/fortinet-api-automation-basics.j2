@@ -1,0 +1,263 @@
+# FortiGate REST APIによるファイアウォールポリシー自動化基盤の構築
+
+FortiGate (FortiOS) で、ファイアウォールポリシーの照会・追加・適用を自動化するパイプ
+ライン向けに、API token認証の REST API Admin アカウントを発行します。既定の
+`super_admin` は使わず、最小権限のカスタム Administrator Profile(`config system
+accprofile`)を先に作り、`fwgrp-permission` の `policy`/`address`/`service` のみを許可
+します。あわせて Trusted Hosts で自動化基盤(CI/CDランナー)のソースIPからのみアクセス
+できるように制限し、CLI から API トークンを発行して、`Authorization: Bearer` ヘッダー
+による REST API 照会(`api/v2/cmdb/firewall/policy`)まで疎通確認します。トークンは発行
+時に一度しか表示されないため、直後にシークレット管理ツールへ格納するところまでを対象
+とします。ポリシーの追加・更新(POST/PUT)に使うリクエストボディの具体的なJSONスキーマ
+は、参照した一次情報(REST API administrator、Using APIs)には掲載されておらず、要サブ
+スクリプションの Fortinet Development Network (FNDN) 側の FortiAPI リファレンスの範囲
+であるため、本手順書では安全にそのスキーマへたどり着く手順までを示します。
+
+## 目的
+
+`super_admin` のような広範な権限を持つ管理者アカウントを自動化パイプラインへ使い回す
+のではなく、ファイアウォールポリシーの照会・追加・適用に必要な範囲だけを許可した専用
+の REST API Admin アカウントを、GUI・CLI 双方の操作を確認しながら安全に発行できるよう
+になることを目指します。あわせて、Trusted Hosts によるソースIP制限、APIトークンが発行
+時に一度しか表示されないという制約、そして `Authorization: Bearer` ヘッダーによる実際
+のAPI疎通確認までを踏まえた、安全な運用手順を身につけます。
+
+## 用語解説
+
+- **REST API Admin**: `System > Administrators` の `Create New > REST API Admin` から
+  作成する、API token認証専用の管理者アカウント種別。GUI・CLIいずれの方法でも、
+  **`super_admin` プロファイルを持つ管理者のみ**が作成できる
+- **API token**: REST API Admin アカウント作成時(GUIで `OK` をクリックした時点、または
+  CLIの `execute api-user generate-key` 実行時点)に生成される認証トークン。**発行時に
+  一度しか表示されない**
+- **`config system api-user`**: REST API Admin アカウント本体を定義するCLIコマンド。
+  `accprofile` / `vdom` / `trusthost` / `cors-allow-origin` / `peer-auth` / `peer-group`
+  などを設定する
+- **`config system accprofile`**: Administrator Profile(管理者プロファイル)を定義する
+  CLIコマンド。`fwgrp`(ファイアウォール設定へのアクセス)を `custom` にすると、
+  `config fwgrp-permission` サブブロックで `address` / `policy` / `schedule` /
+  `service` / `others` の各項目を個別に `none` / `read` / `read-write` で制御できる
+- **Trusted Hosts(`config trusthost` / `ipv4-trusthost`)**: そのアカウントを使える送信
+  元を制限するIPv4/IPv6のホスト・サブネット一覧。複数登録でき、`0.0.0.0/0`(全許可)は
+  登録できない
+- **CORS Allow Origin(`cors-allow-origin`)**: APIレスポンスの `Access-Control-Allow-
+  Origin` ヘッダーの値。ブラウザ上のサードパーティWebアプリからの呼び出しを許可するた
+  めの設定で、`'*'` の使用は避けることが推奨されている
+- **PKI Group**: クライアント証明書とAPIトークンの両方が一致した場合のみアクセスを許可
+  する、追加の照合手段。証明書照合を使わない構成では設定しない
+- **`Authorization: Bearer` ヘッダー**: APIトークンをHTTPリクエストヘッダーに載せる、
+  推奨される認証方式。URLクエリパラメータ(`access_token`)方式も存在するが、使うには
+  `config system global` で `set rest-api-key-url-query enable` を別途有効にする必要
+  があり、セキュリティ上はヘッダー方式が強く推奨されている
+- **`api/v2/cmdb/<path>`**: FortiOSのCMDB(設定データベース)に対するRESTfulなAPIエン
+  ドポイントの基本形。例えば `api/v2/cmdb/firewall/address` はアドレスオブジェクトの
+  一覧照会(GET)を行う呼び出しで、同じ形式が他のCMDBパス(`firewall/policy` 等)にも
+  適用される
+
+## シナリオ設定
+
+今回発行する REST API Admin アカウントと、割り当てるカスタム Administrator Profile の
+基本設定は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| 対象FortiGate(firewall_host) | `{{ firewall_host }}` |
+| REST API Adminのユーザー名(api_username) | `{{ api_username }}` |
+| カスタムAdministrator Profile名(accprofile_name) | `{{ accprofile_name }}` |
+| 所属VDOM(vdom) | `{{ vdom }}` |
+| コメント(comments) | {{ comments }} |
+| APIトークンの有効期限(key_expiry_minutes, 分) | {{ key_expiry_minutes }} |
+
+`{{ accprofile_name }}` の `fwgrp-permission` は次の権限のみを許可します。表にない
+`sysgrp` / `vpngrp` / `utmgrp` などのグループは、既定値の `none` のまま変更しません。
+
+| fwgrp-permission項目 | 許可レベル |
+|----------------------|------------|
+| policy(ファイアウォールポリシー) | {{ fw_policy_access }} |
+| address(アドレスオブジェクト) | {{ fw_address_access }} |
+| service(サービスオブジェクト) | {{ fw_service_access }} |
+| schedule(スケジュールオブジェクト) | {{ fw_schedule_access }} |
+| others(その他のファイアウォール設定) | {{ fw_others_access }} |
+
+このアカウントを使えるTrusted Hosts一覧(trusted_hosts、{{ trusted_hosts | length }}件)
+は次のとおりです。`0.0.0.0/0` のような全許可指定はFortiGate側で登録できないため、自動
+化基盤の実際のソースIPを個別に登録します。
+
+| # | ip | netmask | 用途 |
+|---|----|---------|------|
+{% for host in trusted_hosts %}| {{ loop.index }} | {{ host.ip }} | {{ host.netmask }} | {{ host.description }} |
+{% endfor %}
+
+## 手順
+
+### 1. 発行者の権限とTrusted Hostsの対象IPを確認する(前提確認)
+
+REST API Admin アカウントは、GUI・CLIのいずれで作成する場合も **`super_admin` プロファ
+イルを持つ管理者のみ**が作成できます。現在ログイン中の管理者アカウントが `super_admin`
+であることを確認してください。あわせて、シナリオ設定の `trusted_hosts` に列挙した自動
+化基盤(CI/CDランナー等)のソースIPが、現在から変わっていないことも確認します。
+
+### 2. 最小権限のカスタムAdministrator Profileを作成する
+
+`config system accprofile` で、ファイアウォール関連の設定にのみアクセスできるカスタム
+プロファイルを作成します。`fwgrp` を `custom` にしたうえで `config fwgrp-permission`
+サブブロックを個別に設定し、それ以外のグループ(`sysgrp` など)には一切触れません(既定
+値の `none` のままにします)。
+
+```bash
+config system accprofile
+    edit "{{ accprofile_name }}"
+        set fwgrp custom
+        config fwgrp-permission
+            set address {{ fw_address_access }}
+            set policy {{ fw_policy_access }}
+            set schedule {{ fw_schedule_access }}
+            set service {{ fw_service_access }}
+            set others {{ fw_others_access }}
+        end
+    next
+end
+```
+
+### 3. REST API Admin アカウントをGUIで作成する
+
+`System > Administrators` を開き、`Create New > REST API Admin` を選択します。表示さ
+れる項目を次のとおり設定します。
+
+- **Username**: `{{ api_username }}`(`< > ( ) # " '` の各文字はクロスサイトスクリプ
+  ティング(XSS)の脆弱性につながるおそれがあるため使用しない)
+- **Administrator Profile**: 手順2で作成した `{{ accprofile_name }}` を選択する
+- **PKI Group**: 今回はクライアント証明書との二重照合を使わないため、設定しない
+- **CORS Allow Origin**: ブラウザ上のサードパーティWebアプリからの呼び出しは想定せず
+  (CI/CDランナーからのサーバー間呼び出しのみ)、`'*'` の使用も避けるべきとされている
+  ため、設定しない
+- **Trusted Hosts**: シナリオ設定の `trusted_hosts` を1件ずつ登録する。登録には自身の
+  Source Address(送信元アドレス)が必要になるため、あらかじめ次の一覧を手元に用意する
+
+{% for host in trusted_hosts %}  - {{ host.ip }}(ネットマスク {{ host.netmask }}、{{ host.description }})
+{% endfor %}
+最後に `OK` をクリックします。**この時点でAPIトークンが生成され、一度だけ画面に表示さ
+れます。** 画面を閉じる前に、シークレット管理ツールへ安全に格納してください(平文でリ
+ポジトリやチャット・チケットへ貼り付けないこと)。
+
+### 4. 同じ内容をCLIでも作成する
+
+GUIで作成済みの内容と差分がないか確認する目的も兼ねて、`config system api-user` でも
+同じアカウントを定義します。
+
+```bash
+config system api-user
+    edit "{{ api_username }}"
+        set comments "{{ comments }}"
+        set accprofile "{{ accprofile_name }}"
+        set vdom "{{ vdom }}"
+{% for host in trusted_hosts %}        config trusthost
+            edit {{ loop.index }}
+                set ipv4-trusthost {{ host.ip }} {{ host.netmask }}
+            next
+        end
+{% endfor %}    next
+end
+```
+
+`api-key`(トークン本体)はこの時点では手動で設定せず、手順5の専用コマンドで発行しま
+す。`peer-auth` はクライアント証明書照合を使わない今回の構成では既定値の `disable` の
+ままとし、`cors-allow-origin` も手順3と同じ理由で設定しません。
+
+### 5. APIトークンを発行する
+
+有効期限(expiry)は1〜10080分(最大7日間)の範囲で指定できます。今回は
+`{{ key_expiry_minutes }}` 分を指定し、無期限のトークンを発行しないようにします。
+
+```bash
+execute api-user generate-key {{ api_username }} {{ key_expiry_minutes }}
+```
+
+出力されるトークンは**この場でしか表示されません**。値そのものは本手順書や作業ログに
+記載せず、常に `********` のようにマスクした状態で記録し、発行直後にシークレット管理
+ツール(Vault等)へ格納してください。平文でログ・チケット・チャットに残さないでくださ
+い。
+
+### 6. REST APIでファイアウォールポリシーを照会する(疎通確認)
+
+発行したAPIトークンを `Authorization: Bearer` ヘッダーに載せ、`api/v2/cmdb/firewall/
+policy` へGETリクエストを送って現在のポリシー一覧を照会します。`$FGT_API_TOKEN` には、
+手順5で発行したトークンをあらかじめ環境変数として設定しておいてください(コマンド履歴
+やスクリプトへ平文で直書きしないこと)。
+
+```bash
+curl --insecure \
+  -H "Accept: application/json" \
+  -H "Authorization: Bearer ${FGT_API_TOKEN}" \
+  "https://{{ firewall_host }}/api/v2/cmdb/firewall/policy"
+```
+
+レスポンスのJSONには `http_method` / `size` / `matched_count` / `results` /
+`http_status` などのフィールドが含まれます。`http_status` が `200` で、`results` に
+現在のポリシー一覧が返ることを確認してください。401/403が返る場合は、手順2の
+`fwgrp-permission`(`policy`)、または手順3・4の Trusted Hosts の設定を見直します。
+
+### 7. ポリシーの追加・適用(書き込み呼び出し)へ安全に進むために
+
+`{{ accprofile_name }}` の `policy` はすでに `{{ fw_policy_access }}` に設定済みのた
+め、権限面ではポリシーの追加(POST)・更新(PUT)・削除(DELETE)も行えます。ただし、
+今回参照した一次情報(REST API administrator、Using APIs)には、`firewall/policy` への
+POST/PUTリクエストボディの具体的なJSONスキーマは掲載されておらず、"For a complete list
+of API calls, see the Fortinet Development Network (FNDN)"(要サブスクリプション)と案
+内されています。スキーマを推測してリクエストボディを組み立てると、意図しないポリシー
+を作成するおそれがあるため、書き込み呼び出しを自動化パイプラインへ組み込む前に、次の
+いずれかでスキーマを確認してください。
+
+1. FNDNのFortiAPIリファレンスで、対象バージョンの `firewall/policy` のPOST/PUTスキー
+   マを確認する
+2. FNDNを使えない場合は、GUIまたは`config firewall policy`のCLIで1件だけテスト用ポリ
+   シーを作成し、手順6と同じGETで照会して返ってきたJSON構造をリクエストボディの雛形と
+   して使う(値だけ書き換えて流用する)
+
+いずれの方法で確認したボディも、まず本番以外の環境やメンテナンスウィンドウでPOSTを試
+行し、手順6と同じGETで意図した内容が反映されていることを確認してから、本番の自動化パ
+イプラインに組み込んでください。
+
+## 動作確認
+
+- `System > Administrators` の一覧に `{{ api_username }}` が種別 `REST API Admin` とし
+  て表示されること
+- `{{ api_username }}` の編集画面で、`Administrator Profile` が `{{ accprofile_name }}`
+  になっていること
+- 同じ編集画面の Trusted Hosts に、シナリオ設定の {{ trusted_hosts | length }} 件が過
+  不足なく登録されていること
+- `{{ accprofile_name }}` の `fwgrp-permission` で、`policy` が `{{ fw_policy_access }}`
+  、それ以外の項目がシナリオ設定どおりの権限になっており、`sysgrp` 等の他グループが
+  `none` のままであること
+- `execute api-user generate-key` の実行直後にのみトークンが表示され、その画面を閉じ
+  た後は同じ値を再表示する手段がないこと
+- 手順6の `curl` が `http_status: 200` を返し、`results` にファイアウォールポリシーの
+  一覧が含まれること。Trusted Hosts外のホストから同じリクエストを送ると失敗すること
+
+## 注意事項
+
+- REST API Admin アカウントの作成・編集は、`super_admin` プロファイルの管理者のみが
+  行えます。日常運用でこのアカウントの権限を変更する際も同様です。
+- APIトークンは**発行時に一度しか表示されません**。値そのものを本手順書や作業ログ、チ
+  ケット・チャットに平文で残さず、必ずシークレット管理ツールへ格納してください。紛失
+  した場合は `execute api-user generate-key` で再発行し、依存するパイプライン側の認証
+  情報も差し替える必要があります。
+- `execute api-user generate-key` の有効期限(expiry)は1〜10080分(最大7日間)の範囲
+  でのみ指定できます。無期限運用を避けるため、パイプライン側のローテーション周期に合
+  わせて再発行の自動化もあわせて計画してください。
+- Trusted Hosts に `0.0.0.0/0` のような全許可指定は登録できません。自動化基盤側のソー
+  スIP(CI/CDランナー等)が変わった場合は、忘れずにTrusted Hostsを更新してください。
+- `fwgrp` を `custom` にせず、安易に `read-write` や既定の `super_admin` プロファイル
+  を割り当てると、ファイアウォールポリシー以外(システム設定・VPN・セキュリティプロ
+  ファイル等)まで操作できてしまいます。今回のように `config fwgrp-permission` を個別
+  に設定し、必要な項目以外は `none` のままにしてください。
+- APIトークンは `Authorization: Bearer` ヘッダーで渡すことを前提とします。URLクエリパ
+  ラメータ(`access_token`)方式に切り替えるには `config system global` の
+  `set rest-api-key-url-query enable` が必要ですが、トークンがWebサーバのアクセスログ
+  やブラウザ履歴に残りやすくなるため、特別な理由がない限り有効化しないでください。
+- `firewall/policy` へのPOST/PUTリクエストボディのJSONスキーマは、参照した一次情報に
+  は掲載されていません。手順7の手順を踏まずに推測でリクエストボディを組み立てて本番へ
+  投入しないでください。
+- `CORS Allow Origin` に `'*'` を設定すると、任意のオリジンからのブラウザ経由アクセス
+  を許可してしまうため使用を避けてください。今回のようなサーバー間呼び出しでは設定し
+  ないままで問題ありません。

@@ -1,0 +1,7 @@
+entry_no,schedule_name,recurrence,day_of_week,start_date,end_date,start_time,end_time,rule_name,from_zone,to_zone,rule_entry,description
+1,biz-hours-outbound,weekly,Monday,-,-,08:00,19:00,ALLOW-INTERNET-BIZHOURS,trust,untrust,yes,平日営業時間内のインターネットアクセスを許可(月)
+2,biz-hours-outbound,weekly,Tuesday,-,-,08:00,19:00,ALLOW-INTERNET-BIZHOURS,trust,untrust,no,平日営業時間内のインターネットアクセスを許可(火)
+3,biz-hours-outbound,weekly,Wednesday,-,-,08:00,19:00,ALLOW-INTERNET-BIZHOURS,trust,untrust,no,平日営業時間内のインターネットアクセスを許可(水)
+4,biz-hours-outbound,weekly,Thursday,-,-,08:00,19:00,ALLOW-INTERNET-BIZHOURS,trust,untrust,no,平日営業時間内のインターネットアクセスを許可(木)
+5,biz-hours-outbound,weekly,Friday,-,-,08:00,19:00,ALLOW-INTERNET-BIZHOURS,trust,untrust,no,平日営業時間内のインターネットアクセスを許可(金)
+6,temp-ext-20260815,non-recurring,-,2026-08-15,2026-08-15,08:00,22:00,ALLOW-INTERNET-TEMPEXT,trust,untrust,yes,定例メンテナンス当日のみインターネットアクセスを延長許可

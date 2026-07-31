@@ -1,0 +1,194 @@
+# Palo Alto Networks(PAN-OS)のSchedule機能によるスケジュールベースアクセス制御
+
+`Objects > Schedules`で作成するSchedule(スケジュール)オブジェクトを、
+Security Policy Ruleの`General`タブにある`Schedule`フィールドへ適用し、
+CSVで定義した{{ csv_rows | length }}件のうち、平日の営業時間のみ有効な
+`Weekly`スケジュールと、特定日のみ有効な`Non-Recurring`スケジュールを
+それぞれ作成します。既存の常時許可ルールによるshadowing(先勝ちルールの
+握りつぶし)を避ける順序でルールを登録し、`commit`後はスケジュール終了
+時刻をまたいで`Monitor > Logs`のTrafficログを確認し、新規セッションのみ
+が遮断され既存セッションは継続することを検証します。
+
+## 目的
+
+`Objects > Schedules`で`Weekly`・`Non-Recurring`それぞれのSchedule
+オブジェクトを作成し、Security Policy Ruleの`General`タブの`Schedule`
+フィールドから参照する手順を身につけることを目指します。あわせて、
+ルール評価が上から順・最初に一致した1件のみである特性を理解した上で
+shadowingを避けるルール順序を組み立て、スケジュールの境界時刻をまたいで
+「新規セッションは遮断されるが、既に確立された既存セッションは影響を
+受けない」という挙動をTrafficログから検証できるようになることを目指
+します。
+
+## 用語解説
+
+- **Schedule(スケジュールオブジェクト)**: `Objects > Schedules`の
+  `Add a schedule`から作成するオブジェクト。`Recurrence`(繰り返し種別)
+  として`Daily`・`Weekly`・`Non-Recurring`のいずれかを選ぶ
+- **Recurrence = Weekly**: `Add`をクリックし、`Day of Week`(曜日)を
+  1つ選んだ上で、24時間表記(HH:MM)の`Start Time`と`End Time`を指定
+  する。複数曜日をカバーする場合は曜日ごとに`Add`を繰り返す
+- **Recurrence = Non-Recurring**: `Add`をクリックし、`Start Date`・
+  `Start Time`・`End Date`・`End Time`を指定する、一度きりの日時範囲
+- **Security Policy Ruleの`Schedule`フィールド**: ルール編集画面の
+  `General`タブにあるフィールド。既定でSecurity ruleはすべての日時で
+  常に有効だが、`Schedule`を指定するとそのスケジュールの時間範囲内の
+  みルールが有効になる
+- **ルール評価順序(先勝ち)**: Security Policyルールは上から順に評価
+  され、最初に条件に一致した1件のみが適用されると、それ以降のルールは
+  評価されない。この特性により、スケジュール適用ルールより上に同じ
+  ゾーン間通信を常時許可する広いルールがあると、スケジュールによる
+  制限が握りつぶされる(shadowing)
+- **既定ルール(interzone-default / intrazone-default)**: どのルール
+  にも一致しなかった通信に適用される、ルールベース最下部の既定ルール。
+  interzone-defaultはゾーンをまたぐ通信を拒否し、intrazone-defaultは
+  同一ゾーン内の通信を許可する
+- **新規セッションと既存セッションの扱い**: スケジュールによって有効化
+  されたSecurity ruleが適用されるのは新規セッションのみで、スケジュール
+  有効期間中に確立された既存セッションは、スケジュール終了後もその
+  ルールの影響を受けない
+- **commit**: PAN-OSはcandidate config(候補設定)とrunning config(実行中
+  の設定)を分離する二段階構成モデルを採る。`Commit`を実行するまで、
+  作成したScheduleやルールは実機の動作に反映されない
+- **Move(ルール並び替え)**: 対象ルールの行を選択して`Move`をクリック
+  すると、`Move top`・`Move bottom`・`Before rule`・`After rule`の
+  いずれかでルールベース内の並び順を変更できる
+
+## シナリオ設定
+
+今回作成するSchedule・Security Policy Ruleの対応関係は次の
+{{ csv_rows | length }}行のとおりです。`rule_entry`が`yes`の行が、その
+スケジュールに対応するSecurity Policy Ruleを新規作成する代表行です
+(Weeklyスケジュールは曜日ごとに複数行に分かれますが、ルールとしては
+1件のみ作成します)。
+
+| entry_no | schedule_name | recurrence | day_of_week | start_date | end_date | start_time | end_time | rule_name | from_zone | to_zone | rule_entry | description |
+|----------|----------------|------------|-------------|------------|----------|------------|----------|-----------|-----------|---------|------------|--------------|
+{% for r in csv_rows %}| {{ r["entry_no"] }} | {{ r["schedule_name"] }} | {{ r["recurrence"] }} | {{ r["day_of_week"] }} | {{ r["start_date"] }} | {{ r["end_date"] }} | {{ r["start_time"] }} | {{ r["end_time"] }} | {{ r["rule_name"] }} | {{ r["from_zone"] }} | {{ r["to_zone"] }} | {{ r["rule_entry"] }} | {{ r["description"] }} |
+{% endfor %}
+
+`day_of_week`・`start_date`・`end_date`欄の`-`は「この行では使用しない」
+ことを表します(Weekly行では日付欄を、Non-Recurring行では曜日欄を
+使いません)。`trust`/`untrust`はこの手順書内の仮称であり、実際の環境に
+存在するゾーン名に読み替えてください。
+
+## 手順
+
+### 1. 現状のSecurity Policyルールベースを確認する(shadowingリスクの事前確認)
+
+`Policies > Security`を開き、上から順に既存ルールを確認します。特に、
+シナリオ設定の`from_zone`から`to_zone`への通信を、スケジュールなしで
+常時許可している既存ルールがないかを確認してください。該当する既存
+ルールがある場合、手順4で作成するスケジュール適用ルールをそれより上位
+に配置しないと、shadowingにより制限が機能しません。
+
+### 2. Weeklyスケジュールオブジェクトを作成する
+
+`Objects > Schedules`を開き、`Add a schedule`をクリックします。`Name`に
+`biz-hours-outbound`と入力し、`Recurrence`で`Weekly`を選択します。
+`Weekly`欄で`Add`をクリックするたびに`Day of Week`を1つ選び、24時間
+表記(HH:MM)の`Start Time`と`End Time`を入力する操作を、次の一覧の
+曜日ごとに繰り返します。
+
+{% for r in csv_rows %}{% if r["recurrence"] == "weekly" %}- Day of Week: {{ r["day_of_week"] }} / Start Time: {{ r["start_time"] }} / End Time: {{ r["end_time"] }}
+{% endif %}{% endfor %}
+
+すべての曜日を入力したら`OK`をクリックして保存します。この時点では
+まだ`Commit`は実行しません。
+
+### 3. Non-Recurringスケジュールオブジェクトを作成する
+
+同じく`Objects > Schedules`で`Add a schedule`をクリックし、`Name`に
+`temp-ext-20260815`と入力して`Recurrence`で`Non-Recurring`を選択します。
+`Non-recurring`欄で`Add`をクリックし、カレンダーから対象日を選んで
+`Start Date`・`End Date`を指定した上で、次の時刻を入力します。
+
+{% for r in csv_rows %}{% if r["recurrence"] == "non-recurring" %}- Start Date: {{ r["start_date"] }} / Start Time: {{ r["start_time"] }} / End Date: {{ r["end_date"] }} / End Time: {{ r["end_time"] }}
+{% endif %}{% endfor %}
+
+`Start Date`/`End Date`の画面表示形式は機種・ロケール設定に依存するため、
+直接テキストで入力せず、必ずカレンダーUIから対象日を選択してください。
+入力後は`OK`をクリックして保存し、この時点ではまだ`Commit`は実行しま
+せん。
+
+### 4. 各Scheduleを参照するSecurity Policy Ruleを作成する
+
+`Policies > Security`を開き、`Add`をクリックしてルールを新規作成し
+ます。次の一覧それぞれについて、`General`タブで`Name`と`Schedule`
+(手順2・3で作成したスケジュール名)を設定し、`Source`タブで
+`Source Zone`を、`Destination`タブで`Destination Zone`を設定した上で、
+`Actions`タブの`Action`を`Allow`にします。
+
+{% for r in csv_rows %}{% if r["rule_entry"] == "yes" %}- Rule Name: {{ r["rule_name"] }} / Schedule: {{ r["schedule_name"] }} / Source Zone: {{ r["from_zone"] }} / Destination Zone: {{ r["to_zone"] }} / Action: Allow ({{ r["description"] }})
+{% endif %}{% endfor %}
+
+`OK`で保存します。手順1で常時許可の既存ルールが見つかった場合は、その
+ルールの行を選択して`Move`をクリックし、`Move top`または`Before rule`
+から、いま作成した2件のスケジュール適用ルールをその既存ルールより上位
+に配置してください。この時点ではまだ`Commit`は実行しません。
+
+### 5. commitして設定を確定する
+
+`Commit`をクリックし、candidate configをrunning configへ反映します。
+commitが完了するまで、手順2〜4で作成したScheduleとルールは実機の動作
+に反映されません。
+
+### 6. スケジュール終了時刻をまたいでTrafficログを検証する
+
+{% for r in csv_rows %}{% if r["rule_entry"] == "yes" and r["recurrence"] == "weekly" %}`{{ r["rule_name"] }}`の終了時刻({{ r["end_time"] }})の直前に、対象の
+{{ r["from_zone"] }}から{{ r["to_zone"] }}への通信を発生させ、終了時刻を
+またいでも接続が維持される継続的なセッションを1つ確立しておきます。
+{% endif %}{% endfor %}
+終了時刻を過ぎたら、`Monitor > Logs`を開いて`Traffic`ログ種別を選び、
+次の2点を確認します。
+
+1. 終了時刻より前に確立した既存セッションが、終了時刻を過ぎても遮断
+   されず、`Type`が`end`のログとして正常終了するまで継続して記録され
+   ること(新規セッションのみが影響を受け、既存セッションはスケジュール
+   終了の影響を受けないため)
+2. 終了時刻を過ぎてから新規に発生させた同条件の通信が、対応するスケ
+   ジュール適用ルールにはもう一致せず、既定ルール(interzone-defaultなど)
+   に一致して`Action`が`deny`または`drop`として記録されること
+
+フィルタ欄に次の条件を入力して`Apply Filter`をクリックすると、対象
+ルールに一致したログのみに絞り込めます。
+
+{% for r in csv_rows %}{% if r["rule_entry"] == "yes" %}( rule eq {{ r["rule_name"] }} )
+{% endif %}{% endfor %}
+
+## 動作確認
+
+- `Objects > Schedules`で`biz-hours-outbound`(Weekly)と
+  `temp-ext-20260815`(Non-Recurring)が、シナリオ設定のとおりの曜日・
+  時刻/日付・時刻で登録されていること
+- `Policies > Security`の`General`タブで、シナリオ設定の`rule_entry`が
+  `yes`の各ルールに、対応する`Schedule`が設定されていること
+- シナリオ設定の`from_zone`から`to_zone`へ常時許可する既存ルールが、
+  スケジュール適用ルールより下位(評価順で後)に並んでいること
+  (shadowingが発生していないこと)
+- スケジュール有効時間内に発生させた通信が、対応するルール名に一致して
+  `Monitor > Logs`のTrafficログにAllowとして記録されること
+- スケジュール終了時刻より前に確立した既存セッションが、終了時刻を
+  過ぎても遮断されず、`end`ログとして正常終了すること
+- スケジュール終了時刻を過ぎてから発生させた新規の同条件通信が、対応
+  するスケジュール適用ルールにはもう一致せず、既定ルールにdeny/drop
+  として記録されること
+
+## 注意事項
+
+- **既存の常時許可ルールによるshadowingに注意すること。** ルール評価は
+  上から順・最初に一致した1件のみが適用されます。スケジュール適用
+  ルールより上に、同じゾーン間通信を常時許可する広いルールが存在
+  すると制限が機能しません。手順1で確認し、必要に応じて手順4の`Move`
+  で並び替えてください。
+- **スケジュールの影響を受けるのは新規セッションのみです。** 終了時刻
+  を過ぎても、その時点で継続中の既存セッションは切断されません。業務
+  時間終了と同時に既存通信も即座に遮断したい場合は、本手順の範囲外で
+  ある別の対策(セッションタイムアウトの見直しなど)が必要です。
+- `Commit`を実行するまでcandidate configはrunning configに反映されま
+  せん。手順2〜4の内容は、手順5のcommitまで実機の動作に影響しません。
+- `Start Date`/`End Date`のテキスト入力形式は公式ドキュメントにも明記
+  がなく機種・ロケール設定に依存するため、直接入力せず必ずカレンダー
+  UIから対象日を選択してください。
+- `trust`/`untrust`はこの手順書内の仮称であり、実際の環境に存在する
+  ゾーン名に読み替えてください。

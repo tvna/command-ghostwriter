@@ -1,0 +1,204 @@
+# SonicWall (SonicOS) 攻撃元IPの緊急遮断と初動対応
+
+攻撃を検知した直後に、CSV で定義した {{ csv_rows | length }} 件の攻撃元IPを
+`MATCH OBJECTS | Addresses` の Address Object として登録し、それぞれを
+`POLICY | Access Rules` の最優先(最上位)の Deny ルールで遮断します。遮断後は
+Traffic Statistics で実際に通信が遮断されていることを確認し、いつ・誰が・
+なぜ遮断したかをインシデント記録として残したうえで、恒久ルールとして残すか
+解除するかを判断するための解除基準を定めます。継続的に攻撃を仕掛けてくる
+送信元については、単発の Deny ルールに加えて `POLICY | Security Services >
+Botnet Filter` の併用も検討します。
+
+## 目的
+
+攻撃検知からAddress Object/Deny Access Ruleの作成、遮断確認、インシデント
+記録、解除基準の設定までを、抜け漏れなく最短手順で実施できるようになる
+ことを目指します。あわせて、恒常的な脅威に対しては単発のAccess Ruleだけ
+でなく `Botnet Filter` を併用する判断基準を身につけます。
+
+## 用語解説
+
+- **MATCH OBJECTS | Addresses**: Address Object を作成・編集するための
+  管理画面ナビゲーションパス。`+Add` から Address Object 追加ダイアログを
+  開き、`Name` / `Zone Assignment` / `Type` / `IP Address` を設定して
+  1件のIPアドレスを名前付きオブジェクトとして登録する。`Type` を `Host`
+  にすると、単一IPアドレスを `IP Address` 欄にそのまま入力できる
+- **POLICY | Access Rules**: Access Rule を作成・編集するための管理画面
+  ナビゲーションパス(バージョンによっては `POLICY | Rules and Policies |
+  Access Rules` と表示される)。`+Add` から `Adding Rule` ダイアログを開き、
+  `Action`(`Allow` / `Deny` / `Discard`)・`Priority`(`Auto Prioritize` /
+  `Insert at the End` / `Manual`)・Source/Destination タブの `Source
+  Zone/Interface` / `Destination Zone/Interface` / `Address` などを設定
+  する
+- **Priority(Manual)**: `Adding Rule` ダイアログの `Priority` を `Manual`
+  にすると、そのゾーンペアの Access Rule テーブル内での並び順(数値が
+  小さいほど評価順が先=優先度が高い)を直接指定できる。攻撃元IPの緊急
+  遮断では、既存の許可ルールより先に評価させる必要があるため、最上位
+  (`1`)を指定する
+- **Traffic Statistics**: `POLICY | Access Rules` ページで各ルール行左側の
+  アイコンから確認できる、そのルールに一致した通信量(`Rx Packets` 等)。
+  遮断ルールに攻撃元からの通信が実際に一致しているかどうかの確認に使う
+- **POLICY | Security Services > Botnet Filter**: 既知の Botnet/C&C
+  送信元との通信を継続的に検知・遮断する機構。単発のDenyルールは
+  「その時点で判明している1つのIPアドレス」しか遮断できないのに対し、
+  Botnet Filterを有効にしたAccess Ruleは動的に更新される脅威情報を
+  参照し続けるため、同一送信元からの攻撃が繰り返される、または攻撃元IPが
+  変化する恒常的な脅威に対して併用する
+- **解除基準**: 緊急対応として追加したDeny Access Ruleを、いつ・どのような
+  条件が満たされたら見直し・解除するかをあらかじめ決めておく運用上の基準。
+  本手順書ではSonicOSの自動失効機能には依存せず、インシデント記録に基準
+  日時と確認担当者を明記し、期限管理台帳(チケット等)で管理することを前提
+  とする
+
+## シナリオ設定
+
+今回、緊急遮断の対象とする攻撃元IPと、それぞれに登録するAddress Object /
+Deny Access Ruleは、次の {{ csv_rows | length }} 件です。
+
+| incident_no | attacker_ip | address_object_name | zone_assignment | rule_name | from_zone | to_zone | priority | botnet_filter | description |
+|---|---|---|---|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["incident_no"] }} | {{ r["attacker_ip"] }} | {{ r["address_object_name"] }} | {{ r["zone_assignment"] }} | {{ r["rule_name"] }} | {{ r["from_zone"] }} | {{ r["to_zone"] }} | {{ r["priority"] }} | {{ r["botnet_filter"] }} | {{ r["description"] }} |
+{% endfor %}
+
+`botnet_filter` が `yes` の行は、同一送信元からの攻撃が繰り返し観測されて
+いる、または今後も繰り返される可能性が高いと判断した恒常的な脅威です。
+`no` の行は、今回検知した単発の攻撃に対する遮断のみを想定しています。
+
+## 手順
+
+### 1. 現状のAddress ObjectとAccess Ruleを確認する(変更前の基準を取る)
+
+新しいAddress ObjectとAccess Ruleを登録する前に、現状を確認します。
+
+- `MATCH OBJECTS | Addresses` を開き、シナリオ設定の `address_object_name`
+  と同名のAddress Objectがすでに存在しないことを確認します。
+- `POLICY | Access Rules` を開き、シナリオ設定の `from_zone` / `to_zone`
+  の各ゾーンペアに、`attacker_ip` を許可してしまう既存ルールが無いことを
+  確認します。
+- 攻撃を検知した根拠となったログ(IPS/ログ監視ツール等の検知ログ)を、
+  この時点でのタイムスタンプ付きで手元に保存しておきます。手順5の
+  インシデント記録で使用します。
+
+### 2. 攻撃元IPのAddress Objectを作成する
+
+`MATCH OBJECTS | Addresses` の `+Add` からAddress Object追加ダイアログを
+開き、シナリオ設定の各行につき次のフィールドを表の値のまま設定し、
+`Save` で保存します。
+
+- `Name`: `address_object_name`
+- `Zone Assignment`: `zone_assignment`(`WAN`)
+- `Type`: `Host`
+- `IP Address`: `attacker_ip`
+
+{% for r in csv_rows %}- incident_no {{ r["incident_no"] }}: `{{ r["address_object_name"] }}` / Zone Assignment={{ r["zone_assignment"] }} / Type=Host / IP Address={{ r["attacker_ip"] }}({{ r["description"] }})
+{% endfor %}
+
+### 3. 最優先のDeny Access Ruleを作成する
+
+`POLICY | Access Rules` を開き、シナリオ設定の `from_zone` から `to_zone`
+へのゾーンペアを選択したうえで `+Add` から `Adding Rule` ダイアログを開き、
+各行につき次のフィールドを表の値のまま設定します。
+
+- `My Rule Name`: `rule_name`
+- `Description`: `description`
+- `Action`: `Deny`
+- `IP Version`: `IPv4`
+- `Priority`: `priority`(`Manual`)を選択し、値を `1`(最上位)に指定する
+- `Schedule`: `Always`
+- Source/Destination タブの `Source Zone/Interface`: `from_zone`
+- Source/Destination タブの `Destination Zone/Interface`: `to_zone`
+- Source/Destination タブの Source `Address`: 手順2で作成した
+  `address_object_name`
+- Source/Destination タブの Destination `Address`: `Any`
+
+{% for r in csv_rows %}- incident_no {{ r["incident_no"] }}: `{{ r["rule_name"] }}` / From {{ r["from_zone"] }} To {{ r["to_zone"] }} / Action=Deny / Priority=Manual(1) / Source={{ r["address_object_name"] }} / Destination=Any
+{% endfor %}
+
+`Logging` タブは既定の有効状態(チェック済み)のまま変更しません。すべて
+の項目を設定したら `Enable` を有効にし、`Save` をクリックして保存します。
+既存の許可ルールより先に評価される必要があるため、保存後は必ず手順4で
+並び順を確認してください。
+
+### 4. 遮断の動作確認を行う(Traffic Statisticsで検証)
+
+`POLICY | Access Rules` に戻り、対象ゾーンペアのテーブルで手順3の
+Deny Access Ruleが他の許可ルールより上位(評価順で先)に並んでいることを
+確認します。
+
+1. 各Deny Access Ruleの行左側のアイコンをクリックし、Traffic Statistics
+   (`Rx Packets` 等)を表示します。
+2. 攻撃元IPからの通信が継続している場合は、時間を置いて再度確認し、
+   該当ルールの `Rx Packets` が増加していることを確認します。攻撃がすでに
+   停止している場合は、ログ監視ツール側で当該IPからの新規セッションが
+   発生していないことを確認します。
+3. 意図しない正当な通信(社内拠点やパートナーが同一IPを共有している場合
+   など)まで遮断していないか、手順1で保存したログと突き合わせて確認
+   します。
+
+### 5. インシデント記録を残す
+
+手順1で保存した検知ログと、手順2・3で作成したオブジェクト/ルール名を
+ひも付けて、次の項目をインシデント記録(チケット等)として保存します。
+
+- 検知日時・検知元(ログ監視ツール名等)
+- 攻撃元IP(`attacker_ip`)と対応する `address_object_name` / `rule_name`
+- 対応者・対応日時
+- 遮断根拠となったログの保存場所へのリンク
+
+### 6. 解除基準を設定する
+
+緊急対応として追加したDeny Access Ruleを恒久化するか解除するかを判断する
+ための解除基準を、手順5のインシデント記録に追記します。最低限、次の項目
+を明記してください。
+
+- 解除を検討する条件(例: 一定期間、当該IPからの新規アクセス試行がログに
+  記録されないこと)
+- 解除の可否を判断する担当者・レビュー予定日
+- 解除する場合の手順(`POLICY | Access Rules` から該当ルールを無効化・
+  削除し、`MATCH OBJECTS | Addresses` の対応するAddress Objectも整理する)
+
+解除基準を満たすまでは、手順3で作成したDeny Access Ruleを無効化・削除
+しないでください。
+
+### 7. 恒常的な脅威にはBotnet Filterを併用する
+
+`botnet_filter` が `yes` の行については、単発のDeny Access Ruleに加えて
+`POLICY | Security Services > Botnet Filter` を確認し、Botnet/C&C送信元
+としての検知・遮断が有効になっていることを確認します。個々の切り替え項目
+の表示名はファームウェアのバージョンによって異なる場合があるため、実際の
+画面表示に従って有効化してください。
+
+{% for r in csv_rows %}{% if r["botnet_filter"] == "yes" %}- incident_no {{ r["incident_no"] }}: `{{ r["attacker_ip"] }}`({{ r["description"] }})はBotnet Filterの併用対象
+{% endif %}{% endfor %}
+
+## 動作確認
+
+- `MATCH OBJECTS | Addresses` に、シナリオ設定の各行に対応する
+  Address Object(`Type=Host` / `Zone Assignment=WAN`)が存在すること
+- `POLICY | Access Rules` の対象ゾーンペアで、各Deny Access Ruleが既存の
+  許可ルールより上位(評価順で先)に並んでいること
+- 手順4のTraffic Statisticsで、遮断対象の通信に対して `Rx Packets` が
+  増加していること(または、攻撃元からの新規セッションがログ上で観測され
+  なくなっていること)
+- 手順1で確認した正当な通信が、変更後も引き続き許可されていること
+- 手順5のインシデント記録と手順6の解除基準が、チケット等に保存されて
+  いること
+- `botnet_filter` が `yes` の行について、`POLICY | Security Services >
+  Botnet Filter` での検知・遮断が有効になっていること
+
+## 注意事項
+
+- **遮断前に送信元IPの正当性を確認すること。** NAT越しの共有IPや、
+  正当な保守ベンダー・パートナーが一時的に同一IPから通信している可能性
+  がある場合は、遮断による業務影響を評価してから実施してください。
+- **緊急ルールを恒久ルールとして放置しないこと。** 手順6で定めた解除基準
+  に従い、期限管理台帳(チケット等)でレビュー予定日を必ず追跡してくだ
+  さい。基準を満たさないままの安易な解除も行わないでください。
+- 本手順書は一次情報で確認できたGUI操作のみを扱います。SonicOS CLIや
+  スクリプトによる同等の投入方法は本ページでは確認できなかったため
+  記載していません。CLIで投入する場合は、別途SonicOSのCLIリファレンス
+  で構文を確認してから実施してください。
+- 管理者パスワードやAPI経由でアクセスする場合の認証情報は、本手順書や
+  インシデント記録に平文で残さないでください。記録が必要な場合は
+  `********` のようにマスクし、秘密管理ツール等で別途安全に保管して
+  ください。

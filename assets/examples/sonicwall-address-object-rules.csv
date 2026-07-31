@@ -1,0 +1,11 @@
+rule_no,rule_name,src_name,src_type,src_zone,src_value1,src_value2,dst_name,dst_type,dst_zone,dst_value1,dst_value2,dst_group,svc_name,svc_protocol,svc_port,svc_group,description
+1,-,-,-,-,-,-,H_WEBSRV01,Host,LAN,172.16.50.11,-,G_WEBFARM,-,-,-,-,Webサーバー1号機のHost Address Objectを作成しG_WEBFARMへ追加
+2,-,-,-,-,-,-,H_WEBSRV02,Host,LAN,172.16.50.12,-,G_WEBFARM,-,-,-,-,Webサーバー2号機のHost Address Objectを作成しG_WEBFARMへ追加
+3,-,N_LAN_USERS,Network,LAN,10.0.20.0,255.255.255.0,-,-,-,-,-,-,-,-,-,-,社内LANセグメントをNetwork Address Objectとして作成
+4,-,H_MGMT_ADMIN,Host,LAN,10.0.20.50,-,-,-,-,-,-,-,-,-,-,-,ネットワーク管理端末のHost Address Objectを作成
+5,-,-,-,-,-,-,H_MGMT_JUMP,Host,LAN,172.16.60.5,-,-,-,-,-,-,管理踏み台サーバーのHost Address Objectを作成
+6,-,-,-,-,-,-,-,-,-,-,-,-,SVC_HTTP,TCP,80,G_SVC_WEB,HTTP用Service Objectを作成しG_SVC_WEBへ追加
+7,-,-,-,-,-,-,-,-,-,-,-,-,SVC_HTTPS,TCP,443,G_SVC_WEB,HTTPS用Service Objectを作成しG_SVC_WEBへ追加
+8,-,-,-,-,-,-,-,-,-,-,-,-,SVC_SSH_ADMIN,TCP,22,-,管理SSH用Service Objectを作成
+9,SEC_LAN_TO_WEBFARM_WEB,N_LAN_USERS,-,-,-,-,-,-,-,-,-,G_WEBFARM,-,-,-,G_SVC_WEB,LANユーザーからWebファームへのHTTP/HTTPS通信を許可するSecurity Policyを作成
+10,SEC_ADMIN_TO_JUMP_SSH,H_MGMT_ADMIN,-,-,-,-,H_MGMT_JUMP,-,-,-,-,-,SVC_SSH_ADMIN,-,-,-,管理端末から踏み台サーバーへのSSH管理アクセスを許可するSecurity Policyを作成

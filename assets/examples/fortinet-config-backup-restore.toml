@@ -1,0 +1,15 @@
+fw_hostname = "fgt-edge01"
+backup_trigger_name = "sched-daily-config-backup"
+backup_stitch_name = "stitch-daily-backup-disk"
+trigger_frequency = "daily"
+trigger_hour = 2
+trigger_minute = 30
+revision_backup_on_logout = true
+offsite_stitch_name = "stitch-daily-backup-offsite"
+offsite_action_name = "cli-backup-config-offsite"
+offsite_protocol = "sftp"
+offsite_server = "backup01.example.internal"
+offsite_port = 22
+offsite_user = "fgt-backup-svc"
+verify_revision_id = 4
+credential_handling_note = "オフボックス転送先のログイン情報と、GUIバックアップの暗号化パスワードは、本手順書や自動化スクリプトのテキストに平文で残さない。実際の値は秘密管理ツールで一元管理し、設定投入時にFortiGateのコンソールへ直接入力する。"

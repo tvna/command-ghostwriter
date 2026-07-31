@@ -1,0 +1,4 @@
+policy_id,name,dstaddr,service,schedule_name,schedule_type,day,start,end,schedule_timeout,description
+201,lan-wan-business-hours,all,ALL,business-hours,recurring,monday tuesday wednesday thursday friday,08:00,19:00,enable,平日日中のみ外部アクセスを許可する一般業務端末向けポリシー。終業時刻に既存セッションも強制的に切断する
+202,lan-wan-saturday-halfday,all,ALL,saturday-halfday,recurring,saturday,08:00,12:00,disable,土曜午前のみ外部アクセスを許可する土曜出社対応ポリシー。既存セッションは強制切断せず非アクティブタイムアウトで自然終了させる
+203,lan-wan-maint-window-0816,all,HTTPS,maint-2026-08-16,onetime,-,00:00 2026/08/16,04:00 2026/08/16,enable,8月16日未明のみ許可する一時メンテナンス例外ポリシー。ウィンドウ終了と同時に既存セッションも切断する

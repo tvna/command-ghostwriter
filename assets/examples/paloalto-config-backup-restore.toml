@@ -1,0 +1,14 @@
+firewall_hostname = "fw-osaka-dc1"
+snapshot_name_prefix = "cfgbk"
+backup_date_today = "20260731"
+backup_date_previous_gen = "20260724"
+backup_date_restore_target = "20260717"
+retention_generations = 3
+scheduled_export_name = "nightly-config-export"
+scheduled_export_description = "Panorama管理下の全ファイアウォールとPanorama自身の夜間設定バックアップ"
+scheduled_export_start_time = "23:30"
+scheduled_export_protocol = "SCP"
+scheduled_export_server_host = "backup01.example.internal"
+scheduled_export_server_port = 22
+scheduled_export_server_path = "/backup/panos"
+scheduled_export_server_username = "svc-panos-backup"

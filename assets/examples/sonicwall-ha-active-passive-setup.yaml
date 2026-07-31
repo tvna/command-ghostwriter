@@ -1,0 +1,21 @@
+primary_host: fw-pri-01
+secondary_host: fw-sec-01
+primary_serial: "0017C52A9C10"
+secondary_serial: "0017C52A9C11"
+ha_control_interface: X3
+ha_data_interface: X4
+enable_preempt: true
+enable_virtual_mac: true
+monitored_interfaces:
+  - name: X0
+    zone: LAN
+    shared_ip: 10.10.10.1
+    prefix: 24
+    primary_monitor_ip: 10.10.10.3
+    secondary_monitor_ip: 10.10.10.4
+  - name: X1
+    zone: WAN
+    shared_ip: 203.0.113.1
+    prefix: 29
+    primary_monitor_ip: 203.0.113.3
+    secondary_monitor_ip: 203.0.113.4

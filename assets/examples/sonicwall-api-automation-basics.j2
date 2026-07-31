@@ -1,0 +1,215 @@
+# SonicWall (SonicOS) APIによるルール自動化基盤の構築
+
+自動化専用のフル管理者アカウントを発行したうえで SonicOS API を有効化し、
+{{ rules | length }} 件のシナリオルールを対象に、既存ルールの照会・追加・
+確定(commit)を curl から一連の流れとして実行します。SonicOS API は
+フル管理者権限を持つアカウントでのみ利用でき、権限を絞った専用アカウントは
+発行できないため、発行したアカウントの取り扱いそのものを厳格に管理する
+ことで運用リスクを抑えます。最後に変更内容を照会で再確認し、セッションを
+明示的にログアウトして手順を締めくくります。
+
+## 目的
+
+`{{ device_host }}` 上で、ルール照会・追加・適用(commit)を自動化するための
+最小限の運用基盤を、SonicOS API を用いて構築できるようになることを目指し
+ます。あわせて、フル管理者権限を持つ専用アカウントを安全に発行・保管する
+手順と、変更を確定(commit)しないままセッションが切れた場合に設定が失われる
+という SonicOS API 特有の挙動を理解し、確実に確定させる運用を身につけます。
+
+OPNsenseでは`System > Access > Users`でAPIキーのみを発行するユーザーを作成し、
+そのユーザーに必要最小限の権限だけを付与することで、最小権限のAPI認証情報を
+発行できます。これに対し SonicWall (SonicOS) には同名の機構がなく、SonicOS
+RESTful API(SonicOS/X API Reference Guide)はフル管理者権限を持つアカウント
+でのみ呼び出しを許可し、OPNsenseのような最小権限専用のAPIキーには対応して
+いません。本手順書では、この制約を前提に、フル管理者権限のアカウントを
+自動化専用として分離発行することで運用リスクを軽減する方針を取ります。
+
+## 用語解説
+
+- **SonicOS API**: SonicWallの一次情報である「SonicOS/X API Reference Guide」
+  に定義される、SonicOS/SonicOSX機器をHTTPS経由で操作するための公式REST API
+- **SonicOS API Enable**: `DEVICE | Settings > Administration` 画面の
+  `Audit / SonicOS API` タブにある `SONICOS API` セクションのチェックボックス
+  で、これを有効化しないとAPI呼び出しはすべて拒否される
+- **認証方式**: 同じ `Audit / SonicOS API` タブで選択する、`RFC-2617 HTTP
+  Basic Access authentication` と `RFC-7616 HTTP Digest Access authentication`
+  の2方式。RADIUS/LDAP/TACACS+を使わないローカルアカウントでは、SonicWallは
+  Digest認証の使用を推奨している
+- **SonicWall Administrators / Limited Administrators**: `DEVICE | Users >
+  Local Users & Groups` の `Local Users` タブでユーザーに割り当てるグループ。
+  `SonicWall Administrators` はフル管理者権限を持つグループで、SonicOS API
+  はこのグループのユーザーでのみ呼び出せる。`Limited Administrators` は
+  GUI上の設定項目を絞った限定管理者グループだが、SonicOS APIの利用には
+  対応しない(フル管理者権限が必須という制約は、このグループを使っても
+  回避できない)
+- **pending configuration(保留中の設定)**: SonicOS APIでの変更操作は、
+  `/api/sonicos/config/pending` へ `POST` するまで確定(commit)されず、
+  何も変更していない状態で `POST` すると `E_NO_CHANGE` エラーになる。
+  セッションがアイドルタイムアウトやログアウトで切れると、未確定の変更は
+  破棄される
+- **access-rules/ipv4**: IPv4アクセスルールの照会・追加に使うSonicOS API
+  のエンドポイント(`/api/sonicos/access-rules/ipv4`)
+
+## シナリオ設定
+
+対象機器と、自動化専用アカウントの概要は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| 対象機器(device_host) | `{{ device_host }}` |
+| 自動化専用アカウント(service_account) | `{{ service_account }}` |
+| パスワード | `********`(平文保存禁止。環境変数 `$SONICWALL_API_PASSWORD` 経由で渡す) |
+
+今回、照会・追加を行う {{ rules | length }} 件のIPv4アクセスルールは次の
+とおりです。
+
+| name | from_zone | to_zone | action | source | destination | service | enable |
+|------|-----------|---------|--------|--------|--------------|---------|--------|
+{% for r in rules %}| {{ r["name"] }} | {{ r["from_zone"] }} | {{ r["to_zone"] }} | {{ r["action"] }} | {{ r["source"] }} | {{ r["destination"] }} | {{ r["service"] }} | {{ r["enable"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 現状を確認する(変更前の基準を取る)
+
+- `DEVICE | Settings > Administration` の `Audit / SonicOS API` タブを開き、
+  `SONICOS API` セクションの `Enable SonicOS API` が現在どちらの状態かを
+  確認し、記録します(機種・ファームウェアにより既定値が異なるため、
+  推測せず必ずこの画面で確認してください)。
+- `DEVICE | Users > Local Users & Groups` の `Local Users` タブを開き、
+  自動化専用アカウント用に使う名前 `{{ service_account }}` がまだ存在しない
+  ことを確認します。既存の人間の管理者アカウントを自動化に流用しないための
+  確認です。
+
+### 2. 自動化専用のフル管理者アカウントを発行する
+
+`DEVICE | Users > Local Users & Groups` の `Local Users` タブで `Add User`
+をクリックし、Name欄に `{{ service_account }}` を入力してパスワードを設定
+します。`Groups` タブで `SonicWall Administrators` グループにのみ所属させ
+てください。`Limited Administrators` グループではSonicOS APIを呼び出せない
+ため、このアカウントは必然的にフル管理者権限を持つことになります。発行した
+パスワードはこの手順書やコミットログには記載せず、秘密管理ツール経由で
+`$SONICWALL_API_PASSWORD` として自動化基盤に渡してください。
+
+### 3. SonicOS APIを有効化する
+
+`DEVICE | Settings > Administration` の `Audit / SonicOS API` タブに戻り、
+`SONICOS API` セクションで `Enable SonicOS API` にチェックを入れます。認証
+方式は `RFC-7616 HTTP Digest Access authentication` を選択し、`Accept` を
+クリックして保存します。
+
+### 4. 認証してセッションを開始する
+
+環境変数 `$SONICWALL_API_USER`(`{{ service_account }}` を設定)と
+`$SONICWALL_API_PASSWORD` を用意したうえで、`/api/sonicos/auth` に `POST`
+してログインします。`override` を `true` にすると、既存のトークンが残って
+いても新しいセッションで上書きできます。
+
+```bash
+curl -k -i --digest -u "$SONICWALL_API_USER:$SONICWALL_API_PASSWORD" \
+  -X POST "https://{{ device_host }}/api/sonicos/auth" \
+  -H "Content-Type: application/json" \
+  -d '{"override": true}'
+```
+
+### 5. 既存のIPv4アクセスルールを照会する
+
+ルールを追加する前に、現在のルール一覧を取得して基準にします。
+
+```bash
+curl -k --digest -u "$SONICWALL_API_USER:$SONICWALL_API_PASSWORD" \
+  -X GET "https://{{ device_host }}/api/sonicos/access-rules/ipv4" \
+  -H "Accept: application/json"
+```
+
+### 6. シナリオ設定のルールをAPIで追加する
+
+シナリオ設定の {{ rules | length }} 件を、上から順に
+`access-rules/ipv4` への `POST` で追加します。
+
+```bash
+{% for r in rules %}curl -k --digest -u "$SONICWALL_API_USER:$SONICWALL_API_PASSWORD" \
+  -X POST "https://{{ device_host }}/api/sonicos/access-rules/ipv4" \
+  -H "Content-Type: application/json" \
+  -d '{"access_rules":[{"ipv4":{"name":"{{ r["name"] }}","enable":{{ r["enable"] | lower }},"from":"{{ r["from_zone"] }}","to":"{{ r["to_zone"] }}","action":"{{ r["action"] }}","source":{"address":{"name":"{{ r["source"] }}"}},"destination":{"address":{"name":"{{ r["destination"] }}"}},"service":{"name":"{{ r["service"] }}"}}}]}'
+{% endfor %}```
+
+この時点ではまだ機器の稼働中設定には反映されません(pending configuration
+の状態です)。
+
+### 7. 変更を確定(commit)する
+
+`/api/sonicos/config/pending` への `POST` で、保留中の変更をまとめて確定
+します。
+
+```bash
+curl -k --digest -u "$SONICWALL_API_USER:$SONICWALL_API_PASSWORD" \
+  -X POST "https://{{ device_host }}/api/sonicos/config/pending" \
+  -H "Accept: application/json"
+```
+
+もし手順6の内容に誤りがあり、確定前に取り消したい場合は、同じ
+`/api/sonicos/config/pending` に対して `DELETE` を実行すると保留中の変更を
+すべて破棄できます。
+
+```bash
+curl -k --digest -u "$SONICWALL_API_USER:$SONICWALL_API_PASSWORD" \
+  -X DELETE "https://{{ device_host }}/api/sonicos/config/pending"
+```
+
+### 8. 反映結果を再照会し、セッションをログアウトする
+
+手順5と同じ `GET` を再実行し、{{ rules | length }} 件すべてが期待どおりの
+`from` / `to` / `action` / `source` / `destination` / `service` で反映
+されていることを確認します。確認後、`/api/sonicos/auth` へ `DELETE` を送り、
+セッション(トークン)を明示的に終了します。
+
+```bash
+curl -k --digest -u "$SONICWALL_API_USER:$SONICWALL_API_PASSWORD" \
+  -X GET "https://{{ device_host }}/api/sonicos/access-rules/ipv4" \
+  -H "Accept: application/json"
+curl -k --digest -u "$SONICWALL_API_USER:$SONICWALL_API_PASSWORD" \
+  -X DELETE "https://{{ device_host }}/api/sonicos/auth"
+```
+
+## 動作確認
+
+- 手順5(追加前)と手順8(追加後)の `GET access-rules/ipv4` を比較し、
+  シナリオ設定の {{ rules | length }} 件がすべて新規に追加されていること
+- 手順8で再照会した各ルールの `name` / `from` / `to` / `action` / `source`
+  / `destination` / `service` が、シナリオ設定の表と一致していること
+- 手順7の `commit` 呼び出しが `E_NO_CHANGE` を返していないこと(返って
+  いた場合、手順6の追加が実際には反映されていない可能性があるため、
+  手順5からやり直すこと)
+- `DEVICE | Users > Local Users & Groups` で `{{ service_account }}` が
+  `SonicWall Administrators` グループにのみ所属していること
+- 手順8のログアウト後、`$SONICWALL_API_USER` / `$SONICWALL_API_PASSWORD`
+  を使った再照会が新しいセッションとして再認証を要求すること(旧トークンで
+  素通りしないこと)
+
+## 注意事項
+
+- **SonicOS APIはフル管理者権限を持つアカウントでしか呼び出せません。**
+  OPNsenseのような権限を絞った専用APIキーは発行できないため、
+  `{{ service_account }}` は人間の管理者と同等以上の操作が可能な、いわば
+  緊急時アカウント相当の重要度を持ちます。パスワードのローテーション、
+  発行対象の最小化、操作ログの定期監査を、人間の管理者アカウントと同水準
+  で行ってください。
+- **手順7の `commit`(`/api/sonicos/config/pending` への `POST`)を行う
+  までは変更は確定しません。** セッションがアイドルタイムアウトしたり、
+  確定前にログアウトすると、手順6で追加したルールはすべて失われます。
+  追加作業の直後に必ず手順7を実行してください。
+- パスワード(`$SONICWALL_API_PASSWORD`)は平文でリポジトリやログ、この
+  手順書に残さず、環境変数または秘密管理ツール経由でのみ扱ってください。
+  本書のシナリオ設定表でも値は `********` としてマスクしています。
+- 例示の `curl` コマンドは検証のため `-k`(TLS証明書検証スキップ)を
+  付けています。本番の自動化基盤では、管理インターフェースに対して
+  正しいCA証明書を用いたTLS検証を行ってください。
+- SonicOS APIによる設定エクスポート(バックアップ)は機種・世代によっては
+  非対応またはエラーになることが確認されています。手順1〜3を実施する前に、
+  GUIの設定エクスポート機能で現在の設定のバックアップを取得しておくことを
+  推奨します。
+- `DEVICE | Users > Local Users & Groups` で `Limited Administrators`
+  グループを選んでも、SonicOS APIの呼び出し可否(フル管理者権限が必須)は
+  変わりません。権限を絞りたい場合でも、このグループ選択だけでは目的を
+  達成できないことに注意してください。

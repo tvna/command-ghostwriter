@@ -1,0 +1,23 @@
+device_name: "FGT-EDGE-01"
+model: "FortiGate 100F"
+current_firmware: "7.4.6"
+target_firmware: "7.6.3"
+release_notes_url: "https://docs.fortinet.com/document/fortigate/7.6.3/fortios-release-notes"
+change_ticket: "CHG-2026-0731-01"
+approver: "ネットワーク運用責任者 山田"
+maintenance_window_start: "2026-08-02 22:00 JST"
+maintenance_window_end: "2026-08-03 02:00 JST"
+rollback_deadline: "2026-08-03 00:30 JST"
+backup_protocol: "ftp"
+backup_server: "backup-fs01.example.internal"
+backup_port: 21
+backup_user: "fw-backup-svc"
+backup_destination: "backup-fs01.example.internal のバックアップ共有(暗号化ボリューム)"
+notification_recipients:
+  - "network-ops@example.internal"
+  - "sre-oncall@example.internal"
+rollback_criteria:
+  - "get system status の出力バージョンが target_firmware と一致しない"
+  - "主要インターフェースのリンクダウン、またはBGP/OSPFネイバーの断が解消しない"
+  - "業務クリティカルなFirewall Policy/IPsecトンネルの疎通が復旧しない"
+  - "CPUまたはメモリ使用率が既知の基準値から逸脱した状態が続く"

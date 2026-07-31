@@ -1,0 +1,206 @@
+# Palo Alto Networks(PAN-OS)のAddress Object/Service Objectによるルール集約管理
+
+CSV で定義した{{ csv_rows | length }} 件のホスト・ネットワーク・ポートを、
+`Objects > Addresses`のAddress Object、`Objects > Address Groups`の
+Address Group、`Objects > Services`のService Object、
+`Objects > Service Groups`のService Groupとしてそれぞれ登録し、
+`Policies > Security`のSecurity Policy RuleはIPアドレスやポート番号を
+直接書き込まず、これらのオブジェクト/グループ名だけを参照する形に組み
+立てます。ホストの追加やポートの見直しが発生した場合も、ルール自体では
+なくAddress Group/Service Groupのメンバー編集だけで対応できることを
+`Commit`後に確認します。
+
+## 目的
+
+Address Object・Address Group・Service Object・Service Groupの役割分担を
+理解した上で、ホスト・ネットワーク・ポートをSecurity Policy Ruleに直書き
+するのではなくオブジェクト参照として登録し、変更(ホストの追加・削除、
+ポートの見直しなど)をルールの編集ではなくグループメンバーの編集だけで
+完結できるようになることを目指します。あわせて、Tagを使ってオブジェクト
+を分類し、Commitの前後でcandidate config(候補設定)がrunning config
+(実行中の設定)へ反映されるタイミングを把握できるようになることを
+目指します。
+
+## 用語解説
+
+- **アドレスオブジェクト(Address Object)**: `Objects > Addresses`で作成
+  する、IPアドレスの集合を一箇所で管理するオブジェクト。Type は
+  `IP Netmask`・`IP Range`・`IP Wildcard Mask`・`FQDN`の4種類があり、
+  Security・NATなど各種ポリシールールで参照できる(`IP Wildcard Mask`型
+  のみSecurity policy ruleでのみ参照可能)
+- **アドレスグループ(Address Group)**: `Objects > Address Groups`で作成
+  する、複数のアドレスオブジェクトをまとめるオブジェクト。Type は
+  `Static`または`Dynamic`のいずれかで、Staticグループは`Add`から
+  アドレスオブジェクト(または他のアドレスグループ)を直接選択して登録
+  する
+- **サービスオブジェクト(Service Object)**: `Objects > Services`で作成
+  する、Protocol(`TCP`または`UDP`)とDestination Port(必須)・
+  Source Port(任意)の組み合わせを一箇所で管理するオブジェクト
+- **サービスグループ(Service Group)**: `Objects > Service Groups`で作成
+  する、複数のサービスオブジェクトをまとめるオブジェクト
+- **タグ(Tag)**: `Objects > Tags`で作成する、オブジェクトやポリシー
+  ルールを分類するためのキーワード。アドレスオブジェクト・アドレス
+  グループ・サービス・サービスグループ・ポリシールールなどに付与でき、
+  Colorを割り当てるとPolicyタブ上で背景色により視覚的に区別できる
+- **commit**: PAN-OSは、Web UIまたはCLIでの変更を一旦candidate config
+  として保持し、`Commit`操作を実行するまでは実機の動作(running config)
+  に反映しない二段階の設定モデルを採る
+
+## シナリオ設定
+
+今回登録するアドレスオブジェクトは次のとおりです。
+
+| name | type | value | group | tag | description |
+|------|------|-------|-------|-----|--------------|
+{% for r in csv_rows %}{% if r["kind"] == "address" %}| {{ r["name"] }} | {{ r["type"] }} | {{ r["value"] }} | {{ r["group"] }} | {{ r["tag"] }} | {{ r["description"] }} |
+{% endif %}{% endfor %}
+
+今回登録するサービスオブジェクトは次のとおりです。
+
+| name | protocol | dst_port | group | description |
+|------|----------|----------|-------|--------------|
+{% for r in csv_rows %}{% if r["kind"] == "service" %}| {{ r["name"] }} | {{ r["type"] }} | {{ r["value"] }} | {{ r["group"] }} | {{ r["description"] }} |
+{% endif %}{% endfor %}
+
+これらのオブジェクトを参照するSecurity Policy Ruleは次のとおりです。
+`group`列が`-`のアドレスオブジェクトは、グループを介さずルールから直接
+参照します。
+
+| name | src(Source Address) | dst(Destination Address) | svc(Service) | action | tag | description |
+|------|----------------------|---------------------------|--------------|--------|-----|--------------|
+{% for r in csv_rows %}{% if r["kind"] == "rule" %}| {{ r["name"] }} | {{ r["src_ref"] }} | {{ r["dst_ref"] }} | {{ r["svc_ref"] }} | {{ r["action"] }} | {{ r["tag"] }} | {{ r["description"] }} |
+{% endif %}{% endfor %}
+
+## 手順
+
+### 1. 現状のオブジェクト一覧を確認する(名前衝突の事前確認)
+
+`Objects > Addresses`・`Objects > Services`・`Objects > Address Groups`・
+`Objects > Service Groups`・`Objects > Tags`の一覧をそれぞれ開き、シナリオ
+設定と同じNameのオブジェクトがすでに存在しないことを確認します。Nameは
+大文字小文字を区別して一意である必要があります(タグのNameのみ大文字
+小文字を区別しません)。既存の同名オブジェクトがある場合は、本手順の
+Nameを変更するか、既存オブジェクトを流用するかを判断してから次に進んで
+ください。
+
+### 2. タグを作成する(Objects > Tags)
+
+`Objects > Tags > Add`から、シナリオ設定の表に登場するタグをそれぞれ
+作成します。`Name`にタグ名(127文字以内)を入力し、`OK`を押します。
+`Color`は既定の`None`のままで構いません。
+
+{% for t in csv_rows | rejectattr("tag", "equalto", "-") | map(attribute="tag") | unique | list %}- Name={{ t }}
+{% endfor %}
+
+### 3. アドレスオブジェクトを作成する(Objects > Addresses)
+
+`Objects > Addresses > Add`から、シナリオ設定のアドレスオブジェクト表の
+行ごとに1件作成します。`Name`にオブジェクト名、`Type`に表の`type`列の
+値を選択し、表示された入力欄に`value`列の値を入力します。`Tags`欄には
+手順2で作成した対応するタグを選択し、`OK`を押します。
+
+{% for r in csv_rows %}{% if r["kind"] == "address" %}- Name={{ r["name"] }} / Type={{ r["type"] }} / 値={{ r["value"] }} / Tags={{ r["tag"] }}({{ r["description"] }})
+{% endif %}{% endfor %}
+
+### 4. アドレスグループを作成する(Objects > Address Groups)
+
+`Objects > Address Groups > Add`から、シナリオ設定のアドレスオブジェクト
+表で`group`列が`-`以外の行を、グループ名ごとにまとめて登録します。
+`Name`にグループ名、`Type`に`Static`を選択し、`Add`をクリックして該当
+するアドレスオブジェクトを選択してから`OK`を押します。
+
+{% for g in csv_rows | selectattr("kind", "equalto", "address") | rejectattr("group", "equalto", "-") | map(attribute="group") | unique | list %}- Name={{ g }}(Type=Static)のメンバー:
+{% for r in csv_rows %}{% if r["kind"] == "address" and r["group"] == g %}  - {{ r["name"] }}
+{% endif %}{% endfor %}
+{% endfor %}
+
+### 5. サービスオブジェクトを作成する(Objects > Services)
+
+`Objects > Services > Add`から、シナリオ設定のサービスオブジェクト表の
+行ごとに1件作成します。`Name`にオブジェクト名、`Protocol`に表の
+`protocol`列の値を選択し、`Destination Port`に`dst_port`列の値を
+入力します。`Source Port`は空欄のままにし、`OK`を押します。
+
+{% for r in csv_rows %}{% if r["kind"] == "service" %}- Name={{ r["name"] }} / Protocol={{ r["type"] }} / Destination Port={{ r["value"] }}({{ r["description"] }})
+{% endif %}{% endfor %}
+
+### 6. サービスグループを作成する(Objects > Service Groups)
+
+`Objects > Service Groups > Add`から、シナリオ設定のサービスオブジェクト
+表で`group`列が`-`以外の行を、グループ名ごとにまとめて登録します。
+`Name`にグループ名を入力し、`Service`欄の`Add`をクリックして該当する
+サービスオブジェクトを選択してから`OK`を押します。
+
+{% for g in csv_rows | selectattr("kind", "equalto", "service") | rejectattr("group", "equalto", "-") | map(attribute="group") | unique | list %}- Name={{ g }}のメンバー:
+{% for r in csv_rows %}{% if r["kind"] == "service" and r["group"] == g %}  - {{ r["name"] }}
+{% endif %}{% endfor %}
+{% endfor %}
+
+### 7. Security Policy Ruleを作成し、オブジェクト/グループを参照する(Policies > Security)
+
+`Policies > Security > Add`から、シナリオ設定のルール表の行ごとに1件
+作成します。次の各タブへ表の値をそのまま入力します。
+
+- General タブ: `Name`にルール名、`Rule Type`は既定の`universal`のまま、
+  `Tags`に対応するタグを指定する
+- Source タブ: `Source Address`の`Add`から、`src`列の名前に一致する
+  アドレスオブジェクトまたはアドレスグループを選択する
+- Destination タブ: `Destination Address`の`Add`から、`dst`列の名前に
+  一致するアドレスオブジェクトまたはアドレスグループを選択する
+- Service/URL Category タブ: `Service`のドロップダウンから`Select`し、
+  `svc`列の名前に一致するサービスグループを選択する
+- Actions タブ: `Action Setting`の`Action`を`action`列の値にする
+
+{% for r in csv_rows %}{% if r["kind"] == "rule" %}- Name={{ r["name"] }}: Source Address={{ r["src_ref"] }} / Destination Address={{ r["dst_ref"] }} / Service={{ r["svc_ref"] }} / Action={{ r["action"] }} / Tags={{ r["tag"] }}({{ r["description"] }})
+{% endif %}{% endfor %}
+
+入力後は`OK`のみを行い、この時点ではまだ`Commit`を実行しません。
+
+### 8. 変更を確定する(Commit)
+
+`Commit`をクリックし、候補設定(candidate config)を実行中の設定
+(running config)へ反映します。Commitが完了するまで、手順2〜7で登録した
+内容は実機の動作に反映されません。結果(Success/Warning/Error)を確認し、
+Errorが表示された場合はその内容を解消してから再度`Commit`してください。
+
+## 動作確認
+
+- `Objects > Address Groups`の一覧で、各グループの`Members Count`列が
+  シナリオ設定のメンバー数と一致していること
+- `Objects > Service Groups`の一覧で、各サービスグループにシナリオ設定
+  のサービスオブジェクトがすべて含まれていること
+- `Policies > Security`のルール一覧で、作成したルールの
+  `Source Address`・`Destination Address`・`Service`列が、IPアドレスや
+  ポート番号ではなくオブジェクト/グループ名で表示されていること
+- Commit実行後、結果が`Success`(またはWarningのみ)で完了していること
+- `Monitor > Logs > Traffic`を開き、ログフィルタに`Address`属性・
+  `in`演算子・シナリオ設定のアドレスオブジェクト名またはアドレスグループ
+  名を指定して`Apply`し、想定した通信がシナリオ設定のルール名に一致して
+  記録されていること
+
+## 注意事項
+
+- **Nameの制約を必ず守ること。** アドレスオブジェクト・アドレスグループ・
+  サービスオブジェクト・サービスグループ・Security Policy RuleのNameは
+  63文字以内、大文字小文字を区別し、使用できる文字は英数字・スペース・
+  ハイフン・アンダースコアのみです(ピリオドなどは使用できません)。
+  タグのNameのみ127文字以内で大文字小文字を区別しません。同名オブジェクト
+  は作成できないため、手順1の事前確認を必ず行ってください。
+- **Commitするまでcandidate configは実機の動作(running config)に反映
+  されません。** 手順2〜7で登録した内容はCommitするまで既存の通信に影響
+  しませんが、Commit実行後は即座に反映されるため、Commitはすべてのオブジェ
+  クト・ルールの登録が完了してから1回で行ってください。
+- **将来ホストやポートを追加・変更する場合は、Address Group/Service
+  Groupのメンバーを編集するだけにとどめること。** Security Policy Rule
+  自体の`Source Address`/`Destination Address`/`Service`を都度書き換える
+  運用に戻すと、変更を1箇所に閉じるという本手順の目的が失われます。
+- `IP Wildcard Mask`型のアドレスオブジェクトはSecurity policy ruleでのみ
+  参照可能で、NATなど他のポリシーでは参照できません。本手順の
+  `IP Netmask`型を使う限りは影響しません。
+- `Shared`・`Disable override`(Panorama only)は本手順では変更しません。
+  単一vsys・スタンドアロン運用を前提とし、マルチvsys/Panorama環境固有の
+  設定には触れていません。該当する環境で運用する場合は、影響範囲を
+  別途確認してください。
+- Service Objectの`Destination Port`は必須項目(0-65535、または
+  カンマ区切りの範囲)、`Source Port`は任意項目です。送信元ポートを限定
+  する要件がない場合は空欄のままにしてください。

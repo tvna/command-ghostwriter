@@ -1,0 +1,33 @@
+ha_pair_name: DC1-Edge-HA01
+primary_host: fw-pri-01
+secondary_host: fw-sec-01
+mgmt_ip: 10.10.1.1
+heartbeat_interval_ms: 5000
+failover_trigger_level: 5
+probe_interval_sec: 20
+probe_count: 3
+preempt_mode_enabled: false
+stateful_sync_enabled: true
+change_ticket: CHG-2026-0731-014
+drill_date: "2026-08-15"
+drill_window_start: "22:00"
+drill_window_end: "23:00"
+operator_name: 山田太郎
+approver_name: 佐藤花子
+max_acceptable_switchover_sec: 10
+monitored_sessions:
+  - name: 本社-DC間 IPsecVPNトンネル
+    protocol: IPsec
+    source: 192.168.10.5
+    destination: 192.168.20.10
+    note: 拠点間VPN。切断後は自動再ネゴシエーションの所要時間も記録する
+  - name: 基幹DB接続
+    protocol: TCP/1433
+    source: 10.20.1.50
+    destination: 10.20.5.10
+    note: 業務時間中は常時接続。アプリ側の再接続タイムアウト設定は60秒
+  - name: 社内向けHTTPS公開サービス
+    protocol: TCP/443
+    source: 203.0.113.50
+    destination: 203.0.113.10
+    note: 外部クライアントからの新規セッションが継続して張られる

@@ -1,0 +1,18 @@
+firewall_host: fw-edge1.example.internal
+api_username: api-fw-automation
+accprofile_name: api-fw-automation-profile
+vdom: root
+comments: "CI/CD firewall-policy automation (query/add/apply), least privilege"
+fw_policy_access: read-write
+fw_address_access: read
+fw_service_access: read
+fw_schedule_access: none
+fw_others_access: none
+key_expiry_minutes: 10080
+trusted_hosts:
+  - ip: 203.0.113.10
+    netmask: 255.255.255.255
+    description: "CI/CDランナー(本番)"
+  - ip: 203.0.113.11
+    netmask: 255.255.255.255
+    description: "CI/CDランナー(予備、フェイルオーバー用)"

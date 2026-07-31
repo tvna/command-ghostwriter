@@ -1,0 +1,115 @@
+# Palo Alto Networks(PAN-OS)の個人リモートアクセスVPN(GlobalProtect)構築
+
+社外の個人端末からの暗号化リモートアクセスを、PAN-OSのGlobalProtect remote access VPN(`Network > GlobalProtect > Portals`のPortalと`Network > GlobalProtect > Gateways`のGatewayの組み合わせ、authentication-profile方式)で構成します。外部インターフェース・トンネルインターフェース・ゾーンの準備からサーバー証明書の用意、LDAP認証用のServer Profile/Authentication Profileの作成、Gateway・Portalの設定、Security Policyの作成とコミット、GlobalProtect appでの接続確認までを一連の手順として実施します。拠点(ファイアウォール)同士を結ぶ既存の`paloalto-ikev2-vpn`(拠点間IKEv2 IPsec VPN)とは対象・機構ともに異なる、個人端末単位のリモートアクセス用の手順です。
+
+## 目的
+
+OPNsenseが個人のリモートアクセスVPNをWireGuardインスタンス(`VPN > WireGuard > Instances`)で解決するのに対し、Palo Alto Networks (PAN-OS)には同名の機構は存在せず、GlobalProtect remote access VPN(Gateway + Portal、authentication-profileベース、個人リモートユーザー向け。既存の拠点間IPsec VPNテンプレートとは別物で、WireGuardはネイティブ非対応)というベンダーネイティブな機構で同じ課題を解決します。本手順では、GlobalProtect PortalとGatewayの役割分担、およびAuthentication Profileによる認証の仕組みを理解した上で、社外の個人端末からのリモートアクセスVPNを構築し、GlobalProtect appからの接続を検証できるようになることを目指します。
+
+## 用語解説
+
+- **GlobalProtect Portal(`Network > GlobalProtect > Portals`)**: リモートユーザーが最初に接続する管理エンドポイント。接続してきたGlobalProtect appに対する認証と、どのGatewayへ接続すべきか(Client Authentication/External Gateway Address)の案内、GlobalProtect appソフトウェア自体の配布(App Software)を担う
+- **GlobalProtect Gateway(`Network > GlobalProtect > Gateways`)**: リモートユーザーの暗号化トンネルを実際に終端するオブジェクト。トンネルインターフェース・クライアントへ払い出すIPプール(IP Pool)・認証プロファイルなどを保持する
+- **GlobalProtect app client authentication profile**: `Device > Authentication Profile`で作成し、Portal/Gatewayの双方から参照する認証プロファイル。GlobalProtect app(クライアントソフトウェア)からの接続要求を、このプロファイルが参照するServer Profile(本手順ではLDAP)経由で認証する
+- **個人リモートアクセスVPNと拠点間VPNの違い**: 既存の`paloalto-ikev2-vpn`テンプレートはPAN-OSファイアウォール2台を結ぶ拠点間(サイト間)のIKEv2 IPsec VPNを扱う。本テンプレートが扱うのは社外の個人端末1台ずつがPAN-OSファイアウォールへ接続するリモートアクセスVPNであり、対象・認証方式・機構(IKEゲートウェイ+トンネルインターフェース vs GlobalProtect Portal/Gateway)のいずれも異なる別の運用課題
+- **Server Profile(LDAP)**: PAN-OSがLDAPサーバー(Active Directory等)へ接続するための情報をまとめたオブジェクト。Authentication Profileから参照され、実際の認証処理を代行する
+- **Connect Method**: GlobalProtect Portalの Client Authentication で選択する接続方式。`On-demand (Manual user initiated connection)`はユーザーがGlobalProtect appを手動で操作して接続する方式
+- **External Gateway Address**: Portalの Client Authentication に設定する、GlobalProtect appが実際に接続しにいくGatewayのアドレス(FQDN)
+- **IP Pool**: GlobalProtect Gatewayが接続確立時にクライアントへ払い出す仮想IPアドレスの範囲
+- **User Identification(ゾーン設定)**: トンネルインターフェースが所属するゾーンで有効化する設定。リモートユーザーの通信をユーザー単位で識別できるようにする
+- **commit**: PAN-OSはcandidate configとrunning configを分離する二段階構成モデルを採る。`Commit`を実行するまで、Portal/Gateway/Security Policyへの入力内容は実機の動作に反映されない
+
+## シナリオ設定
+
+GlobalProtect Portal/Gatewayを構成する外部インターフェースと関連オブジェクトは次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| 外部インターフェース(external_interface) | `{{ external_interface }}` |
+| 外部IPアドレス(external_ip) | `{{ external_ip }}` |
+| 外部ゾーン(untrust_zone) | `{{ untrust_zone }}` |
+| 内部ゾーン(trust_zone) | `{{ trust_zone }}` |
+| トンネル用ゾーン(vpn_zone、新規作成) | `{{ vpn_zone }}` |
+| 仮想ルータ(virtual_router) | `{{ virtual_router }}` |
+| Portal/GatewayのFQDN(portal_gateway_fqdn) | `{{ portal_gateway_fqdn }}` |
+| トンネルインターフェース(tunnel_interface) | `{{ tunnel_interface }}` |
+| サーバー証明書名(server_certificate_name) | `{{ server_certificate_name }}` |
+| LDAP Server Profile名(ldap_server_profile_name) | `{{ ldap_server_profile_name }}` |
+| Authentication Profile名(authentication_profile_name) | `{{ authentication_profile_name }}` |
+| Connect Method(connect_method) | `{{ connect_method }}` |
+| IP Pool範囲(ip_pool_start 〜 ip_pool_end) | `{{ ip_pool_start }}` 〜 `{{ ip_pool_end }}` |
+| Security Policyルール名(security_policy_rule_name) | `{{ security_policy_rule_name }}` |
+
+今回GlobalProtectでの接続を許可するリモートユーザーは、LDAP(Active Directory)側で管理されている次の{{ remote_users | length }}名です。PAN-OS側にローカルアカウントは作成しません。
+
+| username | full_name | department |
+|----------|-----------|------------|
+{% for u in remote_users %}| {{ u.username }} | {{ u.full_name }} | {{ u.department }} |
+{% endfor %}
+
+## 手順
+
+### 1. 外部インターフェース・トンネルインターフェース・ゾーンを準備する
+
+`Network > Interfaces > Ethernet`で外部インターフェース`{{ external_interface }}`をLayer3として設定し、IPアドレス`{{ external_ip }}`を割り当てます。`Network > Zones`で既存の外部ゾーン`{{ untrust_zone }}`に所属させ、仮想ルータは`{{ virtual_router }}`を選択します。
+
+続けて`Network > Interfaces > Tunnel`でトンネルインターフェース`{{ tunnel_interface }}`を追加します。`Network > Zones`で新規ゾーン`{{ vpn_zone }}`を作成してこのトンネルインターフェースを所属させ、仮想ルータには同じく`{{ virtual_router }}`を選択したうえで、`{{ vpn_zone }}`ゾーンの設定で`Enable User Identification`を有効にします。
+
+外部からGlobalProtect appが接続してくる際の名前解決のため、社内外のDNSに`{{ portal_gateway_fqdn }}`を`{{ external_ip }}`へ解決するAレコードを登録しておきます。この時点ではまだPortal/Gatewayオブジェクト自体は作成しません。
+
+### 2. サーバー証明書を用意する
+
+GlobalProtect appからの接続を受ける外部インターフェース用に、サーバー証明書`{{ server_certificate_name }}`を用意します。信頼された第三者CAから発行された証明書のインポートを推奨しますが、自己署名証明書でも構成可能です。いずれの場合も、証明書のCommon Name(CN)が`{{ portal_gateway_fqdn }}`と一致していることを確認してください。CNとFQDNが一致していないと、GlobalProtect app側で証明書検証エラーが発生します。
+
+### 3. LDAP認証用のServer ProfileとAuthentication Profileを作成する
+
+Active Directoryへ接続するためのServer Profile `{{ ldap_server_profile_name }}`を、LDAPサーバーの接続情報(サーバーアドレス・Bind DN等、組織のAD環境に応じた値)を用いて作成します。具体的な入力項目は組織のLDAP/AD構成によって異なるため、社内のディレクトリ管理者と接続情報を突き合わせてから入力してください。Bind用のパスワードなど認証情報の実際の値は、入力時のみ台帳(社内の鍵管理システム)から参照し、設定手順書やチケットには残さないでください。
+
+続けて`Device > Authentication Profile`で、手順名`{{ authentication_profile_name }}`のAuthentication Profileを作成し、手順3で作成したServer Profile `{{ ldap_server_profile_name }}`を参照させます。このAuthentication Profileは、次の手順4・5でGatewayとPortalの双方から参照します。
+
+### 4. GlobalProtect Gatewayを設定する
+
+`Network > GlobalProtect > Gateways`で`Add`を選び、Gatewayを作成します。
+
+- General: Interfaceに`{{ external_interface }}`、IP Addressに`{{ external_ip }}`を設定する
+- Authentication: Server Certificateに`{{ server_certificate_name }}`、Authentication Profileに`{{ authentication_profile_name }}`を設定する
+- Agent > Tunnel Settings: Tunnel Interfaceに`{{ tunnel_interface }}`を設定する
+- Agent > Client Settings > IP Pool: `{{ ip_pool_start }}` 〜 `{{ ip_pool_end }}`の範囲を追加する
+
+入力後は`OK`を選びます。この時点ではまだ`Commit`は実行しません。
+
+### 5. GlobalProtect Portalを設定する
+
+`Network > GlobalProtect > Portals`で`Add`を選び、Portalを作成します。
+
+- General/Network Settings(Set Up Access に相当する項目): Interfaceに`{{ external_interface }}`、IP Addressに`{{ external_ip }}`、Server Certificateに`{{ server_certificate_name }}`、Authentication Profileに`{{ authentication_profile_name }}`を設定する
+- Client Authentication(Define Client Authentication に相当する項目): Connect Methodに`{{ connect_method }}`、External Gateway Addressに`{{ portal_gateway_fqdn }}`を設定する
+
+入力後は`OK`を選びます。GlobalProtect appソフトウェア自体をPortalからクライアントへ配布・更新させる場合は、別途Portal管理画面からApp Softwareのホスティング設定(Host App Updates on the Portal)を行ってください。この手順の具体的な操作先は、参照した一次情報のこのページには含まれていないため、別途PAN-OSのGlobalProtect app展開手順を確認してください。
+
+### 6. Security Policyを作成し、コミットする
+
+`Policies > Security`で`Add`を選び、ルール名`{{ security_policy_rule_name }}`で`{{ vpn_zone }}`ゾーンから`{{ trust_zone }}`ゾーンへの通信を許可するルールを作成します。GlobalProtectのトンネルが確立していても、このルールがなければPAN-OSの既定拒否(interzone-default deny)によりリモートユーザーから内部ネットワークへの通信は許可されません。
+
+入力後、`Commit`を実行してcandidate configをrunning configへ反映します。手順1〜5で入力した内容は、このコミットまで実機の動作には反映されません。
+
+### 7. GlobalProtect appを配布し、リモートユーザーの接続を確認する
+
+シナリオ設定のリモートユーザーそれぞれに、GlobalProtect appのインストーラを配布します。GlobalProtect appの接続設定でPortal Addressに`{{ portal_gateway_fqdn }}`を入力し、Authentication Profile `{{ authentication_profile_name }}`に対応するLDAP(Active Directory)アカウントで接続します。Connect Methodが`{{ connect_method }}`のため、ユーザーはGlobalProtect appを手動で操作して接続を開始する必要があります。
+
+## 動作確認
+
+- `Network > GlobalProtect > Gateways`で対象Gatewayを開き、Tunnel Interfaceが`{{ tunnel_interface }}`、IP Poolが`{{ ip_pool_start }}` 〜 `{{ ip_pool_end }}`の範囲で登録されていること
+- `Network > GlobalProtect > Portals`で対象Portalを開き、Client AuthenticationのConnect Methodが`{{ connect_method }}`、External Gateway Addressが`{{ portal_gateway_fqdn }}`で登録されていること
+- `Policies > Security`のルール一覧に`{{ security_policy_rule_name }}`が存在し、Source Zoneが`{{ vpn_zone }}`、Destination Zoneが`{{ trust_zone }}`であること
+- シナリオ設定のリモートユーザーがGlobalProtect appから接続でき、接続後にクライアント側の接続状態画面で`{{ ip_pool_start }}` 〜 `{{ ip_pool_end }}`の範囲内のIPアドレスが割り当てられていることが確認できること
+- 接続したリモート端末から内部ネットワーク(`{{ trust_zone }}`ゾーン配下)宛の通信が到達すること
+
+## 注意事項
+
+- **Security Policyルールの登録を忘れないこと。** GlobalProtectのトンネルが確立していても、`{{ vpn_zone }}`ゾーンから`{{ trust_zone }}`ゾーンへの明示的な許可ルールがなければ、PAN-OSの既定拒否(interzone-default deny)によりリモートユーザーからの通信はすべて遮断されます。
+- **証明書のCommon Name(CN)を`{{ portal_gateway_fqdn }}`と一致させること。** CNとFQDNが一致していないと、GlobalProtect app側で証明書検証エラーが発生し接続できません。
+- **LDAP Server Profileの認証情報を平文で残さないこと。** Bind用のパスワード等の実際の値は入力時のみ台帳から参照し、テンプレートや設定手順書、チケットには記載しないでください。
+- 本テンプレートは拠点間の`paloalto-ikev2-vpn`とは別物です。社外の個人端末を接続させる場合は本テンプレート、拠点(ファイアウォール)同士を接続する場合は`paloalto-ikev2-vpn`を使用してください。
+- 参照した一次情報のページには、GlobalProtect appソフトウェアのホスティング設定(Host App Updates on the Portal)の具体的な操作手順や、接続後の動作確認手順が含まれていません。本手順の手順5後半・動作確認の該当箇所は、GlobalProtectの一般的な運用に基づく内容であり、実際の操作先は別途PAN-OSの該当ドキュメントで確認してください。
+- `Commit`を実行するまでcandidate configはrunning configに反映されません。手順1〜6で入力した内容は、手順6のcommitまで実機の動作に影響しません。

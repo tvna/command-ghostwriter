@@ -1,0 +1,170 @@
+# FortiGateの部門VLANセグメント分離ポリシー構築
+
+FortiGateでは、部門VLAN間の通信に対応するFirewall Policyが1件も存在しなければ、
+既定で拒否されます(暗黙拒否/implicit deny)。この既定拒否を前提に、CSVで定義した
+{{ csv_rows | length }} 件の業務上必要な通信のみを、VLANインターフェースの組を
+Source/Destinationとする Firewall Policy として明示的に許可します。GUI
+(Policy & Objects > Firewall Policy)とCLI(`config firewall policy`)の双方で
+同じポリシーを投入し、最後に Policy match ツールで許可対象・許可対象外双方の
+判定結果を検証します。
+
+## 目的
+
+FortiGateのFirewall PolicyとVLANインターフェース単位のSource/Destination指定を
+用いて、部門VLAN間の通信を既定拒否(implicit deny)としたまま、業務上必要な通信
+のみを明示的に許可できるようになることを目指します。あわせて、通信は方向ごとに
+評価される点、ポリシーの評価順序、Policy matchツールによる許可・拒否双方の検証
+方法を身につけます。
+
+## 用語解説
+
+- **Firewall Policy**: `Policy & Objects > Firewall Policy`(GUI)/
+  `config firewall policy`(CLI)で作成する、FortiGateを通過する通信の可否を
+  決める設定単位。Incoming Interface / Outgoing Interface / Source /
+  Destination / Service / Schedule / Action の組み合わせで通信を照合する
+- **暗黙拒否(implicit deny)**: いずれのFirewall Policyにも一致しなかった通信を
+  最終的にすべて破棄するFortiGateの既定動作。トラフィックのパラメータが設定済み
+  ポリシーのいずれにも一致しない場合、その通信は拒否される。部門VLAN間について
+  も、対応するポリシーを1件も作成しなければそのまま拒否された状態が維持される
+- **srcintf / dstintf**: CLIでFirewall Policyの送信元/宛先インターフェース
+  (ここでは部門VLANインターフェース)を指定するパラメータ
+- **Zone(ゾーン、Interface-based zone)**: 複数のVLANサブインターフェースなどを
+  まとめて1つの送信元/宛先として扱えるグループ。`Network > Interfaces` の
+  `Create New > Zone` で作成し、Firewall PolicyのIncoming/Outgoing Interface
+  としてゾーン名を指定できる。管理対象の部門VLANが多い場合、VLANの組ごとに
+  個別ポリシーを作らずゾーン単位でまとめられる(本手順書ではVLANインターフェース
+  を直接指定する構成を扱う)
+- **Schedule**: ポリシーが有効な時間帯を指定する設定。常時有効にする場合は
+  `always` を指定する
+- **Policy match**: `Policy & Objects` のポリシー一覧ページから利用できる検証
+  ツール。送信元インターフェース・プロトコル・送信元/宛先アドレス・ポートを入力
+  して `Find matching policy` を実行すると、一致するFirewall Policyが一覧上で
+  ハイライト表示される
+
+## シナリオ設定
+
+対象となる部門VLANインターフェースは次の4つです。
+
+| VLANインターフェース名 | 部門 |
+|------------------------|------|
+| vlan10_sales | 営業 |
+| vlan20_finance | 経理 |
+| vlan30_dev | 開発 |
+| vlan40_srv | 共有サーバ(ファイルサーバ・社内API等) |
+
+業務上必要な通信として明示的に許可する Firewall Policy は、次の
+{{ csv_rows | length }} 件です。`srcaddr` / `dstaddr` は各VLANのサブネットまたは
+特定サーバを表す事前作成済みのアドレスオブジェクト名、`service` は
+`Policy & Objects > Services` で確認できる事前作成済みのServiceオブジェクト名です
+(SMB・HTTPSは例であり、実際に使用可能なオブジェクト名に読み替えてください)。
+
+| rule_no | srcintf | dstintf | srcaddr | dstaddr | service | description |
+|---------|---------|---------|---------|---------|---------|--------------|
+{% for r in csv_rows %}| {{ r["rule_no"] }} | {{ r["srcintf"] }} | {{ r["dstintf"] }} | {{ r["srcaddr"] }} | {{ r["dstaddr"] }} | {{ r["service"] }} | {{ r["description"] }} |
+{% endfor %}
+
+表にない部門VLANの組み合わせ(例: 開発VLANから経理VLANへの通信)や、表にある行の
+逆方向の通信は、この後の手順でポリシーを追加しない限り、暗黙拒否のまま維持され
+ます。
+
+## 手順
+
+### 1. 前提となるVLANインターフェース・オブジェクトを確認する
+
+`vlan10_sales` / `vlan20_finance` / `vlan30_dev` / `vlan40_srv` の4つのVLAN
+インターフェースと、シナリオ設定表にあるアドレスオブジェクト・サービス
+オブジェクトが、いずれも作成済みであることを前提とします(これらの作成手順自体
+は本手順書の対象外です)。`Network > Interfaces` を開き、4つのVLANインター
+フェースの存在を確認してください。
+
+現時点では、シナリオ設定表にある{{ csv_rows | length }}組のVLANペアいずれに
+ついても、対応するFirewall Policyがまだ存在しないため、暗黙拒否によりすべて
+拒否される状態です。
+
+### 2. 業務上必要な許可ポリシーをGUIで作成する
+
+`Policy & Objects > Firewall Policy` を開き、`Create New` をクリックします。
+`New Policy` ペインが表示されるので、シナリオ設定表の各行につき1件、Nameを
+入力したうえで次のフィールドを表の値のまま設定します: Schedule(`always`) /
+Action(`ACCEPT`) / Incoming Interface(`srcintf`) / Outgoing Interface
+(`dstintf`) / Source(`srcaddr`) / Destination(`dstaddr`) / Service(`service`)。
+
+{% for r in csv_rows %}- rule_no {{ r["rule_no"] }}: Incoming Interface={{ r["srcintf"] }} / Outgoing Interface={{ r["dstintf"] }} / Source={{ r["srcaddr"] }} / Destination={{ r["dstaddr"] }} / Service={{ r["service"] }}({{ r["description"] }})
+{% endfor %}
+各行を入力後、`Save` をクリックします。
+
+### 3. 同じポリシーをCLIで作成する
+
+```
+{% for r in csv_rows %}config firewall policy
+    edit {{ r["rule_no"] }}
+        set name "lan-seg-{{ r["rule_no"] }}"
+        set srcintf "{{ r["srcintf"] }}"
+        set dstintf "{{ r["dstintf"] }}"
+        set srcaddr "{{ r["srcaddr"] }}"
+        set dstaddr "{{ r["dstaddr"] }}"
+        set action accept
+        set schedule "always"
+        set service "{{ r["service"] }}"
+        set logtraffic all
+    next
+end
+{% endfor %}
+```
+
+`edit` に指定したポリシーIDは本手順書内の例です。既存のポリシーIDと重複しない
+ことを、投入前に必ず確認してください。
+
+### 4. ポリシーの並び順を確認する
+
+`Policy & Objects > Firewall Policy` の表示形式を `By Sequence` に切り替え、
+手順2・3で追加した{{ csv_rows | length }}件のポリシーが一覧に並んでいることを
+確認します。複数のポリシーが同じ送信元・宛先範囲を含む場合は、意図した優先順位
+になるよう、対象ポリシーを選択して `More > Move by ID` から並び替えてください。
+
+### 5. Policy matchツールで許可・拒否双方を検証する
+
+`Policy & Objects` のポリシー一覧ページで `Policy match` を開きます
+(Transparent modeでは利用できません。実行前に、対象トラフィックの経路となる
+ルートが存在することを確認してください)。
+
+{% for r in csv_rows %}- 許可対象(rule_no {{ r["rule_no"] }}): 送信元インターフェース{{ r["srcintf"] }}、送信元アドレス{{ r["srcaddr"] }}、宛先アドレス{{ r["dstaddr"] }}、サービス{{ r["service"] }}を入力して`Find matching policy`を実行し、対応するポリシーがハイライトされることを確認する
+{% endfor %}
+- 許可対象外(例: 開発VLANから経理VLANへの通信、または上表いずれかの行の逆方向
+  の通信): 同様に`Find matching policy`を実行し、手順2・3のいずれのポリシーにも
+  一致しないこと(暗黙拒否のまま拒否されること)を確認する
+
+## 動作確認
+
+- シナリオ設定表の{{ csv_rows | length }}件それぞれについて、対応する
+  Incoming Interface・Outgoing Interface・Source・Destination・Serviceを指定
+  したFirewall Policyが`Policy & Objects > Firewall Policy`に存在し、Actionが
+  `ACCEPT`であること
+- シナリオ設定表にない部門VLANの組み合わせ、および表にある行の逆方向の通信が、
+  Policy matchでどのポリシーにも一致しないこと(暗黙拒否で拒否されること)
+- `By Sequence`表示で、追加したポリシーが意図した優先順位で並んでいること
+- 各ポリシーの`logtraffic`が`all`に設定されており、許可された通信のログが記録
+  されること
+
+## 注意事項
+
+- **通信は方向ごとに評価されます。** ある部門VLANから別の部門VLANへの通信を
+  許可しても、逆方向からの新規セッション開始は別途ポリシーを作成しない限り
+  暗黙拒否のままです。セッションが双方向から開始され得る用途では、両方向分の
+  ポリシーが必要です。
+- Firewall Policyは一覧の上から順に評価され、最初に一致したポリシーが適用され
+  ます。範囲が重なるポリシーを追加する場合は、`By Sequence`表示と
+  `Move by ID`で優先順位を確認・調整してください。
+- 例に用いた`edit`のポリシーIDは説明用の値です。実際の環境で使用中のIDと重複
+  しないことを、投入前に必ず確認してください。
+- `vlan10_sales`等のVLANインターフェース名、および`srcaddr`/`dstaddr`のアドレス
+  オブジェクト名・`service`のServiceオブジェクト名は、いずれも本手順書内の例
+  です。実際の環境の名称に読み替えてください。これらのオブジェクト自体の作成
+  手順は本手順書の対象外です。
+- 管理対象の部門VLANが多い場合は、`Network > Interfaces`でZone
+  (Interface-based zone)を作成し、Firewall PolicyのIncoming/Outgoing
+  InterfaceにVLAN個別ではなくゾーン名を指定することで、同種のポリシーを
+  まとめられます。
+- FortiGateのCLI(SSHまたはコンソール)に接続する際の管理者アカウントの
+  パスワードは、本手順書はもちろんログにも平文で残さず、パスワードマネージャ
+  等で安全に管理してください。

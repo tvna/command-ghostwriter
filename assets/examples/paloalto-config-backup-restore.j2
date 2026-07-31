@@ -1,0 +1,251 @@
+# Palo Alto Networks(PAN-OS)の設定バックアップ定期取得・復元運用構築
+
+PAN-OSファイアウォール単体の`Device > Setup > Operations`にある名前付き
+スナップショット機構(Save/Export Firewall Configurations)と、Panorama配下
+であれば`Panorama > Scheduled Config Export`による定期自動バックアップを
+組み合わせ、命名規則に基づく世代管理された設定バックアップの定期取得と、
+Load操作による復元までを一連の定型運用として整備します。復元(Load)は必ず
+commitを伴うため、適用前に対象のVersion/Nameを取り違えないよう手順内で
+確認します。
+
+## 目的
+
+PAN-OSにおける設定バックアップが、ファイアウォール単体のSave/Export
+Firewall Configurations(名前付きスナップショット+commitごとに自動生成
+されるVersion)と、複数台集中管理時のPanorama Scheduled Config Export
+という二層構造になっていることを理解し、それぞれの役割分担を踏まえて
+定期取得を定型運用化できるようになることを目指します。あわせて、Save
+named configuration snapshot / Export named configuration snapshot /
+Export configuration version / Export device stateの使い分けと、Load
+configuration version / Load named configuration snapshotによる復元、
+およびcommitを挟む適用モデルを理解し、命名規則に基づく世代管理で誤復元
+を防げるようになることを目指します。
+
+## 用語解説
+
+- **candidate config / running config / commit**: PAN-OSは編集中の設定
+  (candidate config)と実機で動作中の設定(running config)を分離する
+  二段階構成モデルを採る。`commit`を実行するまでcandidate configの変更は
+  running configに反映されない
+- **Save candidate configuration**: `Device > Setup > Operations`にある
+  操作。既定のスナップショットファイル(`.snapshot.xml`)を、全管理者に
+  よる変更を含めて上書き保存する
+- **Save named configuration snapshot**: 同じく`Device > Setup >
+  Operations`にある操作。`Name`欄に新規または既存のファイル名を指定して
+  スナップショットを保存する。既定ファイルを上書きしないため、世代を
+  分けて残せる
+- **Export named configuration snapshot**: `Device > Setup > Operations`
+  から、現在のrunning configuration、名前付きのcandidate configuration
+  snapshot、またはインポート済みの設定のいずれかを選び、指定した名前の
+  XMLファイルとしてエクスポートする操作
+- **Export configuration version**: `Device > Setup > Operations`から、
+  running configurationの`Version`を選んでXMLファイルとしてエクスポート
+  する操作。Versionはcommitのたびに自動的に作成される、いわゆるコミット
+  履歴に相当する
+- **Export device state**: `Device > Setup > Operations`から、running
+  configurationに加えてPanoramaのdevice group/templateの設定も含めた
+  ファイアウォールの状態一式をバンドルとしてエクスポートする操作
+- **Load configuration version / Load named configuration snapshot**:
+  それぞれ`Device > Setup > Operations`にある復元操作。`Version`または
+  `Name`を選んで`OK`を押すとcandidate configへ読み込まれ、任意で
+  `Commit`を押すとrunning configを上書きする
+- **Revert to running configuration / Revert to last saved
+  configuration**: いずれも`Device > Setup > Operations`にある操作。
+  前者はcandidate config上の未commit変更を破棄してrunning configの内容
+  へ戻し、後者は直近のSave操作時点まで戻す。確認ダイアログで`Yes`を選ぶ
+- **Panorama > Scheduled Config Export**: Panoramaのみに存在する機構。
+  Panorama自身と配下の全managed firewallのrunning configurationを、
+  スケジュールに従い単一のgzipファイルとしてSCPまたはFTPサーバーへ
+  自動エクスポートする
+- OPNsenseの`System > Configuration > Backups`(設定のバックアップ/復元)
+  や`System > Configuration > History`(変更履歴の追跡・旧バージョンの
+  ダウンロード)とは異なり、Palo Alto Networks (PAN-OS)ではSave/Export
+  Firewall Configurations(ファイアウォール単体の名前付きスナップショット
+  +コミット履歴)、定期自動バックアップはPanoramaのScheduled Config
+  Exportで同じ課題を解決します
+
+## シナリオ設定
+
+対象ファイアウォールと、名前付きスナップショットの命名規則は次のとおり
+です。命名規則は`{{ snapshot_name_prefix }}-{{ firewall_hostname }}-<日付>`
+とし、`<日付>`部分で世代を区別します。
+
+| 項目 | 値 |
+|------|-----|
+| 対象ファイアウォール(firewall_hostname) | {{ firewall_hostname }} |
+| 命名prefix(snapshot_name_prefix) | {{ snapshot_name_prefix }} |
+| 今回取得分の日付(backup_date_today) | {{ backup_date_today }} |
+| 前回世代の日付(backup_date_previous_gen) | {{ backup_date_previous_gen }} |
+| 復元ドリル対象世代の日付(backup_date_restore_target) | {{ backup_date_restore_target }} |
+| ローカル保持世代数(retention_generations) | {{ retention_generations }} |
+
+Panorama配下の場合に設定する、定期自動バックアップ(Scheduled Config
+Export)は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| Name(scheduled_export_name) | {{ scheduled_export_name }} |
+| Description(scheduled_export_description) | {{ scheduled_export_description }} |
+| Scheduled Export Start Time(scheduled_export_start_time) | {{ scheduled_export_start_time }} |
+| Protocol(scheduled_export_protocol) | {{ scheduled_export_protocol }} |
+| Hostname or IP address(scheduled_export_server_host) | {{ scheduled_export_server_host }} |
+| Port(scheduled_export_server_port) | {{ scheduled_export_server_port }} |
+| Path(scheduled_export_server_path) | {{ scheduled_export_server_path }} |
+| Username(scheduled_export_server_username) | {{ scheduled_export_server_username }} |
+| Password | `********`(実値はテンプレートに記載しない。設定投入時にPanorama GUI上で直接入力し、平文保存しない) |
+
+このファイアウォールがPanorama配下にない(スタンドアロン)場合は、手順5の
+Scheduled Config Export設定は省略し、手順2・3の名前付きスナップショット
+運用のみで定期取得を回してください。
+
+## 手順
+
+### 1. 現状の名前付きスナップショット一覧とVersionを確認する(変更前の基準を取る)
+
+新しい世代を1件も保存する前に、既存の状態を確認します。
+
+- `Device > Setup > Operations` > `Export named configuration snapshot`
+  をクリックし、ダイアログの`Name`ドロップダウンで既存の名前付き
+  スナップショット一覧を確認します。前回分
+  `{{ snapshot_name_prefix }}-{{ firewall_hostname }}-{{ backup_date_previous_gen }}`
+  と、復元ドリル対象の
+  `{{ snapshot_name_prefix }}-{{ firewall_hostname }}-{{ backup_date_restore_target }}`
+  がすでに存在していることを確認します。この時点ではまだ何もエクスポート
+  せず、ダイアログを閉じます。
+- 続けて`Export configuration version`をクリックし、`Version`ドロップ
+  ダウンで直近のcommitにより作成された最新のVersion番号を確認し、記録
+  しておきます。今回の作業で新しいVersionが増えることを、この記録と
+  比較して後ほど確認します。
+
+### 2. 命名規則に沿って名前付きスナップショットを保存する
+
+`Device > Setup > Operations` > `Save named configuration snapshot`を
+クリックし、`Name`に
+`{{ snapshot_name_prefix }}-{{ firewall_hostname }}-{{ backup_date_today }}`
+を入力して`OK`、続けて`Close`を押します。既定のスナップショットファイル
+(`.snapshot.xml`)を上書きする`Save candidate configuration`とは異なり、
+この操作は既存の世代を上書きしません。
+
+### 3. 名前付きスナップショットと最新VersionをXMLとしてオフボックスへエクスポートする
+
+- `Device > Setup > Operations` > `Export named configuration snapshot`
+  をクリックし、`Name`で手順2の
+  `{{ snapshot_name_prefix }}-{{ firewall_hostname }}-{{ backup_date_today }}`
+  を選んでエクスポートします。ブラウザのダウンロード先から、退避用の
+  保管場所(バージョン管理システムや外部ストレージなど、ファイアウォール
+  本体の外)へ移動してください。
+- 続けて`Export configuration version`をクリックし、手順1で記録した
+  最新のVersionを選んでXMLとしてもエクスポートします。名前付きスナップ
+  ショット(意図的に保存した世代)とVersionエクスポート(commit単位で
+  自動生成された世代)の両方を保管することで、どちらの単位でも復元
+  できるようにしておきます。
+- 退避先では、命名規則
+  (`{{ snapshot_name_prefix }}-{{ firewall_hostname }}-<日付>`)に基づき
+  世代を識別し、保持世代数({{ retention_generations }}世代)を超える
+  古いXMLファイルを整理します。この世代数管理はPAN-OS自体の機能ではなく、
+  退避先での運用手順です。
+
+### 4. Export device stateでPanorama側設定情報も含めた状態一式を取得する(任意)
+
+定期バックアップに加え、重要な変更作業の前後など節目では
+`Device > Setup > Operations` > `Export device state`も実行し、running
+configurationに加えてPanoramaのdevice group/templateの設定を含む状態
+一式をバンドルとして退避します。
+
+### 5. Panoramaで定期自動バックアップ(Scheduled Config Export)を設定する(Panorama管理下の場合)
+
+- `Panorama > Scheduled Config Export`を開き、`Add`をクリックします。
+- `Name`欄に`{{ scheduled_export_name }}`、`Description`欄に
+  `{{ scheduled_export_description }}`を入力し、`Enable`にチェックを
+  入れます。
+- `Scheduled Export Start Time`に`{{ scheduled_export_start_time }}`
+  (24時間表記)を設定します。
+- `Protocol`で`{{ scheduled_export_protocol }}`を選択します(Windows
+  稼働のサーバーへエクスポートする場合はFTPのみサポートされる点に
+  注意してください)。
+- `Hostname or IP address`に`{{ scheduled_export_server_host }}`、
+  `Port`に`{{ scheduled_export_server_port }}`、`Path`に
+  `{{ scheduled_export_server_path }}`(スペースを含めない)、`Username`
+  欄に`{{ scheduled_export_server_username }}`を入力します。`Password`
+  欄は`********`とし、実際の値はこのタイミングでPanorama GUI上に直接
+  入力し、テンプレートや設定ファイル、commit履歴に平文で残さないように
+  します。
+- `{{ scheduled_export_protocol }}`がSCPの場合は、`Test SCP server
+  connection`をクリックし、ポップアップでパスワードを入力/確認して
+  接続を検証します。
+- `OK`をクリックして設定を保存し、最後に`Commit > Commit to Panorama`
+  を実行して反映します。この操作にはsuperuser権限が必要です。Panorama
+  がHA構成の場合、Scheduled Config ExportはHAピア間で同期されないため、
+  両ピアそれぞれで同じ設定を行ってください。また複数サーバーへ同時刻で
+  エクスポートすると内容に差異が生じるおそれがあるため、複数サーバーへ
+  エクスポートする場合は開始時刻をずらしてください。
+
+### 6. 復元(Load)をドリルとして実施し、commitまで確認する
+
+- 復元対象として、手順3で退避した世代のうち
+  `{{ snapshot_name_prefix }}-{{ firewall_hostname }}-{{ backup_date_restore_target }}`
+  (世代: {{ backup_date_restore_target }})を選びます。事前にこの
+  ファイルがオフボックスの退避先に存在することを確認してください。
+- 復元前に、手順2と同じ要領で現在のcandidate configurationを
+  `{{ snapshot_name_prefix }}-{{ firewall_hostname }}-{{ backup_date_today }}-pre-restore`
+  という名前で追加保存し、復元ドリル自体を元に戻せる状態にしておきます。
+- `Device > Setup > Operations` > `Load named configuration snapshot`
+  をクリックし、`Name`で
+  `{{ snapshot_name_prefix }}-{{ firewall_hostname }}-{{ backup_date_restore_target }}`
+  を選んで`OK`を押します。この時点ではまだcandidate configへの読み込み
+  のみで、running configには反映されません。
+- 内容を確認できたら、同じ画面の(Optional)`Commit`を押してrunning
+  configへ反映します。`Commit`を押さない限り、読み込んだ内容はrunning
+  configを上書きしません。
+- Version番号による復元が必要な場合は、`Load configuration version`
+  から同様に対象のVersionを選び、`OK`、続けて`Commit`を行います。
+- ドリルの後始末として、`Load named configuration snapshot`で直前に
+  保存した`-pre-restore`スナップショットを再度選び、`OK`、`Commit`を
+  行って復元ドリル前の状態へ戻します。
+
+## 動作確認
+
+- 手順1で記録した最新Versionと比較し、手順2〜6の各commit後に
+  `Export configuration version`の`Version`ドロップダウンで新しい
+  Versionが増分していること
+- `Export named configuration snapshot`の`Name`ドロップダウンに、
+  `{{ snapshot_name_prefix }}-{{ firewall_hostname }}-{{ backup_date_today }}`
+  をはじめとする命名規則通りの名前付きスナップショットが表示されること
+- 退避先のオフボックスストレージに、命名規則に沿った
+  {{ retention_generations }}世代分のXMLファイル(named snapshot分および
+  version分)が存在し、超過分が整理されていること
+- Panorama配下の場合、`Panorama > Scheduled Config Export`の一覧で
+  `{{ scheduled_export_name }}`が`Enable`された状態で表示され、
+  `Commit to Panorama`が成功していること
+- 手順6の`Load named configuration snapshot`(復元ドリル)実行後、
+  `Commit`が成功し、復元対象世代(`{{ backup_date_restore_target }}`)の
+  内容がrunning configuration上に反映されていること。その後の後始末
+  Load/Commitにより、復元ドリル前の状態
+  (`{{ backup_date_today }}-pre-restore`として保存済み)へ正しく戻って
+  いること
+
+## 注意事項
+
+- **Loadは選択しただけではrunning configに反映されません。** `Load
+  configuration version` / `Load named configuration snapshot`のいずれ
+  も、`OK`で読み込んだ後に`Commit`を押すまでcandidate configに留まり
+  ます。復元ドリルの後始末で`Commit`を押し忘れると、意図せず古い世代の
+  candidate configが残ったままになります。
+- **復元対象のVersion/Nameを取り違えないこと。** 手順1で最新Versionを
+  事前に記録し、手順6で選ぶName/Versionが本当に目的の世代であることを、
+  命名規則(`{{ snapshot_name_prefix }}-{{ firewall_hostname }}-<日付>`)
+  で必ず確認してから読み込んでください。
+- **`Panorama > Scheduled Config Export`の`Password`欄に実際の値を書き
+  残さないこと。** テンプレート・構成ファイル・チケット・commit履歴の
+  いずれにも平文のパスワードを残さず、投入時にPanorama GUI上で直接
+  入力してください。
+- PanoramaがHA構成の場合、Scheduled Config ExportはHAピア間で自動同期
+  されません。フェイルオーバー後も定期バックアップを継続させるには、
+  両ピアそれぞれで同じスケジュールを設定してください。
+- 複数のサーバーへScheduled Config Exportする場合、同一の開始時刻に
+  設定すると内容に差異が出るおそれがあるため、サーバーごとに開始時刻を
+  ずらしてください。
+- ローカル保持世代数({{ retention_generations }}世代)を超えた古いXML
+  ファイルの削除は、退避先での運用手順であり、PAN-OS自体が自動的に
+  ローテーションする機能ではありません。削除前に、直近の複数世代が
+  正しく退避されていることを必ず確認してください。
