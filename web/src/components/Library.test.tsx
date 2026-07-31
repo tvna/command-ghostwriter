@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { describe, it, expect } from "vitest";
-import { groupBySubCategory, countByCategory, countByActivity } from "./Library";
+import { groupBySubCategory, countByCategory, countByActivity, RAIL } from "./Library";
 import type { Template } from "../lib/types";
+import { CGTemplates } from "../lib/templates";
 
 function tpl(overrides: Partial<Template>): Template {
   return {
@@ -102,5 +103,66 @@ describe("countByActivity", () => {
   it("counts only templates matching the given activity", () => {
     expect(countByActivity(list, "troubleshoot")).toBe(1);
     expect(countByActivity(list, "drill")).toBe(0);
+  });
+});
+
+describe("RAIL predicate exclusivity and exhaustiveness", () => {
+  const NETWORK_RAIL = RAIL.filter((r) => r.id.startsWith("network-"));
+  const SERVER_RAIL = RAIL.filter((r) => r.id.startsWith("server-"));
+
+  it("has exactly 14 network entries and 3 server entries", () => {
+    expect(NETWORK_RAIL).toHaveLength(14);
+    expect(SERVER_RAIL).toHaveLength(3);
+  });
+
+  it("every network template matches exactly one network rail entry", () => {
+    const networkTemplates = CGTemplates.filter((t) => t.category === "network");
+    for (const t of networkTemplates) {
+      const matches = NETWORK_RAIL.filter((r) => r.filter(t));
+      expect(matches, `template ${t.id} (subCategory "${t.subCategory}") matched ${matches.length} network rail entries, want 1`).toHaveLength(1);
+    }
+  });
+
+  it("every server template matches exactly one server rail entry", () => {
+    const serverTemplates = CGTemplates.filter((t) => t.category === "server");
+    for (const t of serverTemplates) {
+      const matches = SERVER_RAIL.filter((r) => r.filter(t));
+      expect(matches, `template ${t.id} (subCategory "${t.subCategory}") matched ${matches.length} server rail entries, want 1`).toHaveLength(1);
+    }
+  });
+});
+
+describe("RAIL counts against real template data", () => {
+  const EXPECTED: Record<string, number> = {
+    all: 719,
+    "network-cisco": 11,
+    "network-yamaha": 9,
+    "network-juniper": 4,
+    "network-fortinet": 4,
+    "network-allied-telesis": 4,
+    "network-nec": 4,
+    "network-arista": 3,
+    "network-dell": 3,
+    "network-hpe-aruba": 4,
+    "network-alaxala": 3,
+    "network-palo-alto": 1,
+    "network-sonicwall": 1,
+    "network-ubiquiti": 1,
+    "network-common": 169,
+    "server-common": 239,
+    "server-debian": 22,
+    "server-rhel": 5,
+    dns: 51,
+    ai: 117,
+    ops: 44,
+    facility: 20,
+  };
+
+  it("each rail entry's count matches the recorded expectation", () => {
+    for (const entry of RAIL) {
+      const expected = EXPECTED[entry.id];
+      expect(expected, `no expected count recorded for rail entry "${entry.id}"`).toBeDefined();
+      expect(countByCategory(CGTemplates, entry.filter), `rail entry "${entry.id}"`).toBe(expected);
+    }
   });
 });
