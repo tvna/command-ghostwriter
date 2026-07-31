@@ -1,0 +1,296 @@
+# SonicWall (SonicOS) 公開サーバー宛ポートフォワード不通の切り分け
+
+外部から公開サーバー`{{ public_ip }}:{{ public_port }}`(`{{ protocol }}`)へ
+届かないという申告(`{{ ticket_id }}`、申告者: {{ reported_by }}、申告日時:
+{{ reported_at }})に対し、SonicOS(SonicWall)が内部でたどる評価順序
+(NAT policy lookup → 宛先ゾーン判定 → Access Rules照合 → アクション適用 →
+NAT変換)に沿って、NAT Policy診断(変換確認)→ Access Rules診断(許可確認)→
+Packet Monitor / Connection Logs診断(戻り経路確認)の順に原因段階を切り分け
+ます。既存の`{{ nat_policy_name }}`(NAT Policy)と`{{ access_rule_name }}`
+(Access Rule)の設定値を確認するのみで、設定の新規作成・変更は一切行いません。
+
+## 目的
+
+外部公開サーバーへの通信不通という申告に対し、(1)NAT Policyの
+Original/Translated設定がSonicWallの既知の設定ミスパターンに該当していない
+か、(2)Access Ruleの照合条件・優先度・宛先ゾーンが正しいか、(3)戻りパケット
+がPacket Monitor / Connection Logs上で想定どおりに観測できるかを、この
+順序で確認し、通信が止まっている段階(NAT・ルール・戻り経路)を設定変更なし
+に特定できるようになることを目指します。
+
+## 用語解説
+
+- **SonicOSのNAT/Access Rule評価順序**: SonicWallは着信パケットに対し、
+  (1) NAT policy lookup(送信元/宛先IP・サービス・着信インターフェースで
+  優先度順にNAT Policyを検索し最初の一致で確定)、(2) NAT lookupで確定した
+  **変換後(Translated)の宛先**のゾーンを基に、評価対象となるAccess Rules
+  の組(送信元ゾーン→変換後宛先ゾーン)を決定、(3) その組の中で優先度順に
+  Access Rulesを照合して最初の一致で確定、(4) 一致したAccess Ruleの
+  action(allow/deny/discard)を適用、(5) 許可された場合にNAT Policyの
+  内容に従って送信元/宛先IP・サービスを変換、という順序で処理する
+- **POLICY | Rules and Policies > NAT Rules(NAT Policy)**: NAT Policyを
+  作成・編集する管理画面。`Original Source`/`Translated Source`/
+  `Original Destination`/`Translated Destination`/`Original Service`/
+  `Translated Service`/`Inbound Interface`/`Outbound Interface`の各項目
+  を持つ。`Translated Service`は変換が不要なら`Original`のままにする
+  必要があり、PAT(ポート変換を伴う場合)のみ変更する。`Inbound Interface`
+  を`Any`のままにすると、複数WANインターフェースを持つ環境でNAT Policy
+  自体が意図せず一致しなくなることがある
+- **POLICY | Rules and Policies > Access Rules**: Access Ruleを作成・編集
+  する管理画面。Access Ruleの照合はNAT変換が適用される**前**のパケット
+  (Original側のSource/Destination/Service)に対して行われる。したがって
+  Destinationには変換後(Translated、内部の実IPアドレス)ではなく変換前
+  (Original、公開IPアドレス)のアドレスオブジェクトを指定する必要がある
+- **Investigate | Packet Monitor**: SonicWallを通過するパケットをキャプチャ
+  して確認する画面。`Trace`が**Trace Off**であることを確認し`Refresh`を
+  クリック、`Captured Packets`に残留があれば`Clear`で消去したのち、
+  `Configure`から開くダイアログの`Monitor Filter`タブで`Interface
+  Name(s)`/`Source IP Address(es)`/`Source Port(s)`/`Destination IP
+  Address(es)`/`Destination Port(s)`/`IP Type(s)`を設定し、`OK`→
+  `Start Capture`でキャプチャを開始する。破棄されたパケットは一覧上で
+  赤色表示され、該当行を選択するとPacket Detail側に破棄理由が表示される
+- **Investigate | Logs | Connection Logs(Connections Monitor)**: SonicWall
+  を経由するアクティブなコネクションを一覧表示する画面。`Src IP`/
+  `Src Port`/`Dst IP`/`Dst Port`/`Protocol`/`Src Iface`/`Dst Iface`/
+  `Flow Type`/`Expiry (sec)`/`Tx Bytes`/`Rx Bytes`の列を持ち、`Filter`で
+  `Source Address`/`Destination Address`/`Destination Port`/`Protocol`
+  を指定して`Apply Filters`で絞り込み、`Reset Filters`で解除する
+- **SonicWallが案内する5つの障害パターン**: (a) パケットがファイア
+  ウォールに届いていない、(b) `Policy drop`として遮断されている、
+  (c) パケットは届いているが`consumed`/`received`状態のまま先へ進まない、
+  (d) 通信は許可されているが応答がない、(e) 通信は許可されているが実サーバー
+  側が`ACK+RST`を返す。それぞれ確認すべき確認先が異なる
+
+## シナリオ設定
+
+今回申告された不通の公開サーバーと、照会に用いる条件は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| 対象ファイアウォール(firewall_name) | `{{ firewall_name }}` |
+| 管理アクセス先(mgmt_ip) | `{{ mgmt_ip }}` |
+| チケット番号(ticket_id) | `{{ ticket_id }}` |
+| 申告者(reported_by) | {{ reported_by }} |
+| 申告日時(reported_at) | {{ reported_at }} |
+| 実施者(operator_name) | {{ operator_name }} |
+| WAN側インターフェース(wan_interface) | `{{ wan_interface }}` |
+| WANゾーン(wan_zone) | `{{ wan_zone }}` |
+| 実サーバーの属するゾーン(dest_zone) | `{{ dest_zone }}` |
+| 公開IPアドレス:ポート(public_ip / public_port) | `{{ public_ip }}:{{ public_port }}` |
+| 実サーバーIPアドレス:ポート(private_ip / private_port) | `{{ private_ip }}:{{ private_port }}` |
+| プロトコル(protocol) | `{{ protocol }}` |
+| 対象NAT Policy名(nat_policy_name) | `{{ nat_policy_name }}` |
+| 対象Access Rule名(access_rule_name) | `{{ access_rule_name }}` |
+| Packet Monitorのキャプチャ時間目安(capture_window_minutes) | {{ capture_window_minutes }}分 |
+
+申告のあった外部端末(testers、{{ testers | length }}件)。全員が同一の公開
+IP・ポートへの通信不可を申告しています。
+
+| # | 申告元 | 送信元アドレス |
+|---|--------|----------------|
+{% for t in testers %}| {{ loop.index }} | {{ t.reporter }} | {{ t.src_ip }} |
+{% endfor %}
+
+`{{ wan_zone }}`・`{{ dest_zone }}`・`{{ wan_interface }}`は本手順書内の
+仮称であり、実際の環境に存在するゾーン名・インターフェース名に読み替えて
+ください。
+
+## 手順
+
+### 1. 内部からの疎通と現状の設定値を確認する(前提確認)
+
+診断を始める前に、まず`{{ private_ip }}:{{ private_port }}`へ内部
+セグメントから直接疎通できることを確認します。内部から疎通できない場合、
+外部からも疎通できないため、以降のNAT/Access Rule/戻り経路の確認より先に
+サーバー側(サービス起動状態、ローカルファイアウォール等)を確認して
+ください。
+
+内部疎通が確認できたら、`POLICY | Rules and Policies > NAT Rules`で
+`{{ nat_policy_name }}`を、`POLICY | Rules and Policies > Access Rules`で
+`{{ access_rule_name }}`を開き、現在の設定値をそれぞれ記録します。この
+記録が、手順2・3のチェックリストと突き合わせるための基準になります。
+
+### 2. NAT Policyを診断する(変換確認)
+
+`POLICY | Rules and Policies > NAT Rules`で`{{ nat_policy_name }}`を開き、
+Original/Translatedタブの値を次のチェックリストと突き合わせます。
+
+- **Original Destination**が`{{ public_ip }}`を指すアドレスオブジェクト、
+  **Translated Destination**が`{{ private_ip }}`を指すアドレスオブジェクト
+  になっているか
+- **Original Service**が`{{ public_port }}`/`{{ protocol }}`、
+  **Translated Service**が`{{ private_port }}`/`{{ protocol }}`に一致
+  しているか。ポート変換が不要な構成のはずが**Translated Service**が
+  `Original`から変更されている、あるいはその逆になっていないか
+- **Inbound Interface**が`Any`ではなく`{{ wan_interface }}`のように具体的
+  なインターフェースへ限定されているか。複数WANインターフェースを持つ
+  環境で`Any`のままだと、着信インターフェースの不一致でNAT Policy自体が
+  評価されないことがある
+- `{{ public_ip }}:{{ public_port }}`宛の通信に対し、`{{ nat_policy_name }}`
+  より**優先度が高い**別のNAT Policyが存在し、意図せず先に一致していないか
+  (NAT PolicyはAccess Ruleと同様、優先度順に評価され最初の一致で確定する)
+
+いずれかに該当する場合、この時点でNAT段階に原因があると判断します。該当が
+なければ手順3に進みます。
+
+### 3. Access Ruleを診断する(許可確認)
+
+`POLICY | Rules and Policies > Access Rules`のZone Matrixで、送信元ゾーン
+`{{ wan_zone }}`から**変換後(Translated)の宛先が属するゾーン**
+`{{ dest_zone }}`への組を開き、`{{ access_rule_name }}`を次のチェック
+リストと突き合わせます。SonicOSはNAT lookupで確定した変換後宛先のゾーンを
+基準にAccess Rulesの組を決定するため、`{{ wan_zone }}`→`{{ dest_zone }}`
+以外の組にルールを置いても評価されません。
+
+- **Destination**が`{{ private_ip }}`(変換後)ではなく、`{{ public_ip }}`
+  を指すアドレスオブジェクト(変換前/Original)になっているか。Access Rule
+  の照合はNAT変換が適用される前のパケットに対して行われるため、変換後の
+  値を指定すると一致しない
+- **Source Port**が特定のポートに固定されておらず、`Any`のままになって
+  いるか。接続元のソースポートは接続の都度ランダムに決まるため、
+  サービスポートと同じ値に固定すると一致しなくなる
+- ルールのDestinationゾーンが`{{ dest_zone }}`になっており、`{{ wan_zone }}`
+  など別のゾーンに誤って作成されていないか
+- `{{ wan_zone }}`→`{{ dest_zone }}`の組の中で、`{{ access_rule_name }}`
+  より**優先度が高い**別のルール(意図しないdeny/discardルールなど)が
+  存在し、先に一致していないか
+
+いずれかに該当する場合、この時点でルール段階に原因があると判断します。
+該当がなければ手順4に進みます。
+
+### 4. Investigate | Packet Monitorで戻りパケットを確認する
+
+NAT・Access Ruleの両段階で問題が見つからない場合、実際のパケットを
+キャプチャして確認します。
+
+1. `{{ mgmt_ip }}`の管理GUIへログインし、`Investigate | Packet Monitor`
+   を開きます。
+2. `Trace`が**Trace Off**であることを確認して`Refresh`をクリックします。
+   `Captured Packets`に前回分が残っていれば`Clear`で消去します。
+3. `Configure`をクリックし、`Monitor Filter`タブで次の値を設定します。
+   NAT変換後の宛先・サービスを確認しやすくするため、**Source IP
+   Address(es)には申告元の送信元アドレスのみ**を指定し、Destination側の
+   条件は絞り込みすぎないようにします。
+
+   | 申告元 | Interface Name(s) | Source IP Address(es) | Destination IP Address(es) | Destination Port(s) | IP Type(s) |
+   |---|---|---|---|---|---|
+{% for t in testers %}   | {{ t.reporter }} | {{ wan_interface }} | {{ t.src_ip }} | {{ public_ip }} | {{ public_port }} | {{ protocol }} |
+{% endfor %}
+
+4. `OK`をクリックし、`Start Capture`をクリックします。申告元に通信を
+   再現してもらいながら{{ capture_window_minutes }}分程度待ち、
+   `Stop Capture`で止めます。
+5. `Captured Packets`一覧を確認します。一致するパケットが表示されれば、
+   その行の宛先IP・宛先ポートがNAT変換後の値(`{{ private_ip }}:
+   {{ private_port }}`)になっているかを確認してください。赤色で表示
+   された行は破棄されたパケットで、選択するとPacket Detail側に破棄理由
+   が表示されます。
+
+### 5. 5つの障害パターンに照らして原因を切り分ける
+
+手順4の結果を、SonicWallが案内する次の5パターンと突き合わせます。
+
+- **パケットがファイアウォールに届いていない**: 手順4で一致するパケットが
+  1件も表示されない場合。上流のISPやルーターがそのポートを
+  `{{ firewall_name }}`まで通過させているか、上流機器側で別途確認して
+  ください
+- **Policy dropとして遮断されている**: 手順4のパケットが破棄表示され、
+  Packet Detailの内容がAccess Ruleによる遮断を示している場合。手順3の
+  Access Rule診断へ戻り、ゾーンの組・Source Port・優先度を再確認します
+- **パケットは届いているが`consumed`/`received`状態のまま**: パケットは
+  観測できるが応答が返らない場合。実サーバーへのARPエントリの有無、
+  `{{ private_ip }}`宛のルーティングエントリの有無、ファイアウォールから
+  `{{ private_ip }}`へのping疎通を確認してください(いずれもSonicOSの
+  Network/Routing/Diagnostics系画面で確認できますが、具体的なメニュー名称
+  はSonicOSのバージョンにより異なるため、実機の画面構成に沿って確認して
+  ください)
+- **通信は許可されているが応答がない**: 手順4で変換後の宛先が正しいことを
+  確認したうえで、`{{ private_ip }}`側のホストファイアウォールやアンチ
+  ウイルス製品による遮断、または`{{ private_ip }}`のデフォルトゲートウェイ
+  が`{{ firewall_name }}`以外を指していないかを確認してください
+- **通信は許可されているが実サーバーが`ACK+RST`を返す**: `{{ private_ip }}`
+  上で`{{ private_port }}`番ポートを実際に待ち受けているサービスが存在
+  するかを確認します。Windows機であれば次のコマンドで待受(`LISTENING`)
+  状態を確認できます。
+
+```text
+netstat -an
+netstat -an 1 | find "{{ private_port }}"
+```
+
+### 6. Connection Logsでセッション状態を確認し、結果を記録する
+
+手順5で明確な原因が絞り込めない場合、`Investigate | Logs | Connection
+Logs`(Connections Monitor)を開き、`Filter`で`Source Address`/
+`Destination Address`/`Destination Port`/`Protocol`にシナリオ設定の値
+(`{{ public_ip }}`/`{{ public_port }}`/`{{ protocol }}`)を入力して
+`Apply Filters`をクリックします。
+
+- 一致するコネクションが1件も表示されない場合、セッションが一度も確立
+  していないことを示します。手順2・3の結果を優先して疑ってください
+- コネクションが表示される場合、`Expiry (sec)`が正常に減っていくか
+  (張り付いていないか)、`Tx Bytes`と`Rx Bytes`の双方が増えているか
+  (片方だけが増えている場合、戻りの通信だけが届いていない非対称な状態
+  です)を確認します
+
+確認後は`Reset Filters`をクリックしてフィルタを解除します。手順1〜6の
+結果を`{{ ticket_id }}`にまとめ、どの段階(NAT・ルール・戻り経路)に原因が
+あるかを`{{ operator_name }}`が記録し、申告者({{ reported_by }})へ報告
+します。**本手順ではNAT Policy・Access Ruleの作成・変更は一切行いません**。
+修正が必要な場合は、この切り分け結果を根拠として別途の変更管理手順に
+従ってください。
+
+## 動作確認
+
+- 手順1で`{{ private_ip }}:{{ private_port }}`への内部疎通が確認できて
+  いること
+- `{{ nat_policy_name }}`のOriginal/Translated設定値が手順2のチェック
+  リストと突き合わせ済みであること
+- `{{ access_rule_name }}`のDestination・Source Port・ゾーンの組・優先度
+  が手順3のチェックリストと突き合わせ済みであること
+- 申告元({{ testers | length }}件)それぞれについて、`Investigate |
+  Packet Monitor`でのキャプチャ結果(一致パケットの有無、赤色表示の有無、
+  変換後の宛先IP/ポート)が記録されていること
+- 手順4の結果が、手順5の5つの障害パターンのいずれかに当てはめて記録
+  されていること
+- 原因が絞り込めない場合、`Investigate | Logs | Connection Logs`での
+  セッション有無・`Expiry (sec)`・`Tx Bytes`/`Rx Bytes`の対称性が確認・
+  記録されていること
+- 手順1〜6を通じて、NAT Policy・Access Ruleのいずれも新規作成・変更されて
+  いないこと
+- 原因段階(NAT・ルール・戻り経路)の切り分け結果が`{{ ticket_id }}`に記録
+  され、申告者({{ reported_by }})へ報告できる状態になっていること
+
+## 注意事項
+
+- **本手順は診断専用です。** NAT Policy・Access Ruleの作成・変更は行わず、
+  既存設定値の確認とPacket Monitor / Connection Logsの閲覧・フィルタ操作
+  のみで完結させてください。修正の実施は必ず別の変更管理プロセスに委ねます。
+- **切り分けは手順1→2→3→4→5→6の順序で進めてください。** NAT段階で原因が
+  確定した場合は、以降の確認を待たずにNAT段階の是正を検討して構いません
+  が、複数の原因が重なっている可能性もあるため、余裕があれば全段階を確認
+  してから判断してください。
+- Access Ruleの照合はNAT変換**前**のパケットに対して行われます。手順3で
+  誤って`{{ private_ip }}`(変換後)をDestinationに指定していないかを
+  必ず確認してください。
+- 調査が終わった`Investigate | Packet Monitor`は`Stop Capture`を必ず実行
+  し、稼働したまま放置しないでください。トラフィック量の多いインター
+  フェースを対象に広いMonitor Filterでキャプチャし続けると、バッファが
+  早く満杯になり以降のパケットを取りこぼします。
+- 本手順は SonicOS 6.5系の`Investigate`メニュー構成に基づいています。
+  SonicOS 7.X系では、Packet Monitorが`Monitor | Tools & Monitors |
+  Packet Monitor`に、キャプチャ開始操作が`Reload`/`Save`+`Start Capture`
+  に、それぞれ名称・配置が変わります。実機のファームウェアバージョンに
+  応じて、メニュー名称を読み替えてください。
+- 手順5の「パケットは届いているがconsumed/received状態のまま」の確認先
+  (ARPテーブル・ルーティングテーブル・Diagnostics)は、SonicOSのバージョン
+  によりメニュー名称・配置が異なるため、本手順書では具体的なメニューパス
+  を断定していません。実機の画面構成を確認してください。
+- 手順1の内部疎通確認および手順6のログ・ステート確認だけで原因が特定でき
+  ない場合、原因がSonicWall側とは限りません。ISP側の経路遮断や実サーバー
+  側の問題である可能性も残るため、本手順の結果だけで原因を断定しないで
+  ください。
+- 管理GUIのログインパスワードや、本手順の過程で扱う可能性のある認証情報
+  は、本手順書・チケット・ログに平文で記載しないでください。記録が必要な
+  場合は`********`のようにマスクし、秘密管理ツール等で別途安全に保管して
+  ください。
