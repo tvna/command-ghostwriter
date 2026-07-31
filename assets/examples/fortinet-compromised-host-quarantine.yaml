@@ -1,0 +1,25 @@
+title: 侵害疑いホストの隔離と調査用通信限定
+incident_ticket: INC-2026-0731-014
+compromised_hostname: fin-ws-042
+compromised_ip: 10.20.31.42
+compromised_mac: "00:1A:2B:3C:4D:5E"
+ioc_evidence:
+  - 既知のC2ドメインへの周期的なDNS問い合わせ
+  - FortiAnalyzerのIOCサービスによる「マルウェア感染サイト」判定を伴う通信の発生
+  - 通常業務時間外の継続的な大量アウトバウンド通信
+forticlient_ems_in_use: true
+quarantine_vlan_interface: qtn.aggr1
+quarantine_parent_interface: aggr1
+quarantine_vlanid: 4093
+quarantine_vlan_ip: 10.254.254.1
+quarantine_vlan_netmask: 255.255.255.0
+quarantine_traffic_policy: quarantine
+ir_vlan_interface: vlan_ir_forensics
+ir_address_object: ir-forensics-workstations
+ir_network: 10.50.99.0/24
+ir_service_name: IR-Forensics-Access
+ir_service_proto: TCP
+ir_service_port: 22
+quarantine_policy_name: qtn-allow-ir-only
+quarantine_block_policy_name: qtn-block-all-log
+soc_contact: セキュリティオペレーションセンター (SOC, 内線 1188)

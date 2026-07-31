@@ -1,0 +1,100 @@
+# SonicWall(SonicOS)侵入防止(IPS)の検知運用からインライン遮断への段階昇格
+
+SonicWall(SonicOS)のIntrusion Prevention Service(IPS)について、シグネチャグループ{{ signature_categories | length }}件をまずDETECT ALL(検知のみ)で有効化して{{ observation_days }}日間運用し、観察中に誤検知として確認された{{ false_positive_signatures | length }}件のシグネチャを個別除外したうえで、観察を終えたカテゴリだけをPREVENT ALL(インライン遮断)へ段階的に昇格します。{{ firewall_name }}の管理インターフェース({{ management_ip }})から、GUI操作のみで完結する手順です。
+
+## 目的
+
+`POLICY | Security Services > Intrusion Prevention` のSignature Groups機構を用い、まず観察(DETECT ALL)で運用してから誤検知の有無を確認し、業務影響を抑えたままPREVENT ALLへ安全に昇格できるようになることを目指します。あわせて、観察中に判明した誤検知シグネチャをカテゴリ全体の昇格に巻き込まず、個別に除外する手順も身につけます。
+
+## 用語解説
+
+- **IPS Global Settings**: `POLICY | Security Services > Intrusion Prevention` のStatus/Settingsページにある `Enable IPS Global Settings` トグル。オフのままだと配下のSignature Groups設定はすべて無効になる
+- **Signature Groups**: `High Priority Attacks` / `Medium Priority Attacks` / `Low Priority Attacks` の3カテゴリで構成されるIPSシグネチャの分類。カテゴリ単位でDETECT ALL/PREVENT ALLを切り替える
+- **DETECT ALL**: 該当カテゴリのシグネチャに一致した通信を検知・ログ記録のみ行い、通信そのものは遮断しない設定
+- **PREVENT ALL**: 該当カテゴリのシグネチャに一致した通信を検知・ログ記録したうえで、コネクションを遮断(ドロップ+リセット)する設定。カテゴリでPREVENT ALLを指定しない限り、実際の遮断(インライン防御)は発生しない
+- **Signaturesタブ(個別シグネチャ設定)**: `Intrusion Prevention` 配下のSignaturesタブでSignature IDを検索しConfigureを開くと、個別シグネチャ単位でPrevention(Disableにするとそのシグネチャだけ遮断を無効化)・Detectionをカテゴリ設定より優先して上書きできる。カテゴリ単位のPREVENT ALL昇格から、特定の誤検知シグネチャだけを除外する用途に使う
+- **System Logs**: `MONITOR | Logs > System Logs`(Intrusion PreventionページのView Logsボタンからも遷移可能)で、検知・遮断されたイベントを確認するログ画面
+
+## シナリオ設定
+
+今回対象とするSignature Groups({{ signature_categories | length }}件)と、今回PREVENT ALLへ昇格するかどうかは次のとおりです。
+
+| # | Signature Group | 今回PREVENT ALLへ昇格するか |
+|---|------------------|--------------------------------|
+{% for c in signature_categories %}| {{ loop.index }} | {{ c.name }} | {% if c.promote_now %}昇格する{% else %}見送り(DETECT ALLを継続){% endif %} |
+{% endfor %}
+
+観察期間中に誤検知と確認され、個別除外の対象とするシグネチャ({{ false_positive_signatures | length }}件)は次のとおりです。
+
+| # | Signature ID | 誤検知の内容 |
+|---|--------------|--------------|
+{% for s in false_positive_signatures %}| {{ loop.index }} | {{ s.id }} | {{ s.note }} |
+{% endfor %}
+
+観察期間は{{ observation_days }}日間とし、この間はいずれのカテゴリもPREVENT ALLを有効化しません。
+
+## 手順
+
+### 1. 現状を確認する(変更前の基準を取る)
+
+{{ firewall_name }}(管理IP: {{ management_ip }})の管理者アカウントでSonicOS管理画面にログインします。パスワードはこの手順書やログ・スクリーンショットに平文で残さず、社内の秘密管理システムから都度参照してください。
+
+`POLICY | Security Services > Intrusion Prevention` のStatus/Settingsページを開き、`Enable IPS Global Settings` トグルおよびSignature Groupsテーブルの現在の状態(すでに一部が有効化されている場合はその内容)を記録しておきます。
+
+### 2. IPS Global Settings を有効化する
+
+Status/Settingsページで `Enable IPS Global Settings` トグルを有効化し、`Accept` をクリックします。これによりSignature Groups以下の設定が反映対象になります(この時点ではまだどのカテゴリもDETECT ALL/PREVENT ALLを有効化していません)。
+
+### 3. 対象カテゴリをDETECT ALLのみで有効化し、観察を開始する
+
+Signature Groupsテーブルで、シナリオ設定に挙げた{{ signature_categories | length }}カテゴリすべてについてDETECT ALLを有効化します。この段階ではPREVENT ALLはいずれのカテゴリでもチェックしません。
+
+{% for c in signature_categories %}- {{ c.name }}: DETECT ALL を有効化(PREVENT ALLは未チェックのまま)
+{% endfor %}
+入力後は `Apply` をクリックして反映します。
+
+### 4. {{ observation_days }}日間、誤検知の有無を観察する
+
+`MONITOR | Logs > System Logs` でIntrusion Preventionのカテゴリに該当する検知イベントを日次で確認し、業務通信を誤って検知していないかを判断します。{{ observation_days }}日間の観察期間中に見つかった誤検知は、シナリオ設定の一覧に追記してから次の手順に進みます。
+
+### 5. 誤検知が確認されたシグネチャを個別に除外する
+
+`Intrusion Prevention` 配下のSignaturesタブで、シナリオ設定の誤検知シグネチャ({{ false_positive_signatures | length }}件)を1件ずつSignature IDで検索し、`Configure` からPreventionを `Disable` に設定します。
+
+{% for s in false_positive_signatures %}- Signature ID {{ s.id }}({{ s.note }}): Configureを開き、Preventionを `Disable` に設定して `OK`
+{% endfor %}
+この除外設定は、次の手順6でカテゴリ全体をPREVENT ALLへ昇格させても優先して適用され、当該シグネチャだけは遮断されません。
+
+### 6. 観察を終えたカテゴリをPREVENT ALLへ昇格する
+
+手順5の個別除外がすべて完了していることを確認したうえで、シナリオ設定で「昇格する」としたカテゴリのみPREVENT ALLを有効化します。
+
+{% for c in signature_categories %}{% if c.promote_now %}- {{ c.name }}: PREVENT ALL を有効化(DETECT ALLは有効のまま維持)
+{% endif %}{% endfor %}
+{% for c in signature_categories %}{% if not c.promote_now %}- {{ c.name }}: 今回はPREVENT ALLを有効化せず、DETECT ALLのみを継続
+{% endif %}{% endfor %}
+変更後は `Apply` をクリックして反映します。
+
+### 7. 昇格後のログを確認する
+
+`MONITOR | Logs > System Logs` を開き、PREVENT ALLへ昇格したカテゴリで実際に遮断(ドロップ+リセット)されたイベントと、手順5で除外したSignature IDの通信が引き続き許可されていることの両方を確認します。
+
+## 動作確認
+
+- Status/Settingsページで `Enable IPS Global Settings` が有効になっていること
+- 今回昇格したカテゴリで、DETECT ALL・PREVENT ALLの両方が有効になっていること
+{% for c in signature_categories %}{% if c.promote_now %}  - {{ c.name }}: DETECT ALL / PREVENT ALL ともに有効
+{% endif %}{% endfor %}- 見送ったカテゴリではPREVENT ALLが有効化されておらず、DETECT ALLのみのままであること
+{% for c in signature_categories %}{% if not c.promote_now %}  - {{ c.name }}: DETECT ALLのみ有効、PREVENT ALLは無効のまま
+{% endif %}{% endfor %}- Signaturesタブで、個別除外したSignature IDのPreventionが `Disable` のままであること
+{% for s in false_positive_signatures %}  - Signature ID {{ s.id }}({{ s.note }})
+{% endfor %}- `MONITOR | Logs > System Logs` で、昇格したカテゴリの正規シグネチャ一致通信が遮断(ドロップ+リセット)として記録されていること
+- 同じログ上で、個別除外したSignature IDに一致する通信が引き続き許可され、遮断されていないこと
+
+## 注意事項
+
+- **観察期間({{ observation_days }}日間)を必ず確保すること。** DETECT ALLでの観察を飛ばして手順6のPREVENT ALL昇格に進むと、誤検知の有無を確認する基準がないまま正規の業務通信を遮断してしまうおそれがあります。
+- **誤検知シグネチャの個別除外(手順5)は、カテゴリのPREVENT ALL昇格(手順6)より必ず先に完了させること。** 順序を逆にすると、除外設定が反映される前に誤検知トラフィックを一時的に遮断してしまう可能性があります。
+- **今回見送るカテゴリ(DETECT ALLを継続するカテゴリ)のPREVENT ALLは有効化しないこと。** 段階昇格の対象外カテゴリまで一括で有効化すると、検証が済んでいない誤検知リスクをそのまま本番の遮断に持ち込むことになります。
+- 管理者パスワードやAPIキー等の認証情報は、この手順書・ログ・スクリーンショットのいずれにも平文で残さないでください。ログイン時は都度、社内の秘密管理システムから参照してください。
+- 昇格後に想定外の遮断が多発した場合は、まず該当カテゴリのPREVENT ALLのみを個別に無効化してDETECT ALLへ切り戻し、原因シグネチャを特定したうえで手順5の個別除外を追加してから、改めて昇格をやり直してください。

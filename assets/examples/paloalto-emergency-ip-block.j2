@@ -1,0 +1,177 @@
+# Palo Alto Networks(PAN-OS)による攻撃元IPの緊急遮断
+
+攻撃を検知した際に、PAN-OSの「Register IP Addresses and Tags Dynamically」機構
+(動的IPタグ登録)を使って、攻撃元IP {{ csv_rows | length }} 件をCLIから即時に
+`incident-block`タグへ登録します。あらかじめ構築済みの動的アドレスグループ
+(Dynamic Address Group)`incident-block-ips`と、それを参照する最優先拒否ルール
+`incident-block-deny`は、タグが付いたIPをcommit不要で即座に遮断対象へ組み込み
+ます。登録後はCLI・GUI・Trafficログの3方向で遮断を確認し、台帳(CSV)に記録した
+解除基準を満たした時点でCLIから個別に解除します。
+
+## 目的
+
+PAN-OSの動的IPタグ登録(Dynamic IP-Tag registration)の仕組みを理解し、攻撃検知
+から攻撃元IPの遮断までを、Security Policyルールベース自体を変更・commitする
+ことなく即時に行えるようになることを目指します。あわせて、CLI・GUI・ログの
+複数経路で遮断結果を確認し、インシデントを記録したうえで、解除基準に基づいて
+安全にタグを解除できるようになることを目指します。
+
+## 用語解説
+
+- **Register IP Addresses and Tags Dynamically**: PAN-OSがサポートするIPアドレス
+  とタグの動的登録機構の正式名称。User-ID agent・VM Information Sources・
+  Panorama Plugin・XML API・Auto-Tagの複数の方法で、IPアドレスとタグの対応を
+  ファイアウォールまたはPanoramaへ動的に登録できる
+- **Dynamic Address Group(動的アドレスグループ)**: タグを一致条件(Match
+  Criteria)としてメンバーを決定するアドレスグループ。タグは静的(設定の一部)
+  にも動的(実行時の一部)にも定義でき、動的タグの更新にcommitは不要だが、その
+  タグを参照するDynamic Address GroupをSecurity Policyで使うにはルール自体を
+  一度commitしておく必要がある
+- **debug object registered-ip test**: XML APIで登録されたIPアドレスに対して
+  タグを追加・削除するCLIコマンド。`debug object registered-ip test
+  [<register/unregister>] <ip/netmask> <tag>`という構文で、単一IPだけでなく
+  サブネット(IPセット)単位でも登録できる
+- **show object registered-ip all**: 全ソースから登録済みのIPアドレスを一覧
+  表示するCLIコマンド。件数のみを確認する場合は`show object registered-ip
+  all option count`を使う
+- **Match Criteriaの否定不可**: Dynamic Address GroupのMatch Criteriaは
+  AND/OR演算子でタグを組み合わせられるが、否定(NOT)条件はサポートされない
+- **Security Policyの評価順序**: ルールは上から順に評価され、最初に一致した
+  1件のみが適用される。以降のルールは評価されないため、拒否ルールは他の
+  許可ルールより上位(先頭に近い側)に置く必要がある
+
+## シナリオ設定
+
+今回のインシデントで検知し、緊急遮断の対象とする攻撃元IPは次の
+{{ csv_rows | length }} 件です。すべて同じタグ`incident-block`を付与し、
+単一のDynamic Address Group(`incident-block-ips`)・単一の拒否ルール
+(`incident-block-deny`、Source Zone `untrust`)で一元管理します。
+
+| entry_no | attacker_ip | tag_name | severity | detection_source | description | release_criteria |
+|---|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["entry_no"] }} | {{ r["attacker_ip"] }} | {{ r["tag_name"] }} | {{ r["severity"] }} | {{ r["detection_source"] }} | {{ r["description"] }} | {{ r["release_criteria"] }} |
+{% endfor %}
+
+`attacker_ip`はホストIP(例: `/32`)だけでなく、サブネットやIPレンジ(IPセット)
+での指定にも対応します。`untrust`はこの手順書内の仮称であり、実際の環境に
+存在するゾーン名に読み替えてください。
+
+## 手順
+
+### 1. 前提(Dynamic Address Groupと最優先拒否ルール)が構築済みであることを確認する
+
+新規登録の前に、`Objects > Address Groups`を開き、`incident-block-ips`が
+`Type: Dynamic`、Match Criteriaがタグ`incident-block`で登録済みであることを
+確認します。続けて`Policies > Security`を開き、`incident-block-deny`が
+`Source Zone: untrust` / `Source Address: incident-block-ips` /
+`Action: Deny`で、他の許可ルールより上位に配置されていることを確認します。
+
+未構築の場合は、この手順内で先に作成します。
+
+- `Objects > Address Groups > Add`を開き、`Name`に`incident-block-ips`、
+  `Description`に用途を入力し、`Type`を`Dynamic`にする。`Add Match
+  Criteria`をクリックし、演算子(`And`/`Or`)とタグ`incident-block`を選択して
+  `OK`をクリックし、最後に`Commit`する
+- `Policies > Security > Add`を開き、`Name`に`incident-block-deny`、
+  `Description`に用途を入力する。`Source Zone`に`untrust`を追加し、
+  `Source Address`に`incident-block-ips`を選択する。`Action`を`Deny`に
+  設定し、ルールベース内で他の許可ルールより上位になる位置に置いてから
+  `Commit`する
+
+この作成・配置のみcommitが必要です。以降の手順2で行うタグ登録自体は
+commit不要で即時に反映されます。
+
+### 2. 検知した攻撃元IPをCLIで即時登録する
+
+シナリオ設定の各行について、CLIから`register`アクションでタグを登録します。
+
+```bash
+{% for r in csv_rows %}debug object registered-ip test register {{ r["attacker_ip"] }} {{ r["tag_name"] }}
+{% endfor %}```
+
+commitは不要です。登録直後から`incident-block-ips`のメンバーとして扱われ、
+`incident-block-deny`による遮断が有効になります。
+
+### 3. 登録結果をCLIで確認する
+
+```bash
+show object registered-ip all
+```
+
+出力に、シナリオ設定の{{ csv_rows | length }}件の`attacker_ip`がすべて表示され、
+対応するタグとして`incident-block`が付いていることを確認します。個別のIPに
+ついて登録元(データソース)まで確認したい場合は、次のコマンドを使います。
+
+```bash
+{% for r in csv_rows %}debug object registered-ip show tag-source ip {{ r["attacker_ip"] }} tag all
+{% endfor %}```
+
+### 4. Dynamic Address GroupのメンバーシップとTrafficログをGUIで確認する
+
+`Policies > Security`で`incident-block-deny`の行を選び、アドレスグループ
+リンク横のドロップダウン矢印から`Value`を選択して、Match Criteriaが意図通り
+であることを確認します。続けて`more`リンクをクリックし、登録済みIPの一覧に
+シナリオ設定の{{ csv_rows | length }}件がすべて含まれていることを確認します。
+
+さらに`Monitor > Logs`を開き、`Traffic`ログ種別でフィルタ欄に
+`( rule eq incident-block-deny )`と入力して`Apply Filter`をクリックし、
+攻撃元IPからの通信が`incident-block-deny`によってdenyされていることを確認
+します。
+
+### 5. インシデントを記録する
+
+登録した{{ csv_rows | length }}件それぞれについて、`severity` /
+`detection_source` / `description` / `release_criteria`をインシデント記録
+(本シナリオ設定の表、またはチケット管理システム)に残します。手順3・4で得た
+登録確認とログの証跡もあわせて添付してください。
+
+### 6. 解除基準を満たした対象をCLIで解除する
+
+`release_criteria`の条件を満たし、承認が得られた行から順に、`unregister`
+アクションでタグを解除します。
+
+```bash
+{% for r in csv_rows %}debug object registered-ip test unregister {{ r["attacker_ip"] }} {{ r["tag_name"] }}
+{% endfor %}```
+
+解除後、`show object registered-ip all`を再実行し、解除した`attacker_ip`が
+一覧から消えていることを確認します。全件解除するまで、他の未解除エントリの
+タグには触れません。
+
+## 動作確認
+
+- `show object registered-ip all`に、シナリオ設定の{{ csv_rows | length }}件の
+  `attacker_ip`がすべて`incident-block`タグ付きで表示されること
+- `Policies > Security`の`incident-block-deny`で、アドレスグループの`Value`
+  一覧に登録済みの{{ csv_rows | length }}件がすべて含まれていること
+- `Monitor > Logs`の`Traffic`ログで、フィルタ`( rule eq incident-block-deny )`
+  により攻撃元IPからの通信がdenyとして記録されていること
+- `incident-block-deny`が、ルールベース上で他の許可ルールより上位(評価順で
+  先)に配置されていること
+- 手順6の解除後、`show object registered-ip all`から該当`attacker_ip`が
+  消えていること
+
+## 注意事項
+
+- **動的タグの更新自体はcommit不要ですが、Dynamic Address Groupと
+  拒否ルールの新規作成・配置変更にはcommitが必要です。** 手順1を未実施の
+  まま手順2のCLI登録だけを行うと、タグは登録されても遮断ルールが存在しない
+  ため、実際には遮断されません。必ず手順1の状態を先に確認してください。
+- **`debug object registered-ip clear all`は使用しないこと。** このコマンド
+  は全ソースから登録済みの全IPアドレスを一括削除し、タグクリア後にファイア
+  ウォールの再起動が必要になる破壊的な操作です。個別の解除には手順6の
+  `unregister`を使用してください。
+- Dynamic Address GroupのMatch Criteriaは否定(NOT)条件をサポートしません。
+  誤って登録したIPを一時的に除外したい場合は、そのIPのタグを`unregister`
+  してください。
+- ルール評価は上から順・最初に一致した1件のみが適用されます。
+  `incident-block-deny`が他の許可ルールより下位にあると、意図せず通信が
+  許可されたままになります。手順1で必ず配置順を確認してください。
+- 自動化のためにXML API(`type=user-id`)で同様の登録を行うことも可能ですが、
+  登録・解除リクエストの具体的なXML(`cmd`)ペイロード形式は本手順が参照した
+  一次情報には記載がないため、本手順では扱いません。自動化する場合は、
+  ファイアウォール上の「Explore the XML API」またはPAN-OS XML API Usage
+  Guideで実際のリクエスト形式を確認してください。
+- 管理者アカウントのパスワードやAPIキーなど認証情報は、この手順書やコマンド
+  履歴・記録先に平文で残さないでください。値を記録する必要がある場合は
+  マスク表記(`********`)を用い、秘密管理システム経由で扱ってください。

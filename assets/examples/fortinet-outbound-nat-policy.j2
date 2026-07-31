@@ -1,0 +1,266 @@
+# FortiGateのCentral SNATによる特定送信元固定NAT追加構成
+
+FortiGate (FortiOS) の Central SNAT(`config firewall central-snat-map`)と
+One-to-Oneタイプの IP Pool を組み合わせ、送信元 `{{ fixed_source_name }}`
+(`{{ fixed_source_ip }}`)からのアウトバウンド通信だけを外部IPアドレス
+`{{ fixed_external_ip }}`へ固定的に変換(PATなしの1対1変換)します。Central
+NATはFortiGate全体で有効・無効を切り替えるグローバルなスイッチであり、有効化
+した瞬間に既存の全Firewall PolicyのNATオプションがスキップされるため、既定の
+アウトバウンドNAT(送信元インターフェースアドレスへの変換)を central-snat-map
+の catch-all ルールとして先に用意したうえで切り替えます。GUI・CLI双方の手順
+を併記し、最後にセッションテーブルで実際のNAT結果を検証します。
+
+## 目的
+
+Central SNAT の central-snat-map と IP Pool(One-to-Oneタイプ)を組み合わせて、
+特定の送信元だけに固定送信元IPアドレスによるNATを追加できるようになることを
+目指します。あわせて、central-nat がFortiGate全体に即時反映されるグローバル
+スイッチであること、central-snat-map が上から順に評価され最初に一致した
+ルールだけが適用されることを理解し、既存の一般アウトバウンドNATを止めずに
+安全に切り替え・検証できるようになることを目指します。
+
+## 用語解説
+
+- **Central SNAT(central-snat-map)**: 「The central SNAT table enables you
+  to define and control (with more granularity) the address translation
+  performed by FortiGate. With the NAT table, you can define the rules for
+  the source address or address group, and which IP pool the destination
+  address uses.」と説明される、送信元アドレス変換(SNAT)を専用のテーブルで
+  一元管理する仕組み。GUIでは(有効化後の)`Policy & Objects > Central SNAT`、
+  CLIでは `config firewall central-snat-map` で設定する
+- **central-nat(システム全体のスイッチ)**: 「The central NAT feature is not
+  enabled by default.」であり、CLIでは `config system settings` の
+  `set central-nat {enable | disable}`、GUIでは `System > Settings` の
+  `System Operations Settings` にある `Central SNAT` で切り替える。
+  「If central NAT is enabled, the NAT option under IPv4 policies is
+  skipped and SNAT must be done via central-snat-map.」と説明されており、
+  有効化すると既存Firewall PolicyのNAT設定は即座に無視される
+- **評価順序**: 「FortiGate reads the NAT rules from the top down until it
+  hits a matching rule for the incoming address... NAT policies can be
+  rearranged within the policy list.」と説明されており、central-snat-mapの
+  ルールは一覧の上から順に評価され、最初に一致したルールだけが適用される
+- **IP Pool(One-to-Oneタイプ)**: 「This type of IP pool means that the
+  internal IP address and the external (translated) IP address match
+  one-to-one. The port address translation (PAT) is disabled when using
+  this type of IP pool.」と説明される、内部IPアドレスと外部IPアドレスが
+  1対1で固定対応し、ポート変換を伴わないIP Poolの種類。CLIでは
+  `config firewall ippool` の `set type one-to-one` で作成する
+- **IP Pool Configuration(central-snat-mapのGUIオプション)**: central-snat-
+  mapルールごとの送信元変換方式を選ぶ項目。「Use outgoing interface
+  address: Use the address of the outgoing interfaces as source address.」
+  (IP Poolを使わず送信元インターフェースのアドレスに変換)と、「Use Dynamic
+  IP Pool: Choose an IP Pool to perform source NAT.」(指定したIP Poolで
+  SNATする)の2択がある
+- **orig-addr / dst-addr(central-snat-mapのCLIオプション)**: いずれも
+  「valid address object preconfigured on the FortiGate」を指定する。
+  アドレスオブジェクト自体の作成は本手順書の対象外とし、事前に
+  `Policy & Objects > Addresses` へ登録済みであることを前提とします
+
+## シナリオ設定
+
+今回、既定のアウトバウンドNAT(一般ルール)に加えて固定送信元NATを追加する
+対象と、その設定値は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| 内部側インターフェース(lan_interface) | `{{ lan_interface }}` |
+| WAN側インターフェース(wan_interface) | `{{ wan_interface }}` |
+| 固定NAT対象の送信元アドレスオブジェクト名(fixed_source_name) | `{{ fixed_source_name }}` |
+| 上記オブジェクトが指すIPアドレス(fixed_source_ip、参考表示) | `{{ fixed_source_ip }}` |
+| 固定送信元NATに使う外部IPアドレス(fixed_external_ip) | `{{ fixed_external_ip }}` |
+| One-to-One IP Pool名(fixed_ippool_name) | `{{ fixed_ippool_name }}` |
+| 固定送信元ルールのポリシーID(fixed_snat_policyid) | {{ fixed_snat_policyid }} |
+| 一般(catch-all)ルールのポリシーID(general_snat_policyid) | {{ general_snat_policyid }} |
+| 固定送信元ルールのコメント(fixed_snat_comment) | `{{ fixed_snat_comment }}` |
+| 一般ルールのコメント(general_snat_comment) | `{{ general_snat_comment }}` |
+| 検証で使う外部宛先IP(verify_target_ip) | `{{ verify_target_ip }}` |
+| 検証で使う宛先ポート(verify_target_port) | {{ verify_target_port }} |
+
+`{{ fixed_source_name }}` は `Policy & Objects > Addresses` に
+`{{ fixed_source_ip }}` を指すアドレスオブジェクトとして事前登録済みである
+ことを前提とします(アドレスオブジェクト自体の作成は本手順書の対象外です)。
+
+## 手順
+
+### 1. 現状を確認する(変更前の基準を取る)
+
+Central NATを有効化する前に、現状を確認します。
+
+- `System > Settings` の `System Operations Settings` を開き、
+  `Central SNAT` が**無効**であることを確認します。
+- `Policy & Objects > Firewall Policy` を開き、`{{ lan_interface }}` から
+  `{{ wan_interface }}` 方向の既存ポリシーで `NAT` が有効になっていること
+  (現在は各ポリシー単位のNATでアウトバウンド通信が変換されていること)を
+  確認し、記録します。
+
+### 2. 固定送信元用のOne-to-One IP Poolを作成する
+
+`{{ fixed_external_ip }}` 1件だけを外部IPアドレスとする、PATを伴わない
+One-to-OneタイプのIP Poolを作成します。
+
+GUI:
+
+1. `Policy & Objects > IP Pools` を開き、`IP Pool` タブを選択します。
+2. `Create new` をクリックします。
+3. `Type` を `One-to-One` に設定します。
+4. 外部IPアドレス範囲(External IP Range)にハイフン区切りで
+   `{{ fixed_external_ip }}-{{ fixed_external_ip }}` を入力します。
+5. `OK` をクリックします。
+
+CLI:
+
+```bash
+config firewall ippool
+    edit "{{ fixed_ippool_name }}"
+        set type one-to-one
+        set startip {{ fixed_external_ip }}
+        set endip {{ fixed_external_ip }}
+    next
+end
+```
+
+One-to-Oneタイプはポート変換(PAT)を行わないため、Explicit port mapping
+(Overloadタイプ専用のオプション)は使用しません。
+
+### 3. Central NATを有効化する(全Firewall PolicyのNATが一斉に切り替わる操作)
+
+**この操作はFortiGate全体に即時反映されます。** 有効化した瞬間、既存の全
+Firewall PolicyのNAT設定はスキップされ、SNATはcentral-snat-mapのルールに
+一致した場合のみ行われます。手順4のルール登録は、この操作の直後に同一の
+メンテナンス枠内で速やかに完了させてください。
+
+GUI:
+
+1. `System > Settings` を開きます。
+2. `System Operations Settings` の `Central SNAT` を有効にします。
+3. `Apply` をクリックします。
+
+CLI:
+
+```bash
+config system settings
+    set central-nat enable
+end
+```
+
+### 4. central-snat-mapに「固定送信元ルール→一般ルール」の順で登録する
+
+central-snat-mapは上から順に評価され最初に一致したルールだけが適用される
+ため、`{{ fixed_source_name }}` に絞った固定送信元ルールを、既定の
+アウトバウンドNATを維持する一般ルールより**先**に登録します。1つの
+`config firewall central-snat-map` ブロック内で `edit` した順序が、新規
+作成時のルール一覧上の並び順になります。
+
+```bash
+config firewall central-snat-map
+    edit {{ fixed_snat_policyid }}
+        set status enable
+        set srcintf "{{ lan_interface }}"
+        set dstintf "{{ wan_interface }}"
+        set orig-addr "{{ fixed_source_name }}"
+        set dst-addr "all"
+        set nat-ippool "{{ fixed_ippool_name }}"
+        set comments "{{ fixed_snat_comment }}"
+    next
+    edit {{ general_snat_policyid }}
+        set status enable
+        set srcintf "{{ lan_interface }}"
+        set dstintf "{{ wan_interface }}"
+        set orig-addr "all"
+        set dst-addr "all"
+        set comments "{{ general_snat_comment }}"
+    next
+end
+```
+
+`{{ general_snat_policyid }}` 番のルールは `nat-ippool` を設定しないため、
+GUIの `IP Pool Configuration` は既定の `Use outgoing interface address`
+のままとなり、以前の各ポリシー単位のNATと同じ「送信元インターフェースの
+アドレスへの変換」が維持されます。
+
+GUIから同じ内容を登録する場合は、Central NAT有効化後に表示される
+`Policy & Objects > Central SNAT` を開き、`Create New` から次のフィールド
+を入力します。
+
+- 固定送信元ルール(`{{ fixed_snat_policyid }}` 番目に作成): Incoming
+  Interface=`{{ lan_interface }}` / Outgoing Interface=`{{ wan_interface }}`
+  / Source Address=`{{ fixed_source_name }}` / Destination Address=`all`
+  / NAT=有効 / IP Pool Configuration=`Use Dynamic IP Pool` →
+  `{{ fixed_ippool_name }}` / Comments=`{{ fixed_snat_comment }}`
+- 一般ルール(`{{ general_snat_policyid }}` 番目に作成): Incoming
+  Interface=`{{ lan_interface }}` / Outgoing Interface=`{{ wan_interface }}`
+  / Source Address=`all` / Destination Address=`all` / NAT=有効 /
+  IP Pool Configuration=`Use outgoing interface address` /
+  Comments=`{{ general_snat_comment }}`
+
+### 5. 評価順(一覧の並び順)を確認する
+
+`Policy & Objects > Central SNAT` の一覧を開き、固定送信元ルール
+(`{{ fixed_snat_policyid }}`)が一般ルール(`{{ general_snat_policyid }}`)
+より**上位**(評価順で先)に表示されていることを確認します。並び順が逆に
+なっている場合、`{{ fixed_source_name }}` からの通信も一般ルールに先に
+一致してしまい、固定送信元IPへの変換が行われません。並び順は一覧上の
+ドラッグ操作で修正できます。
+
+### 6. セッションテーブルで実際のNAT結果を検証する
+
+`{{ fixed_source_ip }}` から `{{ verify_target_ip }}:{{ verify_target_port }}`
+宛の通信を発生させ、FortiGate側でセッションテーブルを確認します。
+
+```bash
+curl -k -m 5 -o /dev/null -w "HTTP %{http_code}\n" https://{{ verify_target_ip }}:{{ verify_target_port }}/
+```
+
+FortiGateのCLIで、生成した通信のセッションを確認します。
+
+```bash
+diagnose sys session list
+```
+
+出力中、送信元が `{{ fixed_source_ip }}` のセッションの `act=snat` の行で、
+括弧内(変換後アドレス)が `{{ fixed_external_ip }}` になっていることを
+確認します。あわせて、`{{ fixed_source_ip }}` 以外の内部ホストから同様の
+通信を発生させ、そのセッションの変換後アドレスが `{{ wan_interface }}` の
+インターフェースアドレスになっている(引き続き一般ルールで変換されている)
+ことも確認します。
+
+## 動作確認
+
+- `Policy & Objects > IP Pools` に `{{ fixed_ippool_name }}` が表示され、
+  `Type` が `One-to-One`、外部IP範囲が `{{ fixed_external_ip }}` のみに
+  なっていること
+- `Policy & Objects > Central SNAT` の一覧で、`{{ fixed_snat_policyid }}`
+  番の固定送信元ルールが `{{ general_snat_policyid }}` 番の一般ルールより
+  上位に表示されていること
+- `{{ fixed_source_ip }}` からの通信の `diagnose sys session list` 出力で
+  `act=snat` の変換後アドレスが `{{ fixed_external_ip }}` になっていること
+- `{{ fixed_source_ip }}` 以外の内部ホストからの通信が、Central NAT有効化
+  前と同じく `{{ wan_interface }}` のインターフェースアドレスへ変換され
+  続けていること(既定のアウトバウンドNATが維持されていること)
+- `System > Settings` で `Central SNAT` が有効になっており、
+  `Policy & Objects > Firewall Policy` の既存ポリシーのNAT設定表示が
+  「central-snat-mapへ移行済み」である旨の案内に変わっていること
+
+## 注意事項
+
+- **Central NATの有効化はFortiGate全体に即時反映されるグローバルな切替
+  です。** 有効化すると既存の全Firewall PolicyのNAT設定が直ちにスキップ
+  されるため、central-snat-mapのルール内容(手順4)を事前に確定させ、
+  手順3の直後にメンテナンス枠内で速やかに登録・検証まで完了させてください。
+- **central-snat-mapは上から順に評価され、最初に一致したルールだけが適用
+  されます。** 固定送信元ルールを一般ルールより後ろに置くと、
+  `{{ fixed_source_name }}` からの通信も一般ルールに先に一致し、固定送信元
+  IPへの変換が行われません。手順5で必ず並び順を確認してください。
+- 未使用のIP PoolやVIPも、FortiGateはローカルアドレスとして扱います。
+  「once an IP pool or VIP has been configured, even if it is never used
+  in a firewall policy, the FortiGate considers it as a local address and
+  will not forward traffic based on the routing table. Therefore, any
+  unused IP pools or VIPs should be deleted to prevent any unexpected
+  behavior.」と説明されており、検証後に使用しなくなったIP Poolは削除して
+  ください。
+- Explicit port mappingはOverloadタイプのIP Poolでのみ使用できます。
+  本手順のOne-to-OneタイプのIP PoolはPATを行わないため対象外です。
+- CLI/GUIへのログインに使う管理者パスワードやAPIトークンは、本手順書や
+  チケット、ログに平文で残さないでください。記録が必要な場合は
+  `********` のようにマスクし、秘密管理ツール等で別途安全に保管してくだ
+  さい。

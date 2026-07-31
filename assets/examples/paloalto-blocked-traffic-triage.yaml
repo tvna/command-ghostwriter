@@ -1,0 +1,17 @@
+reported_at: "2026-07-31 10:15 JST"
+dst_ip: "203.0.113.50"
+dst_port: 443
+protocol: 6
+application: ssl
+category: any
+from_zone: trust-lan
+to_zone: untrust-wan
+to_interface: ethernet1/1
+refresh_interval_seconds: 30
+affected_hosts:
+  - reporter: "田中(営業部)"
+    src_ip: "10.1.20.15"
+  - reporter: "鈴木(経理部)"
+    src_ip: "10.1.20.42"
+  - reporter: "佐藤(情シス)"
+    src_ip: "10.1.30.8"

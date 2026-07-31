@@ -1,0 +1,234 @@
+# SonicWall (SonicOS) のルール変更段階適用と切り戻し管理 — {{ change_ticket }}
+
+Access Ruleの変更を「事前の`DEVICE | Investigate | Logs`でのベースライン観察 →
+`Enable`チェックボックスをオフにした状態での登録 → 承認を得たメンテナンス窓
+での`Enable`化 → 事後確認」の段階で適用し、想定外の遮断・許可を早期に検知
+できる状態を保ちながら実施する変更管理手順書です。各段階の切り替えは
+Access Ruleの`Enable`チェックボックスで刻み、Logging タブの`Enable Logging`
+・`Enable Packet Monitor`を有効にして登録することで、有効化後の挙動を
+`DEVICE | Investigate | Logs`から確認できるようにします。ルールの登録・変更
+のたびに画面上部へ表示される Save/Edit Configuration Banner で、未保存(未
+コミット)の変更内容を確定前にレビューします。変更管理番号
+`{{ change_ticket }}`のもとで、承認者`{{ approver }}`の承認を得たメンテナ
+ンス窓内でのみ`Enable`化を行います。
+
+## 目的
+
+変更管理番号`{{ change_ticket }}`に基づき、SonicWall (SonicOS) のAccess
+Ruleを一度に有効化するのではなく、baseline観察・`Enable`未チェックでの登録
+・メンテナンス窓での`Enable`化・事後確認という段階を踏んで適用します。想定
+外の遮断・想定外の許可(副作用)を`DEVICE | Investigate | Logs`で早期に検知
+し、承認者`{{ approver }}`の判断のもと、`Enable`チェックボックスによる即時
+切り戻しと設定エクスポートからの復元の両方を使い分けられる状態を維持する
+ことを目指します。
+
+OPNsenseの`disabled`/`log`フラグをAPI経由で切り替える段階適用と
+config.xmlのバックアップ/リストアによる切り戻しとは異なり、SonicWall
+(SonicOS) ではAccess RuleのEnable/Disableトグル + per-rule Logging(Enable
+Logging/Enable Packet Monitor)+ Investigate Logsでの事後確認、および
+Save/Edit Configuration Banner(未保存の変更をコミット前に表示、7.3.3で
+UI再設計)で同じ課題を解決します。
+
+## 用語解説
+
+- **Access Rule の `Enable` チェックボックス**: `Adding Rule`ダイアログ
+  (または既存ルールの編集ダイアログ)にあるチェックボックス。オフのまま
+  保存するとルール自体は登録されるが評価対象にならず、通信への影響が
+  発生しない。オンにして保存すると評価対象になる。既存の
+  `sonicwall-default-deny-wan`手順書で確認済みの項目を踏襲する
+- **Logging タブ(`Enable Logging` / `Enable Packet Monitor`)**: 同じ
+  `Adding Rule`ダイアログ内のタブで、ルールごとのログ・キャプチャ設定を
+  行う。`Enable Logging`を有効にすると、このルールに一致した通信が
+  `DEVICE | Investigate | Logs`にイベントとして記録される。`Enable Packet
+  Monitor`を有効にすると、このルールに一致した通信がパケットレベルの
+  キャプチャ対象にも含まれる。キャプチャ結果を閲覧する具体的な画面遷移
+  (ナビゲーションパス)は、今回参照した一次情報のFAQページでは確認でき
+  なかったため、実機のGUIで確認すること
+- **`DEVICE | Investigate | Logs`**: 一次情報(SonicOS 7.3.3 FAQ)が示す
+  ログ確認画面へのナビゲーションパス。`Enable Logging`を有効にした
+  Access Ruleの一致結果(Allow/Deny)を事後確認するために使用する
+- **Save/Edit Configuration Banner**: 設定変更(Access Ruleの追加・編集を
+  含む)が未保存(実行中の設定に未コミット)の状態にあることを、画面上部
+  に表示するUI要素。一次情報のSonicOS 7.3.3 FAQには次のとおり説明されて
+  いる: "The Save/Edit configuration banner ... has been redesigned to be
+  less visually cluttered ... There are no functional changes to
+  configuration save or edit behaviour; this is a layout and clarity
+  improvement only."(このバナー自体は7.3.3で新規導入されたものではなく、
+  それ以前のSonicOS 7.x GUIから存在する。7.3.3ではレイアウトと視認性のみ
+  が再設計され、保存・コミットの機能自体に変更はない。) バナー上の具体的
+  なボタン名称(確定操作・破棄操作それぞれの表示文言)は、このFAQページ
+  では確認できていないため、本手順書では断定しない
+- **観察期間(observation_period) / 切り戻し判断基準(rollback_trigger)**:
+  `Enable`化後、副作用の有無を監視し続ける期間と、この期間内に該当した
+  場合は無条件で`Enable`を外す即時切り戻しへ進む、事前に定義した閾値
+- **`POLICY | Rules and Policies > Access Rules` / `Zone Matrix Selector`**:
+  Access Ruleを作成・編集するための管理画面ナビゲーションパスと、
+  ゾーンペア(From Zone / To Zone)ごとのルールテーブルを切り替える
+  選択ダイアログ。既存の`sonicwall-default-deny-wan`手順書で確認済みの
+  項目を踏襲する
+- **`Priority`**: `Adding Rule`ダイアログの設定項目。`Insert at the End`
+  を選ぶと、対象ゾーンペアのテーブル最下段(評価順で最後、`Any`ルールの
+  直前)にルールが挿入される
+
+## シナリオ設定
+
+| 項目 | 値 |
+|------|-----|
+| 変更管理番号(change_ticket) | {{ change_ticket }} |
+| 観察期間(observation_period) | {{ observation_period }} |
+| 切り戻し判断基準(rollback_trigger) | {{ rollback_trigger }} |
+| 承認者(approver) | {{ approver }} |
+| 対象Access Rule件数 | {{ target_rules | length }} |
+
+対象Access Rule一覧:
+
+| rule_name | from_zone | to_zone | source_addr | dest_addr | service | action | priority |
+|-----------|-----------|---------|--------------|-----------|---------|--------|----------|
+{% for rule in target_rules %}| `{{ rule.rule_name }}` | {{ rule.from_zone }} | {{ rule.to_zone }} | {{ rule.source_addr }} | {{ rule.dest_addr }} | {{ rule.service }} | {{ rule.action }} | {{ rule.priority }} |
+{% endfor %}
+
+`source_addr` / `dest_addr`列のnetwork address objectと`service`列の
+Service Objectは、いずれも`POLICY | Rules and Policies > Access Rules`の
+`Address` / `Port/Services`ドロップダウンで選択する既存オブジェクトを
+前提とします(これらオブジェクト自体の新規作成は本手順書の対象外です)。
+
+## 手順
+
+### 1. 現状のAccess Ruleと`DEVICE | Investigate | Logs`でベースラインを確認する
+
+新しいAccess Ruleを1件も登録する前に、現状を記録します。
+
+- `POLICY | Rules and Policies > Access Rules`を開き、`Zone Matrix
+  Selector`で対象ゾーンペア(本シナリオでは`{{ target_rules[0].from_zone }}`
+  → `{{ target_rules[0].to_zone }}`)を選択し、既存のルール構成をメモまた
+  はスクリーンショットとして記録します。
+- `DEVICE | Investigate | Logs`を開き、対象の送信元・宛先・サービスの通信
+  が現状どう扱われているかを確認します。
+
+{% for rule in target_rules %}- {{ rule.source_addr }} → {{ rule.dest_addr }}({{ rule.service }})の通信を検索し、現状どのルール(または既定動作)に一致しているかを記録します。
+{% endfor %}
+ここではAccess Ruleはまだ追加していないため、現状の通信有無・一致結果を
+baselineとして記録します。想定と異なる通信が既に発生していないかを、この
+時点で確認してください。
+
+### 2. 新しいAccess Ruleを`Enable`未チェック・Logging有効で登録する
+
+`POLICY | Rules and Policies > Access Rules`の`Zone Matrix Selector`で
+対象ゾーンペアのテーブルを開き、`+Add`から`Adding Rule`ダイアログで
+{{ target_rules | length }}件のルールを1件ずつ登録します。**この時点では
+`Enable`にチェックを入れません**。
+
+{% for rule in target_rules %}- `My Rule Name`: `{{ rule.rule_name }}` / `Description`: `{{ rule.description }}` / `Action`: `{{ rule.action }}` / `Priority`: `{{ rule.priority }}` / Source Zone/Interface: `{{ rule.from_zone }}` / Destination Zone/Interface: `{{ rule.to_zone }}` / Source Address: `{{ rule.source_addr }}` / Destination Address: `{{ rule.dest_addr }}` / Port/Services: `{{ rule.service }}` / `Enable`: **チェックしない**
+{% endfor %}
+
+続けて同ダイアログの`Logging`タブを開き、`Enable Logging`と`Enable Packet
+Monitor`の両方を有効にします。設定を終えたら`Save`をクリックします。この
+時点ではルールは無効(Disable)のまま登録されるため、既存の通信への影響は
+ありません。
+
+### 3. Save/Edit Configuration Bannerで変更内容をレビューし、確定する
+
+登録直後、画面上部にSave/Edit Configuration Bannerが表示され、この変更が
+未保存(未コミット)であることを示します。ここで、手順2で登録した
+{{ target_rules | length }}件のAccess Rule以外に、意図しない変更が含まれ
+ていないかを確認します。意図しない変更が含まれている場合は、確定せず原因
+を確認してください。問題がなければ、バナーの案内に従って変更を確定します。
+
+### 4. 承認を得たメンテナンス窓で`Enable`チェックボックスをオンにする
+
+承認者`{{ approver }}`の承認を得たメンテナンス窓の中で、`POLICY | Rules
+and Policies > Access Rules`を開き、手順2で登録した各ルールを編集して
+`Enable`チェックボックスをオンにし、`Save`をクリックします。
+
+{% for rule in target_rules %}- `{{ rule.rule_name }}`の`Enable`をオンにする
+{% endfor %}
+
+有効化は必ず次の手順の`DEVICE | Investigate | Logs`確認とセットで行い、
+単独で放置しないでください。オン操作後もSave/Edit Configuration Bannerが
+表示される場合は、手順3と同様に内容を確認してから確定します。
+
+### 5. `DEVICE | Investigate | Logs`で有効化直後の副作用を確認する
+
+`DEVICE | Investigate | Logs`を開き、対象の送信元・宛先・サービスで検索
+します。
+
+{% for rule in target_rules %}- {{ rule.source_addr }} → {{ rule.dest_addr }}({{ rule.service }})の通信が、意図した`action`(`{{ rule.action }}`)で`{{ rule.rule_name }}`への一致として記録されていることを確認します。
+{% endfor %}
+意図と異なる挙動(想定と異なるルールへの一致、意図しないAllow/Deny)が1件
+でも確認された場合は、`{{ rollback_trigger }}`に該当するとみなし直ちに
+手順7へ進みます。`Enable Packet Monitor`でキャプチャされたパケット単位の
+詳細を確認したい場合は、実機のGUIでキャプチャ結果の表示箇所を確認した
+うえで参照してください(具体的な画面遷移は一次情報のこのFAQページには
+記載がありません)。
+
+### 6. 観察期間中の事後確認
+
+`Enable`化から{{ observation_period }}の間、対象通信の疎通状況と関連ホスト
+からの申告有無を継続的に確認します。
+
+`DEVICE | Investigate | Logs`で対象ルール名(`rule_name`)を検索し続け、
+`{{ rollback_trigger }}`へ該当する事象が発生しないことを確認できた時点で、
+この変更を本番適用として確定し、変更管理番号`{{ change_ticket }}`をクロー
+ズします。
+
+### 7. 切り戻し(2段階)
+
+観察期間中または有効化直後に問題が確認された場合、以下の2段階で切り戻し
+ます。
+
+第1段階: 対象ルールの`Enable`チェックボックスをオフに戻す(即時、他の
+ルールには影響しません)。
+
+{% for rule in target_rules %}- `{{ rule.rule_name }}`の`Enable`をオフにし、`Save`をクリックする
+{% endfor %}
+
+再度Save/Edit Configuration Bannerが表示されるため、内容を確認してから
+確定します。
+
+第2段階: 第1段階(`Enable`解除)だけでは解消しない場合、`Device | Settings
+> Firmware and Settings`の`Import/Export Configuration`から、変更前に
+取得しておいた`.exp`設定ファイルをインポートして復元します。手順・注意点
+は既存の`sonicwall-config-backup-restore`手順書(Import Configurationは
+実行後にアプライアンスが自動再起動する)に従ってください。本手順書では
+そのExport Configurationの取得自体は対象外のため、`{{ change_ticket }}`
+の作業を開始する前に別途取得しておく必要があります。
+
+## 動作確認
+
+- 手順1のbaseline観察と手順6の事後確認を比較し、対象ルールに対応する通信
+  がそれぞれ意図した`action`で一致していること
+- 手順3のSave/Edit Configuration Bannerで、登録した{{ target_rules | length }}
+  件のAccess Rule以外の意図しない変更が含まれていなかったこと
+- 手順5・6の`DEVICE | Investigate | Logs`で、対象ルール以外の通信に対する
+  意図しないAllow/Denyが発生していないこと
+- {{ observation_period }}の観察期間内に`{{ rollback_trigger }}`に該当する
+  事象が発生していないこと
+- 変更完了後、対象ルールの`Enable`状態・`Logging`タブの設定、および
+  `DEVICE | Investigate | Logs`の抜粋が変更管理番号`{{ change_ticket }}`の
+  記録として保管されていること
+
+## 注意事項
+
+- **手順4(`Enable`のオン)は必ず承認者`{{ approver }}`の承認を得たメンテ
+  ナンス窓内で実施し、単独作業では行わないこと。**
+- 有効化は手順5の`DEVICE | Investigate | Logs`確認とセットで行い、旧ルール
+  (既存の関連ルール)を無効化・削除するのは、新ルールで意図どおりの通信が
+  確認できてから(手順5・6完了後)にすること。新旧を同時に切り替えないこと。
+- 切り戻しは手順7の2段階(`Enable`解除 → 復旧しない場合のみExport
+  Configurationからの復元)の順で行い、いきなり設定復元から始めないこと。
+  設定復元はこの変更以外の設定も含めて復元時点の状態へ巻き戻し、実行後
+  アプライアンスが自動再起動するため、最終手段として扱ってください。
+- Access Ruleは`Zone Matrix Selector`で表示されるテーブル内の並び順
+  (評価順)で評価されます。手順2の`Priority`(`Insert at the End`)が意図
+  した位置に入っているかを、`Zone Matrix Selector`で必ず確認してください。
+- Save/Edit Configuration Banner上の具体的なボタン名称(確定操作・破棄
+  操作それぞれの表示文言)、および`Enable Packet Monitor`でキャプチャした
+  パケットを閲覧する画面遷移は、今回参照した一次情報(SonicOS 7.3.3 FAQ)
+  では確認できていません。推測で操作手順を進めず、適用前に実機のGUIで
+  確認してください。
+- 本手順書はSonicOS 7.x系(7.3.3 FAQで確認できた名称)を前提としています。
+  SonicOS 6.5系など旧バージョンではメニュー構成や名称が異なる場合がある
+  ため、適用前に自環境のバージョンとGUI表示を確認してください。
+- 管理者パスワードなど、本手順の実施に用いる認証情報は本手順書や変更記録
+  に平文で残さないでください。値を記録する場合は`********`のようにマスク
+  し、秘密管理ツール等で別途安全に保管してください。

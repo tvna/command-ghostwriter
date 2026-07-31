@@ -1,0 +1,27 @@
+device_host: "fw-branch01.example.internal"
+service_account: "svc-api-automation"
+rules:
+  - name: "Allow-Branch-ERP-HTTPS"
+    from_zone: "VLAN10"
+    to_zone: "VLAN20"
+    action: "allow"
+    source: "Branch-Office-Net"
+    destination: "ERP-App-Server"
+    service: "HTTPS"
+    enable: true
+  - name: "Allow-Branch-DNS"
+    from_zone: "VLAN10"
+    to_zone: "WAN"
+    action: "allow"
+    source: "Branch-Office-Net"
+    destination: "Public-DNS-Servers"
+    service: "DNS"
+    enable: true
+  - name: "Deny-Legacy-FTP"
+    from_zone: "VLAN10"
+    to_zone: "WAN"
+    action: "deny"
+    source: "Branch-Office-Net"
+    destination: "Any"
+    service: "FTP"
+    enable: true

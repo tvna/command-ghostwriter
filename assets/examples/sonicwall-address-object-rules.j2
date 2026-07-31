@@ -1,0 +1,187 @@
+# SonicWallのAddress/Serviceオブジェクトによるルール集約管理構成
+
+SonicOS の Address Object・Address Group・Service Object・Service Group を使い、
+CSV で定義した{{ csv_rows | length }}行のうち、オブジェクト定義行(`rule_name`
+が `-` の行)でホスト・ネットワーク・ポートを先に `MATCH OBJECTS` に登録し、
+ポリシー定義行(`rule_name` が `-` 以外の行)でそれらを名前(またはグループ名)
+で参照する Security Policy を作成します。IPアドレスやポート番号をポリシー
+本体に直書きしないことで、対象が増減してもオブジェクト側の1箇所を編集する
+だけで済む状態を作り、最後に各オブジェクト・グループ・ポリシーの内容を
+突き合わせて参照関係が正しく成立していることを検証します。
+
+## 目的
+
+ホスト・ネットワーク・ポートを Address Object / Address Group / Service
+Object / Service Group として先に `MATCH OBJECTS` に定義し、Security Policy
+の Source・Destination・Port/Services がそれらを名前で参照する構成を作れる
+ようになることを目指します。IPアドレスやポート番号をポリシーに直書きしない
+ことで、対象(Webサーバーの台数など)が変わってもオブジェクト側(または
+Groupのメンバー)を1箇所編集するだけで済み、複数のポリシーを1件ずつ書き換
+える必要がなくなることを体験します。
+
+## 用語解説
+
+- **MATCH OBJECTS | Addresses**: Address Object / Address Group を作成・管理
+  するSonicOSの画面。`Address Objects`タブと`Address Groups`タブを持つ
+- **Address Object**: 通信のsource/destinationを表す名前付きオブジェクト。
+  `Add`アイコンから作成し、`Name`・`Zone Assignment`・`Type`を入力する。
+  `Type`には`Host`(単一IPアドレス)・`Range`(開始〜終了IPアドレス)・
+  `Network`(ネットワークアドレス+ネットマスクまたはプレフィックス長、例:
+  `255.255.255.0`または`/24`)・`FQDN`(ドメイン名、ワイルドカード`*`と
+  DNS TTL(120〜86400秒)の設定に対応)・`MAC`(MACアドレス、例:
+  `00:11:f5:1b:e3:cf`。`Multi homed option`が既定で有効)の5種類があり、
+  `Host`・`MAC`・`FQDN`では`Zone Assignment`の明示指定が必須となる
+- **Address Group**: 複数のAddress Objectをまとめるオブジェクト。`host`・
+  `range`・`network`の各Address Objectを任意に組み合わせて格納できる。
+  `Address Groups`タブの`Add`から`Add Address Group`ダイアログを開き、
+  `Name`を入力後、対象のAddress Objectをリストから選択して右矢印ボタンで
+  グループへ追加する
+- **MATCH OBJECTS | Services**: Service Object / Service Group を作成・管理
+  するSonicOSの画面。`Service Objects`タブと`Service Groups`タブを持つ
+- **Service Object**: `Protocol`(プロトコル種別)と、TCP/UDPなどの標準
+  プロトコルで使う`Port Range`、ICMP/IGMP/OSPF/PIMSMなどで使う`Sub Type`を
+  名前付きで定義するオブジェクト。`Add`アイコンから作成する。`Protocol`で
+  `Custom IP type`を選択した場合は独自のプロトコル番号を入力し、その場合
+  `Port Range`と`Sub Type`は使用しない
+- **Service Group**: 複数のService Objectをまとめるオブジェクト。`Add`アイ
+  コンから作成し、`Name`を入力後、`Not in Group`リストから対象のService
+  Objectを選択して右矢印ボタンで`In Group`側へ移動する。左矢印で個別解除、
+  二重左矢印(`<<`)で全解除ができる
+- **POLICY | Rules and Policies > Security Policy**: Source・Destination・
+  Port/ServicesにAddress Object / Address Group / Service Object / Service
+  Groupを指定して通信可否を決めるルールの画面。テーブル上部の`+Add`から
+  `Adding Rule`ダイアログを開いて作成する
+
+## シナリオ設定
+
+今回登録するオブジェクトとポリシーは、次の{{ csv_rows | length }}行です。
+`rule_name`が`-`の行はオブジェクト定義(Address/Address Group/Service/
+Service Group)のみを行う行、`-`以外の行はそれらのオブジェクトを参照する
+Security Policyを作成する行です。値が`-`の列は、その行では未使用であること
+を表します。
+
+| rule_no | rule_name | src_name | src_type | src_zone | src_value1 | src_value2 | dst_name | dst_type | dst_zone | dst_value1 | dst_value2 | dst_group | svc_name | svc_protocol | svc_port | svc_group | description |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["rule_no"] }} | {{ r["rule_name"] }} | {{ r["src_name"] }} | {{ r["src_type"] }} | {{ r["src_zone"] }} | {{ r["src_value1"] }} | {{ r["src_value2"] }} | {{ r["dst_name"] }} | {{ r["dst_type"] }} | {{ r["dst_zone"] }} | {{ r["dst_value1"] }} | {{ r["dst_value2"] }} | {{ r["dst_group"] }} | {{ r["svc_name"] }} | {{ r["svc_protocol"] }} | {{ r["svc_port"] }} | {{ r["svc_group"] }} | {{ r["description"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 現状を確認し、名前の重複がないことを確認する(前提確認)
+
+新しいオブジェクトを1件も作成する前に、現状を確認します。
+
+- `MATCH OBJECTS | Addresses`の`Address Objects`タブ・`Address Groups`タブ
+  を開き、検索欄で表内の`src_name`/`dst_name`/`dst_group`の値(`H_`/`N_`/
+  `G_`で始まる名前)を1件ずつ検索し、同名オブジェクトが存在しないことを
+  確認します。既に同名が存在すると、新規作成のつもりが既存オブジェクトの
+  編集になってしまいます。
+- `MATCH OBJECTS | Services`の`Service Objects`タブ・`Service Groups`タブ
+  を開き、同様に`svc_name`/`svc_group`の値(`SVC_`/`G_SVC_`で始まる名前)が
+  存在しないことを確認します。
+- `POLICY | Rules and Policies`の`Security Policy`タブを開き、既存ポリシー
+  の並び順と件数を記録しておきます(手順6で新規ポリシーを追加した後、既存
+  ポリシーの評価順序が変わっていないことの確認に使います)。
+
+### 2. Address Object(ホスト/ネットワーク)を作成する
+
+`MATCH OBJECTS | Addresses`を開き`Address Objects`タブで`Add`アイコンを
+クリックします。表示されるダイアログで`Name`・`Zone Assignment`・`Type`
+を入力し、`Type`が`Host`の行は`IP Address`欄に、`Network`の行は`Network`
+欄と`Netmask`欄にそれぞれ表の値を入力して、`Save`をクリックします。
+
+{% for r in csv_rows %}{% if r["rule_name"] == "-" and r["src_type"] != "-" %}- Name: `{{ r["src_name"] }}` / Zone Assignment: `{{ r["src_zone"] }}` / Type: `{{ r["src_type"] }}`{% if r["src_type"] == "Host" %} / IP Address: `{{ r["src_value1"] }}`{% endif %}{% if r["src_type"] == "Network" %} / Network: `{{ r["src_value1"] }}` / Netmask: `{{ r["src_value2"] }}`{% endif %}
+{% endif %}{% if r["rule_name"] == "-" and r["dst_type"] != "-" %}- Name: `{{ r["dst_name"] }}` / Zone Assignment: `{{ r["dst_zone"] }}` / Type: `{{ r["dst_type"] }}`{% if r["dst_type"] == "Host" %} / IP Address: `{{ r["dst_value1"] }}`{% endif %}{% if r["dst_type"] == "Network" %} / Network: `{{ r["dst_value1"] }}` / Netmask: `{{ r["dst_value2"] }}`{% endif %}
+{% endif %}{% endfor %}
+
+### 3. Address Group `G_WEBFARM` を作成し、Webサーバーのメンバーをまとめる
+
+`MATCH OBJECTS | Addresses`の`Address Groups`タブで`Add`をクリックし、
+`Add Address Group`ダイアログを開きます。`Name`に`G_WEBFARM`を入力し、
+次のAddress Objectをリストから選択して右矢印ボタンでグループへ追加し、
+`Save`をクリックします。
+
+{% for r in csv_rows %}{% if r["rule_name"] == "-" and r["dst_group"] == "G_WEBFARM" %}- {{ r["dst_name"] }}
+{% endif %}{% endfor %}
+
+### 4. Service Object(ポート)を作成する
+
+`MATCH OBJECTS | Services`を開き`Service Objects`タブで`Add`アイコンを
+クリックします。`Name`にサービス名、`Protocol`に表の`svc_protocol`の値
+(標準プロトコル)を選択し、`Port Range`の開始・終了ポートにそれぞれ表の
+`svc_port`の値を入力して、`Save`をクリックします。今回はいずれも標準
+プロトコル(TCP)のため`Sub Type`は使用しません。
+
+{% for r in csv_rows %}{% if r["rule_name"] == "-" and r["svc_name"] != "-" %}- Name: `{{ r["svc_name"] }}` / Protocol: `{{ r["svc_protocol"] }}` / Port Range: `{{ r["svc_port"] }}` - `{{ r["svc_port"] }}`
+{% endif %}{% endfor %}
+
+### 5. Service Group `G_SVC_WEB` を作成し、Web用サービスをまとめる
+
+`MATCH OBJECTS | Services`の`Service Groups`タブで`Add`アイコンをクリック
+します。`Name`に`G_SVC_WEB`を入力し、`Not in Group`リストから次のService
+Objectを選択して右矢印ボタンで`In Group`側へ移動し、`Save`をクリックし
+ます。
+
+{% for r in csv_rows %}{% if r["rule_name"] == "-" and r["svc_group"] == "G_SVC_WEB" %}- {{ r["svc_name"] }}
+{% endif %}{% endfor %}
+
+### 6. Security Policyを作成し、オブジェクト/グループを参照させる
+
+`POLICY | Rules and Policies`を開き`Security Policy`タブでテーブル上部の
+`+Add`(`Top`または`Bottom`)をクリックします。表示される`Adding Rule`
+ダイアログで次の値を入力します。`Destination`は`dst_group`が設定されて
+いる行はグループ名を、`Port/Services`は`svc_group`が設定されている行は
+グループ名を、それぞれ個別のオブジェクト名の代わりに指定します。`Action`
+は`Allow`を選択し、`Schedule`は既定の`Always On`のまま変更せず、内容を
+`Validate`で確認してから`Save`をクリックします。
+
+{% for r in csv_rows %}{% if r["rule_name"] != "-" %}- Name: `{{ r["rule_name"] }}` / Action: `Allow` / Source: `{{ r["src_name"] }}` / Destination: `{% if r["dst_group"] != "-" %}{{ r["dst_group"] }}{% else %}{{ r["dst_name"] }}{% endif %}` / Port/Services: `{% if r["svc_group"] != "-" %}{{ r["svc_group"] }}{% else %}{{ r["svc_name"] }}{% endif %}`
+{% endif %}{% endfor %}
+
+## 動作確認
+
+- `MATCH OBJECTS | Addresses`の`Address Objects`タブに、手順2で作成した
+  Address Objectが意図した`Zone Assignment`・`Type`・IPアドレス(または
+  ネットワークアドレス/ネットマスク)で表示されること
+- `Address Groups`タブに`G_WEBFARM`が作成され、メンバーに`H_WEBSRV01`/
+  `H_WEBSRV02`の2件が入っていること
+- `MATCH OBJECTS | Services`の`Service Objects`タブに、手順4で作成した
+  Service Objectが意図した`Port Range`で表示されること
+- `Service Groups`タブに`G_SVC_WEB`が作成され、メンバーに`SVC_HTTP`/
+  `SVC_HTTPS`の2件が入っていること
+- `POLICY | Rules and Policies`の`Security Policy`タブに`SEC_LAN_TO_
+  WEBFARM_WEB`/`SEC_ADMIN_TO_JUMP_SSH`の2件が表示され、`Source`/
+  `Destination`/`Port/Services`がそれぞれ意図したオブジェクト名・グループ
+  名になっていること
+- 手順1で記録した既存ポリシーの並び順・内容が、意図せず変更されていない
+  こと
+- LANセグメント(`10.0.20.0/24`)の端末から`172.16.50.11`/`172.16.50.12`
+  へのHTTP/HTTPS通信が許可され、管理端末(`10.0.20.50`)から
+  `172.16.60.5`へのSSH(22番)のみが許可されること
+
+## 注意事項
+
+- **名前の重複に注意すること。** `Add`で指定する`Name`が既存のAddress
+  Object/Address Group/Service Object/Service Groupと重複していると、
+  新規作成ではなく既存オブジェクトの編集を意図せず行ってしまう可能性が
+  あります。手順1の事前確認を必ず行ってください。
+- **Zone Assignmentは環境ごとの実際のゾーン名に読み替えること。** 本手順
+  書の`LAN`はこの手順書内の仮称であり、`Host`・`MAC`・`FQDN`タイプの
+  Address Objectでは`Zone Assignment`の指定が必須です。実際のSonicWall
+  上で使用しているゾーン名(`LAN`/`WAN`/`DMZ`など、環境によって異なる)に
+  読み替えてから入力してください。
+- **CLI構文はこの手順書に含めていません。** SonicOSにもCLIは存在します
+  が、Address Object/Service Object作成の`set`パラメータ相当の詳細な構文
+  を一次情報で確認できなかったため、推測で記載していません。CLIで投入
+  する場合は、対象のSonicWall上でオンラインヘルプやコマンド補完を用いて、
+  バージョンに応じた正確な構文をその場で確認してから実行してください。
+- `POLICY | Rules and Policies`の`Adding Rule`ダイアログには`Priority`・
+  `Users`(`Include`/`Exclude`)・`GEO Country`・`Type`(`IPv4`/`IPv6`)
+  など、本シナリオでは使用しないフィールドも存在します。それらは組織の
+  ポリシー要件に応じて別途確認・設定してください。
+- Security Policyの変更がSonicWall自身の管理アクセス(GUI/SSHログイン)を
+  経由するゾーンに影響する場合、手順6の登録と動作確認が完了するまで、
+  既存の広めの許可ポリシーを無効化・削除しないでください。
+- GUI/CLIへのログインに使う管理者パスワードやAPIトークンは、本手順書や
+  ログに平文で残さないでください。値を記録する場合は`********`のように
+  マスクし、秘密管理ツール等で別途安全に保管してください。

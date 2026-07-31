@@ -1,0 +1,206 @@
+# SonicWall Active/Standby HA構成とStateful Synchronizationの構築
+
+`{{ primary_host }}`(Primary)と `{{ secondary_host }}`(Secondary)の2台のSonicWall
+アプライアンスで、`DEVICE | High Availability > Settings` からActive/Standby HA
+ペアを組み、`Enable Stateful Synchronization` による状態同期を有効化したうえで、
+`Force Active/Standby Failover` によるフェイルオーバー動作の検証まで行う手順です。
+CARPのような独立した仮想IPオブジェクトは作成せず、既に設定済みのLAN/WAN
+インターフェースIPアドレスそのものを、PrimaryとSecondaryのどちらが現在Active
+かに応じて引き継ぐ点が、本製品のHA機構の特徴です。
+
+## 目的
+
+`DEVICE | High Availability > Settings` と `DEVICE | High Availability >
+Monitoring` それぞれの設定項目の役割を理解し、2台のSonicWallを実際にActive/
+Standby HAペアとして構築したうえで、`Enable Stateful Synchronization` による
+セッション情報の継続と、`Force Active/Standby Failover` による意図的な
+フェイルオーバーの検証まで行えるようになることを目指します。
+
+## 用語解説
+
+- **Active/Standby High Availability (HA)**: 2台のSonicWallのうち1台(Active)が
+  すべてのトラフィックを処理し、もう1台(Standby)は設定を共有した待機状態を保ち、
+  Activeが停止した際に処理を引き継ぐ冗長化方式
+- **HA Devices(Primary/Secondary SonicWall Serial Number)**: `DEVICE | High
+  Availability > Settings` でHAペアを組む相手を指定する項目。Primary側の
+  シリアル番号は自動表示され編集不可、Secondary側のシリアル番号は手動で入力する
+- **HA Control Interface**: Primary/Secondary間でハートビート(死活監視)を
+  やり取りするインターフェース。すでに構成済みのインターフェースが検出されると
+  自動選択され編集不可になる
+- **HA Data Interface**: `Enable Stateful Synchronization` 有効時に、セッション
+  状態などのステートフルデータを転送する(任意設定の)インターフェース
+- **Enable Stateful Synchronization**: ライセンスが必要な機能で、既定では無効。
+  有効にするとPrimaryがVPNトンネル・アクティブユーザー・コネクションキャッシュ
+  などの接続情報をSecondaryへ継続的に送り続け、フェイルオーバー時に既存
+  セッションを切断せずに引き継げる。無効のまま(既定)だとActive/Standby HAは
+  ステートレスで、フェイルオーバー後にセッションとVPNトンネルの再確立が必要になる
+- **Enable Preempt Mode**: 障害から復旧したPrimaryが、再起動後に自動的に
+  Active役割を取り戻す設定。既定では無効
+- **Enable Virtual MAC**: Primary/SecondaryがMACアドレスを共有できるようにする設定
+- **LAN/WAN共有IP**: OPNsenseのCARP VIPのような独立したオブジェクトではなく、
+  Primary機にあらかじめ設定済みのLAN/WANインターフェースIPアドレスそのものを
+  指す。フェイルオーバー時は、現在Activeな機がこのIPアドレスに応答する
+- **Monitoring > Primary/Secondary IPv4 Address**: `DEVICE | High Availability >
+  Monitoring` で監視対象インターフェースごとに設定する、Primary機・Secondary機
+  それぞれ固有のIPアドレス(共有IPと同一サブネット)。どちらがActiveかに関わらず
+  各機自身のリンク状態を相互に探査(probing)するために使う
+- **Force Active/Standby Failover**: HAペアのフェイルオーバー動作を意図的に
+  発生させ、正しく機能するか検証するためのボタン
+- **HA状態(STANDBY/SYNC/NONE/Active Up Time)**: ステータス画面に表示される
+  相手機の状態。STANDBYは待機中で引き継ぎ可能な状態、SYNCは設定/ファームウェアを
+  同期中、NONEはPrimary側から見てSecondaryのハートビートを受信できていない状態を
+  示す。Active Up Timeは現在のActive機がActiveになってからの経過時間
+
+## シナリオ設定
+
+| 項目 | 値 |
+|---|---|
+| Primary機 | `{{ primary_host }}`(Serial: `{{ primary_serial }}`) |
+| Secondary機 | `{{ secondary_host }}`(Serial: `{{ secondary_serial }}`) |
+| HA Control Interface | `{{ ha_control_interface }}` |
+| HA Data Interface | `{{ ha_data_interface }}` |
+| Enable Preempt Mode | {{ enable_preempt }} |
+| Enable Virtual MAC | {{ enable_virtual_mac }} |
+
+監視対象インターフェース(monitored_interfaces、{{ monitored_interfaces | length }} 件):
+
+| interface | zone | 共有IP(shared_ip) | Primary IPv4 Address | Secondary IPv4 Address |
+|---|---|---|---|---|
+{% for iface in monitored_interfaces %}| {{ iface.name }} | {{ iface.zone }} | {{ iface.shared_ip }}/{{ iface.prefix }} | {{ iface.primary_monitor_ip }} | {{ iface.secondary_monitor_ip }} |
+{% endfor %}
+## 手順
+
+### 1. 前提条件を確認する
+
+HA構成を開始する前に、次の前提条件を満たしていることを確認します。
+
+- Primary機・Secondary機が同一モデル、同一バージョンのSonicOSファームウェアで
+  あること(バージョンが異なるとHA機能が正しく動作しない、またはシステムが
+  不安定になるおそれがある)
+- 両機がMySonicWallポータル上でHAペアとして登録・関連付け済みであること
+  (物理的に接続する前に完了させておく)
+- `Enable Stateful Synchronization` を使うため、Stateful High Availability
+  ライセンスが両機それぞれで有効化されていること
+- 監視対象インターフェース(シナリオ設定の `monitored_interfaces`、
+  {{ monitored_interfaces | length }} 件)のIPアドレスは、いずれもDHCPではなく
+  静的IPで構成済みであること
+- Primary機のLAN/WAN共有IP(シナリオ設定の `shared_ip`)が、この手順を始める
+  前の時点で既にPrimary機に設定されていること。本手順ではこのIPアドレス自体は
+  変更しない
+
+### 2. Primary機でHA Devicesを登録する
+
+`{{ primary_host }}` のGUIで `DEVICE | High Availability > Settings` を開き、
+`Enable High Availability` にチェックを入れます。HA Devices欄では、Primary
+SonicWall Serial Numberが `{{ primary_serial }}` として自動表示され編集不可に
+なっていることを確認し、Secondary SonicWall Serial Number欄に
+`{{ secondary_serial }}` を入力します。
+
+### 3. HA Control Interface / HA Data Interfaceを選択する
+
+同じ `DEVICE | High Availability > Settings` 画面で、HA Control Interfaceに
+`{{ ha_control_interface }}` を選択します(すでに構成済みの場合は自動選択され
+編集不可になっていることがあります)。続けてHA Data Interfaceに
+`{{ ha_data_interface }}` を選択します。この2つのインターフェースは、他の
+セグメントと共有しないPrimary-Secondary間の直結配線(クロスケーブルまたは
+専用スイッチ経由)に接続してください。
+
+### 4. Enable Preempt Mode / Enable Virtual MACを設定する
+
+{% if enable_preempt %}`Enable Preempt Mode` にチェックを入れます。Primary機が
+障害から復旧して再起動した際、自動的にActive役割を取り戻すようになります。
+{% else %}`Enable Preempt Mode` はチェックしないままにします。Primary機が
+復旧してもSecondary機がActiveであり続け、Active役割の切り戻しは手動操作に
+なります。
+{% endif %}{% if enable_virtual_mac %}あわせて `Enable Virtual MAC` にも
+チェックを入れ、Primary/SecondaryでMACアドレスを共有できるようにします。
+{% endif %}
+### 5. Enable Stateful Synchronizationを有効にする
+
+同じ画面で `Enable Stateful Synchronization` にチェックを入れます。この項目は
+ライセンスが必要な機能のため、手順1でライセンス有効化を確認できていない場合は
+チェックボックス自体が機能しません。有効化すると、手順3で選択したHA Data
+Interface(`{{ ha_data_interface }}`)を経由して、VPNトンネル・アクティブ
+ユーザー・コネクションキャッシュなどの接続情報がPrimaryからSecondaryへ継続的に
+送信されるようになります。
+
+設定を終えたら `Accept` をクリックします。設定はSecondary機へ自動的に同期され、
+Secondary機が再起動します。Secondary機の再起動が完了するまで、次の手順には
+進まないでください。
+
+### 6. 監視対象インターフェースのPrimary/Secondary IPv4 Addressを設定する
+
+`DEVICE | High Availability > Monitoring` を開き、監視対象インターフェース
+ごとにEdit(編集)アイコンをクリックして、以下を設定します。`Physical/Link
+Monitoring` は既定で選択済みのため、この手順ではチェックを外しません。
+
+{% for iface in monitored_interfaces %}- `{{ iface.name }}`({{ iface.zone }}):
+  Primary IPv4 Address = `{{ iface.primary_monitor_ip }}` / Secondary IPv4
+  Address = `{{ iface.secondary_monitor_ip }}`(いずれも共有IP
+  `{{ iface.shared_ip }}` と同じサブネット内の、機ごとに固有のIPアドレス)
+{% endfor %}
+### 7. HAペアの状態を確認する
+
+設定適用後、Primary機のステータス画面で相手機(Secondary機)の状態を確認します。
+`{{ secondary_host }}` が `STANDBY`(待機中・引き継ぎ可能)と表示されるまで
+待ちます。同期中は `SYNC` と表示されます。`NONE` と表示され続ける場合は、
+手順3のHA Control Interfaceの配線または選択を見直してください。
+
+### 8. Force Active/Standby Failoverでフェイルオーバーを検証する
+
+新しい経路(Secondary機がActiveとして共有IPに応答する状態)が実際に機能する
+ことを確認するため、検証を始める前に、共有IP宛の継続的な通信(`ping` の連続
+実行や既存セッションの保持)をクライアント側で別途開始しておきます。
+
+{% for iface in monitored_interfaces %}```
+ping {{ iface.shared_ip }}
+```
+{% endfor %}
+準備ができたら、`{{ primary_host }}` のGUIで `Force Active/Standby Failover`
+をクリックします。実行後、`{{ secondary_host }}` のステータス画面でActiveに
+切り替わったことを確認し、開始しておいた `ping` が(Stateful Synchronization
+有効時は)切断されずに応答を継続していることを確認します。
+
+{% if enable_preempt %}`Enable Preempt Mode` を有効にしているため、
+`{{ primary_host }}` を復旧させると自動的にActive役割を取り戻します。
+{% else %}`Enable Preempt Mode` を無効にしているため、`{{ primary_host }}` を
+Activeに戻すには、`{{ primary_host }}` 側で改めて `Force Active/Standby
+Failover` を実行するなど、手動での切り戻し操作が必要です。
+{% endif %}
+## 動作確認
+
+- 手順2で登録した `{{ secondary_serial }}` が、Primary機の `DEVICE | High
+  Availability > Settings` のSecondary SonicWall Serial Number欄に正しく
+  反映されていること
+- 手順7で `{{ secondary_host }}` が `STANDBY` と表示され、`SYNC` や `NONE` の
+  まま固定されていないこと
+- `Enable Stateful Synchronization` がチェックされた状態で保存されていること
+- 手順8のフェイルオーバー実行後、`{{ secondary_host }}` がActiveに切り替わり、
+  フェイルオーバー前から継続していた `ping` が切断されずに応答し続けること
+- 各監視対象インターフェースについて、Primary IPv4 Address
+  (`{{ monitored_interfaces[0].primary_monitor_ip }}` など)・Secondary IPv4
+  Address双方への疎通が、現在どちらがActiveであるかに関わらず維持されること
+
+## 注意事項
+
+- `Enable Stateful Synchronization` はライセンスが必要な機能です。手順1で
+  ライセンス有効化を確認せずに有効化しようとすると、チェックボックスが機能
+  しないか、意図した状態同期が行われません。
+- Primary機・Secondary機は同一モデル・同一ファームウェアバージョンで運用して
+  ください。バージョンが異なるとHA機能が正しく動作しない、またはシステムが
+  不安定になるおそれがあります。
+- HA Control Interface / HA Data Interfaceの配線は、Primary-Secondary間の
+  専用線(クロスケーブルまたは他と共有しないスイッチ)としてください。
+  Stateful Synchronization有効時はセッション情報がこの配線上を流れるため、
+  他のセグメントと共有したりWANへ露出させたりしないこと。
+- 手順8のフェイルオーバー検証は、共有IP宛の継続的な通信確認手段を事前に
+  別途用意した状態で行ってください。新しい経路(Secondary機のActive昇格)が
+  実際に機能することを確認する前に、唯一の到達手段を共有IPだけに依存させては
+  いけません。
+- `Enable Preempt Mode` を有効にすると、障害から復旧したPrimary機へ自動的に
+  Active役割が戻るため、復旧のタイミングによっては業務時間中に瞬断が発生する
+  可能性があります。切り戻しのタイミングを制御したい場合は無効のままにして
+  手動で切り戻してください。
+- GUI管理画面へのログインパスワードは、この手順書のいずれの手順にも平文で
+  記載していません。実際の運用でもパスワードマネージャーや秘密管理ツール
+  経由で管理し、手順書やログ・チケットに平文で残さないでください。

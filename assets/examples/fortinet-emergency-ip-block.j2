@@ -1,0 +1,199 @@
+# FortiGateによる攻撃元IPの緊急遮断対応
+
+攻撃検知時に、CSVで定義した{{ csv_rows | length }}件の攻撃元IPアドレスを、
+FortiGate (FortiOS) のIP Ban機能で即時遮断します。GUI(FortiView Sources の
+Ban IP)とCLI(`diagnose user banned-ip add`)の双方の登録手順を併記し、
+`diagnose user banned-ip list` とトラフィックログの両面で遮断を確認したうえ
+で、インシデントとしての記録、時限遮断の自動失効、恒久遮断(無期限)の解除
+基準・永続化方針までを一連の初動対応として整理します。
+
+## 目的
+
+攻撃元IPを検知してから、FortiGateのIP Ban機能を用いて即座に該当IPからの
+通信を遮断し、遮断が実際に効いていることをCLIとログの両面で確認できるように
+なることを目指します。あわせて、遮断内容をインシデント記録として残し、時限
+遮断の自動失効と恒久遮断(無期限)の解除基準・永続化方針を判断できるように
+なることを目指します。
+
+## 用語解説
+
+- **IP Ban (banned-ip)**: 特定の送信元IPアドレスからの通信を、設定した期間
+  または無期限でKernelのパケットフィルタレベルで遮断するFortiGateの機能。
+  遮断は、該当トラフィックに一致するactionがACCEPTのFirewall Policyが存在
+  する場合にのみ働き、一致するとACCEPTがDENYへ置き換わる。一致するポリシー
+  が存在しない場合、通信はもともと暗黙拒否(implicit deny)で拒否される
+- **FortiView Sources (`Dashboard > FortiView > Sources`)**: 送信元別の
+  通信量・セッション数・脅威スコアを表示するモニター画面。テーブル内の
+  送信元(または対象デバイスのMACアドレス)にカーソルを合わせて開く情報
+  ウィンドウから `Quarantine > Ban IP` を選ぶと、Ban IPダイアログが表示され、
+  手動でIP Banを登録できる
+- **`diagnose user banned-ip {list | add | delete | clear | stat}`**: 遮断
+  リストをCLIから操作するコマンド群。`list` は一覧表示、`add` は登録、
+  `delete` は個別解除、`clear` は全件解除、`stat` は統計表示を行う。旧
+  FortiOSの `diagnose user quarantine` コマンドが現行では本コマンドに
+  統合されている
+- **`quarantine attacker` / `quarantine-expiry`**: IPSセンサーやアプリケー
+  ションコントロールなどのセキュリティプロファイルの `config entries` 配下
+  に設定する項目。シグネチャ一致時に攻撃元IPを自動でIP Ban登録し、
+  `quarantine-expiry` で自動遮断の保持時間(秒)を指定する
+- **`ban-source`**: `diagnose user banned-ip add` で遮断理由を分類する引数
+  (`admin` / `dlp` / `ips` / `av` / `dos` / `app`)。`diagnose user
+  banned-ip list` の `cause` 列にも反映される
+
+  | ban-source | 由来 | listのcause列 |
+  |---|---|---|
+  | admin | GUI手動(FortiView Sources の Ban IP)またはCLI手動での登録 | Administrative |
+  | av | アンチウイルスプロファイル(`nac-quar`)による自動検疫 | AV |
+  | app | アプリケーションコントロールプロファイルによる自動検疫 | APP |
+  | dlp | DLPプロファイルによる自動検疫 | DLP |
+  | ips | IPSセンサーによる自動検疫 | IPS |
+
+- **`banned-ip-persistency`**: `config firewall global` 配下の設定で、電源
+  断・再起動をまたいで遮断リストを保持するかを `disabled`(既定、保持しな
+  い)/ `permanent-only`(無期限のものだけ保持)/ `all`(すべて保持)から
+  選択する
+
+## シナリオ設定
+
+今回のインシデントで遮断対象とする攻撃元IPは、次の{{ csv_rows | length }}件
+です。`expiry_sec` は `diagnose user banned-ip add` に渡す遮断期間(秒)で、
+0 の行は無期限(indefinite)の遮断として登録します。
+
+| seq | src_ip | expiry_sec | ban_source | reason | detected_by | ticket_no |
+|---|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["seq"] }} | {{ r["src_ip"] }} | {{ r["expiry_sec"] }} | {{ r["ban_source"] }} | {{ r["reason"] }} | {{ r["detected_by"] }} | {{ r["ticket_no"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 現在の遮断状況を確認する(遮断前の基準を取る)
+
+新しい遮断を登録する前に、CLIで現在の遮断リストを表示し、今回追加する
+{{ csv_rows | length }}件がまだ登録されていないことを確認します。
+
+```
+# diagnose user banned-ip list
+```
+
+### 2. GUI(FortiView Sources)から手動で遮断する
+
+`Dashboard > FortiView > Sources` を開きます。テーブル内で対象の送信元
+(または対象デバイスのMACアドレス)にカーソルを合わせると情報ウィンドウが
+開くので、`Quarantine > Ban IP` をクリックし、表示されたBan IPダイアログで
+遮断設定を行ってから `OK` をクリックします。次の各行について、この操作を
+繰り返します。
+
+{% for r in csv_rows %}- {{ r["src_ip"] }}({{ r["reason"] }}、検知経路: {{ r["detected_by"] }}、チケット: {{ r["ticket_no"] }})
+{% endfor %}
+
+### 3. CLI(diagnose user banned-ip add)から遮断する
+
+GUIと同じ内容を、CLIからも登録できます。`<expiry>` は秒単位で指定し、0を
+指定すると無期限になります。`<ban-source>` にはシナリオ設定の `ban_source`
+の値を指定します。
+
+```
+{% for r in csv_rows %}diagnose user banned-ip add src4 {{ r["src_ip"] }} {{ r["expiry_sec"] }} {{ r["ban_source"] }}
+{% endfor %}```
+
+### 4. 遮断が登録されたことをCLIで確認する
+
+```
+# diagnose user banned-ip list
+```
+
+出力の `src-ip-addr` / `expires` / `cause` 列で、次のとおり登録されている
+ことを確認します。
+
+{% for r in csv_rows %}- {{ r["src_ip"] }}: expiresが{% if r["expiry_sec"] == 0 %}indefinite{% else %}createdから約{{ r["expiry_sec"] }}秒後{% endif %}、causeが{% if r["ban_source"] == "admin" %}Administrative{% elif r["ban_source"] == "ips" %}IPS{% else %}{{ r["ban_source"] }}{% endif %}であること
+{% endfor %}
+
+### 5. 実際の通信が遮断されていることをログで確認する
+
+`Log & Report > Forward Traffic` を開き、次の各送信元IPで検索し、`action`
+が `deny` になっているログが記録されていることを確認します。IP Banは、一致
+するACCEPTのFirewall Policyが存在するトラフィックに対してのみACCEPTをDENY
+へ置き換える仕組みのため、`banned-ip list` への登録だけで遮断が効いている
+と判断せず、必ず実トラフィックのログでも確認してください。
+
+{% for r in csv_rows %}- {{ r["src_ip"] }}
+{% endfor %}
+
+### 6. インシデントとして記録する
+
+シナリオ設定の表(seq / src_ip / expiry_sec / ban_source / reason /
+detected_by / ticket_no)を、手順4・5で確認した登録時刻(created)・失効
+予定(expires)とあわせて、対応するチケット(ticket_no)にインシデント記録
+として転記します。恒久遮断(expiry_sec が 0)の行は、次の手順7で解除基準を
+必ず定めてください。
+
+### 7. 解除基準を定め、恒久遮断の永続化方針を決定する
+
+時限遮断(expiry_sec が 0 以外)は、指定した秒数の経過で自動的に失効しま
+す。失効前に対応が完了した場合や、逆に遮断を継続する必要がある場合は、期限
+前に個別に見直してください。
+
+恒久遮断(expiry_sec が 0)の行は自動失効しないため、原因調査の完了後に手動
+で解除するか、恒久的なFirewall Policy/アドレスグループでの遮断へ置き換える
+かを判断し、解除基準として記録してください。個別に解除する場合は次のコマン
+ドを使用します。
+
+```
+# diagnose user banned-ip delete src4 <src-ipv4>
+```
+
+`# diagnose user banned-ip clear` は登録済みの遮断を全件削除するコマンドで
+す。今回のインシデント以外の遮断も同時に解除されるため、個別解除で対応でき
+ない場合を除き使用しないでください。
+
+恒久遮断を再起動後も保持する必要がある場合は、`banned-ip-persistency` を
+設定します(既定は `disabled` で、再起動をまたぐと遮断は失われます)。
+
+```
+config firewall global
+    set banned-ip-persistency permanent-only
+end
+```
+
+## 動作確認
+
+- 手順1のベースライン取得後に登録した{{ csv_rows | length }}件が、手順4の
+  `diagnose user banned-ip list` にすべて表示されること
+- 各行の `cause` が `ban_source` に対応した値(admin→Administrative、
+  ips→IPS)になっていること
+- 各行の `expires` が、`expiry_sec` が 0 の行は `indefinite`、それ以外の
+  行は `created` から `expiry_sec` 秒後になっていること
+- 手順5の `Log & Report > Forward Traffic` で、各送信元IPからの通信が
+  `action=deny` として記録されていること
+- 恒久遮断(`expiry_sec` が 0)の行について、解除基準(誰が・何を確認したら
+  解除するか)と `banned-ip-persistency` の方針がインシデント記録に残って
+  いること
+
+## 注意事項
+
+- **IP Banは、一致するACCEPTのFirewall Policyが存在するトラフィックに対し
+  てのみ働きます。** 該当ポリシーがない通信はもともと暗黙拒否で拒否されて
+  いるため、`banned-ip list` への登録だけを見て遮断が効いていると判断せず、
+  必ず手順5のログで `action=deny` を確認してください。
+- **`diagnose user banned-ip clear` は全件解除のコマンドです。** 今回のイ
+  ンシデントに関係しない他の遮断も同時に解除されるため、個別のIPだけを解除
+  したい場合は `diagnose user banned-ip delete src4 <ip>` を使用し、
+  `clear` は使用しないでください。
+- **`banned-ip-persistency` の既定値は `disabled` です。** 恒久遮断
+  (`expiry_sec` が 0)を登録しても、再起動や電源断をまたぐと遮断は失われま
+  す。再起動後も遮断を維持する必要がある場合は、`permanent-only` または
+  `all` を明示的に設定してください。
+- **恒久遮断(`expiry_sec` が 0)は自動失効しません。** 解除基準(調査完
+  了、再発なしの確認期間など)を事前に定め、インシデント記録に残してくださ
+  い。長期間の恒久遮断が必要と判明した場合は、`banned-ip list` での運用を
+  続けるのではなく、恒久的なFirewall Policyやアドレスグループでの遮断への
+  切り替えを検討してください。
+- 遮断対象の送信元IPが、社内の共有プロキシ・NATゲートウェイ・VPN終端など、
+  正当な利用者と共用されるアドレスでないことを、遮断前に確認してください。
+  誤って共用アドレスを遮断すると、攻撃者以外の正規利用者の通信も同時に遮断
+  されます。
+- 本手順のCLI操作は、認証済みの管理者CLIセッション(SSH/コンソール)上での
+  実行を前提とします。自動化スクリプトへ組み込む場合は、管理者パスワードや
+  APIトークンをスクリプト本文やログに平文で残さないでください。値を記録す
+  る場合は `********` のようにマスクし、秘密管理ツール等で別途安全に保管し
+  てください。

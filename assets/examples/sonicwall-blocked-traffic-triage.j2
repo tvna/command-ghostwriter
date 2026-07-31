@@ -1,0 +1,244 @@
+# SonicWallの「通信できない」申告に対する原因ルール切り分け
+
+利用者から届く「通信できない」という申告に対し、SonicOSの `Investigate` ビュー
+だけを使ってログ層(`Investigate | Packet Monitor` / `Investigate | Logs |
+Event Logs`)→セッション層(`Investigate | Logs | Connection Logs`、通称
+Connections Monitor)→NAT変換層(`NAT Policy`)の順に原因を切り分けます。設定の
+作成・変更は一切行わない診断専用の手順です。対象は `{{ firewall_name }}`
+(`{{ mgmt_ip }}`)上の {{ cases | length }} 件の申告(`{{ ticket_id }}`、
+申告者: {{ reported_by }}、申告日時: {{ reported_at }})です。
+
+## 目的
+
+「通信できない」という申告に対し、SonicOSのInvestigateビューが持つ3つの機能
+(`Packet Monitor` によるライブキャプチャ、`Logs | Event Logs` によるイベント
+履歴、`Logs | Connection Logs` によるセッション状態、および両ログが持つ
+`NAT Policy` 列)を、ログ→セッション→NATの順に確認し、通信を止めている原因
+(Access Ruleによる遮断か、セッション状態の異常か、NAT変換の食い違いか)を
+設定変更なしに特定できるようになることを目指します。
+
+## 用語解説
+
+- **Investigate | Packet Monitor**: SonicWallを通過する個々のパケットを
+  キャプチャして確認できる画面。`Trace` の状態(赤=停止/緑=稼働中/黄=
+  バッファ満杯)、`Configure` ボタンから開く Packet Monitor Configuration
+  ダイアログの `Settings` / `Monitor Filter` / `Display Filter` / `Logging` /
+  `Advanced Monitor Filter` / `Mirror` の各タブ、`Monitor Default`(初期状態
+  へのリセット)、`Clear`(バッファ消去)、`Start Capture` / `Stop Capture`
+  ボタンで構成される
+- **Monitor Filter**: Packet Monitor Configuration ダイアログのタブの一つ。
+  `Interface Name(s)` / `Source IP Address(es)` / `Source Port(s)` /
+  `Destination IP Address(es)` / `Destination Port(s)` / `IP Type(s)` などを
+  指定してキャプチャ対象を絞り込む。空欄のフィールドはフィルタなし(全て
+  マッチ)として扱われる
+- **Captured Packets / Packet Detail**: キャプチャしたパケットの一覧
+  (`#` / `Time` / `Ingress` / `Egress` / `Source IP` / `Destination IP` /
+  `Ether Type` / `Packet Type` / `Ports [Src, Dst]` / `Status` の列を持つ)と、
+  一覧で選択した1パケットのヘッダ詳細。破棄されたパケットは一覧上で赤色表示
+  され、Packet Detail側のStatus欄に `Drop-code` (破棄理由を示す数値)が
+  表示される
+- **Investigate | Logs | Event Logs**: SonicWallが記録するイベントログの
+  画面。`Filter View` 横の `+` から開く View Filter ダイアログで Source IP /
+  Destination IP などを指定して絞り込み、`ACCEPT` で適用する。`Display
+  Options` から表示列を選択でき、どのAccess Ruleが適用されたかを示す
+  `Access Rule` 列、実際に適用されたファイアウォールアクションを示す
+  `FW Action` 列、NAT変換の有無を示す `NAT Policy` 列などを追加表示できる
+- **Investigate | Logs | Connection Logs(Connections Monitor)**: SonicWall
+  への/を経由するアクティブなコネクションを一覧表示する画面。`Src IP` /
+  `Src Port` / `Dst IP` / `Dst Port` / `Protocol` / `Src Iface` / `Dst
+  Iface` / `Flow Type` / `Expiry (sec)` / `Tx Bytes` / `Rx Bytes` などの列を
+  持つ。`Filter` で `Source Address` / `Destination Address` / `Destination
+  Port` / `Protocol` / `Flow Type` / `Src Interface` / `Dst Interface` を
+  指定し、`Apply Filters` で適用、`Reset Filters` で解除する
+- **NAT Policy**: Event LogsとConnection Logsの双方に現れる列/概念で、その
+  通信に適用されたNATポリシー名を示す。Packet Monitorの `Monitor Filter` で
+  `Source IP Address(es)` のみを指定してキャプチャするとIngress側(入ってくる
+  向き)のNAT変換を、`Destination IP Address(es)` のみを指定するとEgress側
+  (出ていく向き)のNAT変換を、それぞれ確認しやすくなる
+- 管理GUIのログインパスワードは本手順書には一切記載しません。実際の運用でも
+  平文で残さず、パスワードマネージャーや秘密管理ツール経由で管理してください
+
+## シナリオ設定
+
+対象ファイアウォール: `{{ firewall_name }}`(管理アクセス先: `{{ mgmt_ip }}`)
+チケット: `{{ ticket_id }}` / 申告者: {{ reported_by }} / 申告日時:
+{{ reported_at }} / 実施者: {{ operator_name }}
+
+切り分け対象の申告(cases、{{ cases | length }} 件、キャプチャ時間はいずれも
+{{ capture_window_minutes }} 分を目安とします):
+
+| case_no | description | src_ip | src_port | dst_ip | dst_port | protocol | interface | expected_action |
+|---|---|---|---|---|---|---|---|---|
+{% for c in cases %}| {{ c.case_no }} | {{ c.description }} | {{ c.src_ip }} | {{ c.src_port }} | {{ c.dst_ip }} | {{ c.dst_port }} | {{ c.protocol }} | {{ c.interface }} | {{ c.expected_action }} |
+{% endfor %}
+
+表中の `src_port` が `*` の行は「送信元ポート任意」を意味します。Monitor
+Filterへ実際に入力する際は、`*` と入力するのではなく該当フィールドを空欄の
+ままにしてください(空欄は「そのフィールドでは絞り込まない」という扱いに
+なります)。
+
+## 手順
+
+### 1. 申告内容を記録し、対象フローを一意に定義する(前提確認)
+
+`{{ mgmt_ip }}` の管理GUIにログインする前に、シナリオ設定の {{ cases | length }}
+件それぞれについて、送信元/宛先IPアドレス・ポート・プロトコル・対象
+インタフェースが一意に定まっていることを確認します。あいまいな申告(宛先IPが
+不明、プロトコルが未確認など)は、この時点で申告者(`{{ reported_by }}`)に
+追加のヒアリングを行い、表の値を確定させてから次に進んでください。
+
+{% for c in cases %}- case {{ c.case_no }}: {{ c.description }} ({{ c.protocol }}
+  {{ c.src_ip }}:{{ c.src_port }} -> {{ c.dst_ip }}:{{ c.dst_port }},
+  interface {{ c.interface }})
+{% endfor %}
+`interface` に記載したインタフェース名は本手順書内の例です。実際の名称は
+`System Setup | Network > Interface` の設定に合わせて読み替えてください。
+
+### 2. Investigate | Packet Monitor でライブキャプチャを取得する(ログ層 1/2)
+
+1. `{{ mgmt_ip }}` の管理GUIへログインし、`Investigate | Packet Monitor` を
+   開きます。
+2. `Trace` が **Trace Off**(赤)であることを確認し、`Refresh` をクリック
+   します。`Captured Packets` に前回分のパケットが残っていれば `Clear` で
+   消去します。
+3. 誤った設定が残っていないことを保証するため、`Monitor Default` を
+   クリックしてMonitor Filterと Advanced ページの設定を工場出荷状態へ
+   リセットします(確認ダイアログが出ます)。
+4. `Configure` をクリックし、Packet Monitor Configuration ダイアログの
+   `Monitor Filter` タブを開きます。対象の case について、`Interface
+   Name(s)` に対象interfaceを、`Source IP Address(es)` / `Source Port(s)` /
+   `Destination IP Address(es)` / `Destination Port(s)` / `IP Type(s)` に
+   シナリオ設定の値を入力します(`src_port` が `*` の行は該当欄を空欄の
+   ままにします)。`Forwarded packets only` / `Consumed packets only` /
+   `Dropped packets only` はいずれもチェックせず(全ステータスを対象と
+   する既定のまま)にしておきます。
+5. `OK` をクリックしてダイアログを閉じ、`Start Capture` をクリックします。
+6. 申告者に該当の通信を再現してもらいながら、{{ capture_window_minutes }}
+   分程度待ちます。再現後、`Stop Capture` をクリックしてキャプチャを
+   止めます。
+7. `Captured Packets` 一覧を確認します。**赤色**で表示された行は
+   SonicWallによって破棄されたパケットです。該当行をクリックし、Packet
+   Detail側のStatus欄にある `Drop-code` を確認・記録してください。一致する
+   パケットが1件も表示されない場合は、通信がSonicWallまで到達していない
+   (経路・クライアント側・上流機器側の問題である)可能性を優先して疑います。
+
+各caseのMonitor Filter設定値:
+
+| case_no | Interface Name(s) | Source IP Address(es) | Destination IP Address(es) | Destination Port(s) | IP Type(s) |
+|---|---|---|---|---|---|
+{% for c in cases %}| {{ c.case_no }} | {{ c.interface }} | {{ c.src_ip }} | {{ c.dst_ip }} | {{ c.dst_port }} | {{ c.protocol }} |
+{% endfor %}
+
+### 3. Investigate | Logs | Event Logs で該当イベントを確認する(ログ層 2/2)
+
+1. `Investigate | Logs | Event Logs` を開きます。
+2. まだ表示していなければ `Display Options` を開き、`Access Rule` /
+   `FW Action` / `NAT Policy` の各列を表示対象に追加して `SAVE` します。
+3. `Filter View` 横の `+` をクリックし、View Filterダイアログで Source IP /
+   Destination IP に対象caseの `src_ip` / `dst_ip` を入力して `ACCEPT` を
+   クリックします。`Show` のプルダウンで、申告日時(`{{ reported_at }}`)や
+   手順2のキャプチャ時間帯を含む期間を選択してください。
+4. 一致するイベントの `FW Action` 列と `Access Rule` 列を確認します。
+   `Access Rule` に表示された名前が、その通信を実際に処理したルールです。
+   FW Actionが遮断を示している場合、そのAccess Ruleが第一の切り分け結果
+   (原因ルール候補)になります。
+5. 確認が終わったら、`Filter View` 横の `X` で個別または全体のフィルタを
+   クリアします。
+
+### 4. Investigate | Logs | Connection Logs でセッション状態を確認する(セッション層)
+
+手順2・3でAccess Ruleによる明確な遮断が見つからない、または遮断はされて
+いないはずなのに通信できない場合は、セッション(コネクション)の状態を
+確認します。
+
+1. `Investigate | Logs | Connection Logs`(Connections Monitor)を開きます。
+2. `Filter` を開き、`Source Address` / `Destination Address` / `Destination
+   Port` / `Protocol` / `Src Interface` / `Dst Interface` に対象caseの値を
+   入力します。複数条件をORで組み合わせたい場合は、対象の2条件の横にある
+   `Group` にチェックを入れます。
+3. `Apply Filters` をクリックして絞り込み結果を確認します。
+   - 一致するコネクションが1件も表示されない場合、そのフローのセッションが
+     一度も確立していないことを示します(手順3のAccess Ruleでの遮断、または
+     クライアント側で送信されていない可能性)。
+   - コネクションが表示される場合、`Expiry (sec)` が正常に減っていくか
+     (張り付いていないか)、`Tx Bytes` と `Rx Bytes` の双方が増えているか
+     (片方だけが増えている場合は戻りの通信だけが届いていない、非対称な
+     状態です)を確認・記録します。
+4. 確認後は `Reset Filters` をクリックしてフィルタを解除しておきます。
+
+### 5. NAT Policy を確認する(NAT変換層)
+
+手順3のEvent Logsまたは手順4のConnection Logsで、想定と異なる `NAT Policy`
+名が付いている、あるいは付くはずのNAT Policyが付いていない場合は、NAT変換の
+食い違いを疑います。
+
+1. 手順3のEvent Logsに戻り、対象イベントの `NAT Policy` 列に表示された
+   ポリシー名を記録します。想定していたポリシー名と異なる場合、複数の
+   NATポリシーの条件が重複していて、意図しないポリシーが先に一致している
+   可能性があります。
+2. Ingress側(入ってくる向き)のNAT変換を個別に確認したい場合は、手順2の
+   Monitor Filterを再設定し、`Source IP Address(es)` のみを対象caseの
+   `src_ip` にして(他のフィールドは空欄にして)再度 `Start Capture` /
+   `Stop Capture` を行います。Egress側(出ていく向き)を確認したい場合は、
+   同様に `Destination IP Address(es)` のみを対象caseの `dst_ip` にして
+   実施します。
+3. 手順3のEvent Logsで、同じイベントの変換後アドレスを示す `Src. NAT IP` /
+   `Src. NAT Port` / `Dst. NAT IP` / `Dst. NAT Port` の各列も併せて確認し、
+   想定していた変換先と一致するかを記録します。
+
+### 6. 原因ルールを記録し、申告者へ報告する
+
+{{ cases | length }} 件それぞれについて、どの層(Packet Monitorの
+Drop-code / Event LogsのAccess Rule / Connection Logsのセッション状態 /
+NAT Policy)で異常が見つかったか、見つかったルール・ポリシー名、および
+`expected_action` との食い違いの内容を `{{ ticket_id }}` にまとめて記録
+します。**本手順ではAccess RuleやNAT Policyの作成・変更は一切行いません**。
+修正が必要な場合は、原因の特定結果を根拠として別途の変更管理チケットで
+対応してください。
+
+## 動作確認
+
+- {{ cases | length }} 件のcaseすべてについて、Packet Monitorのキャプチャ結果
+  (該当パケットの有無、赤色表示の有無、Drop-codeの値)が記録されていること
+- 各caseについて、Event Logsで一致するイベントの `Access Rule` / `FW Action`
+  / `NAT Policy` の値が確認・記録されていること
+- Access Ruleでの遮断が見当たらないcaseについて、Connection Logsで
+  セッションの有無・`Expiry (sec)` の推移・`Tx Bytes` / `Rx Bytes` の
+  対称性が確認・記録されていること
+- NAT変換の疑いがあるcaseについて、`NAT Policy` 列とIngress/Egress双方の
+  Packet Monitorキャプチャ、および `Src./Dst. NAT IP/Port` 列が確認・記録
+  されていること
+- 手順1〜5を通じて、Access Rule・NAT Policyのいずれも新規作成・変更されて
+  いないこと
+- {{ cases | length }} 件それぞれの原因(候補)が `{{ ticket_id }}` に記録され、
+  申告者(`{{ reported_by }}`)へ報告できる状態になっていること
+
+## 注意事項
+
+- **本手順は診断専用です。** Access RuleやNAT Policyの作成・変更は行わず、
+  Packet Monitor / Event Logs / Connection Logsの閲覧・フィルタ操作のみで
+  完結させてください。修正の実施は必ず別の変更管理プロセスに委ねます。
+- `Monitor Default` はMonitor FilterとAdvanced設定を工場出荷状態へリセット
+  する操作です。キャプチャの合間ではなく、必ず各caseの調査を始める直前に
+  実行してください。途中で実行すると、直前まで設定していたフィルタが失われ、
+  手順4を最初からやり直すことになります。
+- Monitor Filterは、必要なフィールド(Interface Name(s) / IP Type(s) /
+  Source・Destination IP・Port)だけに絞り、それ以上に条件を狭めすぎない
+  ようにしてください。絞りすぎると、原因の手がかりになるパケットまで
+  キャプチャから漏れるおそれがあります。
+- 一覧上で赤色表示された(破棄された)パケットだけを根拠に結論づけず、
+  Packet Detail側のStatus欄(`Drop-code`)まで確認してから原因を記録して
+  ください。
+- 調査が終わったPacket Monitorは `Stop Capture` を必ず実行し、稼働したまま
+  放置しないでください。トラフィック量の多いインタフェースを対象に広い
+  Monitor Filterでキャプチャし続けると、バッファが早く満杯(`Trace` が黄色)
+  になり、以降のパケットを取りこぼします。
+- 管理GUIのログインパスワードは、本手順書のいずれの手順にも平文で記載して
+  いません。実際の運用でもパスワードマネージャーや秘密管理ツール経由で
+  管理し、チケットや記録に平文で残さないでください(記録上どうしても触れる
+  場合は `********` のようにマスクしてください)。
+- 本手順は SonicOS 6.5系の `Investigate` メニュー構成に基づいています。
+  SonicOS 7.X系では、Packet Monitorが `Monitor | Tools & Monitors |
+  Packet Monitor` に、キャプチャ開始操作が `Reload`/`Save`+`Start Capture`
+  に、それぞれ名称・配置が変わります。実機のファームウェアバージョンに
+  応じて、メニュー名称を読み替えてください。

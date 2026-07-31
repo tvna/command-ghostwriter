@@ -1,0 +1,176 @@
+# FortiGateのLocal-In Policyログノイズ抑制
+
+FortiGate (FortiOS 7.6.0以降) のLocal traffic loggingを既定のGlobal制御から
+`Per policy`制御へ切り替え、CSVで定義した{{ csv_rows | length }}件の既存
+local-in-policyそれぞれについて`logtraffic`を個別に設定します。ブロード
+キャスト・マルチキャスト宛ての定常的な遮断ログは`disable`として抑制し、
+WAN側への未許可アクセス試行など意味のある遮断ログは`enable`のまま残します。
+GUI(`Log & Report > Log Settings` / `Policy & Objects > Local-In Policy`)と
+CLI(`config log setting` / `config firewall local-in-policy`)の両方の手順
+を併記し、最後に`Log & Report > Local Traffic`で抑制対象のログが実際に減り、
+意味のある遮断ログは維持されていることを検証します。
+
+## 目的
+
+FortiGateのLocal traffic logging(local-in traffic、すなわちFortiGate宛ての
+allowed/denied unicast/denied broadcastトラフィックのログ)を、単一のグロー
+バル設定ではなくlocal-in-policyごとの`logtraffic`設定で制御できるように
+することを目指します。これにより、ブロードキャストやマルチキャストなど
+定常的に発生する遮断ログをノイズとして抑制しつつ、WAN側への未許可アクセス
+試行のような調査価値のある遮断ログだけをLocal Trafficログに残せるように
+します。あわせて、切り替え後もログが意図どおりに出力/抑制されていることを
+`Log & Report > Local Traffic`で検証できるようになることを目指します。
+
+## 用語解説
+
+- **Local-In Policy**: FortiGate自身宛てのトラフィック(local-in traffic)の
+  許可(ACCEPT)・拒否(DENY)を制御するポリシー。GUIでは`Policy & Objects >
+  Local-In Policy`から作成・編集し、CLIでは`config firewall local-in-policy`
+  (IPv4)/`config firewall local-in-policy6`(IPv6)の`edit <id>`配下で設定
+  する
+- **local-in-policy-log**: `config log setting`配下の設定項目。`enable`に
+  すると、local-in traffic(allowed traffic / denied unicast traffic /
+  denied broadcast traffic)のログ出力可否がグローバル設定ではなく各
+  local-in-policyの`logtraffic`設定で決まるようになる。ドキュメントには
+  「Local-in traffic can also continue to be logged globally instead of
+  per policy」とあり、`disable`(既定)のままだと引き続きグローバル設定側で
+  ログが出力される
+- **logtraffic**: `config firewall local-in-policy`/
+  `config firewall local-in-policy6`の各`edit <id>`配下にある設定項目で、
+  `enable`/`disable`を指定する。ドキュメントには「Local traffic logging can
+  be configured for each local-in policy. This enables more precise and
+  targeted logging by focusing on specific local-in policies that are most
+  relevant to your needs.」と説明されている
+- **Log allowed traffic / Log violation traffic**: `Policy & Objects >
+  Local-In Policy`の編集画面にあるログ有効化チェックボックス。ポリシーの
+  Action(ACCEPT/DENY)に応じて表示が切り替わり、ACCEPTのポリシーでは
+  `Log allowed traffic`、DENYのポリシーでは`Log violation traffic`という
+  項目名でCLIの`logtraffic`と同じ設定を切り替える
+- **policytype="local-in-policy"**: local-in-policyに一致した通信のログに
+  付与されるフィールド。`Log & Report > Local Traffic`で該当ログを他の
+  ログ種別と区別する手掛かりになる
+
+## シナリオ設定
+
+今回`logtraffic`を設定する既存のlocal-in-policyは、次の{{ csv_rows | length }}
+件です。いずれも事前に`Policy & Objects > Local-In Policy`で作成済みで
+あることを前提とし、本手順書では新規のlocal-in-policy作成(`intf`/`srcaddr`/
+`dstaddr`/`service`等の一致条件設定)は対象としません。
+
+| policy_id | ip_ver | action | match_desc | logtraffic |
+|-----------|--------|--------|------------|------------|
+{% for r in csv_rows %}| {{ r["policy_id"] }} | {{ r["ip_ver"] }} | {{ r["action"] }} | {{ r["match_desc"] }} | {{ r["logtraffic"] }} |
+{% endfor %}
+
+`logtraffic`が`disable`の行はブロードキャスト・マルチキャスト等の定常ノイズ、
+`enable`の行は調査価値のある遮断としてログを残す対象です。
+
+## 手順
+
+### 1. 現状のLocal traffic logging設定とログ量を確認する(変更前の基準を取る)
+
+設定を変更する前に、現状を確認し記録します。
+
+- `Log & Report > Log Settings`の`Global Settings`タブを開き、
+  `Local traffic logging`の現在値(既定では`Per VDOM`等のグローバル制御)を
+  確認します。
+- `Log & Report > Local Traffic`を開き、現在記録されているログの傾向
+  (特にブロードキャスト・マルチキャスト宛ての遮断ログがどの程度の頻度で
+  出ているか)を確認し、記録します。
+
+### 2. Local traffic loggingをGUIで`Per policy`へ切り替える
+
+`Log & Report > Log Settings`の`Global Settings`タブで、`Local traffic
+logging`を`Specify`に設定し、`Log local-in traffic`を有効にした上で
+`Per policy`を選択して`Apply`を押します。
+
+### 3. 同じ設定をCLIで投入する
+
+GUIと同じ内容を、`config log setting`の`local-in-policy-log`でも設定
+します。
+
+```bash
+config log setting
+    set local-in-policy-log enable
+end
+```
+
+### 4. 各local-in-policyの`logtraffic`をCLIで設定する
+
+シナリオ設定の`policy_id`ごとに、既存のlocal-in-policyを`edit`で開き、
+`logtraffic`をシナリオ設定の値に設定します。`ip_ver`が`v4`の行は
+`config firewall local-in-policy`、`v6`の行は
+`config firewall local-in-policy6`を使用します。
+
+```bash
+{% for r in csv_rows %}{% if r["ip_ver"] == "v4" %}config firewall local-in-policy
+    edit {{ r["policy_id"] }}
+        set logtraffic {{ r["logtraffic"] }}
+    next
+end
+{% elif r["ip_ver"] == "v6" %}config firewall local-in-policy6
+    edit {{ r["policy_id"] }}
+        set logtraffic {{ r["logtraffic"] }}
+    next
+end
+{% endif %}{% endfor %}```
+
+### 5. 同じ内容をGUIでも確認する
+
+`Policy & Objects > Local-In Policy`を開き、シナリオ設定の`policy_id`ごとに
+ポリシーを編集し、手順4で設定した`logtraffic`と一致していることを確認
+します。Actionが`DENY`のポリシーでは`Log violation traffic`、`ACCEPT`の
+ポリシーでは`Log allowed traffic`のチェック状態が、シナリオ設定の
+`logtraffic`(`enable`ならチェック、`disable`なら未チェック)と一致して
+いることを確認してください。
+
+{% for r in csv_rows %}- policy_id {{ r["policy_id"] }} ({{ r["ip_ver"] }} / {{ r["action"] }}): {{ r["match_desc"] }} -> logtraffic {{ r["logtraffic"] }}
+{% endfor %}
+
+### 6. `Log & Report > Local Traffic`でノイズ抑制と維持を検証する
+
+設定反映後、`Log & Report > Local Traffic`を開き、次の順序で確認します。
+
+1. `logtraffic`が`disable`の行に対応する通信(ブロードキャスト・マルチ
+   キャスト宛て等)について、新しいログが記録されなくなっていること
+2. `logtraffic`が`enable`の行に対応する通信(WAN側への未許可アクセス試行
+   等)については、引き続き`policytype="local-in-policy"`のログが記録され
+   続けていること
+3. 手順1で記録した基準と比較して、全体のログ件数が意図どおり減少している
+   一方、`enable`のままの遮断ログは欠落していないこと
+
+## 動作確認
+
+- `Log & Report > Log Settings`の`Global Settings`タブで、`Local traffic
+  logging`が`Specify` / `Per policy`になっていること
+- `Policy & Objects > Local-In Policy`上で、各`policy_id`の
+  `Log allowed traffic`/`Log violation traffic`のチェック状態がシナリオ
+  設定の`logtraffic`と一致していること
+- `Log & Report > Local Traffic`で、`logtraffic`が`disable`の行に対応する
+  ログ(ブロードキャスト・マルチキャスト宛て等)が新規に記録されなくなって
+  いること
+- `Log & Report > Local Traffic`で、`logtraffic`が`enable`の行に対応する
+  遮断ログ(`policytype="local-in-policy"`)が引き続き記録されていること
+- 手順1で記録した既存の管理アクセス・監視系の通信ログが、意図せず消えて
+  いないこと
+
+## 注意事項
+
+- **`logtraffic`を`disable`にする前に、対象のlocal-in-policyが本当にノイズ
+  のみに一致することを確認すること。** match_descで意図した通信以外にも
+  一致する条件の広いポリシーで`disable`にすると、調査価値のある遮断まで
+  ログから失われるおそれがあります。
+- **`local-in-policy-log`をグローバルに`disable`へ戻すと、個々の
+  `logtraffic`設定は無視され、ログ出力はグローバル設定側の制御に戻ります。**
+  Per policy運用を続ける場合は`local-in-policy-log enable`を維持してくだ
+  さい。
+- 本手順書は既存のlocal-in-policy(`policy_id`で識別)の`logtraffic`変更の
+  みを対象とし、`intf`/`srcaddr`/`dstaddr`/`service`等の一致条件やAction
+  (ACCEPT/DENY)自体の変更は対象外です。ポリシーの新規作成・一致条件の
+  変更が必要な場合は別途確認のうえ実施してください。
+- 手順1のログ傾向確認と手順6の検証は、同じ時間帯・同程度の通信量の条件で
+  比較してください。トラフィック量が変動する時間帯を跨ぐと、ログ件数の
+  増減が本設定変更によるものか判断できなくなります。
+- CLI/GUIへのログインに使う管理者パスワードやAPIトークンは、本手順書や
+  ログに平文で残さないでください。値を記録する場合は`********`のように
+  マスクし、秘密管理ツール等で別途安全に保管してください。

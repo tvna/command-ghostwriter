@@ -1,0 +1,25 @@
+firewall_name = "TZ470-DMZ01"
+mgmt_ip = "10.20.0.1"
+ticket_id = "INC-2026-0731-118"
+reported_by = "customer-support@example.internal"
+reported_at = "2026-07-31 10:05"
+operator_name = "佐藤花子"
+wan_interface = "X1"
+wan_zone = "WAN"
+dest_zone = "DMZ"
+public_ip = "203.0.113.90"
+public_port = 8443
+private_ip = "10.20.30.40"
+private_port = 443
+protocol = "TCP"
+nat_policy_name = "inbound-erp-portal"
+access_rule_name = "allow-wan-to-dmz-erp-portal"
+capture_window_minutes = 5
+
+[[testers]]
+reporter = "branch-osaka"
+src_ip = "198.51.100.20"
+
+[[testers]]
+reporter = "partner-vendor-x"
+src_ip = "198.51.100.140"

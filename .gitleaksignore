@@ -63,3 +63,10 @@ dc3f2e5506116c16390a93f5d7e7ef7f87b02f5d:assets/examples/suricata-flowbits-multi
 # positive here; there is no credential in this template. Refs #584.
 454849f090d14cbc286743e414c209f964726934:assets/examples/triton-model-repository-deploy.j2:curl-auth-user:83
 454849f090d14cbc286743e414c209f964726934:assets/examples/triton-model-repository-deploy.j2:curl-auth-user:95
+
+# sonicwall-dmz-port-forward.toml's access_rule_name is a SonicOS Access Rule
+# naming label ("ACC_WAN_TO_DMZ_WEB01"), the same naming convention as the
+# sibling nat_policy_name/original_service_object/translated_service_object
+# fields in the same file - not a credential. gitleaks' generic-api-key rule
+# flags it on entropy/naming heuristics alone. Refs #619, PR #620.
+cd38a3bfafffd06ef8a3d4b92436eeebf7adcf55:assets/examples/sonicwall-dmz-port-forward.toml:generic-api-key:15

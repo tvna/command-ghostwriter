@@ -1,0 +1,161 @@
+# Palo Alto Networks(PAN-OS)セキュリティポリシールールによるログノイズ抑制
+
+`Policies > Security` の既存セキュリティポリシールールについて、CSVで定義した
+{{ csv_rows | length }}件のうち、ブロードキャスト等の定常ノイズに一致するルールは
+Actions タブの `Log at Session Start` / `Log at Session End` をいずれも無効化して
+ログ生成そのものを止め、境界突破の試行など意味のある拒否ルールは既定どおり
+`Log at Session End` を有効のまま残します。あわせて `Objects > Log Forwarding`
+のプロファイルを Filter Builder で編集し、ノイズ源ルールのログを外部転送
+(Panorama/Syslogサーバー等)からも除外します。最後に commit を実行し、
+`Monitor > Logs` の Traffic ログで、抑制対象のログが増えていないこと、意味のある
+拒否ログは引き続き記録されていることを検証します。
+
+## 目的
+
+PAN-OSのセキュリティポリシールール単位のログ出力制御(`Log at Session Start` /
+`Log at Session End` チェックボックス)と、`Objects > Log Forwarding` プロファイル
+の Filter Builder を組み合わせ、ブロードキャスト等の定常ノイズをログ・転送の両段階
+で抑制しつつ、境界突破の試行など意味のある拒否ログだけを残せるようになることを
+目指します。あわせて、ノイズ抑制の対象を誤ってセキュリティ監視対象の拒否ログにまで
+広げないための判断基準を身につけます。
+
+OPNsenseでは、既定拒否ルールの手前にログを無効化した明示遮断ルール(no-log-rule)
+を追加し、必要に応じて `Firewall > Settings > Advanced` の
+「Log packets matched by default rules」も併用してノイズを抑制しますが、これと
+同名の機構はPalo Alto Networks (PAN-OS)には存在しません。PAN-OSでは、ルール単位の
+ログ出力制御(`Log at Session Start` / `Log at Session End` のオフ)によるノイズ源
+トラフィックの明示的抑制と、`Log Forwarding Profile` のフィルタ(Filter Builder)
+での転送時除外という2段構えの運用で同じ課題を解決します。
+
+## 用語解説
+
+- **Security Policy Rule**: `Policies > Security` で管理する、送信元/宛先/
+  アプリケーション等の一致条件とAction(Allow/Deny)を持つルール。ログ出力の可否は
+  ルールの Actions タブで個別に設定する
+- **Log at Session Start**: Security Policy RuleのActionsタブにあるチェックボックス。
+  セッションの最初のアプリケーションデータパケットが送出された時点でログを記録する。
+  一次情報では、短命セッションの捕捉やGRE等の長時間セッション監視、App-ID判定の
+  デバッグ等のトラブルシューティング用途で有効化するとされ、通常運用では無効のまま
+  でよいとされる
+- **Log at Session End**: 同じくActionsタブのチェックボックス。セッション終了時に
+  1件のログを記録する。一次情報では、消費リソースが少なくアプリケーション識別も
+  確定しているため、本番運用で推奨される既定設定とされる
+- **Log Forwarding Profile**: `Objects > Log Forwarding` で作成するプロファイル。
+  Security Policy RuleのActionsタブから紐付け、ログ種別(Log Type)ごとに
+  Panorama/Syslog/Email/SNMP/HTTP等への転送先を設定する
+- **Filter Builder**: Log Forwarding Profileのマッチリスト(match list)を編集する
+  際、Filterに指定できる項目。Log Attribute(対象ログ項目、例: Rule)・Operator
+  (一致/除外の判定条件)・Attribute Value(比較する値)の組み合わせを`Add`で
+  積み上げてクエリを組み立てる
+- **commit**: PAN-OSはcandidate configとrunning configを分離する二段階構成モデルを
+  採る。GUIで`OK`/`Save`した内容もcommitするまで実機の動作には反映されない
+
+## シナリオ設定
+
+今回ログ出力・転送を調整するルールは次の{{ csv_rows | length }}件です。
+`forward_exclude` が `yes` の行は、`Log Forwarding Profile` のFilter Builderで
+転送除外条件を追加する対象でもあります。
+
+| rule_name | action | match_desc | log_at_session_start | log_at_session_end | forward_exclude | rationale |
+|---|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["rule_name"] }} | {{ r["action"] }} | {{ r["match_desc"] }} | {{ r["log_at_session_start"] }} | {{ r["log_at_session_end"] }} | {{ r["forward_exclude"] }} | {{ r["rationale"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 現状のログ設定とTraffic logの傾向を確認する(変更前の基準を取る)
+
+設定を変更する前に、現状を確認し記録します。
+
+- `Policies > Security` で、シナリオ設定に挙げた各ルールのActionsタブを開き、
+  現在の`Log at Session Start`/`Log at Session End`のチェック状態を確認します。
+- `Monitor > Logs` を開き `Traffic` ログ種別を選び、シナリオ設定の`match_desc`に
+  対応する通信(ブロードキャスト・マルチキャスト宛の拒否等)がどの程度の頻度で
+  記録されているかを確認し、記録しておきます。
+
+### 2. ノイズ源ルールのログ出力を無効化する
+
+`action`が`deny`で`log_at_session_end`が`disable`の行(定常ノイズと判定した
+ルール)について、`Policies > Security`で対象ルールを開き、Actions タブの
+`Log at Session Start`・`Log at Session End`のチェックをいずれも外して`OK`を
+クリックします。
+
+{% for r in csv_rows %}{% if r["log_at_session_end"] == "disable" %}- {{ r["rule_name"] }}: {{ r["match_desc"] }} -> Log at Session Start=disable / Log at Session End=disable({{ r["rationale"] }})
+{% endif %}{% endfor %}
+### 3. 意味のある拒否ルールのログ出力が有効のままであることを確認する
+
+`log_at_session_end`が`enable`の行は、境界突破の試行など調査価値のある拒否です。
+手順2の対象外とし、`Log at Session End`が有効のままであることのみを確認します。
+
+{% for r in csv_rows %}{% if r["log_at_session_end"] == "enable" %}- {{ r["rule_name"] }}: {{ r["match_desc"] }} -> Log at Session End=enable のまま変更しない({{ r["rationale"] }})
+{% endif %}{% endfor %}
+### 4. Log Forwarding ProfileのFilter Builderで転送除外条件を追加する
+
+`Objects > Log Forwarding` を開き、対象ルールに紐付けている`Log Forwarding
+Profile`を選択します。`Traffic`ログ種別のマッチリストプロファイルを編集し、
+Filterで`Filter Builder`を選びます。`forward_exclude`が`yes`の各ルール名に
+ついて、Log Attributeに`Rule`、Attribute Valueにルール名を指定し、Operatorは
+このルールのログを対象から除外する(一致条件の否定)側を選んだうえで`Add`で
+条件を積み上げます。
+
+{% for r in csv_rows %}{% if r["forward_exclude"] == "yes" %}- 除外対象: {{ r["rule_name"] }}(Log Attribute=Rule, Attribute Value={{ r["rule_name"] }})
+{% endif %}{% endfor %}
+条件を追加したら`OK`をクリックしてマッチリストプロファイルを保存し、続けて
+Log Forwarding Profile自体も`OK`で保存します。既存の転送先(Panorama/Syslog等)
+の設定はこの手順では変更しません。
+
+### 5. 変更を確定する(commit)
+
+`Commit`を実行し、candidate configをrunning configへ反映します。手順2〜4で
+入力した内容は、このcommitが完了するまで実機の動作に影響しません。
+
+### 6. Traffic logで抑制と維持の両方を検証する
+
+commit後、`Monitor > Logs`を開き`Traffic`ログ種別を選びます。次の順序で確認
+します。
+
+1. `log_at_session_end`が`disable`の行に対応するルール名について、フィルタ欄に
+   `( rule eq <rule_name> )`の形式で入力して`Apply Filter`を実行し、commit後の
+   新規ログが増えていないことを確認する
+2. `log_at_session_end`が`enable`の行に対応するルール名についても同様に
+   `Apply Filter`を実行し、引き続きログが記録されていることを確認する
+3. 手順1で記録した基準と比較し、全体のログ件数が意図どおり減少している一方、
+   `enable`のままの拒否ログは欠落していないことを確認する
+
+## 動作確認
+
+- `Policies > Security`のActionsタブで、`log_at_session_end`が`disable`の行に
+  対応するルールの`Log at Session Start`/`Log at Session End`がいずれも
+  未チェックであること
+- `Policies > Security`のActionsタブで、`log_at_session_end`が`enable`の行に
+  対応するルールの`Log at Session End`が引き続きチェックされていること
+- `Objects > Log Forwarding`のマッチリストプロファイルに、`forward_exclude`が
+  `yes`の各ルール名を対象とした除外条件がFilter Builderで登録されていること
+- commit後、`Monitor > Logs`の`Traffic`ログで、ノイズ源ルールの新規ログが
+  記録されなくなっていること
+- commit後、`Monitor > Logs`の`Traffic`ログで、意味のある拒否ルールのログが
+  引き続き記録されていること
+
+## 注意事項
+
+- **`log_at_session_end`を`disable`にする前に、対象ルールが本当にノイズのみに
+  一致することを確認すること。** `match_desc`で意図した通信以外にも一致する
+  条件の広いルールで無効化すると、調査価値のある拒否まで記録されなくなる
+  おそれがあります。
+- **`Log at Session Start`/`Log at Session End`をいずれも無効化したルールは、
+  ローカルのログにも一切記録が残りません。** Log Forwarding Profileの除外設定
+  とは異なり、事後に「実は転送だけ止めればよかった」と判断してもログ自体は
+  遡って復元できません。判断に迷う対象は`log_at_session_end`を`enable`のまま
+  残し、手順4のFilter Builder側の除外のみで対応してください。
+- Filter Builderの除外条件はLog Forwarding Profile単位で管理されます。同じ
+  プロファイルを複数のルールで共有している場合、除外条件の追加が意図しない
+  他ルールのログにも影響しないか、Log Attributeに`Rule`を指定した条件で
+  対象を絞り込んだうえで確認してください。
+- 手順1のログ傾向確認と手順6の検証は、同じ時間帯・同程度の通信量の条件で
+  比較してください。トラフィック量が変動する時間帯を跨ぐと、ログ件数の
+  増減が本設定変更によるものか判断できなくなります。
+- `Commit`を実行するまでcandidate configはrunning configに反映されません。
+  手順2〜4で入力した内容は、手順5のcommitまで実機の動作に影響しません。
+- CLI/GUIへのログインに使う管理者パスワードやAPIキーは、本手順書やログに
+  平文で残さないでください。値を記録する場合は`********`のようにマスクし、
+  秘密管理ツール等で別途安全に保管してください。

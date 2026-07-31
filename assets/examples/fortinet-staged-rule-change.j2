@@ -1,0 +1,243 @@
+# FortiGateのルール変更段階適用と切り戻し管理 — {{ change_ticket }}
+
+Firewall Policyの変更を「変更前の通信状況の観察 → Status disabledでの登録 →
+メンテナンス窓でのStatus enable切替 → 事後確認」の段階で適用し、想定外の
+遮断・許可を早期に検知できる状態を保ちながら実施する変更管理手順書です。
+各段階の切り替えはFirewall Policyの`Status`(enable/disable)トグルで刻み、
+`Log Allowed Traffic`(`set logtraffic all`)による観察を各段階で行います。
+想定外の事象が発生した場合は、Statusを`disable`へ戻す即時切り戻しと、
+Configuration Revisions(画面右上のユーザー名メニューの`Configuration >
+Revisions`のDiff/compare・Revert、CLIの`execute revision list config` /
+`execute restore config flash <Revision_ID>`)による全体復元の2段階で切り戻し
+ます。変更管理番号`{{ change_ticket }}`のもとで、承認者`{{ approver }}`の
+承認を得たメンテナンス窓内でのみ有効化を行います。
+
+## 目的
+
+変更管理番号`{{ change_ticket }}`に基づき、FortiGateのFirewall Policyを一度
+に有効化するのではなく、baseline観察・Status disabledでの登録・メンテナンス
+窓でのStatus enable切替・事後確認という段階を踏んで適用します。想定外の遮断
+・想定外の許可(副作用)をForward Traffic logで早期に検知し、承認者
+`{{ approver }}`の判断のもと、Statusトグルによる即時切り戻しとConfiguration
+Revisionsによる全体復元の両方を使い分けられる状態を維持することを目指します。
+
+OPNsenseのconfig.xmlフルバックアップ/リストア(`/api/core/backup/download/this`
+・`/api/core/backup/restore`)とルールの`disabled`トグル・`log`フラグを組み合
+わせた段階適用とは異なり、Fortinet (FortiOS / FortiGate) では Configuration
+Revisions (per-change generation with diff compare and revert) combined with
+policy enable/disable status toggle and traffic logging for observation に
+よって同じ課題を解決します。
+
+## 用語解説
+
+- **top-right user menu > Configuration > Revisions**: 画面右上のユーザー名
+  メニューから開ける、設定を保存するたびに世代(revision)が生成される一覧
+  画面。2つの世代を選択して`Diff`ボタンをクリックすると差分比較ができ、
+  1つの世代を選択して`Revert`ボタンをクリックするとその世代へ復元できる
+  (既存手順書`fortinet-config-backup-restore`で確認済みの内容を踏襲)
+- **execute revision list config**: CLIで世代一覧を表示するコマンド。各世代
+  のIDを確認できる
+- **execute restore config flash `<Revision_ID>`**: CLIで指定した世代IDへ
+  復元するコマンド。`<Revision_ID>`は`execute revision list config`の出力
+  で確認した実際の世代IDに読み替える。復元はFortiGateの再起動を伴う
+- **Firewall Policy 'Status'(enable/disable)**: `Policy & Objects > Firewall
+  Policy`の各ポリシー行にあるenable/disableトグル。CLIでは`config firewall
+  policy`配下の`set status enable` / `set status disable`に対応する
+- **'Log Allowed Traffic'**: Firewall Policy編集画面のログ設定。CLIでは
+  `set logtraffic all`。ポリシーに一致した通信がForward Traffic logへ記録
+  される
+- **Forward Traffic log**: `Log & Report > Forward Traffic`で確認できる、
+  Firewall Policyの一致結果(許可/拒否)を記録するログ
+- **観察期間(observation_period) / 切り戻し判断基準(rollback_trigger)**:
+  Status enable切替後、副作用の有無を監視し続ける期間と、この期間内に該当
+  した場合は無条件でStatusを`disable`へ戻す、事前に定義した閾値
+
+## シナリオ設定
+
+| 項目 | 値 |
+|------|-----|
+| 変更管理番号(change_ticket) | {{ change_ticket }} |
+| 観察期間(observation_period) | {{ observation_period }} |
+| 切り戻し判断基準(rollback_trigger) | {{ rollback_trigger }} |
+| 承認者(approver) | {{ approver }} |
+| 対象ポリシー件数 | {{ target_policies | length }} |
+
+対象ポリシー一覧:
+
+| policyid | name | srcintf | dstintf | srcaddr | dstaddr | service | action |
+|----------|------|---------|---------|---------|---------|---------|--------|
+{% for p in target_policies %}| {{ p.policyid }} | {{ p.name }} | {{ p.srcintf }} | {{ p.dstintf }} | {{ p.srcaddr }} | {{ p.dstaddr }} | {{ p.service }} | {{ p.action }} |
+{% endfor %}
+
+`srcaddr`/`dstaddr`列のアドレスオブジェクトは`Policy & Objects > Addresses`
+に、`service`列のサービスオブジェクトは`Policy & Objects > Services`に、
+それぞれ事前登録済みであることを前提とします(これらの作成自体は本手順の
+対象外です)。
+
+## 手順
+
+### 1. 現状のConfiguration RevisionsとFirewall Policy一覧を確認する(baseline revisionを記録する)
+
+新しいポリシーを1件も追加する前に、現状を記録します。ここで確認する世代IDが
+、手順7で全体復元する際の復元先(baseline)になります。
+
+CLI:
+
+```bash
+execute revision list config
+```
+
+出力の最新行の世代IDを、変更管理番号`{{ change_ticket }}`の作業記録に
+「baseline revision」として控えます。
+
+GUI: 画面右上のユーザー名メニューから`Configuration > Revisions`を開き、
+同じ最新世代が一覧の先頭に表示されていることを確認します。
+
+続けて`Policy & Objects > Firewall Policy`を開き、既存ポリシーの並び順
+(評価順)と現在許可されている通信の内容を確認し、記録します(CLI:
+`show firewall policy`)。
+
+### 2. 変更前の通信状況をForward Traffic logで観察する(baseline取得)
+
+新規/変更ポリシーをまだ登録する前に、対象の送信元・宛先・サービスの通信が
+現状どう扱われているかを`Log & Report > Forward Traffic`で確認します。
+
+{% for p in target_policies %}- {{ p.srcaddr }} → {{ p.dstaddr }}({{ p.service }})の通信を検索し、現状どのポリシー(または implicit deny)に一致しているかを記録します。
+{% endfor %}
+ここではポリシーはまだ追加していないため、現状の通信有無・一致ポリシーを
+baselineとして記録します。想定と異なる通信(想定していないポリシーへの一致
+など)が既に発生していないかをこの時点で確認します。
+
+### 3. 新規/変更ポリシーをStatus disabledで登録する
+
+Status`disable`かつ`Log Allowed Traffic`を有効(`set logtraffic all`)にした
+状態で、新規/変更ポリシーを登録します。この時点では通信への影響はありません。
+
+```bash
+{% for p in target_policies %}config firewall policy
+    edit {{ p.policyid }}
+        set name "{{ p.name }}"
+        set srcintf "{{ p.srcintf }}"
+        set dstintf "{{ p.dstintf }}"
+        set srcaddr "{{ p.srcaddr }}"
+        set dstaddr "{{ p.dstaddr }}"
+        set action {{ p.action }}
+        set schedule "always"
+        set service "{{ p.service }}"
+        set status disable
+        set logtraffic all
+    next
+end
+{% endfor %}```
+
+登録(保存)後、画面右上のユーザー名メニューから`Configuration > Revisions`
+を開き、新しく生成された世代と手順1で控えたbaseline世代の2つを選択して
+`Diff`ボタンをクリックします。表示される差分が、上記で登録した
+{{ target_policies | length }}件のポリシーのみであることを確認してください。
+意図しない差分が含まれる場合は、手順4(有効化)に進まず原因を確認します。
+
+### 4. 承認を得たメンテナンス窓でStatusをenableへ切り替える
+
+承認者`{{ approver }}`の承認を得たメンテナンス窓の中で、手順3で登録した
+ポリシーのStatusを`enable`に切り替えます。
+
+```bash
+{% for p in target_policies %}config firewall policy
+    edit {{ p.policyid }}
+        set status enable
+    next
+end
+{% endfor %}```
+
+GUIから切り替える場合は、`Policy & Objects > Firewall Policy`の一覧で対象
+ポリシー行のStatusトグルをクリックします。有効化は必ず次の手順のForward
+Traffic log確認とセットで行い、単独で放置しないでください。
+
+### 5. Forward Traffic logで有効化直後の副作用を確認する
+
+`Log & Report > Forward Traffic`を開き、対象の送信元・宛先・サービスで検索
+します。
+
+{% for p in target_policies %}- {{ p.srcaddr }} → {{ p.dstaddr }}({{ p.service }})の通信が、意図したaction(`{{ p.action }}`)で`{{ p.name }}`への一致として記録されていることを確認します。
+{% endfor %}
+意図と異なる挙動(想定と異なるポリシーへの一致、意図しないaccept/deny)が
+1件でも確認された場合は、`{{ rollback_trigger }}`に該当するとみなし直ちに
+手順7へ進みます。
+
+### 6. 観察期間中の事後確認
+
+Status enable切替から{{ observation_period }}の間、対象通信の疎通状況と関連
+ホストからの申告有無を継続的に確認します。
+
+`Log & Report > Forward Traffic`で対象ポリシー名を検索し続け、
+`{{ rollback_trigger }}`へ該当する事象が発生しないことを確認できた時点で、
+この変更を本番適用として確定し、変更管理番号`{{ change_ticket }}`をクローズ
+します。
+
+### 7. 切り戻し(2段階)
+
+観察期間中または有効化直後に問題が確認された場合、以下の2段階で切り戻します。
+
+第1段階: 対象ポリシーのStatusを`disable`へ戻す(即時、他のポリシーには影響
+しません)。
+
+```bash
+{% for p in target_policies %}config firewall policy
+    edit {{ p.policyid }}
+        set status disable
+    next
+end
+{% endfor %}```
+
+第2段階: 第1段階(Status disable)だけでは解消しない場合、手順1で記録した
+baseline revisionへ全体を復元します。
+
+```bash
+execute restore config flash <baseline revision ID>
+```
+
+`<baseline revision ID>`は手順1で控えた実際の世代IDに読み替えてください。
+GUIから復元する場合は、画面右上のユーザー名メニューの`Configuration >
+Revisions`でbaseline世代を選択し`Revert`ボタンをクリックします。いずれの
+方法でもFortiGateの再起動を伴います。
+
+## 動作確認
+
+- 手順2のbaseline観察と手順6の事後確認を比較し、対象通信がそれぞれ意図した
+  actionで一致していること
+- 手順3の`Diff`比較で、登録した{{ target_policies | length }}件のポリシーの
+  みが差分として表示されたこと
+- 手順5・6のForward Traffic logで、対象ポリシー以外の通信に対する意図しない
+  accept/denyが発生していないこと
+- {{ observation_period }}の観察期間内に`{{ rollback_trigger }}`に該当する
+  事象が発生していないこと
+- 変更完了後、手順1で記録したbaseline revisionのID、手順3の`Diff`結果が変更
+  管理番号`{{ change_ticket }}`の記録として保管されていること
+
+## 注意事項
+
+- Firewall Policyは一覧に表示される順序(評価順)で評価されます。手順3の
+  `edit {{ target_policies[0].policyid }}`等の挿入位置が既存ポリシーの並び
+  に対してどこに入るかは、`Policy & Objects > Firewall Policy`
+  (`By Sequence`表示)で必ず確認してください。意図しない位置に入ると、後続
+  の既存ポリシーより先に一致し、想定外の遮断・許可が発生するおそれがあり
+  ます。
+- **手順4(Status enableへの切替)は必ず承認者`{{ approver }}`の承認を得た
+  メンテナンス窓内で実施し、単独作業では行わないこと。**
+- 有効化は手順5のForward Traffic log確認とセットで行い、旧ポリシー(既存の
+  関連ポリシー)を無効化・削除するのは、新ポリシーで意図どおりの通信が確認
+  できてから(手順5・6完了後)にすること。新旧を同時に切り替えないこと。
+- 切り戻しは手順7の2段階(Status disable → 復旧しない場合のみConfiguration
+  Revisions全体復元)の順で行い、いきなり全体復元から始めないこと。
+  **`execute restore config`(またはGUIの`Revert`)はFortiGateの再起動を伴い
+  、この変更以外の設定も含めてbaseline revision時点の状態へ巻き戻します。**
+  最終手段として扱ってください。
+- Configuration Revisionsが実際に何世代まで保持されるかは機種のフラッシュ
+  容量に依存し、一次情報には具体的な上限件数の記載がありません(機種ごとの
+  上限はTACへの問い合わせで確認するよう案内されています)。フラッシュ容量
+  512MB未満のモデルではConfiguration Revisions自体を利用できません。手順1
+  のbaseline revisionが世代一覧から押し出されないよう、変更完了までの期間
+  は他の無関係な設定変更を最小限にしてください。
+- 管理者パスワードやAPIトークンなど、本手順の実施に用いる認証情報は本手順
+  書や変更記録に平文で残さないでください。値を記録する場合は`********`の
+  ようにマスクし、秘密管理ツール等で別途安全に保管してください。

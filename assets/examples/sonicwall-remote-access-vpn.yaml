@@ -1,0 +1,26 @@
+wan_ip: "203.0.113.20"
+ssl_vpn_zone: "WAN"
+ssl_vpn_port: 4433
+certificate_selection: "Use Self-signed Certificate"
+user_domain: "LocalDomain"
+inactivity_timeout_minutes: 10
+netextender_address_object: "NetExtender-RA-Pool"
+netextender_ip_start: "192.168.200.100"
+netextender_ip_end: "192.168.200.150"
+tunnel_all_mode: true
+tunnel_all_address_object: "Tunnel-All-Default-Route"
+internal_lan_object: "Internal-LAN-Networks"
+dns_server_1: "192.168.10.10"
+dns_server_2: "192.168.10.11"
+portal_site_title: "Example Corp - Virtual Office"
+portal_banner_title: "Example Corp Remote Access"
+remote_users:
+  - username: "y.kobayashi"
+    full_name: "小林 陽子"
+    department: "総務部"
+  - username: "r.matsumoto"
+    full_name: "松本 亮"
+    department: "開発部"
+  - username: "a.yamaguchi"
+    full_name: "山口 明日香"
+    department: "人事部"

@@ -1,0 +1,12 @@
+rule_no,from_zone,to_zone,proto,port,action,description
+1,ZONE-SALES,ZONE-DEV,tcp,8443,Allow,営業VLANから社内業務システム(HTTPS)への必須アクセス
+2,ZONE-HR,ZONE-DEV,tcp,8443,Allow,人事VLANから社内業務システム(HTTPS)への必須アクセス
+3,MGMT,ZONE-SALES,icmp,-,Allow,監視ZoneからのICMP死活監視
+4,MGMT,ZONE-HR,icmp,-,Allow,監視ZoneからのICMP死活監視
+5,MGMT,ZONE-DEV,icmp,-,Allow,監視ZoneからのICMP死活監視
+6,MGMT,ZONE-GUEST,icmp,-,Allow,監視ZoneからのICMP死活監視
+7,MGMT,ZONE-DEV,udp,161,Allow,監視ZoneからのSNMPポーリング
+8,ZONE-GUEST,ZONE-SALES,tcp,-,Deny,ゲストVLANから営業VLANへのアクセス禁止(業務要件なし)
+9,ZONE-GUEST,ZONE-HR,tcp,-,Deny,ゲストVLANから人事VLANへのアクセス禁止(業務要件なし)
+10,ZONE-GUEST,ZONE-DEV,tcp,-,Deny,ゲストVLANから業務システムVLANへのアクセス禁止(業務要件なし)
+11,ZONE-HR,ZONE-DEV,tcp,3389,Deny,人事VLANから業務システムVLANへのRDP直接アクセス禁止(監査記録用)

@@ -1,0 +1,21 @@
+group_id: 240
+group_name: edge-ha-cluster
+primary_hostname: FGT-EDGE-01
+secondary_hostname: FGT-EDGE-02
+cluster_id: 1
+session_pickup_enabled: true
+maintenance_window: 2026-08-09 02:00-03:00 JST
+target_failover_time_seconds: 5
+continuity_checks:
+  - name: 内部L3セグメント向けICMP監視
+    method: continuous ping
+    target: 10.10.20.1
+    max_allowed_drop_sec: 3
+  - name: 長時間SSHセッションの維持確認
+    method: ssh keepalive
+    target: 10.10.30.5
+    max_allowed_drop_sec: 0
+  - name: 業務APへの定期ヘルスチェック
+    method: periodic curl request
+    target: https://app.internal.example/health
+    max_allowed_drop_sec: 3

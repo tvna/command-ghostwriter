@@ -1,0 +1,6 @@
+rule_name,action,match_desc,log_at_session_start,log_at_session_end,forward_exclude,rationale
+broadcast-noise-deny,deny,ブロードキャスト宛(255.255.255.255)への定常拒否,disable,disable,yes,内部LANの定常ブロードキャストで異常検知に寄与しないため
+multicast-noise-deny,deny,マルチキャストルーティングプロトコル(224.0.0.0/24)宛ての定常拒否,disable,disable,yes,ネットワーク機器間の定常マルチキャストで異常検知に寄与しないため
+ssdp-noise-deny,deny,SSDP(UPnP discovery)ブロードキャスト(239.255.255.250)宛ての定常拒否,disable,disable,yes,IoT・家電機器の定期探索でセキュリティ上意味を持たないため
+wan-mgmt-scan-deny,deny,WAN側(untrust)からの管理ポート(TCP/443・TCP/22)への未許可アクセス拒否,disable,enable,no,境界突破の試行兆候であり調査対象のため抑制しない
+unauthorized-snmp-deny,deny,未許可セグメントからのSNMP(UDP/161)アクセス拒否,disable,enable,no,管理プレーンへの不審アクセスであり調査対象のため抑制しない

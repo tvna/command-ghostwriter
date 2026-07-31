@@ -1,0 +1,35 @@
+firewall_name: TZ470-Branch01
+mgmt_ip: 10.50.0.1
+ticket_id: INC-2026-0731-042
+reported_by: sales-ops@example.internal
+reported_at: "2026-07-31 09:15"
+capture_window_minutes: 5
+operator_name: 田中一郎
+cases:
+  - case_no: 1
+    description: 支店端末から基幹販売システム(HTTPS)への接続が失敗する
+    src_ip: 10.50.10.24
+    src_port: "*"
+    dst_ip: 203.0.113.80
+    dst_port: 443
+    protocol: TCP
+    interface: X1
+    expected_action: 許可されるべき通信
+  - case_no: 2
+    description: 支店端末から本社DNSサーバへの名前解決(UDP/53)が失敗する
+    src_ip: 10.50.0.0/24
+    src_port: "*"
+    dst_ip: 10.10.10.53
+    dst_port: 53
+    protocol: UDP
+    interface: X1
+    expected_action: 許可されるべき通信
+  - case_no: 3
+    description: 支店から拠点間VPN経由の共有ファイルサーバ(SMB)への接続が断続的に失敗する
+    src_ip: 10.50.20.15
+    src_port: "*"
+    dst_ip: 10.10.20.30
+    dst_port: 445
+    protocol: TCP
+    interface: X2
+    expected_action: 許可されるべき通信(断続的な失敗のため状態異常を疑う)

@@ -1,0 +1,305 @@
+# Palo Alto Networks(PAN-OS)のAuthentication Portalによるゲスト網キャプティブポータル構築
+
+PAN-OSのAuthentication Portal(旧称Captive Portal)とAuthentication Policyを
+組み合わせ、ゲスト用ゾーン(`{{ guest_zone }}`)からの未認証Web通信をRedirect
+モードでポータルへ誘導し、ローカルアカウントでの認証後にのみインターネット
+(`{{ untrust_zone }}`ゾーン)への到達を許可します。社内ゾーン(`{{ corp_zone }}`)
+へは明示的な許可ルールを作成せず、PAN-OSの既定ルール`interzone-default`
+による拒否に委ねることで、ゲスト網から社内網への到達を遮断します。証明書・
+SSL/TLS Service Profile・DNS Aレコードの準備から、Authentication Portal
+Settings・Authentication Policy・Security Policyの設定、commit、Traffic log
+とtest security-policy-matchによる検証までを扱います。
+
+## 目的
+
+PAN-OSのAuthentication Portal(Redirectモード)とAuthentication Policyの
+役割分担を理解し、ゲスト用ゾーンの未認証Web通信をポータルへ誘導したうえで、
+認証済みユーザーのみにインターネットアクセスを許可できるようになることを
+目指します。あわせて、社内ゾーンへの到達遮断を新規の拒否ルールではなく
+既存の`interzone-default`(既定拒否)に委ねる設計判断を理解し、ゲスト用
+ローカルアカウントのパスワードを平文で構成やログに残さない運用を実践できる
+ようになることを目指します。
+
+## 用語解説
+
+- **Authentication Portal(旧称Captive Portal)**: 一次情報には "Any web
+  traffic (HTTP or HTTPS) that matches an Authentication policy rule
+  prompts the user to authenticate through Authentication Portal."
+  (Authentication Policyルールに一致したHTTP/HTTPS通信はすべて、
+  Authentication Portalを通じてユーザーに認証を促す)と明記されている
+- **Authentication Policy**: `Policies > Authentication`配下のルールベース。
+  Source/Destinationゾーン・アドレス、Service/URL Categoryと、後述の
+  Authentication Enforcement objectを組み合わせて、どの通信に認証を要求
+  するかを定義する
+- **Redirectモード**: 一次情報には "The firewall intercepts unknown HTTP or
+  HTTPS sessions and redirects them to a Layer 3 interface on the firewall
+  using an HTTP 302 redirect to perform authentication."
+  (ファイアウォールは未知のHTTP/HTTPSセッションを検知し、HTTP 302
+  リダイレクトでファイアウォール自身のLayer 3インターフェースへ誘導して
+  認証させる)、また "the preferred mode because it provides a better
+  end-user experience (no certificate errors)"(証明書エラーが発生せず
+  利用者体験が良いため推奨されるモード)と明記されている
+- **Transparentモード(本手順では使用しない)**: 一次情報には "The firewall
+  intercepts the browser traffic per the Authentication policy rule and
+  impersonates the original destination URL, issuing an HTTP 401 to invoke
+  authentication."(元の宛先URLになりすましてHTTP 401を発行し認証を促す)
+  ものの、"the browser displays a certificate error to users attempting to
+  access a secure site."(HTTPSサイトへのアクセス時にブラウザで証明書
+  エラーが表示される)ため、"only when absolutely necessary, such as in
+  Layer 2 or virtual wire deployments"(Layer 2/virtual wire構成でどうしても
+  必要な場合に限る)モードとされている
+- **Redirect Host / SSL/TLS Service Profile**: Authentication Portal
+  SettingsでRedirectモードを選ぶ際に指定するフィールド。一次情報には
+  Redirect Hostについて「ピリオドを含まないイントラネットホスト名で、
+  Layer 3インターフェースのIPアドレスに解決できること」、事前準備として
+  「Layer 3インターフェースのIPv4アドレスへリダイレクトホストのFQDNを
+  マッピングするDNS Aレコードを作成すること」、証明書について「Common
+  NameにイントラネットホストのDNS名を設定し、Certificate Attributesに
+  Layer 3インターフェースのIPアドレスを追加すること」が明記されている
+- **Timer(Authentication Portal Settings)**: IPアドレスとユーザー名の
+  マッピングを保持する最大時間(分)を指定するフィールド。既定値60分、
+  設定可能範囲は1〜1,440分と一次情報に明記されている
+- **interzone-default**: PAN-OSがあらかじめ用意する既定のSecurity Policy
+  ルール。一次情報には "predefined to allow all intrazone traffic (within
+  a zone) and deny all interzone traffic (between zones)"(ゾーン内通信を
+  すべて許可し、ゾーンをまたぐ通信をすべて拒否するようあらかじめ定義
+  されている)、ルールベース最下部に表示され「既定では読み取り専用だが、
+  タグ・アクション・ログ設定・セキュリティプロファイルに限り上書き
+  (override)できる」と明記されている
+- **Authentication Enforcement object**: Authentication Policyルールの
+  Actionsタブで選択する、認証方式を束ねたオブジェクト。本手順書が参照した
+  一次情報の範囲には、このオブジェクト自体の作成手順(画面パスやフィールド
+  名)が含まれていないため、運用チームの認証設計に基づき事前に作成済み
+  であることを前提とし、本手順書では新規作成の操作は記載しない
+- **Local Database認証**: `Device > Local User Database > Users`で作成する
+  ローカルアカウントによる認証方式。`Device > Authentication Profile`で
+  作成するAuthentication ProfileのTypeにローカル認証を指定し、Advanced
+  タブでこのプロファイルを使って認証できるユーザー/グループを追加する
+  (既定では空のため、追加するまで誰も認証できない)
+
+## シナリオ設定
+
+Authentication Portal Settings(`Device > User Identification >
+Authentication Portal Settings`)に設定する値は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| Mode | Redirect |
+| Redirect Host | `{{ redirect_host }}` |
+| SSL/TLS Service Profile | `{{ ssl_tls_profile_name }}` |
+| Timer(分) | {{ auth_portal_timer_minutes }} |
+
+証明書・DNSの前提は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| リダイレクト先Layer 3インターフェース | `{{ guest_l3_interface }}` |
+| インターフェースIPv4アドレス | {{ redirect_interface_ip }} |
+| DNS Aレコード | `{{ redirect_fqdn }}` → {{ redirect_interface_ip }} |
+| 証明書名(Certificate Name) | `{{ cert_name }}` |
+| 証明書Common Name | `{{ redirect_fqdn }}` |
+| Certificate Attributes(IP Address) | {{ redirect_interface_ip }} |
+
+Authentication Policyルール(`Policies > Authentication`)に設定する値は
+次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| Name | `{{ auth_policy_rule_name }}` |
+| Source Zone | `{{ guest_zone }}` |
+| Destination Zone | any |
+| Authentication Enforcement | `{{ auth_enforcement_object_name }}` |
+| Timeout(分) | {{ auth_policy_timeout_minutes }} |
+
+Service/URL Categoryに指定するサービス({{ allowed_services | length }} 件):
+
+{% for svc in allowed_services %}- `{{ svc }}`
+{% endfor %}
+認証後の通信を許可するSecurity Policyルール(`Policies > Security`)は
+次のとおりです。社内ゾーン(`{{ corp_zone }}`)宛の許可ルールはここには含めません。
+
+| 項目 | 値 |
+|------|-----|
+| Name | `{{ security_allow_rule_name }}` |
+| From Zone | `{{ guest_zone }}` |
+| To Zone | `{{ untrust_zone }}` |
+
+`{{ guest_zone }}` / `{{ corp_zone }}` / `{{ untrust_zone }}` / `{{ guest_l3_interface }}`
+はこの手順書内の仮称・仮のインターフェース名であり、実際の環境に存在する
+ゾーン名・インターフェース名に読み替えてください。
+
+## 手順
+
+### 1. 前提(証明書・DNS・インターフェース)を確認する
+
+新しい設定を投入する前に、次を確認します。
+
+- `{{ guest_l3_interface }}` が `{{ guest_zone }}` ゾーンに割り当てられ、
+  IPv4アドレス `{{ redirect_interface_ip }}` を持つこと
+- DNSで `{{ redirect_fqdn }}` が `{{ redirect_interface_ip }}` に解決
+  できること(一次情報にはリダイレクト先Layer 3インターフェースのIPv4
+  アドレスへリダイレクトホストのFQDNをマッピングするDNS Aレコードを作成
+  することが前提として明記されている)
+- ゲスト端末が信頼するCA(社内CAまたはパブリックCA)が利用できること
+
+### 2. 証明書とSSL/TLS Service Profileを準備する
+
+`Device > Certificate Management > Certificates` で `Add` を選び、証明書を
+発行します。
+
+- Certificate Name: `{{ cert_name }}`
+- Common Name: `{{ redirect_fqdn }}`
+- Signed By: ゲスト端末が信頼するCA
+- Certificate Attributes: IP Address に {{ redirect_interface_ip }} を追加する
+  (一次情報にはリダイレクト用証明書のCertificate AttributesにLayer 3
+  インターフェースのIPアドレスを含めることが明記されている)
+
+続けて `Device > Certificate Management > SSL/TLS Service Profile` で
+`Add` を選び、プロファイルを作成します。
+
+- Name: `{{ ssl_tls_profile_name }}`
+- Certificate: 上記で発行した `{{ cert_name }}`
+- Min Version / Max Version: 管理アクセスやGlobalProtect向けではない
+  サービス用のプロファイルのため、TLSv1.2 / TLSv1.2 を設定する
+
+いずれの画面でも `OK` のみを行い、この時点ではまだ `Commit` は実行しません。
+
+### 3. ゲスト用ローカルアカウントとAuthentication Profileを準備する
+
+`Device > Local User Database > Users` で `Add` を選び、ゲスト用アカウントを
+作成します。Name にアカウント名を入力し、Password / Confirm Password に
+初期パスワードを入力します。
+
+```text
+Password: ********
+Confirm Password: ********
+```
+
+初期パスワードの実際の値は、コンソール入力時のみ秘密管理ツールから参照し、
+このテンプレートや構成バックアップ、コミットログに平文で残さないように
+してください。
+
+続けて `Device > Authentication Profile` で `Add` を選び、Authentication
+Profileを作成します。
+
+- Name: `{{ auth_profile_name }}`
+- Type: ローカル認証(Local Database)を選択する
+- Advanced タブ: このプロファイルで認証できるユーザー/グループとして、
+  手順3で作成したゲスト用アカウントまたは `{{ local_user_group_name }}`
+  グループを追加する(既定ではリストが空のため、追加するまで誰も認証
+  できません)
+
+### 4. Authentication Portal SettingsをRedirectモードで設定する
+
+`Device > User Identification > Authentication Portal Settings` を開き、
+次の値を設定します。
+
+- Timer: {{ auth_portal_timer_minutes }}(分)
+- SSL/TLS Service Profile: `{{ ssl_tls_profile_name }}`
+- Mode: Redirect
+- Redirect Host: `{{ redirect_host }}`(ピリオドを含まないイントラネット
+  ホスト名。手順1で確認したDNS Aレコードの左辺と一致させる)
+- 認証失敗時のフォールバック(Certificate Profile / Authentication
+  Profile): 手順3で作成した `{{ auth_profile_name }}`
+
+`OK` をクリックして保存します。この時点ではまだ `Commit` は実行しません。
+
+### 5. Authentication PolicyルールとSecurity Policy許可ルールを登録する
+
+`Policies > Authentication` で `Add` を選び、ルールを作成します。
+
+- Name: `{{ auth_policy_rule_name }}`
+- Source タブ: Source Zoneに `{{ guest_zone }}` を追加する
+- Destination タブ: 既定の `any` のままにする
+- Service/URL Category タブ: 次のサービスを追加する
+
+{% for svc in allowed_services %}  - `{{ svc }}`
+{% endfor %}
+- Actions タブ: Authentication Enforcementに `{{ auth_enforcement_object_name }}`
+  を選択し、Timeoutに {{ auth_policy_timeout_minutes }}(分)を設定する
+
+続けて `Policies > Security` で `Add` を選び、認証後の通信を許可する
+ルールを追加します。**社内ゾーン(`{{ corp_zone }}`)宛の許可ルールはここでは
+作成しません。**
+
+- Name: `{{ security_allow_rule_name }}`
+- Source タブ: Source Zoneに `{{ guest_zone }}` を設定する
+- Destination タブ: Destination Zoneに `{{ untrust_zone }}` を設定する
+- Applications / Service タブ: 次のサービスを追加する
+
+{% for svc in allowed_services %}  - `{{ svc }}`
+{% endfor %}
+- Actions タブ: Actionを `Allow` にする
+
+いずれも `OK` のみを行い、この時点ではまだ `Commit` は実行しません。
+
+### 6. commitし、Traffic logとtest security-policy-matchで検証する
+
+`Commit` を実行し、候補設定(candidate config)を実行中の設定(running
+config)へ反映します。
+
+反映後、CLIから `test security-policy-match` を実行し、ゲストゾーンから
+社内ゾーンへの通信が `interzone-default` に一致してdenyとなることを
+確認します。
+
+```bash
+test security-policy-match application web-browsing source {{ verify_guest_src_ip }} destination 198.51.100.99 destination-port 443 protocol 6 from {{ guest_zone }} to {{ corp_zone }}
+```
+
+出力に一致したルール名として `interzone-default` が表示され、Actionが
+`deny` になっていることを確認します。
+
+続けて、`Monitor > Logs` を開いて `Traffic` ログ種別を選び、フィルタ欄に
+`( rule eq interzone-default ) and ( zone.src eq {{ guest_zone }} )` と入力
+して `Apply Filter` を実行し、ゲストゾーンから社内ゾーンへ向けた通信が
+実際に拒否・記録されているかを確認します。
+
+## 動作確認
+
+- ゲストゾーン内の未認証端末でHTTP/HTTPSサイトへアクセスすると、
+  `https://{{ redirect_fqdn }}/` へHTTP 302でリダイレクトされ、証明書
+  エラーが表示されずにログインページが表示されること
+- 手順3で作成したゲスト用アカウントでログインすると認証が成功し、以降
+  {{ auth_policy_timeout_minutes }}分間はインターネット(`{{ untrust_zone }}`
+  ゾーン)への到達が許可されること
+- 未認証のままでは `{{ allowed_services | length }}` 種のサービス
+  ({% for svc in allowed_services %}{{ svc }}{% if not loop.last %} / {% endif %}{% endfor %})
+  以外の通信で、インターネットへの到達が許可されないこと
+- `test security-policy-match` で、ゲストゾーンから社内ゾーン
+  (`{{ corp_zone }}`)宛の通信が `interzone-default` に一致し、Actionが
+  `deny` であること
+- `Monitor > Logs` の `Traffic` ログで、フィルタ
+  `( rule eq interzone-default ) and ( zone.src eq {{ guest_zone }} )`
+  により、ゲストゾーンから社内ゾーンへの通信が拒否として記録されること
+- `Policies > Security` のルールベース上で、社内ゾーン(`{{ corp_zone }}`)
+  宛の明示的な許可ルールが存在しないこと
+
+## 注意事項
+
+- **Transparentモードは使用しないこと。** 一次情報にはTransparentモードで
+  HTTPSサイトへアクセスするとブラウザに証明書エラーが表示されると明記
+  されている。ゲスト向けの体験を損なわないため、本手順ではRedirectモード
+  のみを扱う。
+- **社内ゾーン(`{{ corp_zone }}`)宛のSecurity Policy許可ルールを新規に
+  作成しないこと。** ゲスト網からの遮断は新しい拒否ルールではなく、
+  既存の `interzone-default` に委ねる設計です。既に社内ゾーンとの間に
+  広い許可ルール(例: `any` 送信元からの許可)が存在する場合、本手順の
+  分離は成立しません。手順1の前に既存のSecurity Policyルールベースを
+  確認してください。
+- **`interzone-default` のActionを変更しないこと。** Overrideできるのは
+  タグ・アクション・ログ設定・セキュリティプロファイルのみですが、誤って
+  Actionを`allow`に変更すると、ゲストゾーンを含む全interzone通信を許可
+  してしまう重大な設定ミスになります。
+- **ゲスト用アカウントのパスワードを平文で残さないこと。** テンプレート・
+  構成バックアップ・コミットログ・チャット等のいずれにも実際の値を書かず、
+  `********` のようなマスク表記を用い、値は秘密管理ツール経由でのみ
+  受け渡してください。
+- Authentication Enforcement object(`{{ auth_enforcement_object_name }}`)
+  自体の作成手順は、本手順書が参照した一次情報の範囲に含まれていない
+  ため記載していません。適用前に、運用チームの認証設計に基づき作成済み
+  であることを確認してください。
+- `Commit` を実行するまでcandidate configはrunning configに反映されません。
+  手順2〜5で入力した内容は、手順6のcommitまで実機の動作に影響しません。
+- `{{ guest_zone }}` / `{{ corp_zone }}` / `{{ untrust_zone }}` /
+  `{{ guest_l3_interface }}` はこの手順書内の仮称であり、実際の環境に
+  存在するゾーン名・インターフェース名に読み替えてください。

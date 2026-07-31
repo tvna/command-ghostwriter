@@ -1,0 +1,198 @@
+# Palo Alto Networks(PAN-OS)の侵害疑いホスト隔離(Quarantine Device Lists)構成
+
+インシデント`{{ incident_id }}`で侵害が疑われる、GlobalProtect接続端末
+{{ quarantine_hosts | length }}件を`Quarantined Device List`へ登録して隔離し、
+Security Policyルール4件(調査用通信の許可2件・それ以外の遮断2件)で、
+{{ investigation_targets | length }}件の調査用システムとの通信のみを許可した
+うえでその他の通信を封じ込めます。ルールの並び順(許可2件を遮断2件より先に、
+かつ新設ルール全体を既存の広い許可ルールより先に配置)を誤ると封じ込めが
+機能しないため、手順内で並び順を都度確認します。
+
+## 目的
+
+PAN-OSの`Quarantine Device List`(Quarantined Device List)が、GlobalProtect
+アプリで接続された端末を対象とする機構であり、Security Policyルールベース
+自体を組み替えることなく、`DEVICES`欄の`Match Quarantined Devices`という
+一致条件を介して該当端末の通信のみを選択的に制御できることを理解します。
+あわせて、侵害が疑われる端末を隔離リストへ登録したうえで、調査用システム
+向けの通信のみを許可する例外ルールと、それ以外を遮断する既定ルールを正しい
+評価順序で構成し、実際の通信で封じ込めを検証したうえで、調査完了後に隔離を
+解除できるようになることを目指します。
+
+## 用語解説
+
+- **Quarantine Device List(Quarantined Device List)**: 「GlobalProtectアプリ
+  で接続された侵害の疑いがある端末、または非準拠の端末を特定・隔離する」
+  ためのPAN-OSのポリシーオブジェクト。対象製品はNGFWとPrisma Access。端末を
+  リストへ追加すると、その端末のネットワークアクセスを制限しつつ必須の
+  対応作業(remediation)向けの通信は許可する、という運用を実現できる
+- **端末の登録経路**: 管理者が手動で追加するほか、Prisma Access限定の機能
+  として、ログ転送プロファイルの一致リストで組み込みアクションを
+  `Quarantine`に設定した場合や、HIP matchのログ設定で同様に設定した場合、
+  APIによる追加、隔離リストの再配布(redistribution)による追加がある。
+  スタンドアロンのNGFWでは、本手順が参照した一次情報で確認できるのは
+  `Add Device`による手動追加のみである
+- **Host ID / Serial Number**: `Add Device`ダイアログの入力項目で、隔離
+  対象端末を一意に識別する値。EDR・GlobalProtectのログや端末台帳など、
+  調査で判明した情報から取得する(具体的な取得元・値の形式は一次情報に
+  記載がないため、本手順では扱わない)
+- **DEVICES欄の`Match Quarantined Devices`**: Security Policyルールの
+  `Add Rule`画面で、`Source`または`Destination`の`DEVICES`欄から選択できる
+  一致条件。ルールの`Source`側で選択すると隔離リスト上の端末を送信元
+  (Source Device)として、`Destination`側で選択すると宛先(Destination
+  Device)として、そのルールのマッチ条件に使える
+- **Configuration > NGFW and Prisma Access**: 本手順で参照するGUIの
+  最上位ナビゲーション。`Objects > Quarantined Device List`で隔離リストの
+  追加・確認を、`Security Services > Security Policy`でルールの追加を行う
+
+## シナリオ設定
+
+今回のインシデント`{{ incident_id }}`で隔離対象とする、GlobalProtect接続
+端末は次の{{ quarantine_hosts | length }}件です。
+
+| hostname | host_id | serial_number | owner | detection_source | description |
+|---|---|---|---|---|---|
+{% for h in quarantine_hosts %}| {{ h["hostname"] }} | {{ h["host_id"] }} | {{ h["serial_number"] }} | {{ h["owner"] }} | {{ h["detection_source"] }} | {{ h["description"] }} |
+{% endfor %}
+
+隔離中も許可する調査用通信の宛先は、次の{{ investigation_targets | length }}
+件です。
+
+| name | address | service | description |
+|---|---|---|---|
+{% for t in investigation_targets %}| {{ t["name"] }} | {{ t["address"] }} | {{ t["service"] }} | {{ t["description"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 対象端末がGlobalProtect接続端末であることと、必要な情報がそろっていることを確認する
+
+`Quarantine Device List`はGlobalProtectアプリで接続された端末を対象とする
+機構です。上のシナリオ設定の各行について、`host_id`と`serial_number`が
+EDR・GlobalProtectのログや端末台帳などから確認済みであることを確認して
+から、次の手順に進みます。未確認の項目がある行は、確定するまで手順2の
+登録を行わないでください。
+
+### 2. Quarantined Device Listに対象端末を登録する
+
+`Configuration > NGFW and Prisma Access > Objects > Quarantined Device List`
+を開きます。`Global`の構成スコープが既定で選択されていることを確認し、
+必要であれば対象のPrisma Access展開先またはNGFWフォルダにスコープを
+変更してください。
+
+シナリオ設定の各行について、次を繰り返します。
+
+{% for h in quarantine_hosts %}- `Add Device`を選択し、`Host ID`に`{{ h["host_id"] }}`、`Serial Number`に`{{ h["serial_number"] }}`を入力して`Save`を選択する({{ h["hostname"] }} / {{ h["owner"] }})
+{% endfor %}
+
+### 3. 登録結果を確認する
+
+`Objects > Quarantined Device List`の画面を再度開き、手順2で登録した
+{{ quarantine_hosts | length }}件すべてが一覧に表示されていることを
+確認します。この時点ではまだSecurity Policyルールを何も変更していない
+ため、通信の遮断は始まっていません。
+
+### 4. 調査用通信を許可するルールを、遮断ルールより先に作成する
+
+`Configuration > NGFW and Prisma Access > Security Services > Security
+Policy`を開き、`Add Rule`を選択します。次の2件を、後述の遮断ルール
+(手順5)より上位(評価順で先)になる位置に作成します。
+
+- ルール`{{ allow_outbound_rule_name }}`(隔離端末→調査用システム方向):
+  `Source`側の`DEVICES`欄で`Match Quarantined Devices`を選択する。
+  `Destination`に調査用通信の宛先一覧を追加する。`Action and Advanced
+  Inspection`で`Allow`を選択し、`Save`する。宛先一覧は次のとおり。
+
+{% for t in investigation_targets %}  - {{ t["address"] }}({{ t["service"] }}): {{ t["name"] }} — {{ t["description"] }}
+{% endfor %}
+- ルール`{{ allow_inbound_rule_name }}`(調査用システム→隔離端末方向):
+  `Source`に上記と同じ調査用通信の宛先一覧を追加する。`Destination`側の
+  `DEVICES`欄で`Match Quarantined Devices`を選択する。`Action and Advanced
+  Inspection`で`Allow`を選択し、`Save`する。
+
+### 5. それ以外の通信を遮断するルールを、許可ルールより後ろに作成する
+
+同じ`Add Rule`から、次の2件を手順4の2件より下位(評価順で後)、かつ
+既存の広い許可ルールより上位になる位置に作成します。ルール評価は上から
+順に行われ最初に一致した1件のみが適用されるため、この並び順(手順4の
+2件 → 手順5の2件 → 既存ルール)を誤ると、隔離端末の通信が意図せず既存の
+許可ルールに先に一致し、封じ込めが機能しません。
+
+- ルール`{{ deny_outbound_rule_name }}`(隔離端末→任意の宛先): `Source`側
+  の`DEVICES`欄で`Match Quarantined Devices`を選択する。`Destination`は
+  `any`のままにする。`Action and Advanced Inspection`で`Deny`を選択し、
+  `Save`する。
+- ルール`{{ deny_inbound_rule_name }}`(任意の送信元→隔離端末): `Source`は
+  `any`のままにする。`Destination`側の`DEVICES`欄で`Match Quarantined
+  Devices`を選択する。`Action and Advanced Inspection`で`Deny`を選択し、
+  `Save`する。
+
+ご利用の環境がStrata Cloud ManagerやPanoramaなど集中管理コンソール経由で
+ファイアウォールへ設定を配布している場合、`Save`だけでは配下のファイア
+ウォールに変更が反映されないことがあります。管理コンソールの適用(Push/
+Commit)手順に従って、変更を対象ファイアウォールへ配布してください。
+
+### 6. ルール順序と一致条件を確認する
+
+`Security Services > Security Policy`のルール一覧を開き、上から
+`{{ allow_outbound_rule_name }}` → `{{ allow_inbound_rule_name }}` →
+`{{ deny_outbound_rule_name }}` → `{{ deny_inbound_rule_name }}`の順で
+並んでおり、かつこの4件が既存の広い許可ルールより上位にあることを
+確認します。各ルールを開き、`DEVICES`欄に`Match Quarantined Devices`が
+意図した(Source/Destination)側で選択されていることも確認します。
+
+### 7. 実際の通信で封じ込めを検証する
+
+隔離対象端末(GlobalProtect接続を維持した状態)から、調査用通信の宛先
+{{ investigation_targets | length }}件への通信が許可され、それ以外の宛先
+への通信が拒否されることを確認します。あわせて、調査用システム側から
+隔離対象端末への通信が許可されることも確認します。この検証がすべて
+成功するまで、対象端末の隔離状態は解除しません。
+
+### 8. 調査完了後、隔離を解除する
+
+シナリオ設定の`release_criteria`を満たし、承認が得られた端末から順に、
+`Objects > Quarantined Device List`の画面で該当行を選び、リストから
+除外します。除外操作の具体的なボタン名は本手順が参照した一次情報に
+記載がないため、実際の画面表示に従って操作してください。除外後は
+`Objects > Quarantined Device List`を再度開き、対象端末が一覧から
+消えていることを確認します。手順4・5で作成したルールは、他の隔離対象
+端末が残っている間は削除しないでください。
+
+## 動作確認
+
+- `Objects > Quarantined Device List`に、シナリオ設定の
+  {{ quarantine_hosts | length }}件がすべて登録されていること
+- `Security Services > Security Policy`で、`{{ allow_outbound_rule_name }}`
+  ・`{{ allow_inbound_rule_name }}`が`{{ deny_outbound_rule_name }}`・
+  `{{ deny_inbound_rule_name }}`より上位に、かつこの4件が既存の広い
+  許可ルールより上位に並んでいること
+- 隔離対象端末から、調査用通信の宛先{{ investigation_targets | length }}
+  件への通信のみが許可され、それ以外の宛先への通信が拒否されること
+- 調査用システム側から隔離対象端末への通信が許可されること
+- 手順8で解除した端末が`Objects > Quarantined Device List`の一覧から
+  消えていること
+
+## 注意事項
+
+- **`Quarantine Device List`はGlobalProtectアプリで接続された端末が対象
+  です。** 任意のIPアドレスをそのまま登録できる汎用の遮断リストでは
+  ありません。GlobalProtect接続を持たない端末の隔離が必要な場合、本手順
+  は適用できません。
+- **スタンドアロンのNGFWでは、自動追加(ログ転送プロファイル・HIP match・
+  API・再配布)はPrisma Access限定の機能です。** 一次情報で確認できたのは
+  `Add Device`による手動追加のみのため、本手順はすべて手動登録として
+  記載しています。自動追加を利用する場合は、Prisma Access向けの一次情報
+  を別途確認してください。
+- **ルール並び順を厳守すること。** 手順4の許可2件・手順5の遮断2件の
+  並び順、およびこの4件全体を既存の広い許可ルールより上位に置くことの
+  両方が崩れると、隔離対象端末の通信が意図せず許可されたままになります。
+- 手順8の隔離解除操作(除外ボタンの名称)は一次情報に記載がなかったため、
+  本手順では具体的なUI要素名を断定していません。実際の画面表示を確認の
+  うえ操作してください。
+- CLI・API経由での`Quarantine Device List`操作(追加・削除)についても、
+  本手順が参照した一次情報には記載がなかったため扱っていません。自動化
+  が必要な場合は、実際の管理コンソール(Strata Cloud Manager・Panorama)
+  のAPIドキュメントを別途確認してください。
+- 隔離リストの追加・削除ができる管理者ロールは、インシデント対応担当者
+  など必要な範囲に限定してください。

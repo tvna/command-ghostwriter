@@ -1,0 +1,23 @@
+pair_name: "PA-850-HA-Tokyo"
+drill_date: "2026-08-02"
+maintenance_window: "2026-08-02 01:00-03:00 JST(計画メンテナンス枠)"
+rollback_deadline: "2026-08-02T03:00:00+09:00"
+failover_seconds_target: 3
+drill_iterations: 2
+preemptive: true
+participants:
+  - "山田 太郎(ネットワーク運用) - 切替実行・時刻記録"
+  - "佐藤 花子(SRE) - セッション維持監視"
+  - "鈴木 一郎(運用責任者) - 中断判断"
+ha_members:
+  - role: 現在Active
+    hostname: pa-fw-tok-01
+    mgmt_ip: 10.10.0.11
+  - role: 現在Passive
+    hostname: pa-fw-tok-02
+    mgmt_ip: 10.10.0.12
+session_verify_targets:
+  - description: 社内基幹システムへの継続通信
+    target: 10.20.0.50
+  - description: インターネット到達性の継続通信
+    target: 203.0.113.10

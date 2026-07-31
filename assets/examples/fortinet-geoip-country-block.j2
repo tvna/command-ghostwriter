@@ -1,0 +1,274 @@
+# FortiGateのGeoIP特定国WAN着信遮断構成
+
+FortiGate (FortiOS) の Geography-based address(GeoIP データベースに基づく
+アドレスオブジェクト)を用いて、WAN側で公開しているサービス
+(`{{ protected_service_name }}`)宛の着信のうち、TOMLで定義した
+{{ blocked_countries | length }}か国からの通信を Firewall Policy で遮断
+します。国ごとに `config firewall address` で `type geography` のアドレス
+オブジェクトを作成し、業務上必要な例外通信元(`{{ partner_allow_addr_name }}`)
+を遮断ポリシーより評価順で先に許可した上で、Policy match ツールと
+`diagnose firewall ipgeo` 各種コマンド、IP Geography DB のバージョン確認を
+用いて、遮断対象国からの通信が確実に遮断され、かつ例外通信元を含む正当な
+通信が誤って遮断されていないことを検証します。
+
+## 目的
+
+GeoIP機能(Geography-based address)を用いて特定国からのWAN着信を Firewall
+Policy で遮断できるようになること、その際に業務上必要な通信元を誤って
+巻き込まない適用順序(例外許可を先に、国別遮断を後に)を実践できるように
+なること、そして `diagnose firewall ipgeo` や Policy match ツールを用いて
+「遮断すべき通信が遮断されていること」と「誤遮断が発生していないこと」の
+両方を検証できるようになることを目指します。
+
+## 用語解説
+
+- **Geography-based address(Geography型アドレスオブジェクト)**: 一次情報に
+  「Geography addresses are those determined by country of origin. The IP
+  for the country or region is automatically determined from the Geography
+  IP database.」と説明される、国・地域単位で自動的にIP範囲が決まるアドレス
+  オブジェクト。GUIでは `Policy & Objects > Addresses` の `Create new` から
+  `Type` に `Geography` を選び、`Country/Region` フィールドで**単一の国**を
+  選択して作成する(1オブジェクトにつき1か国)
+- **IP Geography DB**: FortiGuardが配信するGeoIP判定用データベース。
+  `diagnose autoupdate versions | grep -A 6 "IP Geography DB"` でバージョン
+  と最終更新日時を確認できる。一次情報には「Without a valid license, local
+  IP geography database will continue to work. However the FortiGate will
+  stop receiving geography IP updates from the FortiGuard servers」とあり、
+  ライセンス無効時はローカルDBは動作を続けるが更新が止まる
+- **geoip-full-db(`config sys global`)**: 完全なGeoIPデータベースをカーネル
+  にロードするかどうかの設定。`enable` にすると通信ログに地理情報が付与され
+  FortiViewの `Countries/Regions` ウィジェット・モニターが利用可能になる。
+  `disable` の場合はメモリを節約する代わりにこれらが利用できない
+- **config firewall address(`set type geography`)**: 一次情報に示される
+  CLI構文は次のとおり。`edit "<アドレス名>"` の後に `set type geography` /
+  `set country "<国コード>"` を設定し `next` / `end` で確定する(例:
+  `edit "TestGeoAddress"` → `set type geography` → `set country "A0"`)
+- **config system geoip-override**: 特定のIPアドレス範囲をカスタム国IDに
+  個別に割り当てる設定。`edit "<カスタム名>"` の下に `config ip-range` で
+  `set start-ip` / `set end-ip` を指定する。割り当てたカスタム国IDは
+  `get sys geoip-country <ID>` や `show full sys geoip-override` で確認
+  できる(GeoIP判定の誤りを個別補正する用途で、注意事項に後述)
+- **diagnose firewall ipgeo**: 一次情報に示されるサブコマンドは
+  `country-list`(全国一覧) / `ip-list`(指定国に属するIPアドレス一覧) /
+  `ip2country`(指定IPアドレスの所在・登録国の判定、anycastかどうかも判定) /
+  `override`(`config system geoip-override` で登録したカスタム国情報の一覧) /
+  `copyright-notice`(著作権表示)。`ip2country` / `ip-list` の具体的な引数
+  指定例は一次情報ページ内には明示されておらず(Fortinet Community記事側に
+  委ねられている)、実行前にFortiGate CLI上で `diagnose firewall ipgeo
+  ip2country ?` のようにヘルプ表示を確認すること
+- **Policy match(Policy Lookup)ツール**: `Policy & Objects` のポリシー
+  一覧画面から実行できる検証ツール。送信元インターフェース・プロトコル・
+  送信元アドレス・宛先アドレス・送信元ポート・宛先ポートを入力すると、その
+  通信がどのFirewall Policyに一致するかを判定し、一致したポリシーを一覧
+  画面上でハイライト表示する
+
+## シナリオ設定
+
+今回の対象となるWAN側インターフェースと保護対象サービス、および遮断ポリ
+シーより先に許可する例外通信元は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| WAN側インターフェース(wan_interface) | `{{ wan_interface }}` |
+| 保護対象サービスの内向きインターフェース(service_dstintf) | `{{ service_dstintf }}` |
+| 保護対象サービスのアドレスオブジェクト(protected_service_name) | `{{ protected_service_name }}` |
+| 例外許可ポリシーID(partner_allow_policy_id) | {{ partner_allow_policy_id }} |
+| 例外許可アドレスオブジェクト(partner_allow_addr_name) | `{{ partner_allow_addr_name }}` |
+
+`{{ partner_allow_addr_name }}` は、次の理由により遮断ポリシーより評価順で
+先に許可します。
+
+{{ partner_allow_note }}
+
+遮断対象国(blocked_countries、{{ blocked_countries | length }}か国、
+`policy_id` の昇順がそのままポリシーの並び順(評価順)になります)は次の
+とおりです。国コードは一次情報の `set country` に投入する値の例示であり、
+実際に投入する前に `diagnose firewall ipgeo country-list` の一覧と照合して
+ください。
+
+| policy_id | code | name |
+|-----------|------|------|
+{% for c in blocked_countries %}| {{ c["policy_id"] }} | {{ c["code"] }} | {{ c["name"] }} |
+{% endfor %}
+
+`{{ protected_service_name }}` / `{{ partner_allow_addr_name }}` は、
+いずれも `Policy & Objects > Addresses` に事前登録済みのIPアドレス/サブ
+ネット型オブジェクトであることを前提とします(作成手順は本手順書の対象外)。
+本手順書でCLIから新規作成するのは、Geography型アドレスオブジェクトのみです。
+
+## 手順
+
+### 1. 現状のポリシー一覧とIP Geography DBの状態を確認する(変更前の基準を取る)
+
+新しいポリシーやアドレスオブジェクトを1件も追加する前に、現状を確認します。
+
+- `Policy & Objects > Firewall Policy` を開き、既存ポリシーの並び順(評価順)
+  と、`{{ protected_service_name }}` 宛に現在許可されている通信の内容を確認
+  し、記録します。
+- IP Geography DBのバージョンと最終更新日時を確認します。
+
+  ```bash
+  diagnose autoupdate versions | grep -A 6 "IP Geography DB"
+  ```
+
+  更新が長期間止まっている場合、国判定の精度が低下し誤遮断や検知漏れに
+  つながる可能性があるため、先にFortiGuardからの更新を確認してください。
+- `config sys global` の `geoip-full-db` が `enable` になっていることを
+  確認します。`disable` の場合は、手順6でFortiViewの `Countries/Regions`
+  を用いた検証ができないため、有効化します。
+
+  ```bash
+  config sys global
+      set geoip-full-db enable
+  end
+  ```
+
+### 2. 例外許可ポリシーを、遮断ポリシーより先に登録する
+
+国別の遮断ポリシーを作る前に、`{{ partner_allow_addr_name }}` からの通信を
+許可するポリシーを登録します。ポリシーは一覧に表示される順序で評価される
+ため、このポリシーは手順4の遮断ポリシーより**必ず先**(評価順で上位)に
+置く必要があります。
+
+```bash
+config firewall policy
+    edit {{ partner_allow_policy_id }}
+        set name "allow-{{ partner_allow_addr_name }}"
+        set srcintf "{{ wan_interface }}"
+        set dstintf "{{ service_dstintf }}"
+        set srcaddr "{{ partner_allow_addr_name }}"
+        set dstaddr "{{ protected_service_name }}"
+        set action accept
+        set schedule "always"
+        set service "ALL"
+        set logtraffic all
+    next
+end
+```
+
+GUIから登録する場合は `Policy & Objects > Firewall Policy > Create New` で
+同じ内容(Incoming Interface=`{{ wan_interface }}` / Outgoing Interface=
+`{{ service_dstintf }}` / Source=`{{ partner_allow_addr_name }}` /
+Destination=`{{ protected_service_name }}` / Action=`ACCEPT`)を入力します。
+
+### 3. 遮断対象国ごとにGeography型アドレスオブジェクトを作成する
+
+シナリオ設定の `blocked_countries` に基づき、国ごとにGeography型アドレス
+オブジェクトを作成します。GUIでは `Policy & Objects > Addresses` を開いて
+`Address` を選び `Create new` から、`Name` を入力し `Type` フィールドで
+`Geography` を選択、`Country/Region` フィールドで対象国を選択、
+`Interface` は既定の `any` のままにして `OK` を押します。
+
+CLIでは次のとおりです。
+
+```bash
+{% for c in blocked_countries %}config firewall address
+    edit "geo-block-{{ c["code"] }}"
+        set type geography
+        set country "{{ c["code"] }}"
+    next
+end
+{% endfor %}```
+
+### 4. 国ごとの遮断ポリシーを、例外許可ポリシーより後・既存の広い許可ポリシーより前に登録する
+
+手順3で作成したGeography型アドレスオブジェクトを送信元(`srcaddr`)とする
+遮断ポリシーを、国ごとに登録します。`policy_id` の昇順で、手順2の例外許可
+ポリシーより**後**に登録します。
+
+```bash
+{% for c in blocked_countries %}config firewall policy
+    edit {{ c["policy_id"] }}
+        set name "deny-geo-{{ c["code"] }}"
+        set srcintf "{{ wan_interface }}"
+        set dstintf "{{ service_dstintf }}"
+        set srcaddr "geo-block-{{ c["code"] }}"
+        set dstaddr "{{ protected_service_name }}"
+        set action deny
+        set schedule "always"
+        set service "ALL"
+        set logtraffic all
+    next
+end
+{% endfor %}```
+
+### 5. ポリシーの並び順を確認・調整する
+
+`Policy & Objects > Firewall Policy` の一覧(`By Sequence` 表示)を開き、
+評価順が次のとおりになっていることを確認します。
+
+1. `{{ partner_allow_policy_id }}`(例外許可、`allow-{{ partner_allow_addr_name }}`)
+2. 手順4で登録した各国の遮断ポリシー(`policy_id` の昇順)
+3. 手順1で記録した既存の広い許可ポリシー(変更しない)
+
+意図した順序と異なる場合は、対象ポリシーを選択して `More > Move by ID` から
+移動方向(Above/Below)とDestination policy IDを指定して修正してください。
+
+### 6. Policy matchとdiagnoseコマンドで遮断・誤遮断の両方を検証する
+
+`Policy & Objects` のポリシー一覧画面で `Policy match` を開き、通信条件
+(送信元インターフェース・プロトコル・送信元アドレス・宛先アドレス・送信元
+ポート・宛先ポート)を入力して `Find matching policy` をクリックします。
+
+1. 遮断対象国に属することが分かっているテスト送信元IPについて、
+   Incoming Interface=`{{ wan_interface }}` / Destination=
+   `{{ protected_service_name }}` の条件で照会し、一致したポリシーが対応
+   する `deny-geo-<code>`(手順4)であることを確認します。
+2. `{{ partner_allow_addr_name }}` に該当する送信元IPについて同様に照会し、
+   一致したポリシーが `allow-{{ partner_allow_addr_name }}`(手順2)で
+   あり、いずれの `deny-geo-<code>` ポリシーにも一致していないことを確認
+   します(誤遮断が発生していないことの直接確認)。
+3. 手順1の `geoip-full-db` が `enable` であることを前提に、FortiViewの
+   `Countries/Regions` ウィジェット・モニターで実際の通信ログ上の国別内訳
+   を確認し、遮断対象国以外から想定外に通信が減っていないか(=想定してい
+   なかった正当な通信元まで巻き込んで遮断していないか)を俯瞰します。
+4. 疑わしいIPアドレスがあれば、`diagnose firewall ipgeo ip2country` /
+   `diagnose firewall ipgeo country-list` で実際の国判定・有効な国コードを
+   個別に確認します(具体的な引数指定はFortiGate CLI上のヘルプで確認して
+   ください)。
+
+## 動作確認
+
+- IP Geography DBのバージョンが手順1で確認した状態から意図せず変化して
+  いないこと(またはFortiGuardから正常に更新されていること)
+- `config sys global` の `geoip-full-db` が `enable` になっていること
+- `Policy & Objects > Firewall Policy` の一覧(`By Sequence`)で、
+  `{{ partner_allow_policy_id }}`(例外許可)が各 `deny-geo-<code>` より
+  上位(評価順で先)に並んでいること
+- Policy matchで、遮断対象国のテスト送信元IPが対応する `deny-geo-<code>`
+  に一致すること
+- Policy matchで、`{{ partner_allow_addr_name }}` の送信元IPが
+  `allow-{{ partner_allow_addr_name }}` に一致し、いずれの `deny-geo-<code>`
+  にも一致しないこと
+- 手順1で記録した既存の広い許可ポリシーの並び順・内容が、意図せず変更
+  されていないこと
+
+## 注意事項
+
+- **例外許可ポリシーを先に、国別遮断ポリシーを後に登録すること。**
+  ポリシーは一覧に表示される順序で評価されるため、順序を誤ると
+  `{{ partner_allow_addr_name }}` からの正当な通信まで遮断される(誤遮断)
+  おそれがあります。
+- **Geography型アドレスオブジェクトは1オブジェクトにつき単一国のみ
+  選択できます。** 複数国を遮断する場合は、本手順書のように国ごとに別々の
+  アドレスオブジェクトとポリシーを作成してください。
+- **IP Geography DBの更新が止まっていないか事前に確認すること。**
+  ライセンスが無効な場合、ローカルDBは動作を続けますが、FortiGuardからの
+  更新は止まり、国判定の精度が時間とともに低下します。
+- GeoIP判定そのものの誤り(本来ブロック対象国に属さないIPが誤って対象国と
+  判定される等)が疑われる場合は、本手順の遮断ポリシー自体は変更せず、
+  `config system geoip-override` で該当IP範囲を専用のカスタム国IDに
+  個別に割り当てることで補正できます(`config ip-range` で `start-ip` /
+  `end-ip` を指定)。この補正はDBの判定そのものを是正する手段であり、
+  手順2の例外許可ポリシーとは目的が異なるため、混同しないでください。
+- 本手順の遮断ポリシーは `dstintf`=`{{ service_dstintf }}` /
+  `dstaddr`=`{{ protected_service_name }}` に限定しています。FortiGate自身
+  の管理アクセス(GUI/SSHログイン)用のポリシーには適用しないでください。
+  管理プレーンを対象に含めると、遮断対象国からの管理者アクセスが遮断され、
+  意図しないロックアウトにつながるおそれがあります。
+- `diagnose firewall ipgeo ip2country` / `ip-list` の具体的な引数指定は
+  一次情報ページ内に例示がありません。推測でコマンドラインを断定せず、
+  実行前にFortiGate CLI上のヘルプ表示で確認してください。
+- CLI/GUIへのログインに使う管理者パスワードやAPIトークンは、本手順書や
+  ログに平文で残さないでください。値を記録する場合は `********` のように
+  マスクし、秘密管理ツール等で別途安全に保管してください。

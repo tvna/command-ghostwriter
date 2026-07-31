@@ -1,0 +1,23 @@
+reported_at = "2026-07-31 09:40"
+public_ip = "203.0.113.77"
+service_port = 8443
+protocol = 6
+application = "ssl"
+from_zone = "untrust-wan"
+to_zone = "untrust-wan"
+private_ip = "10.30.40.50"
+private_subnet = "10.30.40.0/24"
+to_interface = "ethernet1/1"
+nat_rule_name = "dnat-erp-portal-inbound"
+security_rule_name = "allow-erp-portal-inbound"
+virtual_router_name = "vr-edge"
+dmz_gateway_ip = "10.30.40.1"
+refresh_interval_seconds = 10
+
+[[affected_hosts]]
+reporter = "partner-ops-team"
+src_ip = "198.51.100.30"
+
+[[affected_hosts]]
+reporter = "branch-office-nagoya"
+src_ip = "203.0.113.150"

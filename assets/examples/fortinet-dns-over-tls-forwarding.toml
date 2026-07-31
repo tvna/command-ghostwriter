@@ -1,0 +1,21 @@
+primary_dns = "1.1.1.1"
+secondary_dns = "1.0.0.1"
+wan_interface = "wan1"
+dns_service_interface = "internal"
+dnsfilter_profile_name = "dnsfilter-lan-baseline"
+dns_udp_service_name = "svc-dns53-udp"
+dns_tcp_service_name = "svc-dns53-tcp"
+existing_internet_policy_id = 310
+existing_internet_policy_name = "allow-lan-to-internet"
+
+[[lan_segments]]
+policy_id = 301
+name = "deny-plaintext-dns-lan-users"
+srcintf = "internal"
+srcaddr = "lan-users-net"
+
+[[lan_segments]]
+policy_id = 302
+name = "deny-plaintext-dns-guest-wifi"
+srcintf = "guest"
+srcaddr = "guest-wifi-net"

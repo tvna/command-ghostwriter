@@ -1,0 +1,180 @@
+# Palo Alto Networks(PAN-OS)の部門VLAN間セグメント分離とデフォルト拒否適用
+
+CSV で定義した{{ csv_rows | length }} 件の部門VLANを、それぞれ専用の
+Security Zoneへ分離したうえで、ゾーン間(interzone)通信を既定拒否
+(interzone-default deny)のままとし、業務上必要な通信のみを
+Security Policy Ruleで明示的に許可します。ゾーンを分けずにインターフェースを
+追加しただけでは、同一ゾーン内(intrazone)の通信は既定で自由に流通してしまう
+ため、本手順ではまずゾーンの分離を確実に行った上で許可ルールを積み上げます。
+
+## 目的
+
+Security Zone(`Network > Zones`)とSecurity Policy Ruleの役割分担、および
+PAN-OSの既定ルールである`interzone-default`(ゾーン間デフォルト拒否)と
+`intrazone-default`(ゾーン内デフォルト許可)の違いを理解した上で、部門VLANを
+個別ゾーンへ分離し、必要最小限の許可ルールのみを追加できるようになることを
+目指します。あわせて、`interzone-default`のログを有効化して既定拒否の
+挙動を可視化し、許可・拒否双方の結果を検証できるようになることを目指します。
+
+## 用語解説
+
+- **セキュリティゾーン(Security Zone)**: `Network > Zones`で作成する、物理/仮想
+  インターフェースを論理的にグループ化するオブジェクト。インターフェースは
+  必ずいずれか1つのゾーンにのみ所属でき、ゾーン内(intrazone)の通信は既定で
+  自由に流通する一方、ゾーンをまたぐ(interzone)通信にはSecurity Policy Rule
+  での明示的な定義が必要になる
+- **interzone-default**: Security Policyルールベースの最下段に存在する既定
+  ルール。他のどのSecurity Policyルールにも一致しなかったゾーン間通信を
+  拒否(deny)する。GUI上で選択して`Override`すればログ設定などは変更できる
+  が、削除はできない
+- **intrazone-default**: `interzone-default`と対になる既定ルールで、同一
+  ゾーン内の通信をすべて許可(allow)する。部門VLANを個別のゾーンに分けない
+  限り、この既定許可がVLAN間の通信にもそのまま及んでしまう
+- **Security Policy Rule**: `Policies > Security`で作成する、送信元/宛先
+  ゾーンとアドレス・アプリケーション・サービスの組み合わせに基づいて通信を
+  許可/拒否するルール。ルールベースは上から順に評価され、最初に一致した
+  ルールが適用される
+- **サービスオブジェクト(Service Object)**: `Objects > Services`で定義する、
+  プロトコル(TCP/UDP)と宛先ポートの組み合わせ。HTTP/HTTPS用の`service-https`
+  のような既定オブジェクトが用意されているほか、業務に応じたカスタム
+  サービスを作成できる
+- **candidate config / commit**: PAN-OSの二段階設定モデル。`set`コマンドや
+  GUIでの変更はcandidate configに積まれるのみで、`commit`を実行するまで
+  実機のrunning configには反映されない
+
+## シナリオ設定
+
+今回、専用ゾーンへ分離する部門VLANと、その所属インターフェースは次の
+{{ csv_rows | length }} 件です。
+
+| zone_no | zone_name | vlan_id | interface | description |
+|---------|-----------|---------|-----------|--------------|
+{% for r in csv_rows %}| {{ r["zone_no"] }} | {{ r["zone_name"] }} | {{ r["vlan_id"] }} | {{ r["interface"] }} | {{ r["description"] }} |
+{% endfor %}
+
+上記のうち、部門間で業務上必要な通信として明示的に許可するのは次のとおり
+です(`allow_to_zone`が`-`の行は、他ゾーンへの通信を開始しません)。
+
+| rule_name | from(zone_name) | to(allow_to_zone) | service_name | protocol | dst_port |
+|-----------|------------------|--------------------|--------------|----------|----------|
+{% for r in csv_rows %}{% if r["allow_to_zone"] != "-" %}| {{ r["rule_name"] }} | {{ r["zone_name"] }} | {{ r["allow_to_zone"] }} | {{ r["service_name"] }} | {{ r["protocol"] }} | {{ r["dst_port"] }} |
+{% endif %}{% endfor %}
+
+## 手順
+
+### 1. 前提を確認する(既存VLANサブインターフェースとゾーン所属)
+
+各部門VLANに対応するレイヤー3サブインターフェース(シナリオ設定の
+`interface`列)は、すでに作成されIPアドレスが設定済みであることを前提と
+します。本手順ではサブインターフェースの新規作成やVLANタグ設定そのものは
+扱いません。
+
+`Network > Zones`を開き、これらのサブインターフェースが現在どのゾーンに
+所属しているか(未所属か、あるいは複数の部門VLANが同一ゾーンに同居して
+いないか)を確認します。複数の部門VLANが同一ゾーンに同居している場合、
+そのゾーン内では`intrazone-default`により通信が既定で自由に流通するため、
+本手順でゾーンを分離するまでは意図した分離になっていません。
+
+### 2. 部門VLANごとにセキュリティゾーンを作成する
+
+`Network > Zones > Add`から、シナリオ設定の各行につき1ゾーンを作成します。
+`Name`にゾーン名、`Type`に`Layer3`、`Interfaces`に対応するサブインター
+フェースを指定し、`OK`を押して保存します。
+
+{% for r in csv_rows %}- `Name`={{ r["zone_name"] }} / `Type`=Layer3 / `Interfaces`={{ r["interface"] }}
+{% endfor %}
+CLIでは、configureモードで次のとおり登録します。
+
+```bash
+configure
+
+{% for r in csv_rows %}set zone {{ r["zone_name"] }} network layer3 {{ r["interface"] }}
+{% endfor %}```
+
+### 3. 業務上必要な通信の範囲でサービスオブジェクトを用意する
+
+シナリオ設定の許可ルール一覧のうち、`service_kind`が`custom`の行は
+`Objects > Services > Add`でカスタムサービスオブジェクトを作成します。
+`Name`にサービス名、`Protocol`にTCP/UDPの別、`Destination Port`に宛先
+ポート番号を入力し、`OK`を押します。
+
+{% for r in csv_rows | selectattr("service_kind", "equalto", "custom") | unique(attribute="service_name") %}- `Name`={{ r["service_name"] }} / `Protocol`={{ r["protocol"] }} / `Destination Port`={{ r["dst_port"] }}
+{% endfor %}
+`service_kind`が`predefined`の行(例: `service-https`)は、PAN-OSに用意
+されている既定サービスオブジェクトをそのまま参照するため、新規作成は
+不要です。
+
+### 4. 部門間の許可ルールをSecurity Policyに追加する
+
+`Policies > Security > Add`を開き、シナリオ設定の許可ルール一覧の各行
+につき1ルールを作成します。`General`タブでルール名、`Source`タブで
+送信元ゾーン(`from`列)、`Destination`タブで宛先ゾーン(`to`列)、
+`Service/URL Category`タブで対応するサービスオブジェクトを指定し、
+`Actions`タブの`Action`を`Allow`にして`OK`を押します。
+
+CLIでは次のとおり登録します。ルールの並び順(評価順)は、この手順で
+追加した許可ルールが`interzone-default`より必ず上位(先)になるように
+します。
+
+```bash
+{% for r in csv_rows %}{% if r["allow_to_zone"] != "-" %}set rulebase security rules {{ r["rule_name"] }} from {{ r["zone_name"] }} to {{ r["allow_to_zone"] }}
+set rulebase security rules {{ r["rule_name"] }} source any
+set rulebase security rules {{ r["rule_name"] }} destination any
+set rulebase security rules {{ r["rule_name"] }} application any
+set rulebase security rules {{ r["rule_name"] }} service {{ r["service_name"] }}
+set rulebase security rules {{ r["rule_name"] }} action allow
+{% endif %}{% endfor %}```
+
+### 5. 設定を適用する
+
+```bash
+commit
+```
+
+candidate configはcommitを実行するまでrunning configに反映されません。
+実行後は結果(Success/Warning/Error)を確認し、管理接続に影響する変更を
+含む場合は接続が失われていないことをあわせて確認します。
+
+### 6. interzone-defaultルールのログを有効化し、既定拒否を可視化する
+
+`Policies > Security`の一覧最下段にある`interzone-default`を選択して
+`Override`をクリックし、`Actions`タブで`Log at Session End`を選択して
+`OK`を押します。これにより、どの許可ルールにも一致しなかったゾーン間
+通信がトラフィックログに記録されるようになります(既定では記録され
+ません)。`Action`(deny)自体はこの手順では変更しません。
+
+## 動作確認
+
+- 各部門VLANの端末から、シナリオ設定の許可ルール一覧に記載した宛先ゾーン・
+  サービスへの通信が成功すること(例: `VLAN-SALES`から`VLAN-FILESRV`への
+  SMB(445/tcp))
+- 許可ルール一覧に記載のない部門VLAN間の通信(例: `VLAN-SALES`から
+  `VLAN-HR`、`VLAN-SALES`から`VLAN-PORTAL`)が失敗すること
+- `Monitor > Logs > Traffic`で、上記の失敗した通信が`interzone-default`
+  ルールに一致した拒否(deny)として記録されていること(手順6でログを
+  有効化済みであることが前提)
+- `Policies > Security`のルールベースで、部門ごとの許可ルールが
+  `interzone-default`より上位(先)に並んでいること
+- `Network > Zones`で、各ゾーンの`Type`が`Layer3`、`Interfaces`が意図した
+  サブインターフェースのみになっており、複数の部門VLANが誤って同一ゾーン
+  に同居していないこと
+
+## 注意事項
+
+- **ゾーンを分けずにインターフェースだけ追加しないこと。** ゾーンを分離
+  しない限り、同一ゾーン内の通信は`intrazone-default`により既定で自由に
+  流通するため、部門VLANは必ず個別のゾーンに分離してから許可ルールを
+  検討してください。
+- **`interzone-default`のActionを`allow`に変更しないこと。** この手順で
+  変更するのはログ設定(`Log at Session End`)のみであり、Action(deny)を
+  変更すると既定拒否そのものが無効化され、本手順の目的と反対の状態になり
+  ます。
+- ルールベースは上から順に評価され最初に一致したルールが適用されるため、
+  部門ごとの許可ルールは必ず`interzone-default`より上位(先)に配置して
+  ください。
+- カスタムサービスオブジェクトは、対応する許可ルールの`service`としての
+  み参照し、`service any`のような広いサービス指定は避けてください。
+- `commit`を実行するまでcandidate configは実機の動作(running config)に
+  反映されません。特に管理アクセス経路に影響する変更を含む場合は、
+  `commit`後に管理接続が失われていないことを確認してから作業を終えて
+  ください。

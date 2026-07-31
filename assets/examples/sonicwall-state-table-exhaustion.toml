@@ -1,0 +1,26 @@
+firewall_name = "SW-EDGE1"
+from_zone = "LAN"
+to_zone = "WAN"
+access_rule_name = "LAN-WAN-General-Allow"
+connection_limit_percentage = 50
+source_ip_connection_threshold = 500
+syn_flood_protection_mode = "Proxy WAN Client Connections When Attack is Suspected"
+syn_attack_threshold = 20000
+udp_flood_attack_threshold = 5000
+udp_flood_attack_blocking_time = 5
+icmp_flood_attack_threshold = 500
+icmp_flood_attack_blocking_time = 5
+flood_protected_destination = "Any"
+connections_mode = "Maximum DPI Connections"
+
+[[top_offenders]]
+rank = 1
+src_ip = "10.10.20.55"
+observed_connection_count = 8600
+suspected_cause = "業務アプリケーションのAPIクライアントがリトライ処理でTCP接続を再確立し続けている"
+
+[[top_offenders]]
+rank = 2
+src_ip = "10.10.20.113"
+observed_connection_count = 3100
+suspected_cause = "マルウェア感染が疑われる外向きの大量ポートスキャン的通信"

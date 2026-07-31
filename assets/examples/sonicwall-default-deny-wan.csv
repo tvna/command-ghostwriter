@@ -1,0 +1,5 @@
+rule_no,from_zone,to_zone,rule_name,action,source_addr,dest_addr,service,priority,description
+1,WAN,DMZ,allow-dmz-https,Allow,Any,dmz-web-server,HTTPS,Auto Prioritize,DMZ Webサーバへの HTTPS 着信を許可
+2,WAN,DMZ,allow-vpn-gw,Allow,Any,vpn-gateway,svc-ipsec-udp500-4500,Auto Prioritize,拠点間IPsec VPNゲートウェイへの着信を許可
+3,WAN,LAN,allow-vendor-ssh,Allow,maint-vendor-fixed-ip,jump-host,SSH,Auto Prioritize,保守ベンダー固定IPからのSSHジャンプホストアクセスを許可
+4,WAN,WLAN,explicit-deny-wan-wlan,Deny,Any,Any,Any,Insert at the End,WAN to WLANの明示的拒否ルール(既定のAnyルールと同じ拒否効果をログに残す)

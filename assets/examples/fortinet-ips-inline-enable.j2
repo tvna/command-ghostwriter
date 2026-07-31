@@ -1,0 +1,177 @@
+# FortiGateのIPS段階的インライン化(one-arm sniffer観察からブロック昇格)
+
+FortiGate(FortiOS)のIPSセンサーを、まず one-arm sniffer(一本足スニファー)配置で「検知のみ(pass+log)」運用し、{{ entries | length }} 件のシグネチャエントリそれぞれについて誤検知の有無を観察期間({{ observation_days }}日)をかけて確認します。one-arm snifferで検査したトラフィックは検査後に必ず破棄され本番経路には一切影響しないため、業務影響ゼロの状態でシグネチャの挙動を検証できます。誤検知が確認されなかったエントリだけを、同じIPSセンサーごと実運用のインラインポリシーへ追加し(この時点でもまだ`action`は`pass`のまま)、インライン経路上でも検知一致を再確認したうえで、最後にエントリ単位で`action`を`block`/`reset`へ切り替えて実遮断を有効化します。
+
+## 目的
+
+FortiOSのIPSセンサーが持つエントリ単位の`action`(pass/block/reset/default)と、one-arm sniffer(`ips-sniffer-mode`)によるトラフィックに影響しない観察配置を理解した上で、「観察 → インライン検証(pass継続) → 遮断昇格」の順序を飛ばさずに適用し、誤検知によるサービス影響を出さずにIPS防御を有効化できるようになることを目指します。
+
+## 用語解説
+
+- **Security Profiles > Intrusion Prevention**: FortiOS GUIでIPSセンサーを新規作成・編集するメニュー。CLIでは`config ips sensor`に対応する
+- **IPSセンサー(`config ips sensor`)**: シグネチャ/フィルタのエントリをまとめたプロファイル。ファイアウォールポリシーやスニファーポリシーに紐付けて使う。エントリは`config entries`配下に`edit <id>`で追加する
+- **entries / action**: エントリごとの`set action [pass|block|...]`。`pass`(許可)/`block`(遮断)/`reset`(セッションリセット)/`default`(シグネチャ自体のベンダー既定動作に従う)の4種類があり、シグネチャが検知されたときに実際に取る動作を決める
+- **default-action**: 同じくエントリの`set default-action [all|pass|...]`。個々のシグネチャが持つ「ベンダー既定の推奨アクション」による絞り込みフィルタで、値は`all`/`pass`/`block`。フィルタ条件であって実際に適用される動作ではない点が`action`と異なる
+- **one-arm sniffer**: 物理インターフェースを`config system interface`の`set ips-sniffer-mode enable`で構成し、SPANポートやネットワークタップからミラーされたトラフィックのみを検査する一本足構成のIDS。検査後のトラフィックは常に破棄されるため、`action`を`block`にしていても実運用経路のトラフィックには一切影響しない
+- **firewall sniffer policy(`config firewall sniffer`)**: one-arm snifferインターフェース向けのポリシー。`set ips-sensor`/`set ips-sensor-status enable`でIPSセンサーを紐付け、`set logtraffic utm`でセキュリティイベントのみをログする
+- **sniffer-profile**: 各セキュリティプロファイル種別がone-arm sniffer用にあらかじめ用意している既定プロファイル名。GUIの「インターフェース編集」画面からのみ参照・編集できる
+- **utm-status / ips-sensor(`config firewall policy`)**: 実運用のインラインポリシー側の設定。`set utm-status enable`と`set ips-sensor`を追加することで、one-arm snifferで検証済みのセンサーをそのままインライン経路に適用できる
+
+## シナリオ設定
+
+IPSセンサー`{{ sensor_name }}`(VDOM: `{{ vdom }}`)配下に、次の{{ entries | length }}件のエントリを作成します。すべて`initial_action`は`pass`(検知のみ)から開始し、`promote_ready`が`true`のエントリのみ`final_action`へ昇格させます。
+
+| entry_id | description | selector | selector_value | initial_action | final_action | promote_ready |
+|----------|--------------|----------|-----------------|-----------------|----------------|-----------------|
+{% for e in entries %}| {{ e.entry_id }} | {{ e.description }} | {{ e.selector }} | {{ e.selector_value }} | {{ e.initial_action }} | {{ e.final_action }} | {{ e.promote_ready | lower }} |
+{% endfor %}
+
+観察用のone-arm snifferは物理インターフェース`{{ sniffer_interface }}`(SNMPインデックス`{{ sniffer_snmp_index }}`)、スニファーポリシーID`{{ sniffer_policy_id }}`で構成します。検証後にエントリを追加する実運用インラインポリシーはID`{{ inline_policy_id }}`(`{{ inline_srcintf }}` → `{{ inline_dstintf }}`)です。
+
+## 手順
+
+### 1. 対象インターフェースの現状を確認する(one-arm sniffer化の前提)
+
+`{{ sniffer_interface }}`をone-arm snifferに変更する前に、現在ファイアウォールポリシー・スタティックルート・仮想IPなど他の機能で使用されていないこと、および現在のロールが`wan`になっていないことを確認します。ロールが`wan`のまま、または他機能で参照されたままだと、GUIでOne-Arm Snifferの選択肢自体が表示されません。
+
+```bash
+show system interface {{ sniffer_interface }}
+show firewall policy
+show router static
+show firewall vip
+```
+
+出力中に`{{ sniffer_interface }}`への参照が残っていないか、`set role`が`wan`になっていないかを目視で確認してください。参照が残っている場合は、先にそれらの設定から`{{ sniffer_interface }}`を外します。
+
+### 2. IPSセンサーを「検知のみ」で作成する
+
+各エントリの`action`をまず`pass`にした状態でIPSセンサーを作成します。エントリ1・3は`default-action`フィルタでベンダー既定動作が`block`のシグネチャを一括選択し、エントリ2は個別のシグネチャIDを`rule`で指定します。
+
+```bash
+config ips sensor
+    edit "{{ sensor_name }}"
+        set comment "staged rollout: observe first (pass+log), escalate signature by signature"
+        config entries
+{% for e in entries %}            edit {{ e.entry_id }}
+{% if e.selector == "default-action" %}                set default-action {{ e.selector_value }}
+{% else %}                set rule {{ e.selector_value }}
+{% endif %}                set status enable
+                set log enable
+                set action {{ e.initial_action }}
+            next
+{% endfor %}        end
+    next
+end
+```
+
+`default-action`だけを条件にすると対象シグネチャが広範囲になります。実際の運用では、この後にseverityやprotocol、applicationなどのフィルタ条件を追加して対象をさらに絞り込んでください。
+
+### 3. one-arm snifferインターフェースを構成し、スニファーポリシーにIPSセンサーを紐付ける
+
+物理インターフェース`{{ sniffer_interface }}`を`ips-sniffer-mode enable`でone-arm snifferにし、手順2で作成したIPSセンサーをスニファーポリシーに紐付けます。`set logtraffic utm`により、全セッションではなくセキュリティイベント(IPSの検知)のみがログされます。
+
+```bash
+config system interface
+    edit "{{ sniffer_interface }}"
+        set vdom "{{ vdom }}"
+        set ips-sniffer-mode enable
+        set type physical
+        set role undefined
+        set snmp-index {{ sniffer_snmp_index }}
+    next
+end
+
+config firewall sniffer
+    edit {{ sniffer_policy_id }}
+        set interface "{{ sniffer_interface }}"
+        set ips-sensor-status enable
+        set ips-sensor "{{ sensor_name }}"
+        set logtraffic utm
+        set status enable
+    next
+end
+```
+
+`{{ sniffer_interface }}`をSPANポートまたはネットワークタップの出力先に接続してください。one-arm snifferは検査後にトラフィックを必ず破棄するため、`action`の値にかかわらず実運用のトラフィックには一切影響しません。
+
+### 4. 観察期間中、ログで誤検知の有無を確認する
+
+{{ observation_days }}日間の観察期間中、`Log & Report > Security Events`でIPSの検知ログを確認し、業務通信を誤って検知しているエントリがないか洗い出します。
+
+誤検知が疑われるエントリが見つかった場合は、`action`を変更せずに、そのエントリ単体の`status`を`disable`にする、または`config exempt-ip`で送信元/宛先を除外するなど、他のエントリに影響しない範囲で調整してください。
+
+```bash
+config ips sensor
+    edit "{{ sensor_name }}"
+        config entries
+            edit 3
+                config exempt-ip
+                    edit 1
+                        set src-ip <legacy-app-src-subnet>
+                        set dst-ip <legacy-app-dst-subnet>
+                    next
+                end
+            next
+        end
+    next
+end
+```
+
+`<legacy-app-src-subnet>`/`<legacy-app-dst-subnet>`は誤検知が発生している実際の通信の送信元/宛先サブネットに置き換えてください。
+
+### 5. 誤検知のなかったエントリのみ、実運用のインラインポリシーへ同じセンサーを追加する(actionはまだpassのまま)
+
+観察期間中に誤検知が確認されなかったエントリ(上表で`promote_ready`が`true`)についてのみ、次の作業へ進みます。まず、`{{ sensor_name }}`を実運用のインラインポリシー`{{ inline_policy_id }}`に追加します。このステップでは`action`をまだ変更しないため、インライン経路(one-arm snifferではない実トラフィック経路)上でIPSが検知はするが遮断はしない状態になります。
+
+```bash
+config firewall policy
+    edit {{ inline_policy_id }}
+        set srcintf "{{ inline_srcintf }}"
+        set dstintf "{{ inline_dstintf }}"
+        set srcaddr "{{ inline_srcaddr }}"
+        set dstaddr "{{ inline_dstaddr }}"
+        set action accept
+        set schedule "always"
+        set service "ALL"
+        set utm-status enable
+        set ips-sensor "{{ sensor_name }}"
+        set logtraffic utm
+    next
+end
+```
+
+適用後、再度`Log & Report > Security Events`を確認し、インライン経路上での検知結果がone-arm snifferでの観察結果と一致すること(新たな誤検知が発生していないこと)を確かめてください。この一致が確認できるまで、次の手順には進まないでください。
+
+### 6. 検証済みのエントリだけ、actionをblock/resetへ最終切替する
+
+手順5でインライン経路上での一致を確認できたエントリ(`promote_ready`が`true`のエントリ)についてのみ、`action`を`final_action`の値(`block`または`reset`)へ変更します。`promote_ready`が`false`のエントリ(観察継続中)は`pass`のまま維持します。
+
+```bash
+config ips sensor
+    edit "{{ sensor_name }}"
+        config entries
+{% for e in entries %}{% if e.promote_ready %}            edit {{ e.entry_id }}
+                set action {{ e.final_action }}
+            next
+{% endif %}{% endfor %}        end
+    next
+end
+```
+
+## 動作確認
+
+- `show system interface {{ sniffer_interface }}`の出力に`set ips-sniffer-mode enable`が含まれること
+- `show firewall sniffer {{ sniffer_policy_id }}`の出力に`set ips-sensor-status enable`と`set ips-sensor "{{ sensor_name }}"`が含まれること
+- 手順4の観察期間中、`Log & Report > Security Events`で業務通信への誤検知が記録されていないこと(記録されていた場合は手順4の除外設定を先に適用すること)
+- `show firewall policy {{ inline_policy_id }}`の出力に`set utm-status enable`と`set ips-sensor "{{ sensor_name }}"`が含まれること
+- 手順6適用後、`show ips sensor {{ sensor_name }}`の出力で`promote_ready`が`true`だったエントリの`action`が`final_action`の値(block/reset)に変わっており、`promote_ready`が`false`のエントリは`action pass`のままであること
+- 昇格後も`Log & Report > Security Events`で業務通信への意図しない遮断(誤検知由来のfalse block)が発生していないこと
+
+## 注意事項
+
+- **one-arm sniffer自体は本番トラフィックを一切変更しない。** 検査対象はミラーされたコピーであり、検査後は`action`の値にかかわらず常に破棄されます。そのため手順2でエントリの`action`を`block`にしても、それだけでは実際の通信は遮断されません。実遮断が有効になるのは、手順5でセンサーを実運用のインラインポリシーへ追加した後に限られます。
+- **観察期間({{ observation_days }}日)を短縮しないこと。** 誤検知は通信パターンによって発生頻度が偏るため、観察期間を十分に確保してから手順5に進んでください。
+- **手順5でもactionをpassのまま据え置くこと。** インラインポリシーへの追加とactionのblock/reset化を同時に行うと、one-arm snifferでは見えなかった経路差異由来の誤検知にいきなり本番トラフィックが晒されます。必ず手順5(pass継続でのインライン検証)→手順6(block/resetへの切替)の順序を守ってください。
+- **昇格は`promote_ready`が`true`のエントリのみに限定すること。** 観察継続中のエントリ(手順4で誤検知調整中のもの)を手順6で一括してblock化しないでください。
+- one-arm snifferで検査されるトラフィックはCPUで処理され、NPU/CPによるオフロードの恩恵を受けません。CPU使用率とTAP側のバッファ超過によるパケットロスの双方に注意してください。
+- 昇格後に誤検知が判明した場合は、センサー全体を作り直す必要はありません。該当エントリの`action`のみを`pass`へ戻し、原因調査を再開してください。

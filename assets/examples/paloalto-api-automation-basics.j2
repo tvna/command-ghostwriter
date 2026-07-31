@@ -1,0 +1,140 @@
+# Palo Alto Networks(PAN-OS) API自動化基盤の構築
+
+`{{ firewall_host }}`(PAN-OS {{ pan_os_version }}、vsys `{{ vsys_name }}`)に、セキュリティルールの照会・追加・適用(コミット)を自動化するための最小権限API基盤を整備します。対話ログイン用のSuperuser管理者は流用せず、Configuration機能のみを許可したAdmin Role Profile(`{{ admin_role_name }}`)と、専用のRole-Basedサービス管理者(`{{ service_admin_user }}`)、`type=keygen`で発行するAPIキーだけで自動化を完結させます。発行したAPIキーを使ってREST APIでルールを{{ rules | length }}件追加したうえで、XML APIの`commit`で実機に適用し、反映結果を再照会で確認します。
+
+## 目的
+
+PAN-OSのAPI認証の仕組み(`type=keygen`によるAPIキー発行、`X-PAN-KEY`ヘッダでの認証、Admin Role Profileによる権限スコープの分離)を理解し、対話ログイン用の管理者アカウントを自動化に流用しない最小権限のAPI基盤を構築できるようになることを目指します。あわせて、REST APIでの設定変更がcommitするまでrunning configに反映されない点を踏まえ、照会→追加→コミット→再照会という安全な適用順序を実践します。
+
+同じ「API自動化のための最小権限資格情報の発行」という運用課題は、OPNsenseでは`System > Access > Users`で発行する静的なAPI key/secretのBasic認証(`curl -u "$KEY:$SECRET"`)で解決していましたが、PAN-OSでは、Admin Role Profileによる機能単位のスコープ分離と、`type=keygen`で発行しライフタイム管理・一括失効が可能なAPIキーという2段構えの機構で解決します。
+
+## 用語解説
+
+- **PAN-OS XML API / REST API**: いずれもPAN-OS/Panoramaへの設定・操作をHTTPで自動化するAPI。REST APIは`/restapi/<バージョン>/<リソース>`という形のリソース指向エンドポイント(例: `Policies/SecurityRules`)で一部の設定オブジェクトを扱い、XML APIは`xpath`とXML要素を使って`commit`や`show`のような操作を含むより広い範囲をカバーする
+- **type=keygen**: `/api/?type=keygen`にPOSTし、管理者の`user`/`password`と引き換えにAPIキーを発行するリクエストタイプ。パスワードなど機微な情報を含むためPOSTでの呼び出しが推奨されている
+- **X-PAN-KEY**: 発行したAPIキーを以降のリクエストに載せるカスタムHTTPヘッダ名。XML API・REST APIのいずれでも使用する
+- **Admin Role Profile (Device > Admin Roles)**: 管理者に割り当てる権限セットを定義するオブジェクト。`XML API`タブでReport/Log/Configurationなどの機能ごとに有効・無効を切り替えられる
+- **Role Based administrator (Device > Administrators)**: Dynamic role(Superuserなど)ではなく、個別に作成したAdmin Role Profileを割り当てるタイプの管理者アカウント。XML API専用の管理者アカウントを別途用意することがベストプラクティスとされている
+- **API Key Lifetime (min)**: `Device > Setup > Management`の`Authentication Settings`で設定する、発行済みAPIキーの有効期限(分、1〜525600の範囲)。既定値は0で、この場合APIキーは無期限に有効なままになる
+- **commit**: PAN-OSのcandidate configをrunning configへ反映する操作。REST APIによる設定変更はcommitするまで実機の動作には反映されず、XML APIまたは他の管理インターフェースでcommitする必要がある
+
+## シナリオ設定
+
+今回、`{{ firewall_host }}`(vsys `{{ vsys_name }}`)に対して、次の構成でAPI自動化基盤を整備します。
+
+| 項目 | 値 |
+|------|-----|
+| Admin Role Profile名 | `{{ admin_role_name }}` |
+| サービス管理者アカウント名 | `{{ service_admin_user }}` |
+| API Key Lifetime | {{ api_key_lifetime_minutes }}分 |
+
+このAPI基盤を使って追加するセキュリティルールは、次の{{ rules | length }}件です。
+
+| rule_name | from_zone | to_zone | source | destination | application | service | action | description |
+|---|---|---|---|---|---|---|---|---|
+{% for r in rules %}| {{ r["rule_name"] }} | {{ r["from_zone"] }} | {{ r["to_zone"] }} | {{ r["source"] }} | {{ r["destination"] }} | {{ r["application"] }} | {{ r["service"] }} | {{ r["action"] }} | {{ r["description"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 前提を確認する(既存の管理者・ロール構成を把握する)
+
+新しいオブジェクトを作成する前に、`Device > Administrators`で既存の管理者アカウント一覧を、`Device > Admin Roles`で既存のAdmin Role Profile一覧をそれぞれ確認し、`{{ service_admin_user }}`および`{{ admin_role_name }}`という名前が未使用であることを確認します。あわせて、管理アクセスがデフォルトのHTTPSで到達可能であることを確認します(HTTPでの待受は別途インターフェース管理プロファイルの設定が必要なため、本手順では扱いません)。
+
+### 2. 最小権限のAdmin Role Profileを作成する
+
+`Device > Admin Roles`を開き、`Add`から新しいAdmin Role Profileを作成します。Nameに`{{ admin_role_name }}`を入力し、`XML API`タブを開いて、一覧にある機能(Report / Log / Configuration など)のうち、本手順で必要な**Configurationのみ**を有効のままにし、それ以外は無効にします。
+
+### 3. 専用のサービス管理者アカウントを作成し、ロールを割り当てる
+
+`Device > Administrators`を開き、`Add`をクリックします。Nameに`{{ service_admin_user }}`を入力し、Administrator Typeで`Role Based`を選択して、Admin Role Profileに手順2で作成した`{{ admin_role_name }}`を指定します。Passwordには秘密管理システムで生成した値を設定してください(値そのものはこの手順書に記載しません。マスク表記`********`として扱い、平文でリポジトリやログに残さないでください)。設定後は`OK`のあと`Commit`を実行します。
+
+### 4. APIキーの有効期限(Lifetime)を設定する
+
+`Device > Setup > Management`を開き、`Authentication Settings`を編集して`API Key Lifetime (min)`に`{{ api_key_lifetime_minutes }}`を設定します(単位は分、1〜525600の範囲)。既定値の0のままにすると、発行したAPIキーが無期限に有効なままになります。設定後は`OK`のあと`Commit`を実行します。
+
+### 5. APIキーを発行する
+
+手順3のサービス管理者アカウントの認証情報で、APIキーを発行します。`${PANOS_SVC_PASSWORD}`には、秘密管理システムから取得したパスワードを事前に環境変数として設定しておいてください(平文でコマンド履歴やスクリプトに残さないこと)。
+
+```bash
+curl -k -H "Content-Type: application/x-www-form-urlencoded" \
+  -X POST "{{ firewall_host }}/api/?type=keygen" \
+  -d "user={{ service_admin_user }}&password=${PANOS_SVC_PASSWORD}"
+```
+
+レスポンスに含まれるAPIキーの値を、環境変数`PANOS_API_KEY`として保存してください(以降のコマンドはこの変数を参照します)。レスポンスの具体的な要素名は一次情報に記載がないため、実際に返ってきた内容を確認したうえで値を取り出してください。
+
+```bash
+export PANOS_API_KEY="<手順5のレスポンスから取得したAPIキー>"
+```
+
+### 6. 既存のセキュリティルールを照会する
+
+```bash
+curl -k -X GET \
+  "{{ firewall_host }}/restapi/{{ pan_os_version }}/Policies/SecurityRules?location=vsys&vsys={{ vsys_name }}" \
+  -H "X-PAN-KEY: ${PANOS_API_KEY}"
+```
+
+このリクエストは、手順2で有効化した`Configuration`機能の範囲内で完結します。ここで返ってきたルール件数を控えておき、手順9で追加後の件数と比較します。
+
+### 7. 新しいセキュリティルールをREST APIで追加する
+
+シナリオ設定の{{ rules | length }}件を、1件ずつPOSTで追加します。
+
+```bash
+{% for r in rules %}curl -k -X POST \
+  "{{ firewall_host }}/restapi/{{ pan_os_version }}/Policies/SecurityRules?location=vsys&vsys={{ vsys_name }}&name={{ r["rule_name"] }}" \
+  -H "X-PAN-KEY: ${PANOS_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"entry":[{"@location":"vsys","@name":"{{ r["rule_name"] }}","@vsys":"{{ vsys_name }}","action":"{{ r["action"] }}","application":{"member":["{{ r["application"] }}"]},"category":{"member":["any"]},"destination":{"member":["{{ r["destination"] }}"]},"from":{"member":["{{ r["from_zone"] }}"]},"source-hip":{"member":["any"]},"destination-hip":{"member":["any"]},"service":{"member":["{{ r["service"] }}"]},"source":{"member":["{{ r["source"] }}"]},"source-user":{"member":["any"]},"to":{"member":["{{ r["to_zone"] }}"]}}]}'
+{% endfor %}
+```
+
+この時点では、追加したルールはcandidate configにのみ存在し、running configにはまだ反映されていません。各ルールの用途は、シナリオ設定の表(description列)を参照してください(REST APIのJSONボディに含める`description`フィールドの仕様は一次情報で確認できなかったため、リクエストボディには含めていません)。
+
+### 8. 変更をコミット(適用)する
+
+REST APIでの変更はcommitするまでrunning configに反映されないため、XML APIでコミットします。
+
+```bash
+curl -k -X POST "{{ firewall_host }}/api/?type=commit&cmd=<commit></commit>" \
+  -H "X-PAN-KEY: ${PANOS_API_KEY}"
+```
+
+レスポンスに含まれるジョブIDを`PANOS_COMMIT_JOB_ID`として控え、完了するまでジョブの状態を確認します。
+
+```bash
+curl -k -X POST "{{ firewall_host }}/api/?type=op&cmd=<show><jobs><id>${PANOS_COMMIT_JOB_ID}</id></jobs></show>" \
+  -H "X-PAN-KEY: ${PANOS_API_KEY}"
+```
+
+### 9. 適用後に再照会し、running configへの反映を確認する
+
+```bash
+curl -k -X GET \
+  "{{ firewall_host }}/restapi/{{ pan_os_version }}/Policies/SecurityRules?location=vsys&vsys={{ vsys_name }}" \
+  -H "X-PAN-KEY: ${PANOS_API_KEY}"
+```
+
+手順6と同じリクエストです。手順6で控えた件数と比較し、{{ rules | length }}件増えていることを確認します。
+
+## 動作確認
+
+- 手順5の`type=keygen`レスポンスにAPIキーが含まれ、以降のリクエストが`X-PAN-KEY`ヘッダの認証で成功すること
+- `{{ admin_role_name }}`のXML APIタブで、Configuration以外の機能(Report / Log など)が無効のままであること(最小権限になっていること)
+- `{{ service_admin_user }}`のAdministrator Typeが`Role Based`で、Admin Role Profileに`{{ admin_role_name }}`が設定されていること
+- 手順7の直後、手順9より前の時点でGETすると、追加した{{ rules | length }}件がcandidate config側にのみ反映され、commit前のrunning config照会結果には現れないこと
+- 手順8のコミット完了後、ジョブの状態が完了を示すこと
+- 手順9のGET結果に、手順7で追加した{{ rules | length }}件すべてが含まれ、手順6で控えた件数から{{ rules | length }}件増えていること
+- `Device > Setup > Management`の`Authentication Settings`で、`API Key Lifetime (min)`が`{{ api_key_lifetime_minutes }}`(0=無期限のままではない)になっていること
+
+## 注意事項
+
+- **パスワード・APIキーは平文で扱わないこと。** 手順3のPasswordおよび手順5のAPIキーは、いずれもこの手順書やコマンド履歴、リポジトリ、ログに平文で残さず、秘密管理システムと環境変数経由でのみ扱ってください。
+- **最小権限を維持すること。** Admin Role Profileの`XML API`タブでConfiguration以外の機能を有効にしない、Dynamic role(Superuserなど)を自動化用アカウントに割り当てない、対話ログイン用の既存管理者アカウントを自動化に流用しない、をいずれも守ってください。
+- **REST APIの変更はcommitするまで反映されません。** 手順7で追加しただけの状態(手順8のコミット前)では、他の管理者のGUI操作や後続の自動化ジョブがcandidate configとrunning configのどちらを見ているか誤認しやすいため、追加とコミットを同じ自動化フロー内で完結させ、コミット漏れのまま放置しないでください。
+- **APIキーの漏えいに備えること。** APIキーが漏えいした疑いがある場合は、`Device > Setup > Management`の`Authentication Settings`にある`Expire all API Keys`で発行済みのAPIキーを一括失効させ、手順5からやり直してください。この操作は当該ファイアウォール上の全APIキーに影響するため、他の自動化ジョブへの影響を確認してから実行してください。
+- 自己署名証明書を使用する環境向けに`curl -k`(証明書検証省略)の例を示していますが、本番環境ではCAで署名された証明書を導入し、`-k`を外して証明書検証を有効にした状態で運用してください。
+- 自動化ホストからの到達元を制限したい場合は、`Network > Network Profiles > Interface Mgmt`の`Permitted IP Addresses`で許可元IPを絞り込む方法もあります。ただし管理インターフェース全体に影響する変更のため、本手順の範囲外とし、既存の管理アクセス経路を確認したうえで別途安全な適用順序(新経路の検証を先に、既存経路の制限を後に)で実施してください。

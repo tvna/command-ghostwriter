@@ -1,0 +1,231 @@
+# Palo Alto Networks(PAN-OS)のルール変更段階適用と切り戻し管理 — {{ change_ticket }}
+
+Security Policy Ruleの変更を「変更前のTraffic log観察とbaseline named
+configuration snapshotの保存 → `Disable`状態での登録 → `Validate Commit`
+(`Validate Changes`)と`Preview Changes`による事前確認 → メンテナンス窓での
+`Enable`切替 → Policy Optimizerの`Rule Usage`による事後確認」の段階で適用し
+、想定外の遮断・許可を早期に検知できる状態を保ちながら実施する変更管理手順書
+です。各段階の切り替えはSecurity Policy Ruleの`Disable`トグルで刻み、commit
+の前には必ず`Validate Commit`と`Preview Changes`で候補設定(candidate
+configuration)の内容を確認します。想定外の事象が発生した場合は、`Disable`
+への即時切り戻しと、`Device > Setup > Operations`の`Load named configuration
+snapshot`による全体復元の2段階で切り戻します。変更管理番号
+`{{ change_ticket }}`のもとで、承認者`{{ approver }}`の承認を得たメンテナンス
+窓内でのみ`Enable`への切替を行います。
+
+## 目的
+
+変更管理番号`{{ change_ticket }}`に基づき、PAN-OSのSecurity Policy Ruleを
+一度に有効化するのではなく、baseline観察・`Disable`状態での登録・`Validate
+Commit`/`Preview Changes`による事前確認・メンテナンス窓での`Enable`切替・
+Policy Optimizer`Rule Usage`による事後確認という段階を踏んで適用します。
+想定外の遮断・想定外の許可(副作用)をTraffic logとRule Usageの`Hit Count`
+で早期に検知し、承認者`{{ approver }}`の判断のもと、`Disable`トグルによる
+即時切り戻しと`Load named configuration snapshot`による全体復元の両方を
+使い分けられる状態を維持することを目指します。あわせて、candidate
+configurationとrunning configurationを分離するPAN-OSの二段階構成モデルの中で
+、`commit`前にどこまで安全性を確認できるかを理解することを目指します。
+
+## 用語解説
+
+- **candidate configuration / running configuration**: PAN-OSは編集中の設定
+  (candidate configuration)と実機で動作中の設定(running configuration)を
+  分離する二段階構成モデルを採る。GUIでの追加・変更や`Disable`/`Enable`の
+  切替は、`Commit`を実行するまでrunning configurationに反映されない
+- **Commit**: 画面上部の`Commit`をクリックして開くダイアログから実行する、
+  candidate configurationの変更をrunning configurationへ反映する操作。
+  `Commit Scope`として`Commit All Changes (default)`(権限を持つすべての
+  変更を対象にする)と`Commit Changes Made By`(管理者や場所で絞り込む)が
+  選べる
+- **Validate Commit(`Validate Changes`)**: 同じCommitダイアログから実行
+  できる、実際のcommitが表示するのと同じエラー・警告を、running
+  configurationを変更せずに事前確認できる操作。commit前に構文・参照エラーの
+  有無を確かめるために使う
+- **Preview Changes**: 同じくCommitダイアログから実行できる、比較対象の
+  設定ファイル間の差分をside-by-sideで表示する操作。表示前に`Lines of
+  Context`(差分の前後何行を表示するか)を選択し、追加(green)・変更
+  (yellow)・削除(red)を色分けして確認できる
+- **Security Policy Ruleの`Disable`**: ルールを削除せずに評価対象から除外
+  する操作。対象ルールを選択して`Disable`を適用すると、そのルールは
+  ルールベース評価でスキップされる(`Enable`で即座に取り消せる)
+- **Policy Optimizer > Rule Usage**: `Policies > Security > Policy
+  Optimizer > Rule Usage`で確認できる、ルール単位の使用状況ビュー。
+  `Hit Count`(一致回数)・`Last Hit`(直近の一致日時)・`First Hit`
+  (最初の一致日時)・`Modified`・`Created`の各列を持ち、`Timeframe`で
+  期間を絞り込める。対象ルールに対して`Delete`・`Enable`・`Disable`・
+  `Tag`・`Untag`を直接実行できる
+- **Save named configuration snapshot / Load named configuration
+  snapshot**: いずれも`Device > Setup > Operations`にある操作。前者は
+  `Name`欄に指定した名前でcandidate configurationのスナップショットを
+  保存する(既定のスナップショットファイルを上書きしない)。後者は
+  `Name`を選んで`OK`を押すとcandidate configurationへ読み込まれ、任意で
+  `Commit`を押すとrunning configurationを上書きする(読み込んだだけでは
+  running configurationに反映されない)
+
+## シナリオ設定
+
+| 項目 | 値 |
+|------|-----|
+| 変更管理番号(change_ticket) | {{ change_ticket }} |
+| 承認者(approver) | {{ approver }} |
+| 観察期間(observation_period) | {{ observation_period }} |
+| 切り戻し判断基準(rollback_trigger) | {{ rollback_trigger }} |
+| baseline named configuration snapshot名(baseline_snapshot_name) | {{ baseline_snapshot_name }} |
+| 対象ルール件数 | {{ target_rules | length }} |
+
+対象ルール一覧:
+
+| rule_name | from_zone | to_zone | source | destination | application | service | action |
+|-----------|-----------|---------|--------|-------------|-------------|---------|--------|
+{% for r in target_rules %}| {{ r.rule_name }} | {{ r.from_zone }} | {{ r.to_zone }} | {{ r.source }} | {{ r.destination }} | {{ r.application }} | {{ r.service }} | {{ r.action }} |
+{% endfor %}
+
+`source`/`destination`列のアドレスオブジェクトと`service`列のサービス
+オブジェクトは、`Objects > Addresses`・`Objects > Services`に事前登録済み
+であることを前提とします(これらの作成自体は本手順の対象外です)。
+
+## 手順
+
+### 1. 現状のTraffic logを観察し、baseline named configuration snapshotを保存する
+
+新しいルールを1件も追加する前に、現状を記録します。
+
+`Monitor > Logs > Traffic`を開き、対象の送信元・宛先で検索し、現状どの
+ルール(または`interzone-default`)に一致しているかを確認します。
+
+{% for r in target_rules %}- {{ r.source }} → {{ r.destination }}({{ r.application }})の通信を検索し、現状の一致ルールと結果(allow/deny)を記録します。
+{% endfor %}
+続けて`Device > Setup > Operations`を開き、`Save named configuration
+snapshot`をクリックして`Name`に`{{ baseline_snapshot_name }}`を入力し
+`OK`、`Close`の順に押します。この時点のcandidate configurationを、
+手順8で切り戻す際のbaselineとして保存します。
+
+### 2. 新規/変更ルールを`Disable`状態で追加する
+
+`Policies > Security > Add`から、シナリオ設定の各行につき1ルールを作成
+します。`General`タブでルール名、`Source`タブで送信元ゾーン/アドレス、
+`Destination`タブで宛先ゾーン/アドレス、`Application`タブでアプリケー
+ション、`Service/URL Category`タブでサービス、`Actions`タブの`Action`を
+表の値のまま入力し、`OK`を押します。
+
+{% for r in target_rules %}- {{ r.rule_name }}: {{ r.from_zone }} → {{ r.to_zone }} / {{ r.source }} → {{ r.destination }} / application={{ r.application }} / service={{ r.service }} / action={{ r.action }}
+{% endfor %}
+作成後、`Policies > Security`の一覧で上記{{ target_rules | length }}件の
+行をすべて選択し、`Disable`を適用します。この時点ではまだ`Commit`を実行
+していないため、candidate configurationにのみ存在する状態です。
+
+### 3. Validate CommitとPreview Changesで変更内容を事前確認する
+
+画面上部の`Commit`をクリックしてCommitダイアログを開きます。
+
+- `Validate Changes`をクリックし、実際のcommitが表示するのと同じエラー・
+  警告が無いかを確認します。この操作はrunning configurationを変更しません。
+  エラーが表示された場合は、手順2の入力内容を見直してから先へ進みます。
+- `Preview Changes`をクリックし、`Lines of Context`を選択します。表示
+  される差分がside-by-sideで、追加(green)・変更(yellow)・削除(red)に
+  色分けされます。今回追加した{{ target_rules | length }}件のルールのみが
+  追加(green)として表示され、それ以外の意図しない差分が含まれていない
+  ことを確認します。意図しない差分が含まれる場合は、手順4(commit)に進まず
+  原因を確認します。
+
+### 4. `Disable`状態のままcommitする
+
+Commitダイアログで`Commit Scope`を`Commit Changes Made By`にして自分の
+変更のみに絞り込み、`Commit`を実行します。`Disable`状態のルールが
+running configurationへ反映されますが、`Disable`のため通信への影響は
+まだありません。
+
+### 5. 承認を得たメンテナンス窓で`Enable`へ切り替える
+
+承認者`{{ approver }}`の承認を得たメンテナンス窓の中で、手順2で登録した
+{{ target_rules | length }}件のルールを`Policies > Security`の一覧で選択
+し、`Enable`をクリックします。
+
+続けて手順3と同じ要領で、`Commit`ダイアログから`Validate Changes`を実行
+してエラーが無いことを確認し、`Preview Changes`で差分が今回の`Enable`
+切替(変更=yellow)のみであることを確認したうえで、`Commit`を実行します。
+`Enable`への切替は必ずこの事前確認とセットで行い、単独で放置しないで
+ください。
+
+### 6. Policy Optimizer Rule Usageで有効化直後の状況を確認する
+
+`Policies > Security > Policy Optimizer > Rule Usage`を開き、`Timeframe`
+を直近(有効化からの経過時間)に設定します。
+
+{% for r in target_rules %}- {{ r.rule_name }}の`Hit Count`・`Last Hit`を確認します。
+{% endfor %}
+あわせて`Monitor > Logs > Traffic`で対象の送信元・宛先を検索し、意図した
+action(表の`action`列)で一致していることを確認します。意図と異なる挙動
+(想定と異なるルールへの一致、想定外の送信元からのHit Count増加)が1件でも
+確認された場合は、`{{ rollback_trigger }}`に該当するとみなし直ちに手順8へ
+進みます。
+
+### 7. 観察期間中の事後確認
+
+`Enable`切替から{{ observation_period }}の間、Policy Optimizer`Rule
+Usage`の`Hit Count`と`Monitor > Logs > Traffic`を継続的に確認します。
+
+`{{ rollback_trigger }}`へ該当する事象が発生しないことを確認できた時点で
+、この変更を本番適用として確定し、変更管理番号`{{ change_ticket }}`をクローズ
+します。
+
+### 8. 切り戻し(2段階)
+
+観察期間中または有効化直後に問題が確認された場合、以下の2段階で切り戻します。
+
+第1段階: 対象ルールを`Policies > Security`の一覧で選択し`Disable`を
+適用したうえで、手順3と同じ要領で`Validate Changes`→`Preview Changes`→
+`Commit`を実行します(即時、他のルールには影響しません)。
+
+第2段階: 第1段階(`Disable`)だけでは解消しない場合、手順1で保存した
+baseline named configuration snapshotへ全体を復元します。
+
+- `Device > Setup > Operations`を開き、`Load named configuration
+  snapshot`をクリックします。
+- `Name`で`{{ baseline_snapshot_name }}`を選び、`OK`を押します。この時点
+  ではまだcandidate configurationへの読み込みのみで、running
+  configurationには反映されません。
+- 内容を確認できたら、同じ画面の`Commit`を押してrunning configurationへ
+  反映します。`Commit`を押さない限り、読み込んだ内容はrunning
+  configurationを上書きしません。
+
+## 動作確認
+
+- 手順1のTraffic log観察と手順6・7の事後確認を比較し、対象通信がそれぞれ
+  意図したactionで一致していること
+- 手順3の`Preview Changes`で、追加した{{ target_rules | length }}件の
+  ルールのみが差分(green)として表示されたこと
+- 手順5の`Preview Changes`で、`Enable`切替による変更(yellow)のみが差分
+  として表示されたこと
+- Policy Optimizer`Rule Usage`の`Hit Count`が、シナリオ設定の`action`列
+  どおりに増加し、想定外の送信元からのHit Countが発生していないこと
+- {{ observation_period }}の観察期間内に`{{ rollback_trigger }}`に該当
+  する事象が発生していないこと
+- 変更完了後、手順1で保存した`{{ baseline_snapshot_name }}`、手順3・5の
+  `Preview Changes`結果が変更管理番号`{{ change_ticket }}`の記録として
+  保管されていること
+
+## 注意事項
+
+- **`Validate Changes`はrunning configurationを変更しません。** commit前
+  の事前確認として必ず先に実行し、エラーが解消してから`Commit`へ進んで
+  ください。
+- **`Preview Changes`の差分に意図しない変更が含まれていないか、commitの
+  たびに必ず確認すること。** 意図しない差分が含まれたままcommitすると、
+  対象外のルールにも影響が及ぶおそれがあります。
+- **手順5(`Enable`への切替)は必ず承認者`{{ approver }}`の承認を得た
+  メンテナンス窓内で実施し、単独作業では行わないこと。**
+- **`Load named configuration snapshot`は`OK`で読み込んだだけでは
+  running configurationに反映されません。** `Commit`を押すまでcandidate
+  configurationに留まるため、第2段階の切り戻しでは`Commit`の実行まで
+  必ず確認してください。
+- 切り戻しは手順8の2段階(`Disable` → 復旧しない場合のみ`Load named
+  configuration snapshot`による全体復元)の順で行い、いきなり全体復元
+  から始めないこと。全体復元はこの変更以外の設定も含めてbaseline時点の
+  状態へ巻き戻すため、最終手段として扱ってください。
+- ルールベースは上から順に評価され最初に一致したルールが適用されます。
+  手順2で追加したルールの挿入位置が既存ルールに対してどこに入るかは、
+  `Policies > Security`で必ず確認してください。
+- 管理者パスワードやAPIキーなど、本手順の実施に用いる認証情報は本手順書
+  や変更記録に平文で残さないでください。値を記録する場合は`********`の
+  ようにマスクし、秘密管理ツール等で別途安全に保管してください。

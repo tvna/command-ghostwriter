@@ -1,0 +1,157 @@
+# SonicWall(SonicOS)個人リモートアクセスVPN(SSL VPN/NetExtender)構築
+
+SonicWall次世代ファイアウォール(SonicOS/X 7)で、社外の個人端末からの暗号化リモートアクセスをSSL VPN(NetExtenderクライアント)で構成します。NetExtender用IPアドレスプールのアドレスオブジェクト作成から、`NETWORK | SSL VPN > Server Settings`でのサーバ設定、{{ remote_users | length }}名のローカルユーザー作成とSSLVPN Servicesグループへの割り当て、`NETWORK | SSL VPN > Client Settings`(Default Device Profile)でのトンネル方式設定、Virtual OfficeポータルからのNetExtender接続確認までを順に行います。拠点(ルータ/ファイアウォール)同士を結ぶ既存の`sonicwall-ikev2-vpn`(拠点間IKEv2 IPsec VPN)とは対象・機構ともに異なる、個人端末単位のリモートアクセス用の手順です。
+
+## 目的
+
+OPNsenseが個人のリモートアクセスVPNをWireGuardインスタンス(`VPN > WireGuard > Instances`)で解決するのに対し、SonicWall (SonicOS)には同名の機構は存在せず、SSL VPN (NetExtender client) or Global VPN Client (IPsec client) remote access VPN for individual remote users(社外の個人端末向けの暗号化リモートアクセス機構。既存の拠点間IPsec VPNテンプレート`sonicwall-ikev2-vpn`とは別物。WireGuardはSMA100(別製品)でのみサポートされ、SonicOSネイティブでは非対応)というベンダーネイティブな機構で同じ課題を解決します。本手順ではこのうちSSL VPN(NetExtenderクライアント)を用いた構成を扱い、アドレスオブジェクト作成からサーバ設定・ユーザー設定・Client Settings・Virtual Office経由の接続確認までを一通り実施できるようになることを目指します。
+
+一次情報(SonicOS/X 7 SSL VPN Administration Guide)にはGUI手順のみが記載されており、SSL VPN設定に対応するCLIコマンドの記載は確認できませんでした。そのため本手順は`NETWORK | SSL VPN`配下のGUI操作のみで構成しています。
+
+## 用語解説
+
+- **個人リモートアクセス vs 拠点間VPNの違い**: 本テンプレートが扱うのは社外の個人端末1台ずつがSonicWallへSSL VPN接続するリモートアクセスVPNです。既存の`sonicwall-ikev2-vpn`テンプレートはSonicWall 2台を結ぶ拠点間(サイト間)のIPsec VPNを扱っており、対象・認証方式・機構(SSL VPN/NetExtenderポータル vs IKEv2 IPsecのVPN Policy)のいずれも異なる別の運用課題です
+- **NetExtender**: Windows/Linux向けのSSL VPNクライアント。Point-to-Point Protocol(PPP)を用い、Virtual Officeポータル経由またはスタンドアロンクライアントとして起動し、内部ネットワークへ透過的にアクセスできる
+- **Virtual Office**: SonicWall本体が提供するWeb ポータル(`NETWORK | SSL VPN > Virtual Office`)。ユーザーはファイアウォールのIPアドレスへアクセスし、ログインページ下部の`Click here for sslvpn login`リンクからログインしてNetExtenderをダウンロード・起動する
+- **SSLVPN Services(グループ)**: SSL VPNへのアクセスを許可されたユーザーが所属すべき組み込みユーザーグループ。このグループに属さないユーザーはVirtual Officeへのログインを拒否される
+- **Address Object(Zone Assignment: SSLVPN, Type: Range)**: NetExtenderクライアントへ払い出すIPアドレスプールを定義するオブジェクト。`OBJECT | Match Objects > Address Objects`(一次情報の本文表記は`OBJECTS > Address Objects`)で作成し、`NETWORK | SSL VPN > Client Settings`のDefault Device Profileから参照する
+- **Tunnel All Mode**: 有効にすると、リモート端末宛のローカルネットワーク向け通信も含めた全トラフィックをSSL VPN NetExtenderトンネル経由にする。有効化にはあわせて`0.0.0.0`用のアドレスオブジェクトを作成し、対象ユーザー/グループのVPN Accessに割り当てる必要がある
+- **VPN Access(ユーザー/グループ設定内)**: NetExtender・Virtual Officeブックマーク等のリモートクライアントが到達できるネットワークリソースを、アドレスオブジェクト単位で許可するアクセスリスト
+- **Global VPN Client(IPsecクライアント)**: SonicWallが提供するもう一つのリモートアクセス機構で、IPsecベースのクライアントです。SSL VPN/NetExtenderとは別の設定体系(SonicOS 7.xでは`IPSec VPN | Rules and Settings`配下)であり、本テンプレートの操作手順には含みません
+
+## シナリオ設定
+
+今回SSL VPNを有効化するゾーンと、サーバ・クライアント関連の設定値は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| SonicWall WAN側アドレス(wan_ip) | `{{ wan_ip }}` |
+| SSL VPNを有効化するゾーン(ssl_vpn_zone) | {{ ssl_vpn_zone }} |
+| SSL VPN Port(ssl_vpn_port) | {{ ssl_vpn_port }} |
+| Certificate Selection(certificate_selection) | {{ certificate_selection }} |
+| User Domain(user_domain) | {{ user_domain }} |
+| Inactivity Timeout(inactivity_timeout_minutes、分) | {{ inactivity_timeout_minutes }} |
+| NetExtender用アドレスオブジェクト名(netextender_address_object) | `{{ netextender_address_object }}` |
+| NetExtender IPプール範囲(netextender_ip_start 〜 netextender_ip_end) | `{{ netextender_ip_start }}` 〜 `{{ netextender_ip_end }}` |
+| Tunnel All Mode(tunnel_all_mode) | {% if tunnel_all_mode %}Enabled{% else %}Disabled{% endif %} |
+{% if tunnel_all_mode %}| Tunnel All Mode用アドレスオブジェクト(tunnel_all_address_object) | `{{ tunnel_all_address_object }}` |
+{% endif %}| 内部LAN向けアドレスオブジェクト(internal_lan_object) | `{{ internal_lan_object }}` |
+| DNS Server 1 / 2(dns_server_1 / dns_server_2) | `{{ dns_server_1 }}` / `{{ dns_server_2 }}` |
+| Portal Site Title(portal_site_title) | {{ portal_site_title }} |
+| Portal Banner Title(portal_banner_title) | {{ portal_banner_title }} |
+
+今回SSL VPN経由でアクセスさせるリモートユーザーは次の{{ remote_users | length }}名です。
+
+| username | full_name | department |
+|----------|-----------|------------|
+{% for u in remote_users %}| {{ u.username }} | {{ u.full_name }} | {{ u.department }} |
+{% endfor %}
+
+## 手順
+
+### 1. NetExtender用IPアドレスプールのアドレスオブジェクトを作成する
+
+`OBJECT | Match Objects > Address Objects`(一次情報の本文表記は`OBJECTS > Address Objects`)を開き、`Add`をクリックしてNetExtenderクライアントへ払い出すIPアドレス範囲のアドレスオブジェクトを作成します。
+
+- Name: `{{ netextender_address_object }}`
+- Zone Assignment: `SSLVPN`
+- Type: `Range`
+- Starting IP Address: `{{ netextender_ip_start }}`
+- Ending IP Address: `{{ netextender_ip_end }}`
+
+入力後`ADD`、続けて`CLOSE`をクリックします。このアドレス範囲は、SSL VPNサービスの待受インターフェースと同一サブネット内で、かつ他の割当済みアドレスと重複しないようにしてください。
+
+{% if tunnel_all_mode %}Tunnel All Modeを使用するため、同じ画面でもう1件、`{{ tunnel_all_address_object }}`という名前で宛先`0.0.0.0`を表すアドレスオブジェクトも作成しておきます(Type/Zone Assignmentは環境のアドレスオブジェクト命名規則に合わせて設定してください。一次情報には具体的なType選択値の記載がないため、既存の0.0.0.0表現オブジェクトの作成方法は貴社の命名規則に従って設定します)。
+{% endif %}
+
+### 2. SSL VPNのアクセスをゾーンで有効にし、Server Settingsを構成する
+
+`NETWORK | SSL VPN > Server Settings`を開きます。`SSL VPN Status on Zones`の一覧から`{{ ssl_vpn_zone }}`をクリックして緑(有効)に切り替えます。続けて`SSL VPN Server Settings`セクションで次の値を入力します。
+
+- SSL VPN Port: `{{ ssl_vpn_port }}`
+- Certificate Selection: `{{ certificate_selection }}`
+- User Domain: `{{ user_domain }}`
+- Enable Web Management over SSL VPN: Disabled(既定のまま。管理アクセスを別途SSL VPN経由で許可する場合のみ有効化する)
+- Enable SSH Management over SSL VPN: Disabled(既定のまま)
+- Inactivity Timeout (minutes): `{{ inactivity_timeout_minutes }}`
+
+入力後、画面下部の`ACCEPT`をクリックして反映します。
+
+### 3. ローカルユーザーを作成し、SSLVPN Servicesグループとアクセス権を設定する
+
+`OBJECT | User Object > Local Users & Groups`(一次情報の本文表記は`MANAGE | System Setup | Users > Local Users & Groups`)を開き、シナリオ設定の{{ remote_users | length }}名それぞれについて`Add User`からユーザーを作成します。
+
+{% for u in remote_users %}- `{{ u.username }}`({{ u.full_name }} / {{ u.department }})
+{% endfor %}
+
+各ユーザーについて、`User Settings`ダイアログで次を設定します。
+
+- `Groups`タブ: `Available User Groups`から`SSLVPN Services`を選び、右矢印で`Selected User Groups`(Member Of)へ移動する
+- `VPN Access`タブ: `Available Networks`から`{{ internal_lan_object }}`{% if tunnel_all_mode %}と`{{ tunnel_all_address_object }}`{% endif %}を選び、右矢印で`Access List`へ移動する
+
+パスワードは画面入力時のみ台帳(社内の鍵管理システム)から参照し、実際の値を手順書・チケット・チャットに残さないでください。設定後は`OK`(または`Save`)で保存します。
+
+{% if tunnel_all_mode %}Tunnel All Modeで全トラフィックをトンネル経由にするには、上記`VPN Access`に`{{ tunnel_all_address_object }}`(0.0.0.0向けアドレスオブジェクト)を割り当てておく必要があります。割り当てを忘れると、Client Routes側でTunnel All Modeを有効にしても実際には全トラフィックがトンネルに乗りません。
+{% endif %}
+
+### 4. Client Settings(Default Device Profile)でゾーン・IPプール・トンネル方式を設定する
+
+`NETWORK | SSL VPN > Client Settings`を開き、`Default Device Profile`の編集アイコンをクリックします。
+
+`Settings`タブで次を設定します。
+
+- Zone IP V4: `{{ ssl_vpn_zone }}`に対応するSSLVPNゾーン(既定は`SSLVPN`)
+- Network Address IP V4: 手順1で作成した`{{ netextender_address_object }}`を選択する
+
+続けて`Client Routes`タブへ進み、次を設定します。
+
+- Tunnel All Mode: {% if tunnel_all_mode %}Enabled{% else %}Disabled{% endif %}
+- `Networks`から`{{ internal_lan_object }}`を選び、右矢印で`Client Routes`リストへ移動する
+
+`Client Routes`の作成にあわせてアクセスルールも自動生成されます。意図と異なるルールが生成されていないか、設定後に`POLICY`配下のアクセスルール一覧で確認してください。
+
+### 5. NetExtender Client SettingsでDNSとクライアント動作を設定する
+
+同じ`Edit Device Profile`ダイアログの`Client Settings`タブを開きます。`SSLVPN Client DNS Setting`セクションで次を設定します。
+
+- DNS Server 1: `{{ dns_server_1 }}`
+- DNS Server 2: `{{ dns_server_2 }}`
+
+`NetExtender Client Settings`セクションはリモートユーザーの利便性・セキュリティ要件に応じて調整してください(`Enable Client Autoupdate`、`Exit Client After Disconnect`、`Uninstall Client After Exit`など)。設定を終えたら`OK`をクリックして`Edit Device Profile`を閉じます。
+
+続けて`NETWORK | SSL VPN > Portal Settings`を開き、Virtual Officeポータルの表示をカスタマイズします。
+
+- Portal Site Title: `{{ portal_site_title }}`
+- Portal Banner Title: `{{ portal_banner_title }}`
+
+入力後、画面下部の`Accept`をクリックして反映します。
+
+### 6. Virtual OfficeポータルからNetExtenderで接続する
+
+シナリオ設定のリモートユーザーそれぞれが、Webブラウザで`https://{{ wan_ip }}:{{ ssl_vpn_port }}/`(SonicWallのWAN側アドレスとSSL VPN Port)へアクセスし、ログインページ下部の`Click here for sslvpn login`リンクからVirtual Officeへログインします。初回はNetExtenderのインストーラがダウンロード・実行され、以降はスタンドアロンクライアントとしても起動できます。
+
+NetExtender起動時のポップアップでは、SonicWallサーバ・ドメイン(`{{ user_domain }}`)があらかじめ入力された状態で表示されるので、ユーザー名・パスワードを入力して`Connect`をクリックします。接続後、NetExtenderウィンドウの`Status`/`Routes`/`DNS`各画面で、割り当てられたクライアントIP・ルート・DNSサーバを確認できます。
+
+## 動作確認
+
+- `NETWORK | SSL VPN > Server Settings`の`SSL VPN Status on Zones`で`{{ ssl_vpn_zone }}`が緑(有効)になっていること
+- `NETWORK | SSL VPN > Client Settings`の`Default Device Profile`で、`Network Address IP V4`に`{{ netextender_address_object }}`が設定されていること
+- {{ remote_users | length }}名それぞれがNetExtenderで接続でき、`NETWORK | SSL VPN > Status`のセッション一覧に`User Name`・`Client Virtual IP`・`Client WAN IP`・`Login Time`が表示されること
+- 表示された`Client Virtual IP`が、手順1で作成した`{{ netextender_ip_start }}` 〜 `{{ netextender_ip_end }}`の範囲内であること
+{% if tunnel_all_mode %}- Tunnel All Modeを有効化しているため、接続端末のNetExtender`Routes`画面に`0.0.0.0/0.0.0.0`を含む全トラフィックトンネル用ルートが追加されていること
+{% endif %}- 接続したリモート端末から、`{{ internal_lan_object }}`に該当する内部ネットワークへの通信が到達すること
+
+## 注意事項
+
+- **SSLVPN Servicesグループへの割り当てを忘れないこと。** 手順3を行わずにユーザーを作成すると、Virtual Officeへのログイン自体が拒否されます。
+- **VPN Accessで明示的に許可したアドレスオブジェクトのみ到達可能です。** 到達範囲を絞り込まずに広いオブジェクトを割り当てると、意図しない内部ネットワークへの到達を許してしまいます。
+{% if tunnel_all_mode %}- **Tunnel All Modeは、Client RoutesでのEnabled設定と、対象ユーザー/グループのVPN Accessへの`{{ tunnel_all_address_object }}`割り当ての両方が揃って初めて機能します。** 片方のみでは全トラフィックがトンネル経由になりません。
+- Tunnel All Mode(フルトンネル)にすると、接続中のリモート端末のインターネット向け通信もすべてSonicWall経由になります。リモートユーザー数に応じて、WAN側の回線容量を事前に見積もってください。
+{% endif %}- **NetExtender用IPアドレスプールは、SSL VPNサービスの待受インターフェースと同一サブネット内で、他の割当済みアドレスと重複しないこと。** 重複するとクライアントへのIP払い出しに失敗します。
+- **既定のCertificate Selectionは`Use Self-signed Certificate`です。** 自己署名証明書のままだとクライアント側でブラウザ証明書警告が表示されます。本番運用では正式な証明書への切り替えを検討してください。
+- 同時接続数はアプライアンス機種ごとに上限が定められています(一次情報のMaximum concurrent SSL VPN usersの機種別表を参照)。想定するリモートユーザー数が導入機種の上限を超えないことを事前に確認してください。
+- **パスワードは平文で保存・共有しないこと。** 手順3のユーザー作成時のパスワードは、投入時のみ台帳から値を参照し、コマンド履歴・チケット・チャットに実際の値を残さないでください。
+- 本テンプレートは拠点間の`sonicwall-ikev2-vpn`とは別物です。社外の個人端末を接続させる場合は本テンプレート、拠点(ルータ/ファイアウォール)同士を接続する場合は`sonicwall-ikev2-vpn`を使用してください。
+- Global VPN Client(IPsecクライアント)は、本テンプレートで扱うSSL VPN/NetExtenderとは別の設定体系(SonicOS 7.xでは`IPSec VPN | Rules and Settings`配下)です。IPsecクライアントでのリモートアクセスが必要な場合は、別途一次情報を確認したうえで構成してください。
+- WireGuardはSonicOS(本製品ライン)ではネイティブ非対応です。SonicWallの別製品ラインSMA100でのみサポートされる機構であり、本テンプレートの対象外です。
+- 一次情報(SonicOS/X 7 SSL VPN Administration Guide)にはSSL VPN設定に対応するCLIコマンドの記載が確認できなかったため、本手順はGUI操作のみを記載しています。CLIでの投入が必要な場合は、実機のCLIヘルプ等で構文を確認してから行ってください。

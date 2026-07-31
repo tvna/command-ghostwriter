@@ -1,0 +1,168 @@
+# Palo Alto Networks(PAN-OS)によるWANデフォルト拒否ポリシー構築
+
+WAN側ゾーン(untrust)を`interzone-default`ルールによる既定拒否のままとし、
+CSV で定義した{{ csv_rows | length }}件のうち、業務上必要な最小許可ルールのみを
+`Policies > Security`に明示登録します。PAN-OSの`interzone-default`は削除も
+並び替えもできない読み取り専用の既定ルールのため、新たに拒否ルールを作成する
+のではなく、Overrideによるログ設定の変更だけを行います。最後に
+`test security-policy-match`コマンドとTraffic logで、許可・拒否双方の挙動を
+検証します。
+
+## 目的
+
+PAN-OSのゾーンベースSecurity Policyモデルにおいて、WAN側(untrustゾーン)から
+の通信は`interzone-default`ルールにより既定で拒否されることを理解した上で、
+業務上必要な通信のみを最小限の明示的なallowルールとして登録できるように
+なることを目指します。あわせて、読み取り専用の既定ルールに対してOverride/
+Revertでどこまで変更できるかを把握し、`test security-policy-match`とTraffic
+logを用いて許可・拒否双方の挙動を確認できるようになることを目指します。
+
+## 用語解説
+
+- **interzone-default rule**: PAN-OSがあらかじめ用意する既定のSecurity Policy
+  ルール。ゾーンをまたぐ通信(interzone traffic)のうち、他のどのルールにも
+  一致しなかったものをすべて拒否する。ルールベース最下部に表示され、既定では
+  読み取り専用
+- **intrazone-default rule**: 同じくPAN-OSが用意する既定ルールで、同一ゾーン内
+  の通信(intrazone traffic)のうち他のルールに一致しなかったものをすべて許可
+  する。interzone-defaultと同様にルールベース最下部にあり既定では読み取り専用
+- **Security Policyルールベース(Policies > Security)**: 明示的に登録した
+  ルールと、既定ルール(interzone-default/intrazone-default)をあわせて保持
+  する一覧。上から順に評価され、最初に一致したルールが適用されると、それ以降
+  のルールは評価されない
+- **Override / Revert**: 読み取り専用の既定ルールに対して、タグ・アクション
+  (許可/拒否)・ログ設定・セキュリティプロファイルという一部の設定のみを
+  上書きできる操作がOverride。Overrideした内容を既定値へ戻す操作がRevert
+- **Service = application-default**: ルールが許可するアプリケーションを、
+  そのアプリケーション本来の標準ポートのみに限定する設定。ポート番号を個別に
+  指定する代わりに使う既定の推奨設定
+- **commit**: PAN-OSはcandidate configとrunning configを分離する二段階構成
+  モデルを採る。GUIで`Save`したルールもcommitするまで実機の動作には反映
+  されない
+- **test security-policy-match**: 指定した送信元/宛先/アプリケーションなどの
+  組み合わせが、実際にどのSecurity Policyルールに一致するかをCLIから確認
+  できるテストコマンド
+
+## シナリオ設定
+
+WAN側ゾーン`untrust`から、公開サーバー群を収容する`dmz`ゾーンへ許可する通信
+と、既定で拒否される`interzone-default`をあわせて次の{{ csv_rows | length }}件
+で管理します。`rule_no`の昇順がそのままルールベース内の並び順(評価順)に
+なります。
+
+| rule_no | name | from_zone | to_zone | source | destination | application | std_port | action | description |
+|---------|------|-----------|---------|--------|-------------|-------------|----------|--------|--------------|
+{% for r in csv_rows %}| {{ r["rule_no"] }} | {{ r["name"] }} | {{ r["from_zone"] }} | {{ r["to_zone"] }} | {{ r["source"] }} | {{ r["destination"] }} | {{ r["application"] }} | {{ r["std_port"] }} | {{ r["action"] }} | {{ r["description"] }} |
+{% endfor %}
+
+`untrust`は自組織のWAN(インターネット)側インターフェースが所属する前提の
+ゾーン名、`dmz`は公開サーバー群が所属する前提のゾーン名です。実際の環境に
+存在するゾーン名に読み替えてください。`interzone-default`の行(action が
+deny)は新規作成する対象ではなく、PAN-OSに既定で存在する読み取り専用ルール
+です。
+
+## 手順
+
+### 1. 現状のSecurity Policyルールベースを確認する(変更前の基準を取る)
+
+新しいルールを1件も登録する前に、`Policies > Security`を開き、既存の明示
+ルールと、ルールベース最下部に表示される`interzone-default`/
+`intrazone-default`の現在のAction・Log設定を確認します。既定ルールは
+Nameの列に継承アイコンが表示され、Name・Rule Type・Descriptionは編集
+できない読み取り専用であることをあわせて確認します。
+
+### 2. 最小許可ルールを登録する
+
+`Policies > Security`で`Add`を選び、シナリオ設定の`action`が`allow`の行を
+`rule_no`の昇順で登録します。各行につき、次のタブへ表の値をそのまま入力
+します。
+
+- General タブ: `Name`にルール名を入力し、`Rule Type`を選択する
+- Source タブ: `Source Zone`を設定し、`Source Address`を指定する(値が`any`
+  の場合は既定の`any`のままにする)
+- Destination タブ: `Destination Zone`を設定し、`Destination Address`を
+  指定する
+- Applications タブ: `Application`を追加する
+- Service/URL Category タブ: `Service`は`application-default`のままにする
+  (アプリケーション本来の標準ポートのみに限定するため)
+- Actions タブ: `Action`を`Allow`にする
+
+{% for r in csv_rows %}{% if r["action"] == "allow" %}- rule_no {{ r["rule_no"] }}({{ r["name"] }}): {{ r["from_zone"] }} -> {{ r["to_zone"] }} / {{ r["source"] }} -> {{ r["destination"] }} / application={{ r["application"] }} ({{ r["description"] }})
+{% endif %}{% endfor %}
+ログ設定は既定で`Log at Session End`が有効になっているため、この手順では
+変更しません。入力後は`OK`のみを行い、この時点ではまだ`Commit`は実行しません。
+
+### 3. interzone-defaultルールのログ記録をOverrideで有効化する(ルールは新規作成しない)
+
+`interzone-default`によって拒否された通信を可視化するため、ルールそのものは
+変更せず、ログ設定のみを有効化します。`Action`(deny)は変更しません。
+
+- `Policies > Security`で`interzone-default`の行を選択し、`Override`を
+  クリックする
+- `interzone-default`のルール名を選んで編集画面を開く
+- Actions タブで`Log at Session End`を選択し、`OK`をクリックする
+
+### 4. 変更を確定する(commit)
+
+`Commit`を実行し、候補設定(candidate config)を実行中の設定(running
+config)へ反映します。commitが完了するまで、手順2・3で入力した内容は実機の
+動作に反映されません。
+
+### 5. test security-policy-matchとTraffic logで許可・拒否を検証する
+
+CLIから`test security-policy-match`を実行し、シナリオ設定の`allow`行が
+意図したルールに一致することを確認します。
+
+```bash
+{% for r in csv_rows %}{% if r["action"] == "allow" %}test security-policy-match application {{ r["application"] }} source {{ r["test_src"] }} destination {{ r["destination"] }} destination-port {{ r["std_port"] }} protocol {{ r["proto_num"] }}
+{% endif %}{% endfor %}```
+
+出力に一致したルール名(`ALLOW-HTTPS-DMZ`など)とそのAction・from/to
+ゾーンが表示されるので、シナリオ設定の対応する行と一致するかを確認します。
+
+続けて、シナリオ設定に存在しない宛先宛の通信が`interzone-default`に一致し
+denyとなることも確認します。
+
+```bash
+test security-policy-match application web-browsing source 198.51.100.99 destination 203.0.113.99 destination-port 80 protocol 6
+```
+
+出力に一致したルール名として`interzone-default`が表示され、Actionが`deny`
+になっていることを確認します。
+
+最後に、`Monitor > Logs`を開いて`Traffic`ログ種別を選び、フィルタ欄に
+`( rule eq interzone-default )`と入力して`Apply Filter`を実行し、手順3で
+有効化したログが実際に記録されているかを確認します。
+
+## 動作確認
+
+- `test security-policy-match`で、シナリオ設定の`allow`行それぞれが対応する
+  ルール名(`ALLOW-HTTPS-DMZ`など)に一致し、Actionが`allow`であること
+- `test security-policy-match`で、シナリオ設定に存在しない宛先宛の通信が
+  `interzone-default`に一致し、Actionが`deny`であること
+- `Monitor > Logs`の`Traffic`ログで、フィルタ`( rule eq interzone-default )`
+  により拒否された通信が記録されていること
+- `Policies > Security`のName列で、`interzone-default`に上書き(override)
+  アイコンが表示されており、`Action`は`deny`のままであること
+- ルールベース上で、シナリオ設定の`allow`行が`interzone-default`/
+  `intrazone-default`より上位(評価順で先)に並んでいること
+
+## 注意事項
+
+- **interzone-defaultのActionを変更しないこと。** Overrideできるのはタグ・
+  アクション・ログ設定・セキュリティプロファイルのみですが、この手順では
+  ログ設定のみを変更します。誤ってActionを`allow`に変更すると、明示ルールで
+  カバーされていない全interzone通信を許可してしまう重大な設定ミスになります。
+- **interzone-default/intrazone-defaultはName・Rule Type・Descriptionを
+  変更できません。** これらは読み取り専用であり、新しいルールとして複製・
+  改名することもできません。Overrideした内容を取り消したい場合は、
+  `Policies > Security`で該当ルールを選び`Revert`をクリックし、確認ダイアログ
+  で`Yes`を選びます。
+- `Commit`を実行するまでcandidate configはrunning configに反映されません。
+  手順2・3で入力した内容は、手順4のcommitまで実機の動作に影響しません。
+- ルール評価は上から順・最初に一致した1件のみが適用されるため、明示的な
+  allowルールは`rule_no`の昇順、つまりルールベース内で`interzone-default`
+  より上位に登録してください(既定ルールは常に最下部に配置されるため、
+  明示ルール同士の並び順のみ注意すれば足ります)。
+- `untrust`/`dmz`はこの手順書内の仮称であり、実際の環境に存在するゾーン名に
+  読み替えてください。

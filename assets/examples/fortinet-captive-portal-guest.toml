@@ -1,0 +1,10 @@
+guest_interface = "vlan40_guest"
+guest_vlan_id = 40
+guest_user_group = "guest-portal-users"
+guest_addr_obj = "vlan40-guest-subnet"
+wan_interface = "wan1"
+allow_internet_policy_id = 501
+exempt_list_name = "guest-portal-dns-exempt"
+exempt_dns_addr_obj = "internal-dns-server"
+set_custom_redirect_url = true
+guest_redirect_url = "https://www.example.com/welcome"

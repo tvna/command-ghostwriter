@@ -1,0 +1,47 @@
+vp_profile_name: "BP-VulnProtect-Transition"
+as_profile_name: "BP-AntiSpyware-Transition"
+policy_rule_name: "trust-to-untrust-web"
+source_zone: "trust-lan"
+dest_zone: "untrust-wan"
+observation_days: 14
+business_critical_apps:
+  - erp-portal
+  - voip-sip-trunk
+rules:
+  - name: "vp-critical-high-general"
+    profile: vulnerability
+    severity: [critical, high]
+    business_critical: false
+    target_action: reset-both
+    note: "業務クリティカルでないアプリ向け。誤検知率が低いため観察後すぐ昇格対象"
+  - name: "vp-critical-high-biz-critical"
+    profile: vulnerability
+    severity: [critical, high]
+    business_critical: true
+    target_action: reset-both
+    note: "erp-portal等の業務クリティカルアプリ向け。可用性を優先し観察期間を必ず取る"
+  - name: "vp-medium-external"
+    profile: vulnerability
+    severity: [medium]
+    business_critical: false
+    target_action: drop
+    note: "外部公開向け通信。誤検知が出やすいため観察を経てから昇格"
+  - name: "as-medium-internal"
+    profile: anti-spyware
+    severity: [medium]
+    business_critical: false
+    target_action: alert
+    note: "内部トラフィック向け。中重要度は当面Alertのまま維持する方針"
+  - name: "as-critical-high"
+    profile: anti-spyware
+    severity: [critical, high]
+    business_critical: false
+    target_action: reset-both
+    note: "誤検知率が低いため観察後すぐ昇格対象"
+exceptions:
+  - threat_id: "91987"
+    threat_name: "SMB2 Compound Request Anomaly"
+    reason: "内部バックアップジョブの正規SMB2通信を誤検知"
+  - threat_id: "40033"
+    threat_name: "Suspicious DNS Query"
+    reason: "社内DNSフォワーダからの正規再帰問い合わせを誤検知"

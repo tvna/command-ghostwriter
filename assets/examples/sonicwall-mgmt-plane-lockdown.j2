@@ -1,0 +1,206 @@
+# SonicWall (SonicOS) 管理プレーンのアクセス制限強化
+
+`Network | System | Interfaces` で WAN インターフェース(`{{ wan_interface_name }}`)
+の管理サービス(HTTPS / Ping / SNMP / SSH for Management)を GUI/SSH管理に
+必要な最小限まで絞り込み、`OBJECT | Match Objects | Addresses` に登録した
+管理セグメント({{ mgmt_hosts | length }} 件)の Address Object を
+`{{ mgmt_group_name }}` としてグループ化したうえで、`POLICY | Rules and
+Policies > Access Rules` の `WAN to WAN` 管理系ルールの Source を `Any`
+からこのグループへ限定します。自己ロックアウトを防ぐため、現在の管理
+セッションの送信元が新しい管理セグメントに含まれることを事前に確認して
+から適用し、適用後は許可・拒否双方の挙動を検証します。
+
+## 目的
+
+WAN インターフェースの管理サービスを GUI/SSH に必要な最小限
+(HTTPS・SSH)まで絞り込みつつ、その送信元を管理セグメントの Address
+Object グループのみに限定することで、SonicOS 自身の管理プレーンを
+要塞化できるようになることを目指します。あわせて、Access Rule の
+Source を `Any` から限定する際に自己ロックアウトを起こさないための
+事前確認と段階的な検証の進め方を身につけます。
+
+## 用語解説
+
+- **Network | System | Interfaces**: インターフェースの設定を行う管理画面
+  ナビゲーションパス。対象インターフェースの `Configure` を開き、`General`
+  タブの `Management` 欄にある `HTTPS` / `Ping` / `SNMP` / `SSH` の
+  チェックボックスを設定して `OK` を押すと、そのインターフェース宛の
+  管理サービスの有効/無効を切り替えられる
+- **OBJECT | Match Objects | Addresses**: Address Object / Address Object
+  Group を作成・編集するための管理画面ナビゲーションパス。`Address
+  Objects` タブの `Add` から `Name` / `Zone Assignment` / `Type`
+  (`Host` / `Range` / `Network` / `FQDN` / `MAC Address` など) /
+  `IP Address` を設定して1件のオブジェクトを登録できる。`Type` が
+  `Network` の場合はネットワークアドレスと対応する `Netmask` を設定する
+- **Zone Assignment: WAN**: インターネット越しに到達する管理元アドレスの
+  Address Object に割り当てる Zone Assignment。一次情報では「Internet
+  Hosted Address」向けの Address Object を `zone type WAN` で作成すると
+  案内されている
+- **Address Groups タブ**: `OBJECT | Match Objects | Addresses` 内の
+  もう一方のタブ。`Add` から `Add Address Object Group` ダイアログを開き、
+  `Name` を入力したうえで一覧から Address Object を選んで右矢印で追加し、
+  `Save` すると複数の Address Object をまとめた Address Object Group に
+  なる
+- **POLICY | Rules and Policies > Access Rules(Matrix view / `WAN to
+  WAN` matrix button)**: Access Rule を Zone Matrix 形式で表示する管理
+  画面。`WAN to WAN` の矩形をクリックすると、WAN インターフェース自身
+  (SonicWall自身)宛のセッションを扱う Access Rule のテーブルが開く。
+  `Network | System | Interfaces` で管理サービスのチェックボックスを
+  有効化すると、対応する管理系の Access Rule がこのテーブルに現れる
+- **management rules(管理系Access Rule)の Source 限定**: `WAN to WAN`
+  テーブル上の管理系 Access Rule の `Configure` を開き、`Source` フィールド
+  を `Any` から作成済みの Address Object / Address Object Group に変更する
+  操作。一次情報では、この変更後の状態を「the management access rules
+  were applied with specific source addresses instead of selecting any」
+  と説明している
+
+## シナリオ設定
+
+今回、WAN インターフェース `{{ wan_interface_name }}`(Zone:
+`{{ wan_zone }}`)に対して維持・無効化する管理サービスは次のとおりです。
+
+| # | Management Service | 設定 | 理由 |
+|---|---------------------|------|------|
+{% for s in mgmt_services %}| {{ loop.index }} | {{ s["name"] }} | {% if s["keep_enabled"] %}有効化(チェックのまま維持){% else %}無効化(チェックを外す){% endif %} | {{ s["reason"] }} |
+{% endfor %}
+
+管理セグメントとして `{{ mgmt_group_name }}` グループに登録する Address
+Object は、次の {{ mgmt_hosts | length }} 件です(いずれも `Zone
+Assignment: WAN` で作成します)。
+
+| # | Name | Type | IP Address | Netmask | 用途 |
+|---|------|------|------------|---------|------|
+{% for h in mgmt_hosts %}| {{ loop.index }} | {{ h["name"] }} | {{ h["type"] }} | {{ h["ip_address"] }} | {% if h["type"] == "Network" %}{{ h["netmask"] }}{% else %}(Host固定 255.255.255.255){% endif %} | {{ h["description"] }} |
+{% endfor %}
+
+検証用に、この管理セグメントに含まれない送信元IPとして
+`{{ verification_outside_ip }}` を使用します。
+
+## 手順
+
+### 1. 現状の管理サービスとAccess Ruleを確認する(変更前の基準を取る)
+
+新しいAddress ObjectやAccess Rule変更を行う前に、現状を確認します。
+
+- `Network | System | Interfaces` を開き、`{{ wan_interface_name }}` の
+  `Configure` から `General` タブを開いて、`Management` 欄の `HTTPS` /
+  `Ping` / `SNMP` / `SSH` の現在のチェック状態を記録します。
+- `POLICY | Rules and Policies > Access Rules` を開き、view style を
+  `Matrix` にして `WAN to WAN` の矩形をクリックし、現在の管理系
+  Access Rule の `Source` が `Any` になっていることを確認します。
+
+### 2. 現在の管理セッションの送信元が新しい管理セグメントに含まれることを確認する
+
+**この確認を飛ばして手順6に進まないでください。** 今この手順書を実行して
+いる端末(ブラウザ/SSHクライアント)の送信元IPが、シナリオ設定の
+`{{ mgmt_hosts | length }}` 件のいずれか(またはそれを含むネットワーク)
+に一致することを確認します。一致しない場合は、先に自分の送信元を
+シナリオ設定に追加してから手順3以降に進んでください。一致を確認しない
+まま手順6でSourceを限定すると、自分自身が新しいAccess Ruleの対象外と
+なり、その場でロックアウトするおそれがあります。
+
+### 3. 管理セグメントのAddress Objectを作成する
+
+`OBJECT | Match Objects | Addresses` の `Address Objects` タブを開き、
+`Add` からシナリオ設定の各行につき次のフィールドを表の値のまま設定し、
+`Save` で保存します。
+
+- `Name`: `name`
+- `Zone Assignment`: `WAN`
+- `Type`: `type`(`Host` または `Network`)
+- `IP Address`: `ip_address`(`Network` の場合はネットワークアドレス)
+- `Netmask`: `Network` の場合のみ設定(`Host` は自動的に
+  `255.255.255.255` になる)
+
+{% for h in mgmt_hosts %}- {{ loop.index }}件目: `{{ h["name"] }}` / Zone Assignment=WAN / Type={{ h["type"] }} / IP Address={{ h["ip_address"] }}{% if h["type"] == "Network" %} / Netmask={{ h["netmask"] }}{% endif %}({{ h["description"] }})
+{% endfor %}
+
+### 4. Address Object Groupにまとめる
+
+同じ `OBJECT | Match Objects | Addresses` の `Address Groups` タブを
+開き、`Add` から `Add Address Object Group` ダイアログを開きます。
+`Name` に `{{ mgmt_group_name }}` と入力し、手順3で作成した
+{{ mgmt_hosts | length }} 件の Address Object を一覧から選んで右矢印で
+追加し、`Save` をクリックします。
+
+### 5. WAN インターフェースの管理サービスを必要最小限に絞る
+
+`Network | System | Interfaces` に戻り、`{{ wan_interface_name }}` の
+`Configure` を開いて `General` タブの `Management` 欄を、シナリオ設定
+のとおりに設定します。
+
+{% for s in mgmt_services %}- `{{ s["name"] }}`: {% if s["keep_enabled"] %}チェックを入れる(維持){% else %}チェックを外す(無効化){% endif %} — {{ s["reason"] }}
+{% endfor %}
+
+設定後、`OK` をクリックします。この時点ではまだ Source の限定を行って
+いないため、有効なままの `HTTPS` / `SSH` は引き続き `Any` から到達可能
+です。
+
+### 6. WAN to WANの管理系Access RuleのSourceを管理セグメントに限定する
+
+`POLICY | Rules and Policies > Access Rules` の `Matrix` 表示から
+`WAN to WAN` を開きます。手順5で有効なままにした管理サービスに対応する
+管理系Access Ruleについて、`Configure` を開き `Source` フィールドを
+`Any` から手順4で作成した `{{ mgmt_group_name }}` に変更し、`Save` で
+保存します。
+
+{% for s in mgmt_services %}{% if s["keep_enabled"] %}- {{ s["name"] }} 用の管理系Access Rule: Source を `Any` から `{{ mgmt_group_name }}` に変更
+{% endif %}{% endfor %}
+
+手順2で自分の送信元が `{{ mgmt_group_name }}` に含まれることを確認済み
+であっても、保存直後にセッションが切断される可能性があるため、
+**元のセッションはこの時点でまだ閉じないでください。**
+
+### 7. Matrixで設定内容を確認する
+
+`WAN to WAN` のテーブルに戻り、手順6で変更した各管理系Access Ruleの
+`Source` が `Any` ではなく `{{ mgmt_group_name }}` になっていることを
+確認します。
+
+### 8. 許可・拒否双方の挙動を検証する
+
+- 管理セグメントに含まれる送信元(手順3で登録したいずれかのAddress
+  Object)から、別セッション(別ブラウザタブや別端末)で GUI/SSH への
+  接続を試み、成功することを確認します。
+- 管理セグメントに含まれない送信元(`{{ verification_outside_ip }}` 等)
+  からの接続を試み、拒否またはタイムアウトすることを確認します。
+- 両方の確認が取れて初めて、手順1で記録した元のセッションを終了して
+  構いません。
+
+## 動作確認
+
+- `Network | System | Interfaces` の `{{ wan_interface_name }}` で、
+  `Management` 欄が手順5のとおり(HTTPS/SSHのみ有効、Ping/SNMPは無効)
+  になっていること
+- `OBJECT | Match Objects | Addresses` に、`{{ mgmt_group_name }}` の
+  Address Object Groupと、それに含まれる {{ mgmt_hosts | length }} 件の
+  Address Objectが存在すること
+- `POLICY | Rules and Policies > Access Rules` の `WAN to WAN` テーブル
+  で、有効な管理サービスに対応する各Access Ruleの `Source` が
+  `{{ mgmt_group_name }}` になっていること(`Any` のままではないこと)
+- 管理セグメントに含まれる送信元からのGUI/SSH接続が成功すること
+- 管理セグメントに含まれない送信元(`{{ verification_outside_ip }}` 等)
+  からの接続が拒否またはタイムアウトすること
+
+## 注意事項
+
+- **手順2の事前確認を必ず行うこと。** 自分の現在の送信元が管理セグメント
+  に含まれることを確認しないまま手順6でSourceを限定すると、その場で
+  自分自身がロックアウトするおそれがあります。
+- **手順6の保存後、元のセッションをすぐに閉じないこと。** 手順8で
+  許可・拒否双方の挙動を確認できるまで、元のセッションを復旧手段として
+  残してください。
+- 本手順書は一次情報(SonicOS技術ドキュメントの当該ナレッジベース記事)
+  で確認できたSonicOS 7.X系のGUI操作のみを扱います。SonicOS 6.5以前は
+  メニュー名称が異なり(例: `Manage | System Setup | Network |
+  Interfaces`)、一次情報にも別セクションとして案内されているため、
+  該当バージョンを使用している場合はそちらを参照してください。
+- SonicOS CLIやAPIによる同等の投入方法は本ページでは確認できなかった
+  ため記載していません。CLIで投入する場合は、別途SonicOSのCLIリファ
+  レンスで構文を確認してから実施してください。
+- ロックアウトが発生した場合の復旧方法(コンソール接続等)は本手順書の
+  一次情報には記載がありません。適用前に、機器のハードウェアガイドや
+  ベンダーサポート経由で復旧手順を別途確認しておいてください。
+- 管理者パスワードやAPIキーなどの認証情報は、本手順書やログに平文で
+  残さないでください。記録が必要な場合は `********` のようにマスクし、
+  秘密管理ツール等で別途安全に保管してください。

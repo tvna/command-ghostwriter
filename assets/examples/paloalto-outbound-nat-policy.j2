@@ -1,0 +1,245 @@
+# Palo Alto Networks(PAN-OS)の固定送信元NAT追加(既存アウトバウンドNATとの共存)
+
+`Policies > NAT`に、LANホスト`{{ fixed_source_host_ip }}`専用のSource NATルールを1件
+追加し、Translation Type「Static IP」で送信元アドレスを常に`{{ fixed_translated_ip }}`
+へ固定します。既存の一般アウトバウンドNATルール`{{ existing_general_nat_rule_name }}`
+(Translation Type「Dynamic IP and Port」)はそのまま残し、内容には一切触れません。
+NATルールは登録順に上から評価され最初に一致したルールで処理が終わる(先勝ち)ため、
+新しい固定NATルールは一般ルールより先に評価される位置へ配置します。commit後、
+Device > TroubleshootingのNAT Policy Matchツールと実際の通信の両方で、対象ホストと
+他のLANホスト(`{{ other_lan_host_ip }}`)それぞれの変換結果が意図どおりであることを
+検証します。
+
+## 目的
+
+既存の一般アウトバウンドNAT(Dynamic IP and Port)を維持したまま、特定の送信元ホスト
+だけをStatic IPによる固定送信元NATへ振り分けられるようになることを目指します。あわせて、
+NATルールが上から順に評価され最初の一致で処理が終わる(先勝ち)という評価順序の性質を
+理解し、より限定的な条件のルールを一般ルールより先に配置しないと固定NATが機能しない
+ことを踏まえた安全な追加手順を身につけます。最後に、NAT Policy Matchツールと実通信の
+両方を使って、対象ホストと対象外ホストの変換結果を区別して検証できるようになることも
+目指します。
+
+## 用語解説
+
+- **Source NAT (送信元NAT)**: パケットの送信元IPアドレスを変換するPAN-OSの仕組み。
+  `Policies > NAT`にルールを登録して構成する
+- **NATポリシールールの3タブ**: `Policies > NAT`でルールを作成・編集する際の入力タブ。
+  `General`にはルール名とNAT Type、`Original Packet`には変換前(pre-NAT)のパケットの
+  一致条件(Source Zone / Destination Zone / Source Address等)、`Translated Packet`
+  には変換後の変換内容を設定する
+- **Translation Type = Dynamic IP and Port (DIPP)**: 「Allows multiple hosts to have
+  their source IP addresses translated to the same public IP address with different
+  port numbers」と説明される変換方式。複数ホストを同一の変換先アドレスへ、ポート番号を
+  変えながら多対一で変換する、一般的なアウトバウンドNATの方式
+- **Translation Type = Dynamic IP**: 「Allows the one-to-one, dynamic translation of a
+  source IP address only (no port number) to the next available address in the NAT
+  address pool」と説明される変換方式。ポート番号は変換せず、アドレスプール内の空き
+  アドレスへ一対一で動的に割り当てる
+- **Translation Type = Static IP**: 「Allows the one-to-one, static translation of a
+  source IP address, but leaves the source port unchanged」と説明される変換方式。
+  指定した1個の送信元アドレスを、常に同じ1個の変換先アドレスへ静的に一対一変換する。
+  本手順ではこの方式を、特定ホストの送信元アドレス固定に使う
+- **Address Type = Translated Address / Interface Address**: `Translated Packet`タブの
+  Source Translationで、変換先アドレスの指定方法を選ぶ項目。`Translated Address`は
+  あらかじめ作成したアドレスオブジェクトを選択する方式、`Interface Address`はNATルール
+  適用インターフェース自身のアドレスを使う方式
+- **Bi-directional**: Static IPのSource Translationにある設定項目。有効にすると、変換先
+  アドレス宛の着信(外部発内部行き)についても同じルールで逆方向の変換が行われるように
+  なる。「allowing your private-addressed public-facing server to both send and receive
+  packets using its external address」と説明される、外部公開サーバー向けの機能であり、
+  本手順の送信元固定(アウトバウンド専用)の用途では有効にしない
+- **NATルールの評価順序(先勝ち)**: 「The firewall evaluates the rules in order from
+  the top down. Once a packet matches the criteria of a single NAT rule, the packet is
+  not subjected to additional NAT rules」と説明される。「your list of NAT rules should
+  be in order from most specific to least specific」ともあり、条件が限定的なルールほど
+  上位に置く必要がある
+- **NAT Policy Match(Device > Troubleshooting)**: 指定した送信元/宛先アドレス・ゾーン・
+  ポート・プロトコルの組み合わせが、実際にどのNATルールに一致するかをGUIから確認できる
+  診断ツール。`Select Test`で`NAT Policy Match`を選び、`From`/`To`/`Source`/
+  `Destination`/`Source Port`/`Destination Port`/`Protocol`/`To Interface`を入力して
+  実行する
+- **commit**: PAN-OSはcandidate configとrunning configを分離する二段階構成モデルを採る。
+  GUIで`OK`を押しただけの設定もcommitするまで実機の動作には反映されない
+
+## シナリオ設定
+
+今回、既存の一般アウトバウンドNATに加えて固定送信元NATを追加する対象と、比較用の
+対象外ホストは次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| LAN側ゾーン(lan_zone) | `{{ lan_zone }}` |
+| WAN側ゾーン(wan_zone) | `{{ wan_zone }}` |
+| 既存の一般アウトバウンドNATルール名(existing_general_nat_rule_name) | `{{ existing_general_nat_rule_name }}` |
+| 固定送信元にする対象ホストのIPアドレス(fixed_source_host_ip) | `{{ fixed_source_host_ip }}` |
+| 対象ホスト用アドレスオブジェクト名(fixed_source_addr_obj) | `{{ fixed_source_addr_obj }}` |
+| 固定後の送信元(変換先)IPアドレス(fixed_translated_ip) | `{{ fixed_translated_ip }}` |
+| 変換先アドレス用アドレスオブジェクト名(fixed_translated_addr_obj) | `{{ fixed_translated_addr_obj }}` |
+| 新規Static IPルール名(static_nat_rule_name) | `{{ static_nat_rule_name }}` |
+| 比較用の対象外LANホストIPアドレス(other_lan_host_ip) | `{{ other_lan_host_ip }}` |
+| 検証用の外部テスト宛先(external_test_destination) | `{{ external_test_destination }}` |
+| 検証用の宛先ポート(external_test_port) | {{ external_test_port }} |
+
+`{{ existing_general_nat_rule_name }}`は既に稼働している前提の既存ルールであり、本手順
+では作成しません。`{{ lan_zone }}`/`{{ wan_zone }}`はこの手順書内の仮称であり、実際の
+環境に存在するゾーン名に読み替えてください。
+
+## 手順
+
+### 1. 現状を確認する(変更前の基準を取る)
+
+新しいオブジェクト・ルールを1件も登録する前に、現状を確認します。
+
+- `Objects > Addresses`を開き、`{{ fixed_source_addr_obj }}`・
+  `{{ fixed_translated_addr_obj }}`と同名のアドレスオブジェクトが存在しないことを
+  確認します。
+- `Policies > NAT`を開き、`{{ existing_general_nat_rule_name }}`のTranslation Type
+  が`Dynamic IP and Port`のままであること、Source Zoneが`{{ lan_zone }}`、
+  Destination Zoneが`{{ wan_zone }}`であることを確認します。この内容は本手順では
+  変更しません。
+- `Device > Troubleshooting`で`Select Test`から`NAT Policy Match`を選び、
+  From=`{{ lan_zone }}` / To=`{{ wan_zone }}` / Source=`{{ fixed_source_host_ip }}` /
+  Destination=`{{ external_test_destination }}` / Destination Port=
+  `{{ external_test_port }}` / Protocol=6 で実行し、現時点では
+  `{{ existing_general_nat_rule_name }}`が一致することを確認しておきます(変更後に
+  この結果が`{{ static_nat_rule_name }}`へ変わることを、後で比較する基準にします)。
+
+### 2. アドレスオブジェクトを作成する(Objects > Addresses)
+
+`Objects > Addresses > Add`から、次の2件を作成します。`Type`はいずれも
+`IP Netmask`を選択します。
+
+- Name={{ fixed_source_addr_obj }} / Type=IP Netmask / value={{ fixed_source_host_ip }}/32(固定送信元にする対象ホスト)
+- Name={{ fixed_translated_addr_obj }} / Type=IP Netmask / value={{ fixed_translated_ip }}/32(固定後の変換先アドレス)
+
+入力ごとに`OK`を押して保存します。
+
+### 3. 固定送信元NATルールを作成する(Policies > NAT)
+
+`Policies > NAT`で`Add`をクリックし、次の3タブを設定します。
+
+- General タブ: `Name`に`{{ static_nat_rule_name }}`を入力し、`NAT Type`は
+  `ipv4`のままにします。
+- Original Packet タブ: `Source Zone`に`{{ lan_zone }}`を追加し、
+  `Destination Zone`に`{{ wan_zone }}`を選択します。`Source Address`に
+  `{{ fixed_source_addr_obj }}`を追加します(対象ホストのみに一致範囲を限定する
+  ためで、既存の`{{ existing_general_nat_rule_name }}`のようにSource Addressを
+  `any`のままにはしません)。`Destination Address`・`Destination Interface`
+  ・`Service`は既定の`any`のままにします。
+- Translated Packet タブ: `Translation Type`を`Static IP`にし、
+  `Translated Address`に`{{ fixed_translated_addr_obj }}`を選択します。
+  `Bi-directional`は選択せず既定(無効)のままにします(本手順は送信元固定の
+  アウトバウンド専用であり、外部からの着信を同じルールで折り返す必要はないため)。
+
+入力後は`OK`のみを行い、この時点ではまだ`Commit`は実行しません。
+
+### 4. ルールの並び順を一般ルールより上に配置する
+
+`Policies > NAT`の一覧で、`{{ static_nat_rule_name }}`が
+`{{ existing_general_nat_rule_name }}`より上(先に評価される位置)になるよう
+並び順を変更します。NATルールは上から順に評価され最初に一致したルールで処理が
+終わるため、`{{ existing_general_nat_rule_name }}`はSource Addressを`any`のまま
+`{{ lan_zone }}`→`{{ wan_zone }}`のすべての通信に一致します。`{{ static_nat_rule_name }}`
+を下(後)に置いたままだと、`{{ fixed_source_host_ip }}`からの通信も先に
+`{{ existing_general_nat_rule_name }}`に一致してしまい、`{{ static_nat_rule_name }}`
+は一度も評価されません。
+
+### 5. 変更を確定する(commit)
+
+`Commit`を実行し、候補設定(candidate config)を実行中の設定(running config)へ
+反映します。commitが完了するまで、手順2〜4で入力した内容は実機の動作に反映されません。
+
+### 6. NAT Policy Matchで一致ルールを検証する
+
+commit完了後、`Device > Troubleshooting`を開き、`Select Test`で`NAT Policy Match`
+を選び、次の2パターンをそれぞれ実行します。
+
+対象ホスト(固定NAT対象):
+
+- From: {{ lan_zone }}
+- To: {{ wan_zone }}
+- Source: {{ fixed_source_host_ip }}
+- Destination: {{ external_test_destination }}
+- Destination Port: {{ external_test_port }}
+- Protocol: 6
+
+`Results`に`{{ static_nat_rule_name }}`が一致ルールとして表示されることを確認します。
+
+対象外ホスト(比較用):
+
+- From: {{ lan_zone }}
+- To: {{ wan_zone }}
+- Source: {{ other_lan_host_ip }}
+- Destination: {{ external_test_destination }}
+- Destination Port: {{ external_test_port }}
+- Protocol: 6
+
+こちらは引き続き`{{ existing_general_nat_rule_name }}`が一致することを確認します。
+`{{ static_nat_rule_name }}`が一致した場合は、手順3の`Source Address`指定
+(`{{ fixed_source_addr_obj }}`)が正しく`{{ fixed_source_host_ip }}`だけに限定
+されているかを見直してください。
+
+### 7. 実際の通信で変換後の送信元アドレスを検証する
+
+`{{ external_test_destination }}`側で、到着パケットの送信元アドレスを観察します。
+
+```bash
+# {{ external_test_destination }} 側で事前に実行しておく
+tcpdump -ni any dst port {{ external_test_port }} and host {{ fixed_translated_ip }}
+```
+
+続けて、LAN内の`{{ fixed_source_host_ip }}`から`{{ external_test_destination }}`宛に
+通信します。
+
+```bash
+# {{ fixed_source_host_ip }} 側で実行する
+curl -k -m 5 -o /dev/null -w "HTTP %{http_code}\n" https://{{ external_test_destination }}:{{ external_test_port }}/
+```
+
+`{{ external_test_destination }}`側のキャプチャに、送信元アドレスが
+`{{ fixed_translated_ip }}`のパケットが記録されることを確認します。同じ手順を
+`{{ other_lan_host_ip }}`からも実行し、そちらの送信元アドレスは
+`{{ fixed_translated_ip }}`にはならず、`{{ existing_general_nat_rule_name }}`側の
+変換結果(DIPPの変換先アドレス)になることを確認してください。
+
+## 動作確認
+
+- `Objects > Addresses`に`{{ fixed_source_addr_obj }}`・`{{ fixed_translated_addr_obj }}`
+  がそれぞれ意図した値で登録されていること
+- `Policies > NAT`の一覧で、`{{ static_nat_rule_name }}`が
+  `{{ existing_general_nat_rule_name }}`より上(先に評価される位置)に並んでいること
+- NAT Policy Matchで、送信元`{{ fixed_source_host_ip }}`からの通信が
+  `{{ static_nat_rule_name }}`に一致すること
+- NAT Policy Matchで、送信元`{{ other_lan_host_ip }}`からの通信が引き続き
+  `{{ existing_general_nat_rule_name }}`に一致すること
+- `{{ external_test_destination }}`での実際のキャプチャで、
+  `{{ fixed_source_host_ip }}`発の通信の送信元アドレスが`{{ fixed_translated_ip }}`に
+  変換されていること
+- 同じキャプチャで、`{{ other_lan_host_ip }}`発の通信の送信元アドレスが
+  `{{ fixed_translated_ip }}`になっていない(既存の一般DIPP変換のままである)こと
+- `{{ existing_general_nat_rule_name }}`のSource Zone / Destination Zone /
+  Translation Typeが、手順1で確認した内容から変更されていないこと
+
+## 注意事項
+
+- **`{{ existing_general_nat_rule_name }}`の設定内容は変更しないこと。** 本手順は
+  新しいルールを1件追加するだけであり、既存の一般アウトバウンドNATルールの
+  Source Zone / Destination Zone / Translation Type等には一切触れません。
+- **ルールの並び順を厳守すること。** NATルールは先勝ちで評価されるため、
+  `{{ static_nat_rule_name }}`を`{{ existing_general_nat_rule_name }}`より下に
+  置くと、`{{ fixed_source_host_ip }}`からの通信も先に一般ルールへ一致してしまい、
+  固定NATが機能しません。手順4の並び替えを必ず行ってください。
+- **`Bi-directional`を有効にしないこと。** 有効にすると、`{{ fixed_translated_ip }}`
+  宛の外部発の着信も同じルールで内部の`{{ fixed_source_host_ip }}`へ折り返される
+  ようになり、意図しない着信経路を作ってしまうおそれがあります。本手順の用途は
+  アウトバウンド専用の送信元固定であり、外部からの着信を許可する要件ではありません。
+- **`Original Packet`タブの`Source Address`を`{{ fixed_source_addr_obj }}`に限定
+  すること。** `any`のままにすると、`{{ static_nat_rule_name }}`の並び順が
+  `{{ existing_general_nat_rule_name }}`より上にある場合、`{{ lan_zone }}`から
+  `{{ wan_zone }}`へ出るすべての通信が固定NATへ吸収されてしまいます。
+- `Commit`を実行するまでcandidate configはrunning configに反映されません。
+  手順2〜4で入力した内容は、手順5のcommitまで実機の動作に影響しません。
+- CLI/GUIへのログインに使う管理者パスワードやAPIキーは、本手順書やチケット、
+  ログに平文で残さないでください。記録が必要な場合は`********`のようにマスクし、
+  秘密管理ツール等で別途安全に保管してください。

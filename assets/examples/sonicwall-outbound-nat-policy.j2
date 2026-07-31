@@ -1,0 +1,202 @@
+# SonicWall (SonicOS) 特定送信元向け固定アウトバウンドNATポリシー追加構成
+
+SonicOS の `POLICY | Rules and Policies > NAT Rules` に、既定で自動生成される
+Many-to-One NAT Policy(LAN/DMZ/WLANなど複数の内部送信元をWANインターフェース
+の共有IPアドレス`{{ default_wan_ip }}`へまとめて変換する)を変更・削除せずに
+残したまま、特定の内部送信元`{{ source_host_name }}`(`{{ source_host_ip }}`)
+だけを固定の変換後IPアドレス`{{ fixed_translated_ip }}`へ変換するカスタム
+NAT Policy(One-to-One static outbound NAT)を追加します。Address Objectを
+事前に用意し、追加したNAT Policyが対象ホストに対して既定のMany-to-One NAT
+Policyより先に評価される位置にあることを確認したうえで、Connections Monitor
+のログで実際の変換結果を検証します。
+
+## 目的
+
+SonicOSが既定で自動生成するMany-to-One NAT Policyを変更・削除せずに残した
+まま、特定の内部送信元(`{{ source_host_name }}`)だけを対象とした固定送信元
+(One-to-One static outbound NAT)のカスタムNAT Policyを追加できるように
+なることを目指します。Address Objectを使ってOriginal Source/Translated
+Sourceを名前で指定し、追加したポリシーが対象ホストに対して既定のMany-to-One
+NAT Policyより優先して評価される状態を作り、Connections Monitorのログで
+実際の変換結果を確認できるようになることも目指します。
+
+OPNsenseの各インターフェースに対するアウトバウンドNATモード切替
+(Automatic/Hybrid/Manual)とは異なり、SonicWall (SonicOS)には同名の機構は
+存在しません。SonicOSでは既定の自動生成Many-to-One NAT PolicyへのカスタムNAT
+Policy追加(特定送信元の固定変換)によって、既定の自動アウトバウンドNATを
+維持したまま特定の送信元だけ固定IPへ変換するという同じ運用課題を解決します。
+
+## 用語解説
+
+- **POLICY | Rules and Policies > NAT Rules**: NAT Policy を作成・編集する
+  ための管理画面ナビゲーションパス。このページの`+Add`から`Adding NAT Rule`
+  ダイアログを開いて作成する
+- **Many-to-One NAT Policy**: 複数の内部送信元(Many)を1つの変換後アドレス
+  (One)へまとめて変換するタイプのNAT Policy。SonicOSでは既定でLAN/DMZ/WLAN
+  の各ゾーンからWANへの通信に対してこの種類のNAT Policyが自動生成される。
+  既定ポリシーのOriginal Source/Translated Sourceに設定されている具体的な
+  オブジェクト名は、SonicOSのバージョンや初期設定によって異なる場合がある
+  ため、適用前に自環境のNAT Rules一覧で実際の値を確認すること
+- **One-to-One (static) outbound NAT**: 1つの内部送信元(One)を1つの固定
+  変換後アドレス(One)へ変換するタイプのNAT Policy。Many-to-Oneと異なり、
+  対象送信元は他のホストと変換後アドレスを共有しない
+- **Adding NAT Rule ダイアログの主なフィールド**: `Original Source`(変換前
+  の送信元)/`Translated Source`(変換後の送信元)/`Original Destination`
+  (変換前の宛先。今回は`Any`のまま変更しない)/`Translated Destination`
+  (変換後の宛先。今回は`Original`のまま=宛先は変換しない)/`Original
+  Service`(変換前のサービス。今回は`Any`のまま変更しない)/`Translated
+  Service`(変換後のサービス。今回は`Original`のまま=ポートは変換しない)/
+  `Inbound Interface`/`Outbound Interface`(変換後のパケットが出ていく
+  インターフェース)/`Comment`(説明文)
+- **MATCH OBJECTS | Addresses**: Address Object を作成・管理するSonicOSの
+  画面。`Add`ダイアログでは`Name`・`Zone Assignment`・`Type`(`Host`の場合
+  は`IP Address`)を入力する
+- **Investigate | Logs | Connection Logs (Connections Monitor)**: 現在の
+  接続状態を送信元/宛先/適用されたNAT Policyなどで確認できるSonicOSの画面
+
+## シナリオ設定
+
+今回、既定のMany-to-One NAT Policyに加えて追加する固定送信元アウトバウンド
+NATの設定値は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| WAN側インターフェース(wan_interface) | `{{ wan_interface }}` |
+| WANゾーン(wan_zone) | `{{ wan_zone }}` |
+| LANゾーン(lan_zone) | `{{ lan_zone }}` |
+| 既定のMany-to-One NAT Policyによる共有変換後IP(default_wan_ip) | `{{ default_wan_ip }}` |
+| 対象送信元ホスト名(source_host_name) | {{ source_host_name }} |
+| 対象送信元IPアドレス(source_host_ip) | `{{ source_host_ip }}` |
+| 送信元用Address Object名(source_address_object) | `{{ source_address_object }}` |
+| 固定変換後IPアドレス(fixed_translated_ip) | `{{ fixed_translated_ip }}` |
+| 固定変換後IP用Address Object名(fixed_translated_object) | `{{ fixed_translated_object }}` |
+| NAT Policy名(nat_policy_name) | `{{ nat_policy_name }}` |
+| NAT Policyコメント(nat_policy_comment) | {{ nat_policy_comment }} |
+| 接続確認先パートナーサービス(partner_service_host) | `{{ partner_service_host }}` |
+
+`{{ source_host_name }}`が`{{ partner_service_host }}`へ接続する際、パートナー
+側のIP許可リストに登録済みの`{{ fixed_translated_ip }}`から常に発信される
+ようにする必要があります。それ以外のLAN内端末は、これまでどおり既定の
+Many-to-One NAT Policyにより`{{ default_wan_ip }}`を共有した変換を受け続け、
+今回の変更による影響を受けません。
+
+## 手順
+
+### 1. 現状を確認する(前提確認)
+
+新しいオブジェクトやポリシーを1件も追加する前に、現状を確認します。
+
+- `POLICY | Rules and Policies > NAT Rules`を開き、`{{ nat_policy_name }}`と
+  同名のNAT Policyが存在しないことを確認します。あわせて、既存のNAT Policy
+  一覧の件数と並び順を記録し(手順4で並び順を調整した後の比較に使います)、
+  LANゾーンからWANゾーンへの既定のMany-to-One NAT Policyが存在すること、
+  およびその`Translated Source`が`{{ default_wan_ip }}`を指していることを
+  確認します。
+- `MATCH OBJECTS | Addresses`を開き、`{{ source_address_object }}`/
+  `{{ fixed_translated_object }}`と同名のAddress Objectが存在しないことを
+  確認します。既に同名が存在すると、新規作成のつもりが既存オブジェクトの
+  編集になってしまいます。
+
+### 2. Address Objectを作成する(送信元ホスト/固定変換後IP)
+
+`MATCH OBJECTS | Addresses`の`Address Objects`タブで`Add`アイコンをクリック
+し、`Name`・`Zone Assignment`・`Type`(`Host`)・`IP Address`を入力して
+`Save`をクリックします。
+
+- Name: `{{ source_address_object }}` / Zone Assignment: `{{ lan_zone }}` /
+  Type: `Host` / IP Address: `{{ source_host_ip }}`
+- Name: `{{ fixed_translated_object }}` / Zone Assignment: `{{ wan_zone }}` /
+  Type: `Host` / IP Address: `{{ fixed_translated_ip }}`
+
+### 3. カスタムNAT Policy(固定送信元アウトバウンドNAT)を作成する
+
+`POLICY | Rules and Policies > NAT Rules`を開き、テーブル下部の`+Add`を
+クリックして`Adding NAT Rule`ダイアログを開きます。次の値を入力して
+`Save`をクリックします。宛先・サービスは変換せず送信元のみを固定するため、
+`Original Destination`/`Translated Destination`/`Original Service`/
+`Translated Service`はいずれも既定値のまま変更しません。
+
+- Name: `{{ nat_policy_name }}`
+- Original Source: `{{ source_address_object }}`
+- Translated Source: `{{ fixed_translated_object }}`
+- Original Destination: `Any`
+- Translated Destination: `Original`(宛先アドレスは変換しません)
+- Original Service: `Any`
+- Translated Service: `Original`(ポートは変換しません)
+- Inbound Interface: `Any`
+- Outbound Interface: `{{ wan_interface }}`
+- Comment: `{{ nat_policy_comment }}`
+
+### 4. NAT Policyの並び順を確認し、既定のMany-to-One NAT Policyより前に来るよう調整する
+
+SonicOSはNAT Rules一覧の並び順に従って上から順にポリシーを評価し、最初に
+一致したポリシーを適用します。`{{ source_address_object }}`からの通信に
+対して、手順3で作成した`{{ nat_policy_name }}`より先に既定のMany-to-One
+NAT Policyが評価されてしまうと、意図した固定変換が適用されません。
+
+`POLICY | Rules and Policies > NAT Rules`の一覧で、`{{ nat_policy_name }}`
+が対象ゾーンの既定のMany-to-One NAT Policyより前(上位)に位置していること
+を確認してください。並び順の変更方法(ドラッグ操作の可否など)はSonicOSの
+バージョンにより異なる場合があるため、適用前に自環境のGUIで直接確認し、
+必要であれば並び順を調整したうえで保存してください。
+
+### 5. 対象ホストから通信を発生させ、変換結果を確認する
+
+`{{ source_host_ip }}`(`{{ source_host_name }}`)から`{{ partner_service_host }}`
+宛に通信を発生させます。
+
+```bash
+curl -s -o /dev/null -w "HTTP %{http_code}\n" https://{{ partner_service_host }}/
+```
+
+通信後、SonicWallの`Investigate | Logs | Connection Logs`(Connections
+Monitor)を開き、Source欄を`{{ source_host_ip }}`で絞り込んで、該当の接続に
+適用されたNAT Policyが`{{ nat_policy_name }}`であること、Translated Source
+(変換後の送信元)が`{{ fixed_translated_ip }}`になっていることを確認します。
+
+## 動作確認
+
+- `POLICY | Rules and Policies > NAT Rules`の一覧に`{{ nat_policy_name }}`
+  が表示され、`Original Source`/`Translated Source`/`Original Destination`/
+  `Translated Destination`/`Original Service`/`Translated Service`の設定値
+  がシナリオ設定と一致していること
+- `{{ nat_policy_name }}`が、`{{ source_address_object }}`に対して既定の
+  Many-to-One NAT Policyより先に評価される位置にあること
+- Connections Monitorで、`{{ source_host_ip }}`からの新規接続に
+  `{{ nat_policy_name }}`が適用され、Translated Sourceが
+  `{{ fixed_translated_ip }}`になっていること
+- `{{ source_host_ip }}`以外のLAN内端末からの通信は、引き続き既定の
+  Many-to-One NAT Policyにより`{{ default_wan_ip }}`へ変換されること
+  (今回の変更による影響を受けないこと)
+- 手順1で記録した既存のNAT Policyの件数・並び順が、`{{ nat_policy_name }}`
+  の追加以外では意図せず変更されていないこと
+
+## 注意事項
+
+- **既定のMany-to-One NAT Policyを削除・無効化しないこと。** このポリシー
+  は`{{ source_host_ip }}`以外の全LAN内端末のインターネット接続に使われて
+  います。今回追加する`{{ nat_policy_name }}`はあくまで特定送信元向けの
+  例外であり、既定ポリシーを置き換えるものではありません。
+- **並び順を必ず確認すること。** `{{ nat_policy_name }}`が既定のMany-to-One
+  NAT Policyより後ろ(下位)に位置したままだと、`{{ source_host_ip }}`から
+  の通信も既定ポリシーに先に一致し、固定変換が適用されません。手順4の確認
+  を必ず行ってください。
+- **名前の重複に注意すること。** `Add`で指定する`Name`が既存のAddress
+  Object/NAT Policyと重複していると、新規作成ではなく既存オブジェクトの
+  編集を意図せず行ってしまう可能性があります。手順1の事前確認を必ず行って
+  ください。
+- 本手順書の`Adding NAT Rule`ダイアログの項目名は、同じ`NAT_Rules`ドキュ
+  メント配下の別ページ(Inbound NAT Policy作成例)で確認済みの項目名を踏襲
+  しています。Many-to-One NAT Policy作成例のページ固有の画面表記(既定
+  ポリシーのOriginal Source/Translated Sourceの初期値、優先度の並べ替え
+  操作の詳細等)は一次情報のこのページ単体では確認できなかった項目がある
+  ため、適用前に自環境のGUIで実際の表記・挙動を確認してください。推測で
+  断定した記載はしていません。
+- CLI構文はこの手順書に含めていません。SonicOSにもCLIは存在しますが、NAT
+  Policy作成の`set`パラメータ相当の詳細な構文を一次情報で確認できなかった
+  ため、推測で記載していません。CLIで投入する場合は、対象のSonicWall上で
+  オンラインヘルプやコマンド補完を用いて、バージョンに応じた正確な構文を
+  その場で確認してから実行してください。
+- 管理者パスワードやAPIキーなど認証情報は、本手順書やチケット、ログに平文
+  で残さないでください。記録が必要な場合は`********`のようにマスクし、
+  秘密管理ツール等で別途安全に保管してください。

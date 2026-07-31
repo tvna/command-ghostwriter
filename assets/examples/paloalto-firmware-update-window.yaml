@@ -1,0 +1,19 @@
+maintenance_window: "2026-08-15 01:00-04:00 JST"
+current_version: "PAN-OS 10.2.9-h1"
+target_version: "PAN-OS 10.2.10"
+min_content_version: "8890-8695"
+ha_pair: true
+rollback_criteria: "アップグレード後15分以内にHA状態がsynchronizedに復帰しない、または新規セッションの確立が回復しない場合は切り戻す"
+
+notify_channels:
+  - "#network-maintenance (Slack)"
+  - "運用チームMLへの事前告知メール"
+  - "変更管理チケットへのクローズ報告"
+
+firewalls:
+  - role: "Active"
+    hostname: pa-edge01
+    mgmt_ip: 10.30.1.11
+  - role: "Passive"
+    hostname: pa-edge02
+    mgmt_ip: 10.30.1.12

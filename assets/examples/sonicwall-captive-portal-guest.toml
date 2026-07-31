@@ -1,0 +1,12 @@
+guest_zone_name = "GUEST"
+max_guests = 40
+deny_target_objects = ["LAN-INTERNAL-NET", "DMZ-SERVERS-NET", "MGMT-NET"]
+guest_profile_name = "GUEST-DAILY"
+username_prefix = "guest"
+account_lifetime_desc = "24時間"
+session_lifetime_desc = "8時間"
+idle_timeout_desc = "30分"
+initial_guest_count = 20
+guest_account_comment = "2026-08 来訪者向け一時アカウント"
+test_guest_name = "guest-verify01"
+internal_probe_ip = "10.20.30.10"

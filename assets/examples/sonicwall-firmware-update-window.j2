@@ -1,0 +1,196 @@
+# SonicWallファームウェア更新のメンテナンス窓運用
+
+SonicWall公式ナレッジベース「How can I upgrade SonicOS Firmware?」
+({{ reference_url }})に沿って、{{ device_name }}({{ model }})を
+{{ current_firmware }} から {{ target_firmware }} へアップグレードします。
+事前のアップグレードパス確認・関係者告知から、メンテナンス窓
+({{ maintenance_window_start }} 〜 {{ maintenance_window_end }})内での
+`DEVICE | Settings > Firmware and Backups` でのバックアップ取得・
+`Upload New Firmware` によるファームウェアアップロード・
+`Boot Uploaded Firmware With Current Configuration` による現行設定を保持
+したブート、ロールバック判断期限({{ rollback_deadline }})までの動作検証、
+事後の記録・継続監視までを一連の手順として整理します。GUIの詳細なボタン名
+・確認ダイアログの文言・所要時間・復元(ロールバック)操作の正確な手順の
+うち、今回参照した一次情報で確認できなかった細部は記載していません。実施
+前に必ず一次情報および対象バージョンの公式ドキュメントで最新の操作手順を
+確認してください。
+
+## 目的
+
+`DEVICE | Settings > Firmware and Backups` 画面での `Upload New Firmware`
+と `Boot Uploaded Firmware With Current Configuration` を用いたSonicOS
+ファームウェア更新を、メンテナンス窓内で安全に完了できるようになることを
+目指します。あわせて、ロールバック基準をあらかじめ定義し、判断期限までに
+基準を満たさない場合は計画通りに切り戻す規律を身につけます。
+
+## 用語解説
+
+- **DEVICE | Settings > Firmware and Backups**: SonicOS GUIの上部ナビゲー
+  ション `DEVICE` 配下にある、ファームウェアの更新とバックアップの管理を
+  行う設定画面
+- **Upload New Firmware**: `DEVICE | Settings > Firmware and Backups` 画面
+  で、新しいファームウェアイメージをアップロードする操作
+- **Boot Uploaded Firmware With Current Configuration**: アップロード済み
+  のファームウェアを、現在稼働中の設定を保持したまま起動する操作。設定を
+  初期化する他の起動オプション(正確な名称は今回参照した一次情報では確認
+  できていません)と混同しないよう注意してください
+- **アップグレードパス**: 現在稼働中のファームウェアバージョンから目的の
+  バージョンへ、サポートされた経路で更新できること。中間バージョンを飛ば
+  すアップグレードは、意図しない不具合につながるおそれがあるため避けます
+- **ロールバック基準・ロールバック判断期限**: あらかじめ定義しておく、
+  更新失敗とみなす条件と、その条件に基づき切り戻しを判断する期限。判断
+  期限を過ぎてから場当たり的に判断しないための仕組みです
+
+## シナリオ設定
+
+今回アップグレード対象とするデバイスと、メンテナンス窓の設定は次のとおり
+です。
+
+| 項目 | 値 |
+|------|-----|
+| デバイス名(device_name) | {{ device_name }} |
+| モデル(model) | {{ model }} |
+| 現行バージョン(current_firmware) | {{ current_firmware }} |
+| 目標バージョン(target_firmware) | {{ target_firmware }} |
+| 一次情報URL(reference_url) | {{ reference_url }} |
+| 変更チケット(change_ticket) | {{ change_ticket }} |
+| 承認者(approver) | {{ approver }} |
+| メンテナンス窓開始(maintenance_window_start) | {{ maintenance_window_start }} |
+| メンテナンス窓終了(maintenance_window_end) | {{ maintenance_window_end }} |
+| ロールバック判断期限(rollback_deadline) | {{ rollback_deadline }} |
+| バックアップ保管先(backup_destination) | {{ backup_destination }} |
+
+告知先(notification_recipients、{{ notification_recipients | length }} 件):
+
+| # | 宛先 |
+|---|------|
+{% for r in notification_recipients %}| {{ loop.index }} | {{ r }} |
+{% endfor %}
+
+ロールバック基準(rollback_criteria、{{ rollback_criteria | length }} 件。
+いずれか1件でも該当したら手順6でロールバックを検討します):
+
+{% for c in rollback_criteria %}{{ loop.index }}. {{ c }}
+{% endfor %}
+
+## 手順
+
+### 1. 現状のバージョンとアップグレードパスを確認する(変更前の基準を取る)
+
+アップグレードを開始する前に、現状を確認します。
+
+- GUI: `DEVICE | Settings > Firmware and Backups` を開き、表示されている
+  現在のファームウェアバージョンが {{ current_firmware }} と一致すること
+  を確認します。
+- {{ current_firmware }} から {{ target_firmware }} へのアップグレードが
+  サポートされたパスであることを、SonicWallサポートポータルの情報で確認
+  します。中間バージョンを飛ばすアップグレードは行いません。
+- {{ reference_url }} の内容を確認し、今回のメンテナンス手順との齟齬が
+  ないことを確認します。
+
+### 2. 変更内容を関係者に告知し、承認を得る
+
+- 変更チケット {{ change_ticket }} に、対象デバイス({{ device_name }} /
+  {{ model }})、現行バージョン、目標バージョン、メンテナンス窓
+  ({{ maintenance_window_start }} 〜 {{ maintenance_window_end }})、
+  ロールバック判断期限({{ rollback_deadline }})を記載します。
+- 承認者 {{ approver }} の事前承認を得ます。業務への影響が大きい時間帯を
+  避け、メンテナンス窓が業務優先度と整合していることを確認します。
+- メンテナンス窓の開始前に、告知先へ通知します。
+
+{% for r in notification_recipients %}- {{ r }} へ通知
+{% endfor %}
+
+### 3. アップグレード前にバックアップを取得する
+
+メンテナンス窓の開始後、実際のアップグレード操作に入る前に、現行設定の
+バックアップを取得します。
+
+- `DEVICE | Settings > Firmware and Backups` 画面でバックアップを作成し、
+  {{ backup_destination }} へエクスポートして保管します。バックアップ作成
+  操作の正確なボタン名・表示項目は今回参照した一次情報では確認できな
+  かったため、画面上の表記に従って操作してください。
+- 目標バージョン({{ target_firmware }})のファームウェアイメージは、事前
+  にSonicWallサポートポータルからダウンロードし、アップロード可能な状態
+  にしておきます。
+
+### 4. ロールバック基準を確認し、Upload New Firmwareでアップロードする
+
+- 手順1で確認したロールバック基準(シナリオ設定を参照)を、実施者間で
+  再確認します。基準に該当した場合は判断に迷わず即座に手順6の切り戻し
+  検討へ進めるよう、あらかじめ合意しておきます。
+- `DEVICE | Settings > Firmware and Backups` で `Upload New Firmware` を
+  実行し、手順3で用意した {{ target_firmware }} のファームウェアイメージ
+  をアップロードします。
+
+### 5. Boot Uploaded Firmware With Current Configurationで起動する
+
+- アップロードが完了したら、アップロード済みのファームウェアに対して
+  `Boot Uploaded Firmware With Current Configuration` を選択して起動しま
+  す。設定を初期化する他の起動オプションは選択しないでください。
+- 再起動中は通信が一時的に断続する可能性があるため、業務影響がメンテナ
+  ンス窓({{ maintenance_window_start }} 〜 {{ maintenance_window_end }})
+  内に収まるよう、十分な時間を確保しておきます。
+- 計画外の判断は行わず、あらかじめ定めた手順のみを実施します。
+
+### 6. アップグレード後のバージョンを検証し、結果を記録する(該当時はロールバックを検討)
+
+- GUI: `DEVICE | Settings > Firmware and Backups` を再度開き、表示されて
+  いるファームウェアバージョンが {{ target_firmware }} に更新されている
+  ことを確認します。
+- 主要なインターフェース・Access Rule・VPNトンネルなど、業務上重要な
+  コンポーネントの状態を継続的に監視します。
+- ロールバック判断期限({{ rollback_deadline }})までに、シナリオ設定の
+  ロールバック基準がいずれも該当しないことを確認します。
+
+{% for c in rollback_criteria %}{{ loop.index }}. {{ c }} に該当しないこと
+{% endfor %}
+
+いずれか1件でも該当した場合は、判断期限を待たず直ちに切り戻しを検討し
+ます。
+
+- 判断期限までに確認がすべて完了した場合は、変更チケット
+  {{ change_ticket }} に実施結果を記録し、告知先へ完了を通知します。
+- ロールバック基準に該当した場合は、手順3で取得したバックアップを用いて
+  従来のファームウェア・設定への復元を検討します。正確な復元手順(画面上
+  の操作)は今回参照した一次情報では確認できていないため、実施前に画面
+  表示に従って確認するか、SonicWallサポートへ確認してください。復元後も
+  変更チケットに経緯を記録します。
+
+## 動作確認
+
+- `DEVICE | Settings > Firmware and Backups` の表示バージョンが
+  {{ target_firmware }}(ロールバック時は {{ current_firmware }})と一致
+  すること
+- シナリオ設定のロールバック基準にいずれも該当していないこと
+- 手順3で取得したバックアップが {{ backup_destination }} から参照可能で
+  あること
+- 変更チケット {{ change_ticket }} に実施結果(完了またはロールバック検討)
+  が記録され、告知先({{ notification_recipients | length }} 件)へ結果が
+  通知されていること
+- 主要なインターフェース・Access Rule・VPNトンネルの状態が、アップグレー
+  ド前と同等またはそれ以上に維持されていること
+
+## 注意事項
+
+- **Boot Uploaded Firmware With Current Configurationを選択すること。**
+  設定を初期化する他の起動オプションと混同しないよう、実施前に選択肢の
+  文言を必ず確認してください。誤って設定初期化を伴うオプションを選択す
+  ると、現行設定が失われるおそれがあります。
+- **本手順書は、GUIの詳細なボタン名・確認ダイアログの文言・所要時間・
+  復元(ロールバック)操作の正確な手順をあえて記載していません。** 今回
+  参照を試みた一次情報(下記URL)は、このセッションからのアクセス時に
+  ボット対策により内容を取得できませんでした。そのため
+  `DEVICE | Settings > Firmware and Backups` / `Upload New Firmware` /
+  `Boot Uploaded Firmware With Current Configuration` という用語のみを
+  確認済みの情報として扱い、それ以外のGUI操作の細部は記載していません。
+  実施前に必ず一次情報および対象バージョンの公式ドキュメントで最新の
+  操作手順を確認してください。一次情報: {{ reference_url }}
+- **ロールバック判断期限を過ぎてから判断しないこと。** 期限
+  ({{ rollback_deadline }})までに基準を満たさない場合は速やかに切り戻し
+  を検討します。
+- **アップグレードパスを事前に確認すること。** 中間バージョンを飛ばす
+  アップグレードは避けてください。
+- 管理者認証情報(GUIログインパスワード等)は本手順書や変更チケットに平文
+  で記載せず、マスク表記(`********`)で扱い、秘密管理ツール経由で参照して
+  ください。この手順書の内容をそのままコピー&ペーストして投入しないこと。

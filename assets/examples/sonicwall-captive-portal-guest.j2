@@ -1,0 +1,283 @@
+# SonicWall(SonicOS)のGuest Servicesによるゲストセグメント向けキャプティブポータル認証導入
+
+SonicOSには「キャプティブポータル」という名称の機能はなく、同等の役割を
+**Guest Services** が担います。既存のゲスト用Zone(`{{ guest_zone_name }}`)の
+`MATCH OBJECTS | Zones` > `Guest Services` タブでGuest Servicesを有効化し、
+`Deny Networks` に社内セグメントのAddress Objectを指定して到達を遮断した
+うえで、`Users | Guest Services` でGuest Profileを、`Users | Guest Accounts`
+でGuest Accountsを発行します。最後に、来訪者端末での認証プロンプト(Guest
+Login)表示と、社内セグメントへの到達遮断の両方を実機で検証します。本手順は
+一次情報でGUI操作のみが確認できたSonicOS 7.X向けであり、E-CLI等のコマンド
+構文は記載していません。
+
+## 目的
+
+ゲスト用Zone `{{ guest_zone_name }}` にGuest Servicesを有効化し、`Deny
+Networks` で社内ネットワークへの到達を遮断したうえで、Guest Profile・Guest
+Accountsによる来訪者向けの認証済みインターネットアクセスを提供できるように
+なることを目指します。あわせて、キャプティブポータル相当の認証フロー
+(Guest Login)と、社内セグメントへの到達遮断の双方を実機で検証する方法を
+身につけます。
+
+## 用語解説
+
+- **Guest Services**: SonicOSがZone単位で提供する来訪者向けアクセス制御
+  機能。一次情報では「provided network administrators with an easy solution
+  for creating wired and wireless guest passes and/or locked-down
+  Internet-only network access for visitors or untrusted network nodes」と
+  説明されており、「キャプティブポータル」という機能名は使われていない
+- **MATCH OBJECTS | Zones(Guest Servicesタブ)**: Zoneの設定を行う画面。
+  一次情報では「Navigate to Object | Match Objects | Zones page. Click
+  Configure button for the zone you wish to add Guest Services to... Click
+  Guest Services tab」と説明される。GUI上部の `Object` から `Match Objects`
+  配下の `Zones` を開き、対象Zoneの `Configure` ボタンを押した先にある
+  `Guest Services` タブを指す
+- **Enable Guest Services**: 同タブのチェックボックス。一次情報では
+  「CAUTION: Enabling Guest Services will immediately affect all users on
+  that zone and allow access to Internet Only. it is recommended to test
+  this feature by creating a New zone and assigning it to an unused
+  interface before implementing on production network.」と注意喚起されて
+  おり、有効化すると対象Zone上の全ユーザーが即座にInternet Onlyアクセス
+  (認証必須)の対象になる
+- **Enable inter-guest communication**: 同タブのチェックボックス。一次情報
+  では「Allows guests to communicate directly with other users who are
+  connected to this zone」と説明される
+- **Deny Networks / Pass Networks**: 同タブの項目。一次情報ではそれぞれ
+  「Blocks traffic to the networks you name. Select the subnet, address
+  group, or IP address to block traffic to.」「Allows traffic through the
+  Guest Service-enabled zone to the networks you select.」と説明される
+- **Max Guests**: 同タブの項目で、Zoneに同時接続できるゲストユーザー数の
+  上限。一次情報では既定値が `10` と説明される
+- **Users | Guest Services(Guest Profiles)**: Guest Profileの一覧・作成・
+  編集を行う画面。一次情報では「Navigate to Device| Users | Guest Services
+  page」「The Guest Profiles page enables you to view, add, edit and delete
+  profiles」と説明される
+- **Users | Guest Accounts**: 個別のGuest Accountの発行(`Add Guest`)、
+  および複数アカウントの一括生成(`Generate`)を行う画面。一次情報では
+  「Navigate to Device| Users | Guest Accounts page」と説明される
+- **Account Lifetime / Session Lifetime / Idle Timeout**: Guest Profile・
+  Guest Accountの有効期限に関する設定。一次情報ではAccount Lifetime
+  (個別アカウントでは同義の項目名は`Account Expires`)は「how long an
+  account remains on the security appliance before the account expires」、
+  Session Lifetimeは「how long a guest login session remains active after
+  it has been activated ... cannot exceed the value set in the Account
+  Lifetime」、Idle Timeoutは「the maximum period of time when no traffic is
+  passed on an activated guest services session ... cannot exceed the value
+  set in the Session Lifetime」と説明される
+
+## シナリオ設定
+
+今回、ゲスト用Zoneと発行するGuest Profile/Guest Accountsの設定値は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| ゲストZone名(guest_zone_name) | `{{ guest_zone_name }}` |
+| Max Guests(max_guests) | {{ max_guests }} |
+| Guest Profile名(guest_profile_name) | `{{ guest_profile_name }}` |
+| User Name Prefix(username_prefix) | `{{ username_prefix }}` |
+| Account Lifetime(account_lifetime_desc) | {{ account_lifetime_desc }} |
+| Session Lifetime(session_lifetime_desc) | {{ session_lifetime_desc }} |
+| Idle Timeout(idle_timeout_desc) | {{ idle_timeout_desc }} |
+| 一括発行するGuest Accounts数(initial_guest_count) | {{ initial_guest_count }} |
+| Guest Account共通コメント(guest_account_comment) | {{ guest_account_comment }} |
+| 検証用個別アカウント名(test_guest_name) | `{{ test_guest_name }}` |
+| 到達遮断検証用の社内ホストIP(internal_probe_ip) | `{{ internal_probe_ip }}` |
+
+`Deny Networks` に指定するAddress Object/Group一覧(deny_target_objects、
+{{ deny_target_objects | length }} 件)は次のとおりです。
+
+| # | Address Object/Group名 |
+|---|--------------------------|
+{% for obj in deny_target_objects %}| {{ loop.index }} | `{{ obj }}` |
+{% endfor %}
+
+これらのAddress Object/Group名は環境ごとの仮称であり、実際の社内セグメント
+(LAN・DMZ・管理セグメント等)を指すAddress Object/Group名に読み替えてください。
+
+## 手順
+
+### 1. 対象Zoneと遮断先Address Objectの現状を確認する
+
+Guest Servicesの有効化は対象Zone上の全ユーザーへ即座に影響するため、着手前
+に次の2点を確認します。
+
+- `{{ guest_zone_name }}` Zoneが来訪者専用であり、社内LAN/WLAN等の既存の
+  本番Zoneと同一でないこと
+- シナリオ設定に列挙したAddress Object/Groupが `MATCH OBJECTS | Addresses`
+  に既に存在すること(存在しない場合、`Deny Networks` の選択肢に表示され
+  ないため、先に作成してください)
+
+`MATCH OBJECTS | Zones` を開き、`{{ guest_zone_name }}` の行で、現時点では
+Guest Servicesが有効化されていないこともあわせて確認します。
+
+### 2. `{{ guest_zone_name }}` ZoneでGuest Servicesを有効化し、Deny Networksで社内セグメントへの到達を遮断する
+
+`MATCH OBJECTS | Zones` で `{{ guest_zone_name }}` の `Configure` ボタンを
+クリックし、`Guest Services` タブを開いて次のとおり設定します。
+
+- `Enable Guest Services` にチェックを入れる
+- `Enable inter-guest communication` は**チェックしない**(来訪者網の分離
+  要件に沿って、ゲスト同士の直接通信も遮断対象に含めるため)
+- `Max Guests`: `{{ max_guests }}`
+- `Deny Networks`: 次の {{ deny_target_objects | length }} 件を選択する
+
+{% for obj in deny_target_objects %}  - `{{ obj }}`
+{% endfor %}
+- `Pass Networks`: 今回のシナリオでは例外的に許可する内部リソースがない
+  ため、何も選択しない
+- `Bypass AV Check for Guests` / `Enable External Guest Authentication` /
+  `Custom Authentication Page` / `Post Authentication Page` /
+  `Bypass Guest Authentication` / `Redirect SMTP traffic to` は今回のシナ
+  リオでは使用せず、既定値(未設定)のまま変更しません
+
+設定後 `OK` をクリックします。一次情報の注意書きのとおり、この保存操作は
+`{{ guest_zone_name }}` Zone上の全ユーザーへ即座に影響し、以後は認証(Guest
+Login)なしにインターネットへ到達できなくなります。
+
+### 3. Guest Profileを作成する
+
+`Users | Guest Services` を開きます。まだチェックしていない場合は `Show
+guest login status window with logout button` にチェックを入れ、ログイン中
+のゲスト端末に残りセッション時間を表示するログイン状態ウィンドウを出せる
+ようにします。続けて `Add` から `Add Guest Profile` ダイアログを開き、次の
+とおり設定します。
+
+- `Profile Name`: `{{ guest_profile_name }}`
+- `User Name Prefix`: `{{ username_prefix }}`
+- `Auto-generate user name`: チェックする
+- `Auto-generate password`: チェックする(パスワードを平文で入力・保存し
+  ないため。生成される8文字の英字パスワードは本手順書には記載しません)
+- `Enable Account`: チェックする
+- `Auto-Prune Account`: チェックする(有効期限切れ後にアカウントを自動
+  削除する)
+- `Enforce login uniqueness`: チェックする(1アカウントにつき同時ログイン
+  を1セッションに限定する)
+- `Activate Account Upon First Login`: チェックする(初回ログイン時点から
+  有効期限のカウントを開始する)
+- `Account Lifetime`: `{{ account_lifetime_desc }}`
+- `Session Lifetime`: `{{ session_lifetime_desc }}`
+- `Idle Timeout`: `{{ idle_timeout_desc }}`
+- `Comment`: `{{ guest_account_comment }}`
+
+`OK` をクリックして保存します。
+
+### 4. 検証用の個別Guest Accountを発行する
+
+手順6・7の検証で使用する個別アカウントを先に1件発行します。`Users | Guest
+Accounts` を開き、`Add Guest` をクリックします。
+
+`Add Guest Account` ダイアログの `Settings` タブで次のとおり入力します。
+
+- `Profile`: `{{ guest_profile_name }}`
+- `Name`: `{{ test_guest_name }}`
+- `Comment`: `{{ guest_account_comment }}`
+- `Password` / `Confirm Password`: `Generate` ボタンで自動生成する(値は
+  `********` とし、本手順書・チケット・ログのいずれにも平文で記載しない。
+  検証担当者へは別経路(パスワードマネージャー等)で個別に共有すること)
+
+続けて `Guest Services` タブで次のとおり入力し、`OK` をクリックします。
+
+- `Enable Guest Services Privilege`: チェックする
+- `Enforce login uniqueness`: チェックする
+- `Automatically prune account upon account expiration`: チェックする
+- `Activate account upon first login`: チェックする
+- `Account Expires`: `{{ account_lifetime_desc }}`
+- `Session Lifetime`: `{{ session_lifetime_desc }}`
+- `Idle Timeout`: `{{ idle_timeout_desc }}`
+
+### 5. 来訪者向けにGuest Accountsを一括生成する
+
+`Users | Guest Accounts` の `Generate` ボタンをクリックし、`Generate Guest
+Accounts` ダイアログの `Settings` タブで次のとおり入力します。
+
+- `Profile`: `{{ guest_profile_name }}`
+- `Number of Accounts`: `{{ initial_guest_count }}`
+- `User Name Prefix`: `{{ username_prefix }}`
+- `Comment`: `{{ guest_account_comment }}`
+
+続けて `Guest Services` タブで次のとおり入力し、`OK` をクリックします。
+
+- `Enable Guest Services Privilege`: チェックする
+- `Enforce login uniqueness`: チェックする
+- `Automatically prune account upon account expiration`: チェックする
+- `Account Expires`: `{{ account_lifetime_desc }}`
+
+生成された{{ initial_guest_count }}件のアカウントには、`{{ username_prefix
+}}` を接頭辞としたユーザー名(例: `{{ username_prefix }}123`)とランダムな
+8文字の英字パスワードが自動採番されます。各アカウントのパスワードは
+`Users | Guest Accounts` 画面から個別に確認・払い出しし、本手順書やチケット
+には転記しないでください。
+
+### 6. キャプティブポータル認証(Guest Login)の動作を検証する
+
+`{{ guest_zone_name }}` Zoneに接続した検証端末からWebブラウザで任意のサイト
+へアクセスし、Guest Loginの認証プロンプトへリダイレクトされることを確認
+します。手順4で発行した `{{ test_guest_name }}` のユーザー名と、別途共有
+されたパスワードでログインします。
+
+ログインに成功すると、一次情報のTesting手順にあるとおり、残りログイン
+セッション時間を表示するGuest Login Statusウィンドウが表示されます。この
+ウィンドウが表示され、かつ元のサイトへの到達が成功することを確認して
+ください。
+
+### 7. 社内ネットワークへの到達遮断を検証する
+
+同じ検証端末(ログイン済み、`{{ guest_zone_name }}` Zoneに接続)から、Deny
+Networksに指定した社内セグメント内のホスト `{{ internal_probe_ip }}` への
+到達を試み、失敗することを確認します。
+
+```bash
+ping -c 3 {{ internal_probe_ip }}
+curl -sS -m 3 http://{{ internal_probe_ip }}/ -o /dev/null -w "%{http_code}\n"
+```
+
+`ping` は応答なし(タイムアウト)、`curl` はタイムアウトまたは接続失敗
+(応答コードが得られない)となることを確認します。あわせて、インター
+ネット(WAN)向けの通信は手順6のとおり引き続き成功することを確認し、遮断
+が社内セグメント宛てに限定されていることを切り分けてください。
+
+## 動作確認
+
+- `MATCH OBJECTS | Zones` の `{{ guest_zone_name }}` > `Guest Services`
+  タブで、`Enable Guest Services` がチェックされ、`Max Guests` が
+  `{{ max_guests }}`、`Deny Networks` に指定した {{ deny_target_objects |
+  length }} 件のAddress Object/Groupが登録されていること
+- `Users | Guest Services` に `{{ guest_profile_name }}` プロファイルが
+  存在し、Account Lifetime/Session Lifetime/Idle Timeoutがシナリオ設定の
+  とおりであること
+- `Users | Guest Accounts` に `{{ test_guest_name }}` を含むアカウントが
+  `{{ guest_profile_name }}` プロファイルから発行されていること
+- `{{ guest_zone_name }}` Zoneの未認証端末がWebアクセス時にGuest Login
+  認証プロンプトへリダイレクトされ、`{{ test_guest_name }}` でのログイン
+  成功後にGuest Login Statusウィンドウ(残りセッション時間の表示)が
+  出ること
+- ログイン済みのゲスト端末から `{{ internal_probe_ip }}` への `ping`/
+  `curl` がいずれも失敗し、WAN向け通信は成功すること
+
+## 注意事項
+
+- **Enable Guest Servicesの保存は対象Zone上の全ユーザーへ即座に影響
+  する。** 一次情報の注意書きのとおり、本番で稼働中のZoneに誤って適用
+  すると、そのZone上の既存端末が突然Internet Onlyかつ認証必須の状態に
+  切り替わる。事前に新規Zone・未使用インターフェースでのテストが推奨
+  されており、本手順は `{{ guest_zone_name }}` が来訪者専用のZoneである
+  ことを前提とする。社内LAN/WLAN等の本番Zoneには適用しないこと。
+- **パスワードを平文で記録・共有しないこと。** Guest Profile/Guest
+  Accountの `Auto-generate password` 機能で生成されるパスワードは、本
+  手順書・チケット・ログのいずれにも転記せず、`********` のマスク表記
+  で扱う。検証担当者・来訪者への配布はパスワードマネージャー等の別経路
+  で個別に行うこと。
+- `Deny Networks`/`Pass Networks` で選択するAddress Object/Groupは、
+  シナリオ設定に列挙した名称が実在し、かつ社内セグメントのIPレンジと
+  正しく対応していることを `MATCH OBJECTS | Addresses` 側で事前に確認
+  すること。対応関係を誤ると、遮断すべき社内セグメントへの到達を防げ
+  ない。
+- 本手順はSonicOS 7.X向けGUI操作のみを記載している。一次情報にはSonicOS
+  6.5/6.2以前向けの操作(経路が異なる)も別途記載されているが、本手順
+  では対象外とした。E-CLI等によるコマンド投入手順は一次情報で構文が
+  確認できなかったため記載していない。CLIで自動化する場合は、自環境の
+  E-CLIリファレンスで構文を個別に確認すること。
+- `Enable inter-guest communication` は本シナリオでは意図的にチェックし
+  ない。ゲスト同士の直接通信(例: 同一Zone内デバイス間の共有機能)を業務
+  上許可する必要がある場合は、来訪者網の分離要件とのトレードオフを評価
+  したうえで個別に有効化を検討すること。

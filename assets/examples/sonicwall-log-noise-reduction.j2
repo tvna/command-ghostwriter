@@ -1,0 +1,169 @@
+# SonicWall (SonicOS) 定常ノイズのログ抑制と意味のある遮断ログの保持
+
+`DEVICE | Log > Settings` の Log Redundancy Filter(GUI上のフィールド名は
+Syslog Event Redundancy Rate)とカテゴリ別ログ有効/無効チェックボックスを
+使い、CSV で定義した{{ csv_rows | length }}件のログ源のうち、ブロードキャスト
+等の定常ノイズだけを抑制し、攻撃遮断や不正アクセス試行などの意味のある
+遮断ログを個別に残します。変更前には現在の設定をカスタム説明付きテンプレート
+として保存し、いつでも読み込んで元に戻せる状態を確保したうえで、抑制対象・
+保持対象それぞれの挙動をログで検証します。
+
+## 目的
+
+SonicOS の `DEVICE | Log > Settings` にある Log Redundancy Filter
+(Syslog Event Redundancy Rate)とカテゴリ別ログ有効/無効チェックボックスを
+使って、ブロードキャストやマルチキャストなど定常的に発生し個別確認の意味を
+持たないログだけを抑制し、攻撃検知や不正アクセス試行のような意味のある
+遮断ログを引き続き個別に確認できる状態を維持できるようになることを目指し
+ます。あわせて、変更前に現在の設定をテンプレートとして保存しておくことで、
+抑制しすぎた場合にいつでも元の設定へ読み込み直せる安全な適用手順を身につけ
+ます。
+
+## 用語解説
+
+- **DEVICE | Log > Settings**: SonicOS 7.X系でログの記録・表示・転送頻度を
+  設定する管理画面ナビゲーションパス。現在の設定内容(テンプレート)が表示
+  され、`EDIT` から編集できる
+- **Log Redundancy Filter**: 一次情報で次のとおり説明される機構。
+  "The Log Redundancy Filter allows you to define the time in seconds that
+  the same events logged on the firewall page as a single entry in the
+  SonicWALL log." 同一イベントが短時間に繰り返し発生しても、指定秒数の間は
+  単一のログエントリとして扱われる
+- **Syslog Event Redundancy Rate**: `DEVICE | Log > Settings` の `EDIT` で
+  編集する、Log Redundancy Filter のうち syslog サーバーへの転送頻度を
+  秒単位で指定するフィールド。一次情報には、この値も含めたログの再表示・
+  再送信頻度の既定値について次の説明があります。
+  "The default value is 0 sec which indicates the real time display of
+  events" / "Increasing the value shows after how many seconds the same
+  logs will be displayed again or sent to email or to syslog server."
+  すなわち既定は0秒(リアルタイム)で、値を大きくするほど同一イベントの
+  再記録・再送信の間隔が広がる
+- **テンプレートの保存・読み込み(custom description)**: 一次情報のCAUTIONで
+  案内されている手順。"Before you make change to global log level, it is
+  highly recommended to save the current template ... so that it can be
+  imported later. To save the current template, login to device and
+  navigate to Device|Log|Settings and save the template with a custom
+  description." 変更前に現在の設定をカスタムの説明文付きテンプレートとして
+  保存しておくと、同じ画面から読み込んで元に戻せる
+- **カテゴリ別ログ有効/無効チェックボックス**: `DEVICE | Log > Settings` の
+  テンプレート内にある、ログ記録の対象カテゴリごとの有効/無効チェックボック
+  ス。Log Redundancy Filter が「同一イベントを集約する」機構であるのに対し、
+  こちらは「特定カテゴリのイベントそのものを記録対象から外す」機構であり、
+  ブロードキャストのように大量かつ定常的に発生するカテゴリを丸ごと記録対象
+  外にできる。実際に表示されるカテゴリの一覧・名称はSonicOSのバージョンや
+  ファームウェアにより異なるため、装置の実画面表示に従うこと
+- **SonicOS 6.5系での呼称**: 一次情報では、SonicOS 6.5以前ではこの画面が
+  `Manage|Log Settings|Base Setup` という別のナビゲーションパスで案内されて
+  いる(テンプレートの保存先はここ、EDITでの編集自体は同じくDevice|Log|
+  Settings配下と案内されている)
+
+## シナリオ設定
+
+今回、ログの抑制・保持を検討する{{ csv_rows | length }}件のログ源は次の
+とおりです。`treatment` が `category_disable` の行はカテゴリごと記録対象
+から外す候補、`redundancy_filter` の行は Syslog Event Redundancy Rate の
+集約対象として件数のみ把握できればよい候補、`keep` の行は個別に記録を残す
+べき意味のある遮断ログです。`noise_label` は本手順内でのみ使う識別用ラベル
+で、SonicOSの実際のカテゴリ名ではありません。
+
+| event_no | log_message | traffic_type | hourly_count | noise_label | treatment | description |
+|----------|-------------|--------------|--------------|-------------|-----------|--------------|
+{% for r in csv_rows %}| {{ r["event_no"] }} | {{ r["log_message"] }} | {{ r["traffic_type"] }} | {{ r["hourly_count"] }} | {{ r["noise_label"] }} | {{ r["treatment"] }} | {{ r["description"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 現在のログ設定をテンプレートとして保存する(変更前の切り戻し手段を確保する)
+
+`DEVICE | Log > Settings` を開きます。ここで新しい値を1件も変更する前に、
+現在の設定内容をカスタムの説明文(例: `pre-log-noise-reduction backup`)を
+付けてテンプレートとして保存します。誤って抑制しすぎた場合は、同じ画面から
+このテンプレートを読み込み直すことで元の設定に戻せます。
+
+### 2. Syslog Event Redundancy Rateを変更する(EDIT)
+
+同じ `DEVICE | Log > Settings` 画面の `EDIT` を開き、Syslog Event
+Redundancy Rate を既定値の0秒から変更します。シナリオ設定のうち
+`treatment` が `redundancy_filter` の行は、この値を増やすことで同一
+イベントの再記録間隔が広がり、単一のログエントリとして扱われる対象です。
+
+{% for r in csv_rows %}{% if r["treatment"] == "redundancy_filter" %}- event_no {{ r["event_no"] }}: {{ r["log_message"] }}(現在 約{{ r["hourly_count"] }}件/時間) - {{ r["description"] }}
+{% endif %}{% endfor %}
+
+この値はSyslog宛の再表示・再送信間隔に適用される全体設定であり、行単位で
+個別に指定するものではありません。前述のとおり、UI表示・メール送信向けの
+同種の頻度設定も同じ画面内にありますが、本手順ではSyslog Event Redundancy
+Rateのみを変更対象とします。
+
+### 3. 定常ノイズカテゴリのログを無効化する
+
+`treatment` が `category_disable` の行は、Syslog Event Redundancy Rateの
+集約だけでは記録自体が残り続けるため、テンプレート内のカテゴリ別ログ有効/
+無効チェックボックスで該当カテゴリの記録を無効化します。`log_message` の
+内容に対応するカテゴリを、装置の実画面に表示されるカテゴリ一覧から選んで
+チェックを外してください。
+
+{% for r in csv_rows %}{% if r["treatment"] == "category_disable" %}- event_no {{ r["event_no"] }}: {{ r["log_message"] }}(現在 約{{ r["hourly_count"] }}件/時間、ラベル: {{ r["noise_label"] }}) - {{ r["description"] }}
+{% endif %}{% endfor %}
+
+`treatment` が `keep` の行に対応するカテゴリは、この手順では**チェックを
+外しません**。
+
+### 4. 変更を保存する
+
+`EDIT` 画面の変更内容(Syslog Event Redundancy Rate、カテゴリ別チェック
+ボックス)を保存し、`DEVICE | Log > Settings` に戻って値が反映されている
+ことを確認します。
+
+### 5. 抑制対象と保持対象それぞれの挙動を検証する
+
+シナリオ設定の各行に対応する通信を実際に発生させたうえで、ログを確認します。
+
+1. `treatment` が `category_disable` の行に対応する通信を発生させ、記録
+   自体が新たに増えていないことを確認します。
+2. `treatment` が `redundancy_filter` の行に対応する通信を繰り返し発生
+   させ、手順1の変更前のように1回ごとの個別エントリが増え続けるのではなく、
+   単一のログエントリとして扱われていることを確認します。
+3. `treatment` が `keep` の行に対応する通信を発生させ、変更前と同様に
+   1件ずつ個別のログエントリとして記録され続けていることを確認します。
+
+{% for r in csv_rows %}{% if r["treatment"] == "keep" %}- event_no {{ r["event_no"] }}: {{ r["log_message"] }} - {{ r["description"] }}
+{% endif %}{% endfor %}
+
+## 動作確認
+
+- `DEVICE | Log > Settings` で、Syslog Event Redundancy Rateが手順2で
+  設定した値になっていること(既定の0秒から変更されていること)
+- `treatment` が `category_disable` の行に対応するカテゴリのチェックが
+  外れており、該当する通信を発生させても新たなログが記録されないこと
+- `treatment` が `redundancy_filter` の行に対応する通信を繰り返し発生
+  させても、個別エントリが増え続けず単一のログエントリとして扱われること
+- `treatment` が `keep` の行に対応する通信が、変更前と同様に1件ずつ個別の
+  ログエントリとして記録され続けていること
+- 手順1で保存したテンプレートが `DEVICE | Log > Settings` から読み込み
+  可能な状態で残っていること
+
+## 注意事項
+
+- **`treatment` が `keep` の行に対応するカテゴリのチェックを外さないこと。**
+  攻撃遮断や不正アクセス試行などの意味のある遮断ログをカテゴリ単位で無効化
+  すると、インシデント対応時に必要な記録そのものが失われます。
+- **手順1のテンプレート保存を省略しないこと。** カテゴリの無効化は取り消し
+  が可能ですが、どのカテゴリがどの設定だったかを個別に記憶しておくのは
+  現実的ではないため、変更前のテンプレート保存を必ず先に行ってください。
+- カテゴリ別ログ有効/無効チェックボックスの実際のカテゴリ名・一覧は
+  SonicOSのバージョンやファームウェアにより異なります。本手順書の
+  `noise_label` はあくまで本手順内の識別用ラベルであり、装置の実画面に
+  表示されるカテゴリ名と機械的に一致するとは限らないため、`log_message`
+  の内容をもとに対応するカテゴリを判断してください。
+- 本手順書は一次情報(SonicWallナレッジベースの当該記事)で確認できた
+  SonicOS 7.X系のGUI操作を中心に扱います。SonicOS 6.5以前はテンプレートの
+  保存先ナビゲーションパスが異なり(`Manage|Log Settings|Base Setup`)、
+  一次情報にも別セクションとして案内されているため、該当バージョンを
+  使用している場合はそちらを参照してください。
+- SonicOS CLIやAPIによる同等の設定方法は本ページでは確認できなかったため
+  記載していません。CLIやAPIで実施する場合は、別途SonicOSのCLI/APIリファ
+  レンスで構文を確認してから実施してください。
+- 管理者パスワードやAPIキーなどの認証情報は、本手順書やログに平文で残さ
+  ないでください。記録が必要な場合は `********` のようにマスクし、秘密
+  管理ツール等で別途安全に保管してください。

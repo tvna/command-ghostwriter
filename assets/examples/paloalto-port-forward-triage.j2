@@ -1,0 +1,227 @@
+# Palo Alto Networks(PAN-OS)のポートフォワード不通切り分け
+
+「公開サーバー{{ public_ip }}:{{ service_port }}へ外部から通信できない」という
+申告が{{ affected_hosts | length }}件({{ reported_at }}時点)寄せられた状況を
+想定し、PAN-OSのネイティブ機構であるDevice > TroubleshootingのNAT Policy
+Match → Security Policy Match → Monitor > Logs > Trafficと仮想ルーターの
+ルートルックアップ、の順で原因箇所をNAT・ルール・戻り経路の3段階に切り分け
+ます。設定変更は一切行わず、照会のみで原因箇所を特定するところまでを対象と
+します。
+
+## 目的
+
+外部公開サーバーへの通信不通という申告に対し、(1)期待するDestination NAT
+変換が実際に一致しているか、(2)Security Policyルールが実際にallowとして
+一致しているか、(3)Traffic logに遮断記録が残っていないか、(4)実サーバー側
+への戻り経路が仮想ルーターのルートテーブル上で意図した出力インターフェース
+に向いているか、をこの順序で切り分け、NAT・ルール・戻り経路のどの段階で
+通信が止まっているかを特定できるようになることを目指します。
+
+## 用語解説
+
+- **Device > Troubleshooting**: ファイアウォールのWebインターフェースから、
+  接続性とポリシー一致を照会するツール。`Select Test`でテスト種別を選び、
+  設定を変更せずに一致結果を`Results`欄で確認できる
+- **NAT Policy Match**: `Device > Troubleshooting`のテスト種別の1つ。
+  `From`(送信元ゾーン)・`To`(宛先ゾーン)・`Source`(送信元アドレス)・
+  `Destination`(宛先アドレス)・`Source Port`・`Destination Port`・
+  `Protocol`(0〜255の数値)・`To Interface`(照会対象の宛先インター
+  フェース)・`HA Device ID`を入力して実行すると、実際に一致するNATルール
+  が`Results`に表示される
+- **Security Policy Match**: `Device > Troubleshooting`のテスト種別の1つ。
+  `From`・`To`・`Source`・`Destination`・`Destination Port`・
+  `Source User`・`Protocol`・`Application`・`Category`を入力し、
+  `Show all potential match rules`を有効にして実行すると、最初に一致する
+  ルールまでに評価された候補ルールをすべて`Results`に表示できる
+- **Monitor > Logs > Traffic(Traffic log)**: 各セッションの開始・終了を
+  記録するログ画面。日時、送信元/宛先ゾーン、アドレスとポート、
+  アプリケーション名、適用されたセキュリティルール名、ルールのaction
+  (allow/deny/drop)、入力/出力インターフェース、バイト数、セッション
+  終了理由を含む。`Type`列が`deny`の場合はルールが特定のアプリケーション
+  を識別したうえで遮断したことを、`drop`の場合はルールがアプリケーション
+  を`any`のまま遮断設定していたことを意味する
+- **フィルタ(Connector/Attribute/Operator/Value)**: Traffic log等のログ
+  画面で検索条件を組み立てる4要素。Connectorが`and`/`or`、Attributeが
+  対象列、Operatorが比較方法、Valueが比較値を表す
+- **自動更新間隔**: ログ画面の更新間隔ドロップダウン。`60 seconds`・
+  `30 seconds`・`10 seconds`・`Manual`のいずれかを選択できる
+- **仮想ルーターのルートルックアップ**: `Network > Virtual Routers`の一覧
+  で対象の仮想ルーターの行にある`More Runtime Stats`を開き、`Routing`
+  タブでルートテーブル(フォワーディングテーブル)を確認できる。宛先
+  サブネットに対してどの出力インターフェースが選択されるかをここで
+  確認する
+
+## シナリオ設定
+
+今回申告された通信不可の公開サーバーと、照会に用いる条件は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| 申告受付時刻(reported_at) | {{ reported_at }} |
+| 公開IPアドレス(public_ip) | {{ public_ip }} |
+| 公開ポート番号(service_port) | {{ service_port }} |
+| プロトコル番号(protocol、TCP=6) | {{ protocol }} |
+| アプリケーション(application) | {{ application }} |
+| 送信元ゾーン(from_zone) | {{ from_zone }} |
+| 照会用の宛先ゾーン(to_zone) | {{ to_zone }} |
+| 照会先インターフェース(to_interface) | {{ to_interface }} |
+| 実サーバーのIPアドレス(private_ip) | {{ private_ip }} |
+| 実サーバーの属するサブネット(private_subnet) | {{ private_subnet }} |
+| 想定するDestination NATルール名(nat_rule_name) | {{ nat_rule_name }} |
+| 想定するSecurity Policyルール名(security_rule_name) | {{ security_rule_name }} |
+| 対象の仮想ルーター名(virtual_router_name) | {{ virtual_router_name }} |
+| 実サーバー側に想定するデフォルトゲートウェイ(dmz_gateway_ip) | {{ dmz_gateway_ip }} |
+| Traffic logの自動更新間隔(refresh_interval_seconds) | {{ refresh_interval_seconds }}秒 |
+
+申告者一覧(affected_hosts、{{ affected_hosts | length }}件)。全員が同一の
+公開IP・ポートへの通信不可を申告しています。
+
+| # | 申告者 | 送信元アドレス |
+|---|--------|----------------|
+{% for host in affected_hosts %}| {{ loop.index }} | {{ host["reporter"] }} | {{ host["src_ip"] }} |
+{% endfor %}
+
+`{{ to_zone }}`・`{{ to_interface }}`・`{{ virtual_router_name }}`は本手順書
+内の仮称であり、実際の環境に存在するゾーン名・インターフェース名・仮想
+ルーター名に読み替えてください。
+
+## 手順
+
+### 1. Traffic logを自動更新に設定し、既存の遮断記録の有無を確認する
+
+`Monitor > Logs > Traffic`を開きます。画面上部の自動更新間隔ドロップダウン
+で`{{ refresh_interval_seconds }} seconds`を選択し、申告者に通信を再現して
+もらっている間、画面を再読み込みしなくても新しいエントリが追記される状態に
+します。
+
+続けて、フィルタ追加からConnector`and`・Attributeを宛先アドレス・
+Operator`eq`・Value`{{ public_ip }}`、同様に宛先ポート`eq`
+`{{ service_port }}`の条件を追加します。送信元アドレスの条件は、申告者
+ごとに次の値へ切り替えて確認してください。
+
+{% for host in affected_hosts %}- {{ host["reporter"] }}: 送信元アドレス={{ host["src_ip"] }}
+{% endfor %}
+
+該当エントリの`Type`列が`deny`または`drop`の場合、そのエントリのルール名を
+手順3で突き合わせるために控えます。該当エントリが1件も見つからない場合は、
+セッション自体がルール評価まで到達していない可能性があるため、手順2に
+進みます。
+
+### 2. NAT Policy Matchで期待するDestination NAT変換に一致するか照会する
+
+`Device > Troubleshooting`を開き、`Select Test`で`NAT Policy Match`を選び
+ます。申告者ごとに次の値を入力して実行し、`Results`で一致したNATルール
+(または一致するルールがない旨)を確認します。
+
+- From: {{ from_zone }}
+- To: {{ to_zone }}
+- Destination: {{ public_ip }}
+- Destination Port: {{ service_port }}
+- Protocol: {{ protocol }}
+- To Interface: {{ to_interface }}
+
+{% for host in affected_hosts %}| {{ host["reporter"] }} | Source={{ host["src_ip"] }} |
+{% endfor %}
+
+Source Portは申告者側では特定できないため、空欄のまま実行します。`Results`
+に表示された一致ルール名が`{{ nat_rule_name }}`と異なる場合、または
+一致するルールがない場合は、この時点でNAT段階に原因があると判断します。
+
+### 3. Security Policy Matchで実際に一致するルールとactionを照会する
+
+同じ`Device > Troubleshooting`で`Select Test`を`Security Policy Match`に
+切り替えます。From/To/Destination/Destination Port/Protocol/Application
+はシナリオ設定の値を、Sourceは申告者ごとの送信元アドレスを入力し、
+`Show all potential match rules`を有効にして実行します。有効にすることで、
+最初に一致するルールまでの間に評価された候補ルールをすべて`Results`で
+確認できます。
+
+`Results`に表示された一致ルール名・actionを確認し、次の2点を判定します。
+
+- 一致ルール名が`{{ security_rule_name }}`と異なる場合、または
+  actionが`allow`でない場合、この時点でルール段階に原因があると判断します
+- 一致ルール名が`{{ security_rule_name }}`でactionが`allow`の場合、
+  手順1で控えたTraffic logのルール名と突き合わせます。一致すれば、
+  NAT・ルールの両段階は問題なく、手順4の戻り経路の確認に進みます
+
+### 4. 仮想ルーターのルートルックアップで戻り経路を確認する
+
+NAT・ルールの両段階で問題が見つからない場合、`Network > Virtual Routers`
+を開き、`{{ virtual_router_name }}`の行にある`More Runtime Stats`を開いて
+`Routing`タブを表示します。実サーバーの属するサブネット`{{ private_subnet }}`
+宛のルートが、`{{ to_interface }}`側の想定するインターフェースへ向いている
+ことを確認します。想定と異なるインターフェース・ネクストホップが表示される
+場合、ファイアウォール自身の経路設定が戻りパケットの妨げになっている可能性
+があります。
+
+### 5. 実サーバー側のデフォルトゲートウェイを確認する(PAN-OSの外側の確認)
+
+手順4でファイアウォール側の経路に問題がない場合、実サーバー
+(`{{ private_ip }}`)にログインし、デフォルトゲートウェイが
+`{{ dmz_gateway_ip }}`(このファイアウォールの当該セグメント側インター
+フェースアドレス)を指しているかを確認します。この確認はPAN-OSのGUI/CLIの
+範囲外ですが、戻り経路の非対称性を切り分けるために必要です。
+
+```bash
+ssh admin@{{ private_ip }}
+ip route show default
+```
+
+デフォルトゲートウェイがファイアウォール以外を指している場合、応答パケット
+がファイアウォールを経由せず非対称経路になり、PAN-OSのセッションテーブルと
+矛盾して応答が破棄されている可能性が高いと判断します。
+
+### 6. 申告者ごとに切り分け結果を記録する
+
+手順1〜5で確認した内容を、申告者ごとに次の形式で記録します。
+
+{% for host in affected_hosts %}- {{ host["reporter"] }}({{ host["src_ip"] }}): Traffic logのType / NAT Policy Matchの一致結果 / Security Policy Matchの一致ルールとaction / ルートルックアップの結果 を記入
+{% endfor %}
+
+この記録をもとに、どの段階(NAT・ルール・戻り経路)に原因があるかを判断
+します。ルールの追加・変更やルーティングの修正が必要な場合は、本手順の
+範囲外である別途の変更管理手順に従ってください。
+
+## 動作確認
+
+- `Monitor > Logs > Traffic`の自動更新間隔が{{ refresh_interval_seconds }}秒
+  に設定され、申告者が通信を再現している間に新しいエントリが自動的に
+  追記表示されること
+- 申告者({{ affected_hosts | length }}件)それぞれについて、`NAT Policy
+  Match`の`Results`で一致したNATルール(または一致するルールがない旨)が
+  判明していること
+- 申告者それぞれについて、`Security Policy Match`の`Results`で一致した
+  ルール名とactionが判明し、手順1で控えたTraffic logのルール名と
+  突き合わせ済みであること
+- NAT・ルールの両段階で問題が見つからなかった申告者について、
+  `{{ virtual_router_name }}`の`Routing`タブで`{{ private_subnet }}`宛の
+  ルートが想定するインターフェースに向いていることが確認されていること
+- 必要に応じて実サーバー(`{{ private_ip }}`)のデフォルトゲートウェイが
+  `{{ dmz_gateway_ip }}`であることが確認されていること
+- 申告者ごとに、NAT・ルール・戻り経路のどの段階が原因かの切り分け結果が
+  記録され、変更要否の判断に引き継げる状態になっていること
+
+## 注意事項
+
+- **Device > TroubleshootingのNAT Policy Match / Security Policy Matchは
+  設定を変更しない照会専用のツールです。** 本手順のいずれの段階でもNAT
+  ルール・Security Policyルール自体は変更しません。ルールの追加・変更が
+  必要と判断した場合は、別途の変更管理手順に従ってください。
+- **切り分けは手順1→2→3→4→5の順序で進めること。** NAT段階で原因が確定
+  した場合は、ルール・戻り経路の確認を待たずにNAT段階の是正を検討して
+  構いませんが、複数の原因が重なっている可能性もあるため、余裕があれば
+  全段階を確認してから判断してください。
+- **自動更新間隔は確認に必要な時間だけ短くし、確認後はManualまたはより
+  長い間隔に戻すこと。** `10 seconds`等の短い間隔を長時間放置すると、
+  管理プレーンへの負荷が積み重なります。
+- フィルタのValueが`eq`/`has`/`in`等のOperatorキーワードと一致する文字列
+  を含む場合は、構文エラーを避けるため引用符で囲んでください。
+- 手順5の実サーバーへのSSHログインに使う認証情報は、本手順書やチケット、
+  ログに平文で残さないでください。記録が必要な場合は`********`のように
+  マスクし、秘密管理ツール等で別途安全に保管してください。
+- Traffic log・NAT Policy Match・Security Policy Match・ルートルックアップ
+  のいずれでも該当する記録・一致ルールが見つからない場合、原因がPAN-OS側
+  とは限りません。ISP側の経路遮断やクライアント側の問題である可能性も
+  残るため、本手順の結果だけで原因を断定しないでください。
+- 申告者名などの個人が特定できる情報を記録・共有する際は、社内の情報取り
+  扱いルールに従ってください。

@@ -1,0 +1,15 @@
+mgmt_permitted_ips:
+  - 10.0.99.0/24
+  - 10.0.99.10/32
+interface_mgmt_profile_name: mgmt-restricted
+allowed_protocols:
+  - HTTPS
+  - SSH
+  - Ping
+data_plane_interfaces:
+  - name: ethernet1/1
+    type: Ethernet
+    zone: dmz-mgmt
+  - name: ethernet1/2.100
+    type: VLAN
+    zone: internal-mgmt

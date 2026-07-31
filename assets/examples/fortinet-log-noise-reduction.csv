@@ -1,0 +1,6 @@
+policy_id,ip_ver,action,match_desc,logtraffic
+1,v4,DENY,LANブロードキャスト(255.255.255.255)宛て定常パケットの拒否,disable
+2,v4,DENY,マルチキャストルーティングプロトコル(224.0.0.0/24)宛て定常パケットの拒否,disable
+3,v4,DENY,WAN側インターフェースからの管理ポート(TCP/443・TCP/22)への未許可アクセス拒否,enable
+4,v4,DENY,未許可セグメントからのSNMP(UDP/161)アクセス拒否,enable
+5,v6,DENY,IPv6リンクローカルマルチキャスト(ff02::/16)宛て定常パケットの拒否,disable

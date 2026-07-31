@@ -1,0 +1,157 @@
+# SonicWall(SonicOS)による部門VLANセグメント間分離ルール設計
+
+部門ごとのVLANが暫定的に同一Zoneへ同居し、Zone内(intra-zone)通信として自由に
+相互通信できている状態から、部門VLANごとに新しいZoneを作成して分離します。
+CSV で定義した {{ csv_rows | length }} 件のルールのみを Zone Matrix 経由で
+明示的に許可・拒否し、それ以外のZone間通信は既定拒否(inter-zone default deny)
+に委ねます。管理端末が属するZone/経路は、いかなる段階でも変更しません。
+
+## 目的
+
+SonicOSにおけるZoneとAccess Rulesの関係(同一Zone内は既定許可、Zone間は既定拒否)
+を理解した上で、部門VLANを個別Zoneへ分離し、CSVで定義した必要最小限の通信のみを
+Zone Matrix経由の許可ルールとして登録できるようになることを目指します。あわせて、
+既定拒否が意図通り機能していることをイベントログで検証し、管理端末の到達性を
+失わない適用順序を身につけます。
+
+## 用語解説
+
+- **Zone**: 1つ以上のインターフェースをわかりやすい名前でグルーピングし、Zone間を
+  流れる通信に対してセキュリティルールを適用するための論理的な仕組み。同じポリシーを
+  インターフェースごとに個別記述する代わりに、Zone単位でまとめて適用できる
+- **MATCH OBJECTS | Zones / Add Zone**: 新しいZoneを作成するメニュー。`MATCH OBJECTS`
+  メニューの`Zones`画面で`Add Zone`ボタンから作成する。Zoneはインターフェースへの
+  割り当てとは独立したオブジェクトとして先に作成できる
+- **intra-zone / inter-zone通信**: 同一Zone内インターフェース間の通信(intra-zone)は
+  既定で許可される一方、異なるZone間の通信(inter-zone)はAccess Rulesによって
+  制御され、該当する許可ルールがなければ既定で拒否される
+- **POLICY | Rules and Policies | Access Rules / Zone Matrix Selector**: Zone間の
+  通信を許可・拒否するAccess Rulesを管理する画面。画面上部の`Zone Matrix Selector`
+  で対象の`From Zone`/`To Zone`の組み合わせを選び、`+Add`から個別ルールを追加する
+- **Action(Allow / Deny / Discard)**: Access Rule 1件ごとに設定する動作。今回の
+  CSVでは`Allow`(許可)と`Deny`(明示拒否)のみを使用する
+- **NETWORK | Interfaces / Virtual Interface**: VLANサブインターフェースを作成・
+  編集する画面。`+Add Interface`から`Virtual Interface`を選ぶと表示される
+  `Add Virtual Interface`ダイアログで、`Zone`・`VLAN Tag`・`Parent Interface`
+  (物理インターフェース)を指定する。ここで選ぶ`Zone`がそのVLANの所属先になる
+- **INVESTIGATE | Logs | Event Logs**: 通信の許可・遮断結果を確認するログ画面。
+  Zone間の既定拒否によって遮断された通信は、drop code(例: `Enforced Firewall Rule`)
+  付きのイベントとして記録される
+
+## シナリオ設定
+
+今回新しく作成する部門Zoneと、割り当て対象のVLANは次のとおりです(親インターフェース
+名`X3`は例示であり、実際の環境の物理インターフェース名に読み替えてください)。
+
+| 部門 | VLAN ID | 新規Zone名 | 親インターフェース(例) |
+|------|---------|-----------|------------------------|
+| 営業 | 10 | ZONE-SALES | X3 |
+| 人事 | 20 | ZONE-HR | X3 |
+| 業務システム | 30 | ZONE-DEV | X3 |
+| ゲスト | 90 | ZONE-GUEST | X3 |
+
+これら4VLANは現在いずれも既存の共有Zoneに属しており、Zone内通信として相互に自由に
+到達できています。監視ホストと管理端末は、この4Zoneとは別の既存`MGMT`Zoneに属して
+おり、本手順では`MGMT`Zoneの割り当ては一切変更しません。
+
+Zone間で許可・拒否する通信は、CSVで定義した次の {{ csv_rows | length }} 件です。
+
+| rule_no | from_zone | to_zone | proto | port | action | description |
+|---------|-----------|---------|-------|------|--------|--------------|
+{% for r in csv_rows %}| {{ r["rule_no"] }} | {{ r["from_zone"] }} | {{ r["to_zone"] }} | {{ r["proto"] }} | {{ r["port"] }} | {{ r["action"] }} | {{ r["description"] }} |
+{% endfor %}
+
+表中の `-` は該当なし(ICMPなどポート指定が不要な行)を表します。
+
+## 手順
+
+### 1. 現状のZone割当と管理経路を確認する
+
+`NETWORK | Interfaces` を開き、VLAN 10/20/30/90の各サブインターフェースが現在
+どのZoneに属しているかを確認します。本手順の前提どおり、これらが暫定的に同一の
+既存Zoneに属していることを確認してください。あわせて、今このGUIセッションを
+操作している管理端末が、これから作成する4Zone(ZONE-SALES/ZONE-HR/ZONE-DEV/
+ZONE-GUEST)のいずれにも属していないこと(既存の`MGMT`Zoneに属していること)を
+必ず確認します。万一該当する場合は、本手順を開始する前に管理端末の接続元VLANを
+`MGMT`側へ切り替えてください。
+
+### 2. 部門ごとに新しいZoneを作成する
+
+`MATCH OBJECTS | Zones` を開き、`Add Zone` から次の4Zoneを作成します。Zoneは
+インターフェースへの割り当てより先に、単独のオブジェクトとして作成できます。
+
+- ZONE-SALES
+- ZONE-HR
+- ZONE-DEV
+- ZONE-GUEST
+
+### 3. 許可ルールを、VLANのZone割り当てを変更する前にZone Matrixへ登録する
+
+`POLICY | Rules and Policies | Access Rules` を開き、`Zone Matrix Selector` で
+対象の `From Zone` / `To Zone` の組み合わせを選択したうえで、`+Add` からルールを
+追加します。まだVLANのZone割り当てを変更していないこの時点で許可ルールを先に
+登録しておくことで、手順5でZoneを切り替えた瞬間に必要な通信が既定拒否で止まる
+空白期間を避けられます。
+
+{% for r in csv_rows %}{% if r["action"] == "Allow" %}- rule_no {{ r["rule_no"] }}: From Zone={{ r["from_zone"] }} / To Zone={{ r["to_zone"] }} / {{ r["proto"] }}{% if r["port"] != "-" %}/{{ r["port"] }}{% endif %} / Action=Allow ({{ r["description"] }})
+{% endif %}{% endfor %}
+
+### 4. 拒否ルールを明示的に登録する
+
+既定拒否だけに頼らず、業務要件のない通信を監査ログに残すため、次の行は`Action=Deny`
+の明示ルールとして同じ`Access Rules`画面から登録します。
+
+{% for r in csv_rows %}{% if r["action"] == "Deny" %}- rule_no {{ r["rule_no"] }}: From Zone={{ r["from_zone"] }} / To Zone={{ r["to_zone"] }} / {{ r["proto"] }}{% if r["port"] != "-" %}/{{ r["port"] }}{% endif %} / Action=Deny ({{ r["description"] }})
+{% endif %}{% endfor %}
+
+### 5. 部門VLANサブインターフェースのZoneを新Zoneへ1つずつ切り替える
+
+`NETWORK | Interfaces` で対象のVLANサブインターフェースを編集し、`Zone`
+ドロップダウンをシナリオ設定の対応する新規Zoneへ変更して保存します。VLAN 10→
+ZONE-SALES、VLAN 20→ZONE-HR、VLAN 30→ZONE-DEV、VLAN 90→ZONE-GUESTの順に、
+**1つ切り替えるごとに**手順6のZone Matrix確認と動作確認を行ってから次の
+VLANへ進んでください。4つを一括で切り替えないことで、想定外の通信断が発生した
+場合の影響範囲と原因箇所を1VLAN分に限定できます。`MGMT`Zoneに属するVLANは対象
+外であり、本手順では変更しません。
+
+### 6. Zone Matrixで登録状況を確認する
+
+`POLICY | Rules and Policies | Access Rules` の `Zone Matrix Selector` で、
+手順3・4で使用したZoneペアを1組ずつ選択し、CSVで定義した件数分のルールが
+それぞれ表示されていることを確認します。
+
+## 動作確認
+
+- 許可ルール対象の通信(例: ZONE-SALES→ZONE-DEVのtcp/8443)が、対応するVLAN内の
+  端末から実際に成功すること。例えば次のようなコマンドで到達性を確認できます
+
+  ```bash
+  curl -sS -m 3 https://<ZONE-DEV内のホストIP>:8443/ -o /dev/null -w "%{http_code}\n"
+  ```
+
+- 拒否ルール対象、およびCSVに定義のないZoneペア間の通信が失敗すること
+- `INVESTIGATE | Logs | Event Logs` に、CSVに定義のないZoneペア間の通信が
+  drop code(例: `Enforced Firewall Rule`)付きのイベントとして記録されること
+- `POLICY | Rules and Policies | Access Rules` の `Zone Matrix Selector` で、
+  手順5完了後の各Zoneペアのルール件数がCSVの定義どおりであること
+- 手順1〜6を通じて、管理端末からのGUIアクセスが一度も切断されていないこと
+
+## 注意事項
+
+- **適用順序を厳守すること。** 許可ルール(手順3)・拒否ルール(手順4)を先に
+  登録し、VLANのZone割り当て変更(手順5)は最後に、かつ1VLANずつ行う。順序を
+  逆にすると、Zone切り替え直後に必要な通信が既定拒否で止まる空白期間が生じる。
+- **管理端末の所属Zoneを必ず事前確認すること。** 管理端末が今回分離対象の
+  部門VLANに属していた場合、Zone切り替えと同時にGUI/SSHへの到達経路を自ら
+  遮断してしまう(ロックアウト)おそれがある。手順1で必ず確認し、該当する場合は
+  先に管理端末の接続元を`MGMT`Zone側へ移してから本手順を開始する。
+- 手順4の明示的な`Deny`行は、既定拒否だけに頼らず監査ログに理由
+  (`description`)を残すためのものであり、Zone未作成・割当変更前の段階では
+  効果を発揮しない。既定拒否の代わりにはならない。
+- `MATCH OBJECTS | Zones`・`POLICY | Rules and Policies | Access Rules`・
+  `NETWORK | Interfaces`の正確なメニュー名やダイアログ項目は、SonicOSの
+  バージョン(7.0/7.1/8等)やモード(Policy Mode/Classic Mode)により表記が
+  異なる場合があるため、適用前に自環境のGUIで実際の項目名を確認すること。
+- 本テンプレートはGUI操作を前提としている。E-CLI等での自動投入コマンドは
+  一次情報で構文を確認できなかったため記載していない。CLIで一括投入する場合は、
+  自環境のE-CLIリファレンスで構文を個別に確認すること。

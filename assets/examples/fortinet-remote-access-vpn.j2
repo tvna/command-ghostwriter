@@ -1,0 +1,181 @@
+# FortiGate(FortiOS)個人リモートアクセスVPN(SSL-VPN full-tunnel)構築
+
+FortiGate(FortiOS)で、社外の個人端末からの暗号化リモートアクセスをSSL-VPN(SSL-VPNポータル+トンネルモード)で構成します。{{ remote_users | length }}名のリモートユーザーをローカルユーザーとして作成し、フルトンネル専用のSSL-VPNポータルとSSL-VPN設定、内部ネットワーク/WAN向けの2本のファイアウォールポリシーを順に構築したうえで、FortiClientからの接続とログでの検証まで行います。拠点(ルータ/ファイアウォール)同士を結ぶ既存の`fortinet-ikev2-vpn`(拠点間IKEv2 IPsec VPN)とは対象・機構ともに異なる、個人端末単位のリモートアクセス用の手順です。
+
+## 目的
+
+OPNsenseが個人のリモートアクセスVPNをWireGuardインスタンス(`VPN > WireGuard > Instances`)で解決するのに対し、Fortinet (FortiOS/FortiGate)には同名の機構は存在せず、SSL VPN full-tunnel remote access(SSL-VPNポータル+トンネルモード、個人リモートユーザー向け。既存の拠点間IKEv2 IPsec VPNテンプレートとは別物で、WireGuardはネイティブ非対応)というベンダーネイティブな機構で同じ課題を解決します。本手順では、SSL-VPN機能の有効化からポータル・SSL-VPN設定・ファイアウォールポリシーの作成、FortiClientによる接続確認までを一通り実施できるようになることを目指します。
+
+## 用語解説
+
+- **SSL VPN full-tunnel remote access**: 個人のリモート端末からFortiGateへ暗号化トンネルを確立し、内部ネットワーク・インターネット向けの通信をすべて(フルトンネル)FortiGate経由にする、Fortinetネイティブなリモートアクセス機構。OPNsenseのWireGuardインスタンス(`VPN > WireGuard > Instances`)とは異なる、Fortinet独自の実装
+- **拠点間VPNとの違い**: 既存の`fortinet-ikev2-vpn`テンプレートはFortiGate2台を結ぶ拠点間(サイト間)のIPsec VPNを扱う。本テンプレートが扱うのは社外の個人端末1台ずつがFortiGateへ接続するリモートアクセスVPNであり、対象・認証方式・機構(IKEv2 IPsecのトンネルインターフェース vs SSL-VPNポータル)のいずれも異なる別の運用課題
+- **VPN > SSL-VPN Portals(`config vpn ssl web portal`)**: 接続後にユーザーへ提供する機能(トンネルモードの可否、Split Tunnelingの有無など)をまとめたオブジェクト。`set tunnel-mode enable`でトンネルモードを許可し、`set split-tunneling disable`でフルトンネル(内部・インターネット向けの全通信をトンネル経由にする)を強制する
+- **VPN > SSL-VPN Settings(`config vpn ssl settings`)**: リスニングインターフェース・サーバ証明書・トンネル用IPプール・Authentication/Portal Mappingなど、SSL-VPN全体の待受設定をまとめる箇所
+- **Authentication/Portal Mapping**: ユーザーグループごとに、接続後どのSSL-VPNポータルを割り当てるかを対応付ける設定。CLIでは`config authentication-rule`配下の`set groups`/`set portal`に対応する
+- **ssl.root(SSL-VPN tunnel interface)**: SSL-VPN接続確立時にFortiGateが内部的に使用する仮想インターフェース。ファイアウォールポリシーの送信元インターフェース(`Incoming Interface`)として指定する
+- **tunnel-ip-pools**: SSL-VPN接続クライアントへ払い出す仮想IPアドレスの範囲を定義するファイアウォールアドレスオブジェクト(既定名`SSLVPN_TUNNEL_ADDR1`)。SSL-VPN Settingsおよびポータルの`ip-pools`から参照する
+
+## シナリオ設定
+
+FortiGateのSSL-VPN待受と、内部/WAN側インターフェースの構成は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| WAN側インターフェース(wan_interface) | `{{ wan_interface }}` |
+| WAN側IPアドレス(wan_ip) | `{{ wan_ip }}` |
+| 内部側インターフェース(internal_interface) | `{{ internal_interface }}` |
+| 内部側IPアドレス(internal_ip) | `{{ internal_ip }}` |
+| SSL-VPN待受ポート(ssl_vpn_port) | `{{ ssl_vpn_port }}` |
+| サーバ証明書(server_cert) | `{{ server_cert }}` |
+| SSL-VPNポータル名(portal_name) | `{{ portal_name }}` |
+| トンネル用IPプール(tunnel_ip_pool) | `{{ tunnel_ip_pool }}` |
+| ユーザーグループ(user_group) | `{{ user_group }}` |
+
+今回登録するリモートユーザーは次の{{ remote_users | length }}名です。
+
+| username | full_name | department |
+|----------|-----------|------------|
+{% for u in remote_users %}| {{ u.username }} | {{ u.full_name }} | {{ u.department }} |
+{% endfor %}
+
+## 手順
+
+### 1. SSL-VPNの機能可視化を有効にする
+
+GUIでは`System > Feature Visibility`を開き、`Core Features`セクションの`SSL-VPN`を有効にして`Apply`を押します。CLIでは次のとおりです。
+
+```bash
+config system settings
+    set gui-sslvpn enable
+end
+```
+
+### 2. WAN側・内部側インターフェースのIPアドレスを設定する
+
+SSL-VPN接続を待ち受けるWAN側インターフェース`{{ wan_interface }}`と、リモートユーザーの接続先となる内部側インターフェース`{{ internal_interface }}`のIPアドレスを設定します。`Network > Interfaces`で対象インターフェースを編集し、`IP/Network Mask`に値を入力して`OK`を押すか、CLIで次のように設定します。
+
+```bash
+config system interface
+    edit "{{ wan_interface }}"
+        set vdom "root"
+        set ip {{ wan_ip }} {{ wan_netmask }}
+    next
+    edit "{{ internal_interface }}"
+        set vdom "root"
+        set ip {{ internal_ip }} {{ internal_netmask }}
+    next
+end
+```
+
+### 3. リモートユーザーとユーザーグループを作成する
+
+`User & Authentication > User Definition`で、シナリオ設定の{{ remote_users | length }}名それぞれについてローカルユーザーを作成し、`User & Authentication > User Groups`で全員を1つのグループ`{{ user_group }}`にまとめます。CLIでは次のとおりです。
+
+```bash
+config user local
+{% for u in remote_users %}    edit "{{ u.username }}"
+        set type password
+        set passwd ********
+    next
+{% endfor %}end
+
+config user group
+    edit "{{ user_group }}"
+        set member{% for u in remote_users %} "{{ u.username }}"{% endfor %}
+
+    next
+end
+```
+
+パスワードの実際の値は、コンソール入力時のみ台帳(社内の鍵管理システム)から参照し、設定表示や保存先には平文で残さないようにします。上記の`********`はマスク表記であり、実際のパスワード文字列ではありません。
+
+### 4. トンネルモード専用のSSL-VPNポータルを作成する
+
+`VPN > SSL-VPN Portals`で、トンネルモードのみを許可するポータル`{{ portal_name }}`を作成し、`Split Tunneling`を無効化してフルトンネル(内部・インターネット向けの全通信をトンネル経由にする)を強制します。CLIでは次のとおりです。
+
+```bash
+config vpn ssl web portal
+    edit "{{ portal_name }}"
+        set tunnel-mode enable
+        set split-tunneling disable
+        set ip-pools "{{ tunnel_ip_pool }}"
+    next
+end
+```
+
+### 5. SSL-VPN設定(リスニング・証明書・Authentication/Portal Mapping)を構成する
+
+`VPN > SSL-VPN Settings`で、`Listen on Interface(s)`に`{{ wan_interface }}`を選択し、`Listen on Port`に`{{ ssl_vpn_port }}`を設定します。`Server Certificate`には利用する証明書(既定は`{{ server_cert }}`)を選び、`Authentication/Portal Mapping`でグループ`{{ user_group }}`に対して`{{ portal_name }}`を割り当てる新しいマッピングを作成します。CLIでは次のとおりです。
+
+```bash
+config vpn ssl settings
+    set servercert "{{ server_cert }}"
+    set tunnel-ip-pools "{{ tunnel_ip_pool }}"
+    set tunnel-ipv6-pools "{{ tunnel_ipv6_pool }}"
+    set source-interface "{{ wan_interface }}"
+    set source-address "all"
+    set source-address6 "all"
+    config authentication-rule
+        edit 1
+            set groups "{{ user_group }}"
+            set portal "{{ portal_name }}"
+        next
+    end
+end
+```
+
+`Listen on Port`を既定(443)以外に変更する場合の対応するCLIフィールド名は、参照した一次情報のCLIサンプルには含まれていないため、ポート変更はGUIの`Listen on Port`から行ってください。また`All Other Users/Groups`(どのAuthentication/Portal Mappingにも一致しない全ユーザー)に割り当てる既定ポータルは、一次情報内でもGUI手順の記載(`tunnel-access`)とCLIサンプルの記載(`set default-portal "full-access"`)が一致していません。実運用では、意図せずフルアクセス権限のポータルが割り当たらないよう、`All Other Users/Groups`に割り当てるポータルを投入後に必ず確認してください。
+
+### 6. ファイアウォールポリシーを作成する
+
+SSL-VPN接続後のトンネルインターフェース`ssl.root`を送信元インターフェースとして、内部ネットワーク向け(`{{ internal_interface }}`)とインターネット向け(`{{ wan_interface }}`)の2本のポリシーを作成します。`Policy & Objects > Firewall Policy`で`Create New`を押し、`Incoming Interface`に`SSL-VPN tunnel interface(ssl.root)`を選択します。CLIでは次のとおりです。
+
+```bash
+config firewall policy
+    edit 0
+        set name "{{ policy_access_name }}"
+        set srcintf "ssl.root"
+        set dstintf "{{ internal_interface }}"
+        set srcaddr "all"
+        set dstaddr "all"
+        set groups "{{ user_group }}"
+        set action accept
+        set schedule "always"
+        set service "ALL"
+    next
+    edit 0
+        set name "{{ policy_outgoing_name }}"
+        set srcintf "ssl.root"
+        set dstintf "{{ wan_interface }}"
+        set srcaddr "all"
+        set dstaddr "all"
+        set groups "{{ user_group }}"
+        set action accept
+        set schedule "always"
+        set service "ALL"
+    next
+end
+```
+
+`set service "ALL"`は検証用の暫定設定です。本番投入前に、リモートユーザーが実際に必要とするサービス/ポートへ絞り込んでください。全許可のまま放置すると意図しない通信を許してしまいます。
+
+### 7. FortiClientから接続し、SSL-VPNトンネルを確立する
+
+シナリオ設定のリモートユーザーそれぞれが、FortiClient(www.forticlient.comから入手)の`Remote Access`で新規接続を追加します。`VPN Type`を`SSL VPN`、`Remote Gateway`をFortiGateのWAN側アドレス`{{ wan_ip }}`に設定し、`Customize Port`を有効にして`{{ ssl_vpn_port }}`を入力、保存後に手順3で作成した認証情報で接続します。接続後は、内部ネットワーク宛の通信を除くすべての通信がトンネル経由になります。
+
+## 動作確認
+
+- `show vpn ssl web portal "{{ portal_name }}"`の出力に`set tunnel-mode enable`と`set split-tunneling disable`が含まれること
+- `show vpn ssl settings`の出力に`set source-interface "{{ wan_interface }}"`と`set tunnel-ip-pools "{{ tunnel_ip_pool }}"`が含まれること
+- FortiClientから{{ remote_users | length }}名それぞれが接続でき、`VPN > Monitor > SSL-VPN Monitor`の接続ユーザー一覧に表示されること
+- `Log & Report > Forward Traffic`でSSLエントリの詳細を開き、接続元ユーザー・送信元IP(トンネルIPプールの範囲内)が記録されていること
+- 接続したリモート端末から内部ネットワーク`{{ internal_ip }}`宛への通信が到達すること
+
+## 注意事項
+
+- **`All Other Users/Groups`の既定ポータル割り当てを必ず確認すること。** 一次情報でもGUI手順の記載とCLIサンプルの記載が一致していません(手順5参照)。意図せずフルアクセス権限のポータルが割り当たっていないか、投入後に`show vpn ssl settings`で確認してください。
+- **パスワードは平文で保存・共有しないこと。** 手順3の`set passwd`は投入時のみ台帳から値を参照し、コマンド履歴・チャット・チケットに実際の値を残さないでください。
+- **`set service "ALL"`は検証用の暫定設定。** 本番投入前に、リモートユーザーが実際に必要とするサービス/ポートへ絞り込んでください。
+- 本テンプレートは拠点間の`fortinet-ikev2-vpn`とは別物です。社外の個人端末を接続させる場合は本テンプレート、拠点(ルータ/ファイアウォール)同士を接続する場合は`fortinet-ikev2-vpn`を使用してください。
+- `split-tunneling disable`(フルトンネル)にすると、接続中のリモート端末のインターネット向け通信もすべてFortiGate経由になります。ユーザー数やインターネット向け帯域の増加を踏まえて、WAN側の回線容量を事前に見積もってください。

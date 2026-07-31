@@ -1,0 +1,11 @@
+rule_no,policy_name,src_name,src_subnet,dst_name,dst_subnet,dst_group,svc_name,svc_protocol,svc_port,svc_group,incoming_interface,outgoing_interface,action,description
+1,-,-,-,H_WEBSRV01,172.16.30.11/32,GRP_WEBFARM,-,-,-,-,-,-,-,Webファーム1号機のアドレスオブジェクトを作成しGRP_WEBFARMへ登録
+2,-,-,-,H_WEBSRV02,172.16.30.12/32,GRP_WEBFARM,-,-,-,-,-,-,-,Webファーム2号機のアドレスオブジェクトを作成しGRP_WEBFARMへ登録
+3,-,H_LAN_USERS,10.0.10.0/24,-,-,-,-,-,-,-,-,-,-,社内LANセグメントをアドレスオブジェクトとして作成
+4,-,H_NW_ADMIN,10.0.10.50/32,-,-,-,-,-,-,-,-,-,-,ネットワーク管理端末をホストアドレスオブジェクトとして作成
+5,-,-,-,H_MGMT_JUMP,172.16.40.5/32,-,-,-,-,-,-,-,-,管理踏み台サーバーをホストアドレスオブジェクトとして作成
+6,-,-,-,-,-,-,SVC_HTTP,TCP,80,SVCGRP_WEB,-,-,-,HTTP用サービスオブジェクトを作成しSVCGRP_WEBへ登録
+7,-,-,-,-,-,-,SVC_HTTPS,TCP,443,SVCGRP_WEB,-,-,-,HTTPS用サービスオブジェクトを作成しSVCGRP_WEBへ登録
+8,-,-,-,-,-,-,SVC_SSH_ADMIN,TCP,22,-,-,-,-,管理SSH用サービスオブジェクトを作成
+9,ALLOW_LAN_TO_WEBFARM_WEB,H_LAN_USERS,-,-,-,GRP_WEBFARM,-,-,-,SVCGRP_WEB,port1,port3,accept,LANユーザーからWebファームへのHTTP/HTTPS通信を許可
+10,ALLOW_ADMIN_TO_MGMTJUMP_SSH,H_NW_ADMIN,-,H_MGMT_JUMP,-,-,SVC_SSH_ADMIN,-,-,-,port1,port3,accept,管理端末から踏み台サーバーへのSSH管理アクセスを許可

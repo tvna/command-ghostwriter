@@ -1,0 +1,301 @@
+# FortiGateのDNS over TLSアップストリーム転送構成
+
+FortiGate (FortiOS) の `config system dns` を用いて、FortiGate自身が行う
+DNS問い合わせ(FortiGuardや各種システム機能が使う上位DNSサーバーへの問い
+合わせ)を DNS over TLS (DoT) による暗号化転送に切り替えます。あわせて、
+TOMLで定義した {{ lan_segments | length }} 件のLANセグメントを送信元とする
+平文DNS(port 53)の直接WAN送出を Firewall Policy で遮断し、LAN側クライアン
+トがFortiGateの管理下を経由せずに外部DNSサーバーへ直接問い合わせる経路を
+塞ぎます。最後に、GUIのDNSサーバー到達性表示・`show system dns`・Policy
+matchツールを用いて、暗号化への切り替えと遮断の両方が意図どおり機能して
+いることを検証します。
+
+## 目的
+
+FortiGate自身の上位DNS問い合わせをDoTによる暗号化転送に切り替え、DoTに
+対応していないDNSサーバーを誤って指定しないように構成できるようになる
+ことを目指します。あわせて、LANセグメントからの平文DNS(port 53)の直接
+WAN送出を、既存のインターネットアクセス許可ポリシーより評価順で前に
+Firewall Policyとして登録し、Policy matchツールで「遮断すべきDNS通信が
+遮断され、それ以外の通信は影響を受けていないこと」の両方を検証できる
+ようになることを目指します。
+
+## 用語解説
+
+- **DNS over TLS (DoT)**: 一次情報に「DNS over TLS (DoT) is a security
+  protocol for encrypting and encapsulating DNS queries and responses over
+  the TLS protocol. DoT increases user privacy and security by preventing
+  eavesdropping and manipulation of DNS data via man-in-the-middle
+  attacks.」と説明される、DNSクエリ/レスポンスをTLS(TCP/853)で暗号化・
+  カプセル化するプロトコル
+- **config system dns(`set protocol`)**: FortiGate自身が行うDNS問い合わせ
+  (local-out)のプロトコルを指定するCLIブロック。`set primary` /
+  `set secondary` でDNSサーバーを指定したうえで、`set protocol
+  {cleartext dot doh}` のように複数プロトコルを併用指定するか、
+  `set protocol dot` でDoTのみに限定できる
+- **DNS Protocols(GUI)**: `Network > DNS` の *DNS Protocols* セクションに
+  ある `TLS (TCP/853)` / `HTTPS (TCP/443)` のチェックボックス。CLIの
+  `set protocol` と対応する
+- **DNS Filter profile(`config dnsfilter profile`)**: カテゴリ単位でDNS
+  問い合わせを許可/遮断するプロファイル。`config ftgd-dns` の下の
+  `config filters` で `edit <ID>` ごとに `set category` と `set action`
+  を設定する。本手順ではLAN向けDNSサービスに対する任意の追加防御層として
+  扱う(遮断すべきカテゴリIDは環境ごとのFortiGuardカテゴリ一覧に合わせて
+  選定すること)
+- **config system dns-server(`DNS Service on Interface`)**: FortiGateが
+  特定インターフェース上でDNSサーバーとして動作するための設定。GUIでは
+  `Network > DNS Servers` の *DNS Service on Interface* から `Mode` と
+  `DNS Filter` プロファイルを選択する。一次情報には「DoT and DoH are
+  supported in explicit mode where the FortiGate acts as an explicit DNS
+  server that listens for DoT and DoH requests.」とあり、これはLAN側の
+  クライアントからFortiGate宛に届くDoT/DoHクエリを待ち受ける機能であって、
+  本手順の主目的である「FortiGate自身から上位サーバーへ向かうDoT転送」
+  (local-out)とは方向が異なる、任意の補完機能として扱う
+- **Firewall Policy(`config firewall policy`)**: FortiGateでトラフィック
+  を通過させるために必須の設定単位。`edit <policy ID>` で個々のポリシー
+  を選択し、`set srcintf` / `set dstintf` / `set srcaddr` / `set dstaddr`
+  / `set action` / `set service` 等を設定する。ポリシーは一覧に表示され
+  る順序で評価され、最初に一致したポリシーが適用される
+- **Policy match(Policy Lookup)ツール**: `Policy & Objects` のポリシー
+  一覧画面から実行できる検証ツール。送信元インターフェース・プロトコル・
+  送信元アドレス・宛先アドレス・送信元ポート・宛先ポートを入力すると、
+  その通信がどのFirewall Policyに一致するかを判定し、一致したポリシーを
+  一覧画面上でハイライト表示する
+
+## シナリオ設定
+
+今回、FortiGate自身の上位DNS問い合わせ先と、既存のインターネットアクセス
+許可ポリシー(変更しません)は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| 上位DNSサーバー(primary_dns) | `{{ primary_dns }}` |
+| 上位DNSサーバー(secondary_dns) | `{{ secondary_dns }}` |
+| WAN側インターフェース(wan_interface) | `{{ wan_interface }}` |
+| LAN向けDNS Service on Interface(dns_service_interface、任意) | `{{ dns_service_interface }}` |
+| DNS Filterプロファイル名(dnsfilter_profile_name、任意) | `{{ dnsfilter_profile_name }}` |
+| DNS(UDP/53)用サービスオブジェクト名(dns_udp_service_name) | `{{ dns_udp_service_name }}` |
+| DNS(TCP/53)用サービスオブジェクト名(dns_tcp_service_name) | `{{ dns_tcp_service_name }}` |
+| 既存のインターネットアクセス許可ポリシーID(existing_internet_policy_id) | {{ existing_internet_policy_id }} |
+| 既存のインターネットアクセス許可ポリシー名(existing_internet_policy_name) | `{{ existing_internet_policy_name }}` |
+
+平文DNS遮断ポリシーを登録するLANセグメント(lan_segments、
+{{ lan_segments | length }} 件)は次のとおりです。`policy_id` の昇順が
+そのままポリシーの並び順(評価順)になります。
+
+| policy_id | name | srcintf | srcaddr |
+|-----------|------|---------|---------|
+{% for seg in lan_segments %}| {{ seg["policy_id"] }} | {{ seg["name"] }} | {{ seg["srcintf"] }} | {{ seg["srcaddr"] }} |
+{% endfor %}
+
+`srcaddr` 列のアドレスオブジェクト(`lan-users-net` 等)と
+`{{ existing_internet_policy_name }}`(ID: {{ existing_internet_policy_id }})
+は、いずれも `Policy & Objects` に事前登録済みであることを前提とします
+(作成手順は本手順書の対象外です)。LAN側クライアントは、DHCPで払い出され
+るDNSサーバーとしてFortiGateの各セグメントのインターフェースアドレスを
+使用している前提とします。
+
+## 手順
+
+### 1. 現状のDNS設定とFirewall Policy一覧を確認する(変更前の基準を取る)
+
+新しい設定を1件も投入する前に、現状を確認します。
+
+- `Network > DNS` を開き、現在の `Primary DNS Server` / `Secondary DNS
+  Server` を記録します。一次情報には「The legacy FortiGuard DNS servers
+  (208.91.112.53 and 208.91.112.52) do not support DoT or DoH queries, and
+  will drop these packets.」とあるため、これらのアドレスが設定されていな
+  いこと(設定されている場合はDoT切り替え前に変更が必要なこと)を確認しま
+  す。
+- `Policy & Objects > Firewall Policy` を開き、既存ポリシーの並び順(評価
+  順)と、`{{ existing_internet_policy_name }}`(ID:
+  {{ existing_internet_policy_id }})を含む現在許可されている通信の内容を
+  確認し、記録します。
+
+### 2. FortiGate自身の上位DNS問い合わせをGUIでDoTに切り替える
+
+`Network > DNS` を開き、次を設定します。
+
+- `Primary DNS Server`: `{{ primary_dns }}`
+- `Secondary DNS Server`: `{{ secondary_dns }}`
+- *DNS Protocols* セクションで `TLS (TCP/853)` を有効にする(平文フォール
+  バックを残さない場合は `Cleartext` を無効のままにする)
+- `Apply` を押す
+
+### 3. 同じ内容をCLIでも登録する
+
+GUIと同じ内容を、`config system dns` でも登録します。ここでは平文
+フォールバックを持たず、DoTのみを使用する構成にします。
+
+```bash
+config system dns
+    set primary {{ primary_dns }}
+    set secondary {{ secondary_dns }}
+    set protocol dot
+end
+```
+
+### 4. 平文DNS(port 53)遮断用のサービスオブジェクトを作成する
+
+Firewall Policyの `service` に指定するカスタムサービスを、
+`config firewall service custom` で作成します。DNSはUDP/53とTCP/53の両方
+を使用するため、プロトコルごとに分けて作成します。
+
+```bash
+config firewall service custom
+    edit "{{ dns_udp_service_name }}"
+        set protocol UDP
+        set udp-portrange 53
+    next
+end
+config firewall service custom
+    edit "{{ dns_tcp_service_name }}"
+        set protocol TCP
+        set tcp-portrange 53
+    next
+end
+```
+
+### 5. LANセグメントごとに平文DNS遮断ポリシーを登録する
+
+シナリオ設定の `lan_segments` に基づき、セグメントごとに平文DNS(port 53)
+のWAN方向直接送出を拒否するポリシーを登録します。`policy_id` の昇順で、
+既存の `{{ existing_internet_policy_name }}`(ID:
+{{ existing_internet_policy_id }})より**必ず前**(評価順で上位)に置いて
+ください。ポリシーは一覧に表示される順序で評価されるため、先に
+`{{ existing_internet_policy_name }}` が一致すると、後続の遮断ポリシーが
+評価されずDNSパケットが素通りしてしまいます。
+
+```bash
+{% for seg in lan_segments %}config firewall policy
+    edit {{ seg["policy_id"] }}
+        set name "{{ seg["name"] }}"
+        set srcintf "{{ seg["srcintf"] }}"
+        set dstintf "{{ wan_interface }}"
+        set srcaddr "{{ seg["srcaddr"] }}"
+        set dstaddr "all"
+        set action deny
+        set schedule "always"
+        set service "{{ dns_udp_service_name }}" "{{ dns_tcp_service_name }}"
+        set logtraffic all
+    next
+end
+{% endfor %}```
+
+GUIから登録する場合は `Policy & Objects > Firewall Policy > Create New`
+で、Incoming Interface / Source / Outgoing Interface(`{{ wan_interface }}`)
+/ Destination(`all`) / Service(`{{ dns_udp_service_name }}`,
+`{{ dns_tcp_service_name }}`) / Action(`DENY`)を各行の値のまま入力します。
+
+`Policy & Objects > Firewall Policy` の一覧(`By Sequence`表示)で並び順を
+確認し、意図した順序と異なる場合は対象ポリシーを選択して `More > Move by
+ID` から `Above`/`Below` と Destination policy ID を指定して修正してくだ
+さい。
+
+### 6. (任意)LAN向けDNS Service on InterfaceにDNS Filterプロファイルを適用する
+
+LAN側クライアントがFortiGate自身をDNSサーバーとして利用している場合、
+`{{ dns_service_interface }}` インターフェース上のDNSサービスにカテゴリ
+フィルタを追加できます。この手順は任意であり、手順2〜5の暗号化転送・遮断
+の効果には影響しません。
+
+```bash
+config dnsfilter profile
+    edit "{{ dnsfilter_profile_name }}"
+        config ftgd-dns
+            config filters
+                edit 1
+                    set category 30
+                    set action block
+                next
+            end
+        end
+    next
+end
+config system dns-server
+    edit "{{ dns_service_interface }}"
+        set dnsfilter-profile "{{ dnsfilter_profile_name }}"
+    next
+end
+```
+
+GUIでは `Network > DNS Servers` の *DNS Service on Interface* で対象イン
+ターフェースを編集し、`DNS Filter` に `{{ dnsfilter_profile_name }}` を
+選択して `OK` を押します。`category 30` は一次情報の例(education
+カテゴリ)をそのまま用いています。実際に遮断するカテゴリIDは、環境ごとの
+FortiGuardカテゴリ一覧に合わせて選定してください。
+
+### 7. GUI・CLI・Policy matchで切り替えと遮断の両方を検証する
+
+- `Network > DNS` を再度開き、`Primary DNS Server` / `Secondary DNS
+  Server` の到達性・レイテンシ表示が「unreachable」等の異常を示していな
+  いことを確認します。一次情報には「At times, the latency status of the
+  DNS servers might also appear high or unreachable.」とあり、DoT非対応
+  サーバーを指定した場合にこの表示で気づけます。
+- CLIで設定が反映されていることを確認します。
+
+  ```bash
+  show system dns
+  ```
+
+  出力に `set protocol dot` が含まれていることを確認してください。
+- `Policy & Objects` のポリシー一覧画面で `Policy match` を開き、
+  次の2点を確認します。
+  1. `lan_segments` の各行について、Incoming Interface=`srcintf` /
+     Source=`srcaddr` / Destination=`all` / Destination Port=`53`
+     (TCP/UDP)の条件で照会し、一致したポリシーが手順5で登録した対応する
+     `name`(例: {% for seg in lan_segments %}`{{ seg["name"] }}`{% if not loop.last %} / {% endif %}{% endfor %})
+     であることを確認します。
+  2. 同じ送信元で Destination Port を `53` 以外(例: `443`)に変えて照会
+     し、一致したポリシーが引き続き `{{ existing_internet_policy_name }}`
+     であることを確認します(DNS以外の通信が意図せず遮断されていないこと
+     の確認)。
+
+## 動作確認
+
+- `Network > DNS` の `Primary DNS Server`/`Secondary DNS Server` の到達
+  性・レイテンシ表示に異常(unreachable等)がないこと
+- `show system dns` の出力に `set protocol dot` が含まれること
+- `Policy & Objects > Firewall Policy` の一覧(`By Sequence`)で、
+  `lan_segments` の各遮断ポリシーが `{{ existing_internet_policy_name }}`
+  (ID: {{ existing_internet_policy_id }})より上位(評価順で先)に並んで
+  いること
+- Policy matchで、各LANセグメントからの宛先ポート53の通信が対応する
+  `deny-plaintext-dns-*` ポリシーに一致すること
+- Policy matchで、同じLANセグメントからの宛先ポート53以外の通信が
+  `{{ existing_internet_policy_name }}` に一致し続けること(誤遮断が
+  発生していないことの確認)
+- 手順1で記録した既存ポリシーの並び順・内容が、意図せず変更されていない
+  こと
+
+## 注意事項
+
+- **遮断ポリシーの並び順を厳守すること。** ポリシーは一覧に表示される順序
+  で評価されるため、`lan_segments` の遮断ポリシーを
+  `{{ existing_internet_policy_name }}` より後ろに置くと、先に一般の
+  インターネットアクセス許可ポリシーが一致してしまい、平文DNSが遮断され
+  ないまま素通りします。並び順は `More > Move by ID` でいつでも修正でき
+  ます。
+- **DoT非対応のDNSサーバーを `primary`/`secondary` に指定しないこと。**
+  一次情報には legacy のFortiGuard DNSサーバー(`208.91.112.53` /
+  `208.91.112.52`)がDoT/DoHに非対応でパケットをドロップする旨が明記され
+  ています。DoTが利用できないサーバーしか使えない環境では、`set protocol
+  dot` ではなく `set protocol {cleartext dot doh}` のように平文フォール
+  バックを残すか、DoT/DoHを無効化することが一次情報でも推奨されています。
+- **本手順のFirewall Policyは、LANセグメントを送信元とするスルー
+  (through-traffic)通信のみを対象とします。** FortiGate自身が手順2・3で
+  設定した上位DNSサーバーへ送信するlocal-outのDoTクエリは、この
+  Firewall Policyの評価対象ではないため、本手順の遮断ポリシーによって
+  影響を受けません。
+- 一次情報のページ内には、local-out DNS問い合わせが実際にDoTで送信されて
+  いることを直接確認する診断コマンドの例示がありません。本手順の検証は
+  GUIのDNSサーバー到達性表示と `show system dns` によるコンフィグ反映の
+  確認にとどまります。より確実な確認が必要な場合は、WAN側インターフェー
+  スでTCP/853向けの通信をパケットキャプチャする等、別途の手段を検討して
+  ください。
+- 手順6(DNS Filterプロファイル・`config system dns-server`)は任意の
+  補完機能です。適用先の `{{ dns_service_interface }}` インターフェース
+  にDNSサービスを提供していない環境では、この手順は不要です。
+- CLI/GUIへのログインに使う管理者パスワードやAPIトークンは、本手順書や
+  ログに平文で残さないでください。値を記録する場合は `********` のように
+  マスクし、秘密管理ツール等で別途安全に保管してください。

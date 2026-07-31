@@ -1,0 +1,25 @@
+incident_id = "INC-2026-0731-014"
+firewall_hostname = "fw-tokyo-edge1"
+observed_at = "2026-07-31 09:12 JST"
+alert_threshold_percent = 90
+observed_active_sessions = 236000
+from_zone = "untrust"
+protected_zone = "dmz"
+classified_profile_name = "dos-classified-src-cap-dmz"
+dos_rule_name = "dos-protect-dmz-inbound"
+max_concurrent_sessions_per_source = 500
+
+[[candidate_source_hosts]]
+source_ip = "203.0.113.45"
+active_sessions = 48210
+note = "単一送信元からの持続的なTCP接続が最多"
+
+[[candidate_source_hosts]]
+source_ip = "198.51.100.77"
+active_sessions = 21980
+note = "同時間帯に2番目にセッション数が多い送信元"
+
+[[candidate_source_hosts]]
+source_ip = "203.0.113.201"
+active_sessions = 15630
+note = "短時間で新規セッションが急増した送信元"

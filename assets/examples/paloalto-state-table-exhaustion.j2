@@ -1,0 +1,235 @@
+# Palo Alto Networks(PAN-OS)のセッションテーブル枯渇時の原因ホスト特定とDoS Protection再発防止
+
+インシデント`{{ incident_id }}`を想定し、`{{ firewall_hostname }}`でセッション/ステート
+テーブルの使用率急騰アラート(使用率が概算で{{ alert_threshold_percent }}%に達したという
+監視システム側の通知)を受けた際に、CLIの`show session info`でファイアウォール自身の
+アクティブセッション数を確認し、ACC(Application Command Center)と`Monitor > Session
+Browser`で原因となっている送信元ホスト(候補{{ candidate_source_hosts | length }}件)を
+特定します。そのうえで、Classified DoS Protection Profileの`Resources Protection`タブに
+ある送信元別の`Max Concurrent Sessions`(最大同時セッション数)上限を設定し、DoS Protection
+Policyルールへ`Action = Protect`で適用するところまでを対象とします。手順1・2は照会のみで
+原因ホストを特定する段階、手順3以降が設定変更(プロファイル作成・ポリシールール追加・
+commit)の段階です。
+
+## 目的
+
+セッション/ステートテーブルの使用率が急騰した際に、`show session info`による現況確認と
+ACC・Session Browserによる原因ホストの特定を、設定変更を一切行わない照会だけで完結できる
+ようになることを目指します。あわせて、Classified DoS Protection Profileの
+`Resources Protection`タブで送信元別の`Max Concurrent Sessions`上限を設定する意味
+(Classifiedプロファイルは「DoS Protectionポリシールールで指定された個々のデバイスに
+フラッド閾値を適用する」機構であり、`Address`フィールドを`source-ip-only`にすることで
+送信元IPごとに独立した上限として働くこと)を理解し、DoS Protection Policyルールの
+`Action`を`Protect`にしない限りプロファイルの閾値が適用されないという一次情報記載の
+仕様を踏まえて、正しい適用手順で再発防止を実施できるようになることを目指します。
+
+## 用語解説
+
+- **`show session info`**: ファイアウォール自身の現在のアクティブセッション数を確認できる
+  PAN-OSの運用(operational)CLIコマンドです。出力に含まれる具体的な項目名はPAN-OS
+  バージョンや機種により表記が異なる場合があり、本手順が参照した一次情報(DoS Protection
+  Profilesのページ)には本コマンド自体の出力例は含まれていないため、出力項目名を断定せず、
+  実機の表示に従ってアクティブセッション数を確認する運用として扱います
+- **ACC(Application Command Center)**: 送信元・宛先・アプリケーション等の切り口で
+  トラフィックの集計を確認できるPAN-OSのGUI画面です。具体的なウィジェット名・表示項目は
+  本手順が参照した一次情報には記載がないため断定せず、実際の画面構成に従って送信元別の
+  セッション数・トラフィック量の多いホストを確認する用途として扱います
+- **`Monitor > Session Browser`**: 現在稼働中のセッションをブラウズ・フィルタするPAN-OSの
+  GUI画面です。Attribute/Operator/Valueの組み合わせで、送信元アドレス等の条件を指定して
+  現在のセッションを絞り込めます
+- **DoS Protection Profile(Classified / Aggregate)**: 一次情報には、Classifiedプロファイル
+  は「Sets flood thresholds that apply to each individual device specified in a DoS
+  Protection policy rule(DoS Protectionポリシールールで指定された個々のデバイスそれぞれに
+  フラッド閾値を適用する)」機構、Aggregateプロファイルは「Sets thresholds that apply to
+  the entire group of devices specified in a DoS Protection policy rule instead of to
+  each individual device(個々のデバイスではなく、ルールで指定されたデバイス群全体に閾値を
+  適用する)」機構と説明されています。本手順では、送信元ホストごとに独立した上限を課す
+  ためClassifiedプロファイルを使用します
+- **Classifiedプロファイルの`Address`フィールド**: `source-ip-only`・`destination-ip-only`・
+  `src-dest-ip-both`のいずれかを選び、着信コネクションを送信元IPのみ・宛先IPのみ・送信元と
+  宛先の組み合わせのいずれで閾値にカウントするかを決めます。本手順では送信元別に上限を
+  課すため`source-ip-only`を選択します
+- **`Resources Protection`タブ / `Max Concurrent Sessions`**: DoS Protection Profileの
+  設定タブの1つで、プロファイルを適用したDoS Protectionポリシールールに一致するデバイスが
+  受け付けられる最大同時セッション数を設定します。一次情報には、この閾値の決め方について
+  「Set the threshold to approximately 80% of the resources' capacity, then monitor and
+  adjust the threshold as needed.(リソースの実容量の約80%を閾値として設定し、その後は
+  監視しながら必要に応じて調整する)」と案内されています
+- **DoS Protection Policyルールの`Action`(Protect / Allow / Deny)**: 一次情報には、
+  `Protect`について「The firewall protects the devices defined in the DoS Protection
+  policy rule by applying the specified DoS Protection profile or profiles thresholds
+  to traffic that matches the rule.(ルールに一致するトラフィックに対し、指定したDoS
+  Protectionプロファイルの閾値を適用してデバイスを保護する)」と、`Allow`/`Deny`について
+  「The Allow and Deny actions enable you to make exceptions within larger groups but do
+  not apply DoS protection to the traffic.(より大きなグループの中で例外を作れるが、DoS
+  Protection自体は適用しない)」と説明されています。さらに「The firewall applies DoS
+  Protection profiles only if the Action is Protect.(`Action`が`Protect`の場合にのみ
+  DoS Protectionプロファイルが適用される)」と明記されており、`Protect`以外を選ぶと
+  プロファイルで設定した`Max Concurrent Sessions`は一切機能しません
+- **DoS Protectionポリシールールとプロファイルの対応関係**: 一次情報には「A rule can have
+  one aggregate DoS Protection profile and one classified DoS Protection profile.(1件の
+  ルールにAggregateプロファイル1件・Classifiedプロファイル1件をそれぞれ最大1件まで設定
+  できる)」と説明されています
+- **commit**: PAN-OSは編集中の設定(candidate config)と実機で動作中の設定(running
+  config)を分離する二段階構成モデルを採ります。`commit`を実行するまでcandidate configの
+  変更はrunning configに反映されません
+
+## シナリオ設定
+
+今回のインシデント`{{ incident_id }}`の概要と、対象ファイアウォールは次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| インシデントID(incident_id) | {{ incident_id }} |
+| 対象ファイアウォール(firewall_hostname) | {{ firewall_hostname }} |
+| アラート発報時刻(observed_at) | {{ observed_at }} |
+| 監視システムが検知した使用率のしきい値(alert_threshold_percent) | {{ alert_threshold_percent }}% |
+| アラート発報時点の監視システム側集計によるアクティブセッション数(observed_active_sessions) | {{ observed_active_sessions }} |
+
+`alert_threshold_percent`・`observed_active_sessions`は、SNMP等でファイアウォールを定期的に
+ポーリングしている監視システム側が算出・通知した値という想定です。算出方法・ポーリング方法は
+監視システムの実装に依存するため、本手順の対象外とし、手順1で`show session info`により
+ファイアウォール自身の値を独自に確認します。
+
+再発防止として設定するClassified DoS Protection Profileと、適用先のDoS Protection Policy
+ルールは次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| 送信元ゾーン(from_zone) | {{ from_zone }} |
+| 保護対象ゾーン(protected_zone) | {{ protected_zone }} |
+| Classified DoS Protection Profile名(classified_profile_name) | {{ classified_profile_name }} |
+| DoS Protection Policyルール名(dos_rule_name) | {{ dos_rule_name }} |
+| 送信元別の最大同時セッション数(max_concurrent_sessions_per_source) | {{ max_concurrent_sessions_per_source }} |
+
+手順2で原因ホストとして確認する候補は、次の{{ candidate_source_hosts | length }}件です。
+`active_sessions`は、アラート発報後にACCで洗い出した時点の目安値であり、手順2で
+Session Browserにより実際の値を再確認します。
+
+| # | 送信元IP | ACCで確認した同時セッション数の目安 | 備考 |
+|---|----------|--------------------------------------|------|
+{% for h in candidate_source_hosts %}| {{ loop.index }} | {{ h["source_ip"] }} | {{ h["active_sessions"] }} | {{ h["note"] }} |
+{% endfor %}
+
+`{{ from_zone }}`/`{{ protected_zone }}`はこの手順書内の仮称であり、実際の環境に存在する
+ゾーン名に読み替えてください。
+
+## 手順
+
+### 1. 現状を確認する(変更前の基準を取る)
+
+設定変更を一切行う前に、ファイアウォール自身の値を確認し、監視システム側の通知
+({{ observed_active_sessions }}、しきい値{{ alert_threshold_percent }}%)と突き合わせます。
+
+- CLIで`show session info`を実行し、現在のアクティブセッション数を確認します。出力の
+  具体的な項目名は実機の表示に従ってください。
+- `Objects > Security Profiles > DoS Protection`を開き、`{{ classified_profile_name }}`と
+  同名のClassified DoS Protection Profileが既に存在しないことを確認します。
+- `Policies > DoS Protection`を開き、`{{ dos_rule_name }}`と同名のルールが既に存在しない
+  ことと、既存のDoS Protectionルールの並び順(評価順)を確認します。
+
+### 2. ACCとSession Browserで原因ホストを特定する
+
+ACC(Application Command Center)を開き、アラート発報時刻`{{ observed_at }}`前後の時間帯で
+送信元別のセッション数・トラフィック量が多いホストを確認します。表示項目やウィジェットの
+構成は環境・PAN-OSバージョンにより異なるため、実際の画面に従って確認してください。
+
+洗い出した候補について、`Monitor > Session Browser`を開き、Attribute/Operator/Valueで
+送信元アドレスを条件に指定して、候補ごとの現在の同時セッション数を1件ずつ確認します。
+
+{% for h in candidate_source_hosts %}- {{ h["source_ip"] }}: 送信元アドレス条件でSession Browserを絞り込み、現在の同時セッション数を確認・記録する({{ h["note"] }})
+{% endfor %}
+
+この時点ではまだ設定変更を行いません。手順3・4で使う`max_concurrent_sessions_per_source`
+({{ max_concurrent_sessions_per_source }})は、ここで確認した平常時からの乖離と、用語解説の
+「リソースの実容量の約80%を閾値として設定し、監視しながら調整する」という一次情報の考え方
+を踏まえて決定したものとします。
+
+### 3. Classified DoS Protection Profileを作成する
+
+`Objects > Security Profiles > DoS Protection`を開き、`Add`を選択します。
+
+- `Name`に`{{ classified_profile_name }}`を入力します。
+- `Type`を`Classified`にします。
+- `Address`フィールドで`source-ip-only`を選択します(送信元IPごとに独立した上限として
+  働かせるためです)。
+- `Resources Protection`タブを開き、`Max Concurrent Sessions`に
+  `{{ max_concurrent_sessions_per_source }}`を入力します。
+- `OK`を選択して保存します。この時点ではまだ`Commit`は実行しません。
+
+### 4. DoS Protection Policyルールを作成し、Classified Profileを適用する
+
+`Policies > DoS Protection`を開き、`Add`を選択します。
+
+- `Name`に`{{ dos_rule_name }}`を入力します。
+- Source Zoneに`{{ from_zone }}`、Destination Zoneに`{{ protected_zone }}`を設定します
+  (保護対象は`{{ protected_zone }}`側のデバイス群です)。
+- Classified Profileの選択欄で、手順3で作成した`{{ classified_profile_name }}`を選択します。
+- `Action`を**`Protect`**にします。用語解説のとおり、一次情報には「`Action`が`Protect`の
+  場合にのみDoS Protectionプロファイルが適用される」と明記されており、`Allow`または
+  `Deny`のままではせっかく手順3で設定した`Max Concurrent Sessions`が一切機能しません。
+- `OK`を選択して保存します。この時点ではまだ`Commit`は実行しません。
+
+### 5. ルールの評価順序を確認し、commitする
+
+`Policies > DoS Protection`のルール一覧を開き、`{{ dos_rule_name }}`が、手順1で確認した
+既存ルールのうち`{{ from_zone }}`→`{{ protected_zone }}`間の通信に一致し得るルールより
+先に評価される位置にあることを確認します。PAN-OSのポリシーは上から順に評価され最初に
+一致したルールが適用されるため、意図せず既存ルールより後ろに配置すると新設ルールが
+評価されないおそれがあります。
+
+確認後、`Commit`を実行してcandidate configをrunning configへ反映します。commitが完了する
+まで、手順3・4で入力した内容は実機の動作に反映されません。
+
+### 6. commit後にセッション数と使用率を再確認する
+
+commit完了後、しばらく様子を見てから次を確認します。
+
+- CLIで`show session info`を再度実行し、手順1で確認した値と比較してアクティブセッション数
+  が落ち着く、または増加が頭打ちになる傾向が見えるかを確認します。
+- `Monitor > Session Browser`で、手順2の候補ホストそれぞれの同時セッション数が
+  `{{ max_concurrent_sessions_per_source }}`前後で頭打ちになっているかを確認します。
+- `{{ protected_zone }}`側で稼働する正規サービスへの通信が、候補ホスト以外の送信元から
+  引き続き成立していることも確認します。`Max Concurrent Sessions`は送信元IPごとの上限
+  であるため、正規の送信元が個別にこの上限を超えない限り影響を受けないはずですが、値を
+  低く設定しすぎた場合は正規利用への誤った制限が起きうるため、あわせて確認してください。
+
+## 動作確認
+
+- `show session info`で確認したアクティブセッション数が、手順1(変更前)と比較して手順6
+  (commit後)で落ち着く、または増加が頭打ちになっていること
+- `Objects > Security Profiles > DoS Protection`に`{{ classified_profile_name }}`が
+  `Type=Classified`・`Address=source-ip-only`・`Resources Protection`の
+  `Max Concurrent Sessions={{ max_concurrent_sessions_per_source }}`で登録されていること
+- `Policies > DoS Protection`に`{{ dos_rule_name }}`が、Source Zone=`{{ from_zone }}`・
+  Destination Zone=`{{ protected_zone }}`・Classified Profile=`{{ classified_profile_name }}`・
+  `Action=Protect`で登録され、既存の対象ルールより先に評価される位置にあること
+- `Monitor > Session Browser`で、手順2の候補{{ candidate_source_hosts | length }}件それぞれ
+  の同時セッション数が、`{{ max_concurrent_sessions_per_source }}`前後で頭打ちになっている
+  こと
+- `{{ protected_zone }}`側の正規サービスについて、候補ホスト以外の送信元からの通信が
+  引き続き成立していること
+
+## 注意事項
+
+- **DoS Protection Policyルールの`Action`を必ず`Protect`にすること。** 一次情報には
+  「`Action`が`Protect`の場合にのみDoS Protectionプロファイルが適用される」と明記されて
+  います。`Allow`または`Deny`のままでは、手順3で設定した`Max Concurrent Sessions`は一切
+  機能せず、再発防止の効果がありません。
+- **`Max Concurrent Sessions`を低く設定しすぎないこと。** 一次情報は「リソースの実容量の
+  約80%を閾値として設定し、監視しながら調整する」という考え方を案内しています。手順2で
+  確認した平常時のセッション数を踏まえずに厳しい値を設定すると、正規の送信元からの通信
+  まで新規セッションとして破棄されるおそれがあります。commit後は手順6の確認を必ず行い、
+  必要に応じて`{{ max_concurrent_sessions_per_source }}`を調整してください。
+- **ルールの評価順序を確認してからcommitすること。** `{{ dos_rule_name }}`が、対象通信に
+  先に一致してしまう既存ルールより後ろに置かれていると、新設ルールが評価されないまま
+  何も変わりません。
+- `show session info`の出力項目名、ACCの具体的なウィジェット構成、`Add Device`以外の
+  操作ボタンの正確な名称は、本手順が参照した一次情報(DoS Protection Profilesおよび
+  関連ページ)には記載がなかったため、本手順では断定していません。実際の画面表示に
+  従って操作してください。
+- 手順1・2は照会のみであり設定変更を行いません。原因ホストの特定に確証が持てない段階で
+  手順3以降(プロファイル作成・ポリシールール追加・commit)に進まないでください。
+- CLI/GUIへのログインに使う管理者パスワードやAPIキーは、本手順書やチケット、ログに平文で
+  残さないでください。記録が必要な場合は`********`のようにマスクし、秘密管理ツール等で
+  別途安全に保管してください。

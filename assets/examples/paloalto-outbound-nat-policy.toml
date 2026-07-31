@@ -1,0 +1,11 @@
+lan_zone = "trust"
+wan_zone = "untrust"
+existing_general_nat_rule_name = "NAT-EGRESS-DEFAULT-DIPP"
+fixed_source_host_ip = "10.0.30.50"
+fixed_source_addr_obj = "addr-app-integration-svc"
+fixed_translated_ip = "203.0.113.55"
+fixed_translated_addr_obj = "addr-pub-fixed-nat-55"
+static_nat_rule_name = "NAT-fixed-src-app-integration-svc"
+other_lan_host_ip = "10.0.30.60"
+external_test_destination = "198.51.100.80"
+external_test_port = 443

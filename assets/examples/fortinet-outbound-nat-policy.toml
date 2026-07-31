@@ -1,0 +1,12 @@
+wan_interface = "wan1"
+lan_interface = "internal1"
+fixed_source_name = "svr-partner-api"
+fixed_source_ip = "10.0.30.25"
+fixed_external_ip = "203.0.113.50"
+fixed_ippool_name = "ippool-svr-partner-api-fixed"
+fixed_snat_policyid = 1
+general_snat_policyid = 2
+fixed_snat_comment = "Fixed source NAT for partner API server (dedicated egress IP)"
+general_snat_comment = "Default outbound NAT for all other internal hosts (outgoing interface address)"
+verify_target_ip = "198.51.100.10"
+verify_target_port = 443

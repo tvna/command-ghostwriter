@@ -1,0 +1,307 @@
+# SonicWall (SonicOS) コネクションテーブル逼迫時のホスト特定とConnection Limiting/Flood Protection再発防止
+
+SonicOS の `Investigate | Logs | Connection Logs`(通称 Connections Monitor)で
+送信元アドレス別に接続状況を絞り込み、コネクションキャッシュを圧迫している
+原因ホストを特定します。特定後は、既存の `POLICY | Rules and Policies >
+Access Rules` 上の対象ルール `{{ access_rule_name }}`({{ from_zone }} →
+{{ to_zone }})に Connection Limiting(v2)の `Number of connections allowed
+(% of maximum connections)` と `Enable Connection Threshold for each Source
+IP` を設定してホスト単位の再発を防ぎ、あわせて `NETWORK | Firewall | Flood
+Protection` の TCP(SYN)/UDP/ICMP各タブでしきい値(Attack Threshold)を調整
+して、ワームやスキャンツールによる急激な接続数の増加そのものを抑制します。
+最後に Connections Monitor と各プロトコルの Traffic Statistics で効果を
+検証します。
+
+## 目的
+
+コネクション/ステートテーブルの使用率急騰という申告に対し、`Investigate |
+Logs | Connection Logs`(Connections Monitor)を送信元アドレスで絞り込んで
+原因ホストを特定できるようになることを目指します。あわせて、Access Rules
+が備える Connection Limiting(v2)の `Number of connections allowed (% of
+maximum connections)` と送信元IPアドレス単位の `Enable Connection Threshold
+for each Source IP` を用いて、特定した原因ホストだけでなく `{{ from_zone }}`
+→ `{{ to_zone }}` 方向の通信全体に再発防止の上限を課し、さらに `NETWORK |
+Firewall | Flood Protection` の SYN/UDP/ICMP各しきい値(Attack Threshold)を
+調整することで、ワームの急速な感染拡大やスキャンツールによる接続数急増
+そのものを抑制できるようになることを目指します。
+
+## 用語解説
+
+- **Investigate | Logs | Connection Logs(Connections Monitor)**: SonicWall
+  への/を経由するアクティブなコネクションを一覧表示する画面。`Src IP` /
+  `Src Port` / `Dst IP` / `Dst Port` / `Protocol` / `Src Iface` / `Dst
+  Iface` / `Flow Type` / `Expiry (sec)` / `Tx Bytes` / `Rx Bytes` などの列を
+  持つ。`Filter` で `Source Address` / `Destination Address` / `Destination
+  Port` / `Protocol` / `Flow Type` / `Src Interface` / `Dst Interface` を
+  指定し、`Apply Filters` で適用、`Reset Filters` で解除する。表は個々の
+  コネクションの一覧であり、送信元別の集計列は持たないため、原因ホストの
+  絞り込みは `Source Address` フィルタを1IPずつ適用して該当行数を確認する
+  形で行う
+- **Connection Limiting(v2)**: 一次情報に「Connection Limiting v2 uses
+  **Firewall Access Rules** to allow the administrator to choose which
+  **IP address**, which **Service**, and which **traffic direction** when
+  configuring connection limiting.」とあり、「It is not possible to use IPS
+  signatures as a Connection Limiting classifier; only Access Rules ... are
+  permissible.」とも明記される、Access Rule単位でコネクションキャッシュの
+  配分を制限する機構。一次情報にはさらに「Connection Limiting is applied by
+  defining a percentage of the total maximum allowable connections that
+  might be allocated to a particular type of traffic. ... the default LAN >
+  WAN setting, where all available resources might be allocated to LAN >
+  WAN (any source, any destination, any service) traffic.」とあり、既定では
+  `{{ from_zone }}` → `{{ to_zone }}` のようなAllowルールにこの制限が
+  一切かかっていないことが、コネクションテーブル逼迫の一因になり得る
+- **Number of connections allowed (% of maximum connections)**: Access
+  Ruleの編集ダイアログ最後のタブ(`Optional Settings`タブ)にあるフィールド。
+  一次情報に「Specify the percentage of the maximum connections this rule
+  is to allow in the Number of connections allowed (% of maximum
+  connections) field.」とあり、そのルールに一致する通信全体へ割り当てる
+  コネクションキャッシュの割合(%)を指定する。最小許容値は1%(「limiting
+  general traffic to a smaller percentage (minimum allowable value is
+  1%)」)
+- **Enable Connection Threshold for each Source IP / Enable Connection for
+  each Destination IP**: 同じ `Optional Settings` タブ内のチェックボックス。
+  一次情報に「Set a limit for the maximum number of connections allowed per
+  source IP address by selecting Enable Connection Threshold for each
+  Source IP and entering the value in the field.」「Set a limit for the
+  maximum number of connections allowed per destination IP address by
+  selecting Enable Connection for each Destination IP ...」とあり、いずれも
+  「Only available for Allow rules.」と明記される。送信元(LAN側ホスト等)、
+  宛先(WAN側の特定サーバ等)のどちらか、または両方を選んで1ホストあたりの
+  上限を個別に設定できる
+- **NETWORK | Firewall | Flood Protection**: 一次情報に「This tab is
+  available under Network > Firewall > Flood Protection and is available
+  only Classic mode of NSsp, NSa and TZ platforms.」とあるTCP/UDP/ICMPの
+  フラッド対策設定画面。SYNしきい値の調整は `Network > Firewall > Flood
+  Protection > TCP > Layer 3 SYN Flood Protection- SYN Proxy` タブ(一次情報
+  に「This tab is available only in Policy mode」と明記)、UDP/ICMPの
+  しきい値調整は `Network > Firewall > Flood Protection > UDP` /
+  `Network > Firewall > Flood Protection > UDP > ICMP > IPv4` の各タブ
+  (UDPタブの一次情報には「This section is available only in Classic
+  mode.」と明記)で行う。Classic Mode / Policy Modeのどちらで運用している
+  かによって実際の表示位置が異なる場合があるため、事前に自機のモードを
+  確認すること
+- **SYN Attack Threshold**: 前述のLayer 3 SYN Flood Protection - SYN Proxy
+  タブ内のセクション。一次情報に「Attack Threshold - Enables you to set the
+  threshold for the number of incomplete connection attempts per second
+  before the device drops packets at any value between 5 and 200,000. The
+  default is the Suggested value calculated from gathered statistics by the
+  appliance.」とある
+- **UDP Flood Attack Threshold / UDP Flood Attack Blocking Time**: UDPタブ
+  の設定。一次情報に「UDP Flood Attack Threshold – The maximum number of UDP
+  packets allowed per second ... The minimum value is 50, the maximum value
+  is 1000000, and the default value is 1000.」「UDP Flood Attack Blocking
+  Time – ... The minimum time is 1 second, the maximum time is 120 seconds,
+  and the default time is 2 seconds.」とある。`Enable UDP Flood Protection`
+  を有効化しないと他のUDP設定は反映されない
+- **ICMP Flood Attack Threshold / ICMP Flood Attack Blocking Time**: ICMP >
+  IPv4タブの設定。一次情報に「ICMP Flood Attack Threshold – ... The minimum
+  number is 10, the maximum number is 100000, and the default number is
+  200.」「ICMP Flood Attack Blocking Time – ... The minimum time is 1
+  second, the maximum time is 120 seconds, and the default time is 2
+  seconds.」とある。`Enable ICMP Flood Protection` を有効化しないと他の
+  ICMP設定は反映されない
+- **NETWORK | Firewall | Advanced の Connections(Maximum SPI/DPI
+  Connections)**: 一次情報に「Navigate to Network > Firewall > Advanced.
+  Scroll to Connections.」「Maximum SPI Connections (DPI services
+  disabled) ... Maximum DPI Connections (DPI services enabled) - This is
+  the recommended setting ... DPI Connections (DPI services enabled with
+  additional performance optimization) ...」とある、機器全体のコネクション
+  キャッシュ容量とDPI検査深度のトレードオフを選ぶ設定。一次情報に「Any
+  change to the Connections setting requires the SonicWall security
+  appliance be restarted for the change to be implemented.」と明記される
+  とおり、変更には機器の再起動を伴うため、本手順では最終手段として扱う
+
+## シナリオ設定
+
+今回対応するSonicWallと、調整するConnection Limiting / Flood Protection /
+Connectionsモードの設定値は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| 対象SonicWall(firewall_name) | `{{ firewall_name }}` |
+| Access Ruleのゾーンペア(from_zone → to_zone) | `{{ from_zone }}` → `{{ to_zone }}` |
+| 対象Access Rule名(access_rule_name) | `{{ access_rule_name }}` |
+| Number of connections allowed(connection_limit_percentage) | {{ connection_limit_percentage }}% |
+| Enable Connection Threshold for each Source IP(source_ip_connection_threshold) | {{ source_ip_connection_threshold }} |
+| SYN Flood Protection Mode(syn_flood_protection_mode) | {{ syn_flood_protection_mode }} |
+| SYN Attack Threshold(syn_attack_threshold) | {{ syn_attack_threshold }} |
+| UDP Flood Attack Threshold(udp_flood_attack_threshold) | {{ udp_flood_attack_threshold }} |
+| UDP Flood Attack Blocking Time(udp_flood_attack_blocking_time) | {{ udp_flood_attack_blocking_time }}秒 |
+| ICMP Flood Attack Threshold(icmp_flood_attack_threshold) | {{ icmp_flood_attack_threshold }} |
+| ICMP Flood Attack Blocking Time(icmp_flood_attack_blocking_time) | {{ icmp_flood_attack_blocking_time }}秒 |
+| UDP/ICMP Flood Attack Protected Destination List(flood_protected_destination) | `{{ flood_protected_destination }}` |
+| Connectionsモード(connections_mode、最終手段) | {{ connections_mode }} |
+
+コネクションテーブル使用率急騰の通知を受けて `Investigate | Logs |
+Connection Logs` を確認した結果、次の {{ top_offenders | length }} 件の
+`{{ from_zone }}` 側ホストが接続数上位候補として挙がっています(`rank`
+昇順)。
+
+| rank | src_ip | observed_connection_count | suspected_cause |
+|------|--------|----------------------------|------------------|
+{% for o in top_offenders %}| {{ o["rank"] }} | {{ o["src_ip"] }} | {{ o["observed_connection_count"] }} | {{ o["suspected_cause"] }} |
+{% endfor %}
+
+`{{ access_rule_name }}` は `{{ from_zone }}` → `{{ to_zone }}` を許可する
+既存のAccess Rule(Action=Allow)であることを前提とします。このルール自体の
+新規作成は本手順書の対象外です。
+
+## 手順
+
+### 1. 変更前の基準として、既存の設定を記録する
+
+Connection Limiting・Flood Protectionをいずれも変更する前に、現状を
+記録します。
+
+- `POLICY | Rules and Policies > Access Rules` を開き、`{{ access_rule_name }}`
+  のActionが`Allow`であることを確認します。ルールを編集して `Optional
+  Settings` タブを開き、`Number of connections allowed (% of maximum
+  connections)` の現在値、`Enable Connection Threshold for each Source IP`
+  /`Enable Connection for each Destination IP` の現在の有効/無効状態と値を
+  記録します(既定では無効、割合は実質100%相当です)。
+- `NETWORK | Firewall | Flood Protection` を開き、TCP(Layer 3 SYN Flood
+  Protection - SYN Proxyタブ、Policy Modeの場合)/UDP/ICMP > IPv4の各タブの
+  現在の `Enable ... Flood Protection` の有効/無効状態としきい値を記録
+  します。
+- `NETWORK | Firewall | Advanced` の `Connections` セクションを開き、現在
+  選択されているモード(`Maximum SPI Connections` / `Maximum DPI
+  Connections` / `DPI Connections`)を記録します。この時点ではまだ変更
+  しません。
+
+### 2. Connections Monitor で送信元別に絞り込み、原因ホストを特定する
+
+`Investigate | Logs | Connection Logs`(Connections Monitor)を開きます。
+Connections Monitor Settingsの `Source Address` フィルタに、シナリオ設定
+の `top_offenders` の各 `src_ip` を1件ずつ入力して `Apply Filters` を
+クリックし、`Active Connections Monitor` テーブルに表示される該当行数・
+`Dst IP` / `Dst Port` / `Protocol` / `Flow Type` の傾向を確認します。
+
+{% for o in top_offenders %}- rank {{ o["rank"] }}: Source Address={{ o["src_ip"] }} でフィルタし、表示される行数が記録済みの {{ o["observed_connection_count"] }} 件から大きく乖離していないか確認する(推定原因: {{ o["suspected_cause"] }})
+{% endfor %}
+
+確認が終わったら `Reset Filters` でフィルタを解除しておきます。乖離が
+ある場合は `observed_connection_count` の記録を更新してください。
+
+### 3. 対象Access RuleにConnection Limiting(v2)を設定する
+
+`POLICY | Rules and Policies > Access Rules` を開き、手順1で確認した
+`{{ access_rule_name }}`(`{{ from_zone }}` → `{{ to_zone }}`)を編集し、
+`Optional Settings` タブで次のとおり設定します。
+
+1. `Number of connections allowed (% of maximum connections)` に
+   `{{ connection_limit_percentage }}` を入力する(1〜100の範囲、最小許容値
+   は1%)
+2. `Enable Connection Threshold for each Source IP` にチェックを入れ、
+   `{{ source_ip_connection_threshold }}` を入力する(送信元、つまり
+   `{{ from_zone }}` 側ホスト1台あたりの同時接続数の上限)
+3. `Add`(既存ルールの編集の場合は`Save`相当の確定操作)をクリックする
+
+この設定は `{{ from_zone }}` → `{{ to_zone }}` の通信を許可する条件その
+ものは変更しません。あくまで、そのルールに一致する通信全体に割り当てる
+コネクションキャッシュの割合と、送信元1ホストあたりの上限を追加するのみ
+です。
+
+### 4. Flood Protection(SYN/UDP/ICMP)のしきい値を調整する
+
+`NETWORK | Firewall | Flood Protection` を開きます。
+
+1. TCPタブ(Policy Modeの場合は `Layer 3 SYN Flood Protection- SYN Proxy`
+   タブ)で `SYN Flood Protection Mode` に `{{ syn_flood_protection_mode }}`
+   を選択し、`SYN Attack Threshold` セクションの `Attack Threshold` に
+   `{{ syn_attack_threshold }}` を入力する(5〜200,000の範囲)
+2. UDPタブで `Enable UDP Flood Protection` にチェックを入れ、`UDP Flood
+   Attack Threshold` に `{{ udp_flood_attack_threshold }}`(50〜1,000,000の
+   範囲)、`UDP Flood Attack Blocking Time` に
+   `{{ udp_flood_attack_blocking_time }}`(1〜120秒の範囲)、`UDP Flood
+   Attack Protected Destination List` に `{{ flood_protected_destination }}`
+   を設定する
+3. ICMP > IPv4タブで `Enable ICMP Flood Protection` にチェックを入れ、
+   `ICMP Flood Attack Threshold` に `{{ icmp_flood_attack_threshold }}`
+   (10〜100,000の範囲)、`ICMP Flood Attack Blocking Time` に
+   `{{ icmp_flood_attack_blocking_time }}`(1〜120秒の範囲)、`ICMP Flood
+   Attack Protected Destination List` に `{{ flood_protected_destination }}`
+   を設定する
+4. 各タブで `Accept` をクリックする
+
+### 5. (逼迫が解消しない場合のみ)Connectionsモードを見直す
+
+手順3・4を適用してもコネクションテーブルの使用率が高止まりする場合に
+限り、`NETWORK | Firewall | Advanced` の `Connections` セクションを見直し
+ます。`Maximum SPI Connections`(DPIサービス無効、最大接続数を最優先)は
+セキュリティサービスの保護を弱めるため、原則として現在の
+`{{ connections_mode }}` から変更しないでください。変更が必要な場合は、
+変更管理の承認を得たうえで、機器の再起動を伴うメンテナンス時間を確保して
+から実施してください。
+
+### 6. 効果を検証する
+
+`Investigate | Logs | Connection Logs` を再度開き、手順2と同じ
+`Source Address` フィルタを `top_offenders` の各ホストへ適用して、該当行数
+が減少していることを確認します。あわせて `POLICY | Rules and Policies >
+Access Rules` で `{{ access_rule_name }}` を再度開き、`Optional Settings`
+タブの設定値が手順3のとおり保存されていることを確認します。`NETWORK |
+Firewall | Flood Protection` のTCP/UDP/ICMP各タブに付随するTraffic
+Statisticsページを開き、しきい値超過によるパケットドロップの発生状況を
+確認します。
+
+## 動作確認
+
+- `POLICY | Rules and Policies > Access Rules` の `{{ access_rule_name }}`
+  で、`Optional Settings` タブの `Number of connections allowed (% of
+  maximum connections)` が `{{ connection_limit_percentage }}`%、
+  `Enable Connection Threshold for each Source IP` が有効かつ
+  `{{ source_ip_connection_threshold }}` に設定されていること
+- `NETWORK | Firewall | Flood Protection` のTCP(SYN)/UDP/ICMP各タブで、
+  `{{ syn_attack_threshold }}` / `{{ udp_flood_attack_threshold }}` /
+  `{{ icmp_flood_attack_threshold }}` のしきい値と、それぞれの
+  `Enable ... Flood Protection` が有効になっていること
+- `Investigate | Logs | Connection Logs` で `top_offenders` の各
+  `src_ip` をフィルタした際の該当行数が、手順2で記録した水準から減少して
+  いること
+- 手順1で記録した既存の正当な `{{ from_zone }}` → `{{ to_zone }}` 通信が、
+  変更後も `Access Rules` で引き続き許可され、Traffic Statisticsの
+  `Rx Packets` が増加し続けていること(コネクション制限によって正常通信
+  まで遮断されていないこと)
+- `NETWORK | Firewall | Advanced` の `Connections` モードが、手順5を
+  実施しなかった場合は手順1で記録した `{{ connections_mode }}` のまま
+  変更されていないこと
+
+## 注意事項
+
+- **`Enable Connection Threshold for each Source IP` / `Enable Connection
+  for each Destination IP` はAllowルールでのみ有効です。** 一次情報にも
+  「Only available for Allow rules.」と明記されており、対象の
+  `{{ access_rule_name }}` のActionが`Allow`であることを手順1で必ず確認
+  してください。
+- **`Number of connections allowed (% of maximum connections)` の最小許容値
+  は1%です。** 極端に低い値を設定すると、正当な `{{ from_zone }}` →
+  `{{ to_zone }}` 通信そのものが制限されるおそれがあります。手順6で
+  Traffic Statisticsの `Rx Packets` が増加し続けていることを必ず確認して
+  ください。
+- **Connection Limitingの分類はAccess Rules(送信元/宛先IPアドレス・
+  Service・トラフィック方向)でのみ行えます。** 一次情報に「It is not
+  possible to use IPS signatures as a Connection Limiting classifier」と
+  明記されており、IPSシグネチャを分類条件として使うことはできません。
+- **Flood ProtectionのUDP/ICMPしきい値は、`Enable UDP/ICMP Flood
+  Protection` を有効化しないと反映されません。** チェックボックスの有効化
+  漏れがないか、手順6で必ず再確認してください。
+- **`NETWORK | Firewall | Advanced` の `Connections` モード変更は機器の
+  再起動を伴います。** 一次情報に「Any change to the Connections setting
+  requires the SonicWall security appliance be restarted for the change to
+  be implemented.」と明記されており、`Maximum SPI Connections` への変更は
+  DPIセキュリティサービスの保護も弱めます。本手順では手順3・4で解消しない
+  場合の最終手段とし、変更管理の承認とメンテナンス時間の確保を前提として
+  ください。
+- Flood Protectionの一部タブ(Layer 3 SYN Flood Protection - SYN Proxyは
+  Policy Modeのみ、UDP Flood Protectionの設定はClassic Modeのみ、と一次
+  情報に明記)は、SonicOSの動作モード(Classic Mode / Policy Mode)によって
+  表示位置や利用可否が異なります。本手順の適用前に、自機がどちらのモードで
+  運用されているか確認してください。
+- 本手順書は一次情報(SonicOS技術ドキュメントのConnection Limiting/Flood
+  Protection/Connectionsセクション)で確認できたGUI操作のみを扱います。
+  SonicOS CLIによる同等の投入方法は本手順書作成時点では確認できなかった
+  ため記載していません。CLIで投入する場合は、別途SonicOSのCLIリファレンス
+  で構文を確認してから実施してください。
+- 管理者パスワードやAPIキーなど認証情報は、本手順書やチケット、ログに
+  平文で残さないでください。記録が必要な場合は`********`のようにマスク
+  し、秘密管理ツール等で別途安全に保管してください。

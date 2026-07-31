@@ -1,0 +1,5 @@
+incident_no,attacker_ip,address_object_name,zone_assignment,rule_name,from_zone,to_zone,priority,botnet_filter,description
+1,203.0.113.45,blk-203.0.113.45,WAN,emrg-deny-203.0.113.45,WAN,LAN,Manual,no,SSH総当たり攻撃を検知したため単発遮断
+2,198.51.100.77,blk-198.51.100.77,WAN,emrg-deny-198.51.100.77,WAN,DMZ,Manual,no,公開Webサーバへの脆弱性スキャンを検知したため単発遮断
+3,192.0.2.201,blk-192.0.2.201,WAN,emrg-deny-192.0.2.201,WAN,WAN,Manual,yes,管理画面への継続的な不正ログイン試行を検知したため遮断しBotnet Filterも併用
+4,192.0.2.88,blk-192.0.2.88,WAN,emrg-deny-192.0.2.88,WAN,LAN,Manual,yes,同一送信元からの継続的なポートスキャンを検知したため遮断しBotnet Filterも併用

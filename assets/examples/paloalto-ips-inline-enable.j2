@@ -1,0 +1,217 @@
+# Palo Alto Networks (PAN-OS) Threat Preventionプロファイルのインライン遮断段階移行
+
+PAN-OSのThreat Prevention機能が提供するVulnerability Protection Profile
+『{{ vp_profile_name }}』とAnti-Spyware Profile『{{ as_profile_name }}』に
+ついて、公式ベストプラクティス『Transition ... Safely to Best Practices』
+の手順に沿って、シグネチャのActionをまずAlert(検知のみ)に設定して
+{{ observation_days }}日間観察し、誤検知をExceptionsタブで調整したうえで、
+Severity(重要度)とアプリケーションの業務重要度に応じてDrop/Reset-Bothへ
+段階的に昇格します。対象ルールは{{ rules | length }}件、観察期間中に
+個別調整するExceptionsは{{ exceptions | length }}件です。
+
+## 目的
+
+PAN-OSのVulnerability Protection ProfileおよびAnti-Spyware Profileにおける
+シグネチャのAction(alert/drop/reset-both等)の意味と、Severity・アプリ
+ケーションの業務重要度に応じた段階移行方針を理解し、Monitor > Logs >
+ThreatでのAlertの観察とExceptionsタブでの個別調整を経て、業務影響を最小化
+しながら検知専用(Alert)からインライン遮断(Drop/Reset-Both)へ安全に昇格
+できるようになることを目指します。
+
+OPNsenseのpromiscuous(IDS)モードとは異なり、Palo Alto Networks (PAN-OS)
+には検知専用モードと遮断モードをインターフェース単位で切り替える同名の
+機構はありません。`Network > Interfaces`のTap Interfaceは完全受動的な
+可視化専用(ミラーポート)でトラフィックを一切ブロックできないため、
+観察から遮断への昇格に使うことはできません。そのため本手順では、
+インライン配置のFirewallはそのままに、Threat Prevention(Vulnerability
+Protection / Anti-Spyware)プロファイルのシグネチャアクションを、公式
+ベストプラクティス『Transition ... Safely to Best Practices』の手順に
+沿ってAlert(検知のみ)からDrop/Reset-Both(遮断)へ段階移行する運用で、
+同じ「まず観察してから遮断へ昇格する」という課題を解決します。
+
+## 用語解説
+
+- **Vulnerability Protection Profile**: `Objects > Security Profiles >
+  Vulnerability Protection`で作成する、既知の脆弱性(CVE)を悪用する
+  エクスプロイトを検知/遮断するプロファイル
+- **Anti-Spyware Profile**: `Objects > Security Profiles > Anti-Spyware`
+  で作成する、スパイウェア/C2通信やDNSベースの脅威を検知/遮断する
+  プロファイル
+- **Security Profiles(Security Policyルールへの適用)**: Vulnerability
+  Protection Profile・Anti-Spyware Profileは、それ単体では効果を持たず、
+  Security PolicyルールのSecurity Profilesとして選択して初めて評価
+  対象になる。Security ProfilesはActionが`Allow`のルールでのみ評価
+  される
+- **Rules タブ**: プロファイル編集画面内で、Severity(重要度: critical/
+  high/medium/low/informational)を条件にシグネチャをグルーピングし、
+  Actionを一括設定するタブ
+- **Exceptions タブ**: 同じくプロファイル編集画面内で、Threat Name/CVE/
+  Vendor IDを指定して個別シグネチャのActionを上書きするタブ。観察期間中に
+  誤検知と判定したシグネチャをここで個別調整する
+- **Action(alert / drop / reset-both 等)**: Rules/Exceptionsタブで設定
+  するシグネチャの動作。`alert`は記録のみで通信は継続、`drop`はパケット
+  破棄、`reset-both`はクライアント・サーバ双方にTCP RSTを送出して切断する
+- **Monitor > Logs > Threat**: シグネチャのヒット状況を確認するThreat
+  ログ画面。Alert運用中はここで誤検知の有無を判断する
+- **Packet Capture(single / extended)**: シグネチャがヒットした際に
+  パケットを保存するオプション。管理プレーンのリソース消費を考慮しつつ、
+  Alert中のcritical/high/medium severityシグネチャにはextended、Drop/
+  Reset-Both化したシグネチャにはsingleを設定するのがベストプラクティスの
+  推奨
+- **Tap Interface(参考)**: `Network > Interfaces`で設定できる完全受動的な
+  ミラーポート。ネットワーク経路外に接続してトラフィックのコピーのみを
+  検査するため、可視化専用でブロックには使えない
+
+## シナリオ設定
+
+今回のプロファイルと適用先は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| Vulnerability Protection Profile名(vp_profile_name) | {{ vp_profile_name }} |
+| Anti-Spyware Profile名(as_profile_name) | {{ as_profile_name }} |
+| 適用先Security Policyルール(policy_rule_name) | {{ policy_rule_name }} |
+| ゾーン(source_zone → dest_zone) | {{ source_zone }} → {{ dest_zone }} |
+| 観察期間(observation_days) | {{ observation_days }}日 |
+
+業務クリティカルなアプリケーション(business_critical_apps,
+{{ business_critical_apps | length }}件。可用性を優先し、Alertでの
+観察期間を必ず取ってから昇格します):
+
+| # | アプリケーション |
+|---|-------------------|
+{% for app in business_critical_apps %}| {{ loop.index }} | {{ app }} |
+{% endfor %}
+
+今回設定するルール(rules, {{ rules | length }}件)は次のとおりです。
+
+| # | ルール名 | プロファイル | Severity | 業務クリティカル | 初期Action | 目標Action | 備考 |
+|---|---------|-------------|----------|-------------------|-----------|-----------|------|
+{% for r in rules %}| {{ loop.index }} | {{ r["name"] }} | {{ r["profile"] }} | {{ r["severity"] | join('/') }} | {% if r["business_critical"] %}Yes{% else %}No{% endif %} | alert | {{ r["target_action"] }} | {{ r["note"] }} |
+{% endfor %}
+
+観察期間中に誤検知と判断し、Exceptionsで個別調整するシグネチャ
+(exceptions, {{ exceptions | length }}件):
+
+| # | Threat ID | Threat Name | 調整理由 |
+|---|-----------|-------------|----------|
+{% for e in exceptions %}| {{ loop.index }} | {{ e["threat_id"] }} | {{ e["threat_name"] }} | {{ e["reason"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 既定のSeverity別Actionと業務クリティカルなアプリケーションを確認する
+
+プロファイルを新規作成する前に、現状を確認します。`Objects > Security
+Profiles > Vulnerability Protection`および`Objects > Security Profiles >
+Anti-Spyware`を開き、既存プロファイルがあればRulesタブのSeverity列・
+Action列で現在のActionを確認します。あわせて、シナリオ設定の
+business_critical_apps({{ business_critical_apps | length }}件)が
+現在どのSecurity Policyルールで許可されているかを`Policies > Security`
+で確認し、これらのアプリケーションへは可用性を優先してAlertから開始
+する方針を関係者と共有しておきます。
+
+### 2. Vulnerability Protection Profile / Anti-Spyware Profileを作成し、ルールのActionをまずAlertに設定する
+
+`Objects > Security Profiles > Vulnerability Protection` で `Add` を
+クリックし、Profile Nameに`{{ vp_profile_name }}`を入力します。Rules
+タブで `Add` し、シナリオ設定のうち`profile`が`vulnerability`の行に
+ついて、Severityのチェックボックスで対象重要度を選択したうえで、Action
+は**すべて`alert`**に設定します。
+
+{% for r in rules %}{% if r["profile"] == "vulnerability" %}- ルール名: {{ r["name"] }} / Severity: {{ r["severity"] | join('/') }} / Action: alert (目標: {{ r["target_action"] }})
+{% endif %}{% endfor %}
+
+同様に `Objects > Security Profiles > Anti-Spyware` で `Add` し、Profile
+Nameに`{{ as_profile_name }}`を入力してRulesタブで次の行を追加します。
+こちらもActionは**すべて`alert`**から開始します。
+
+{% for r in rules %}{% if r["profile"] == "anti-spyware" %}- ルール名: {{ r["name"] }} / Severity: {{ r["severity"] | join('/') }} / Action: alert (目標: {{ r["target_action"] }})
+{% endif %}{% endfor %}
+
+`Save` してプロファイルを保存します。
+
+### 3. Security Policyルールへプロファイルを適用し、Commitする
+
+`Policies > Security` で対象ルール`{{ policy_rule_name }}`
+({{ source_zone }} → {{ dest_zone }})を開き、ルールのActionが`Allow`に
+なっていることを確認します(Security ProfilesはAllowアクションのルール
+でのみ評価されるため)。Security Profilesの設定から、Vulnerability
+Protection Profileに`{{ vp_profile_name }}`を、Anti-Spyware Profileに
+`{{ as_profile_name }}`をそれぞれ選択して `OK` を押し、`Commit` します。
+
+### 4. 観察期間中、Monitor > Logs > ThreatでAlertを分析し、誤検知をExceptionsで調整する
+
+Commit後、最低{{ observation_days }}日間はActionをalertのまま運用し、
+`Monitor > Logs > Threat`でヒットしたシグネチャを継続的に確認します。
+
+業務通信に対して繰り返しヒットしているシグネチャがあれば、そのThreat
+Name/CVE/Vendor IDを記録し、誤検知と判断したものは対象プロファイルの
+Exceptionsタブから次のシグネチャを個別に調整します。
+
+{% for e in exceptions %}- Threat ID {{ e["threat_id"] }}({{ e["threat_name"] }}): {{ e["reason"] }}
+{% endfor %}
+
+Exceptionsで調整する際は、Packet Captureも合わせて見直します。Alert中の
+critical/high/medium severityシグネチャにはextendedを設定して調査材料を
+残し、管理プレーンへの負荷が問題になる場合はsingleに切り替えます。
+
+### 5. 誤検知の解消を確認できたルールから、Actionをalertから目標Actionへ段階的に昇格する
+
+シナリオ設定の`target_action`列を参照し、Exceptions調整後に誤検知が
+解消したことを確認したルールから順にActionを変更します。業務クリティカル
+なアプリケーション(business_critical_apps)向けのルールは、観察期間
+{{ observation_days }}日を必ず満了させてから昇格してください。
+
+{% for r in rules %}- {{ r["name"] }}: alert → {{ r["target_action"] }}{% if r["business_critical"] %}(業務クリティカル対象。観察期間満了後のみ昇格){% endif %}
+{% endfor %}
+
+対象プロファイルのRulesタブでActionを`{{ rules[0]["target_action"] }}`
+等の目標値に変更し `OK` → `Commit` します。一度にすべてのルールを昇格
+させず、Severity・業務重要度ごとに分けてCommitし、都度Threatログで
+影響を確認しながら進めてください。
+
+### 6. 昇格後、Monitor > Logs > Threatで実際に遮断されていることを検証する
+
+Commit後、`Monitor > Logs > Threat`を再度開き、昇格したルールに対応する
+シグネチャのAction列が目標値(drop/reset-both)で記録されていることを
+確認します。あわせて、業務クリティカルなアプリケーション
+({{ business_critical_apps | length }}件)の通信が引き続き正常に
+完了していることを、利用部門にも確認してください。
+
+## 動作確認
+
+- `Policies > Security`の`{{ policy_rule_name }}`にVulnerability
+  Protection Profile(`{{ vp_profile_name }}`)とAnti-Spyware Profile
+  (`{{ as_profile_name }}`)が適用され、ルールのActionが`Allow`のままで
+  あること
+- `Monitor > Logs > Threat`で、観察期間{{ observation_days }}日中に
+  記録されたシグネチャのAction列がすべて`alert`であったこと
+- exceptions({{ exceptions | length }}件)のThreat Name/CVEが、対象
+  プロファイルのExceptionsタブに登録されていること
+- 昇格後、`Monitor > Logs > Threat`のAction列が対象シグネチャで目標値
+  (drop/reset-both)に変わっていること
+- 業務クリティカルなアプリケーション(business_critical_apps)の通信が、
+  昇格前後で継続して正常に完了していること
+
+## 注意事項
+
+- **業務クリティカルなアプリケーションは、必ずAlertでの観察期間
+  ({{ observation_days }}日)を満了させてから昇格すること。** 観察を
+  省略すると、未確認の誤検知がそのまま通信断につながります。
+- **Security ProfilesはActionが`Allow`のルールでのみ評価される。**
+  `{{ policy_rule_name }}`のActionを誤って`Allow`以外に変更すると、
+  プロファイル自体が評価されなくなり、検知も遮断も行われなくなります。
+- 一度にすべてのルールをdrop/reset-bothへ昇格させず、Severity・業務
+  重要度ごとに分けてCommitし、都度Threatログで影響を確認しながら段階的に
+  進めてください。
+- Anti-Spyware ProfileのDNS Security関連のPolicy Actionは、本手順の
+  alert→drop/reset-both移行とは別に、公式ベストプラクティスでは
+  Sinkholeを設定することが推奨されている。DNS Securityの調整は本手順の
+  スコープ外であり、別途対応すること。
+- Inline Cloud Analysisによる検査結果についても、本手順と同様にまず
+  Alertで観察してからreset-bothへ移行する運用が推奨されている。Rules/
+  Exceptionsタブとは別の設定箇所のため、混同しないこと。
+- Exceptionsタブで完全に調整(実質的に無効化)したシグネチャは、以後
+  そのシグネチャのヒット自体が見えにくくなる。誤検知と断定できた
+  シグネチャのみを対象にし、判断根拠を`reason`として記録しておくこと。

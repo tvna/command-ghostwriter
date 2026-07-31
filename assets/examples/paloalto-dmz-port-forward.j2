@@ -1,0 +1,243 @@
+# Palo Alto Networks(PAN-OS)のDMZ公開サーバー宛先NAT(one-to-one)ポートフォワード構成
+
+`Objects > Addresses`で公開IP用・実IP用のアドレスオブジェクトを作成した上で、
+`Policies > NAT`にDestination NATルール(one-to-oneマッピング)を1件、
+`Policies > Security`に対応するSecurity Policyルールを1件登録し、DMZ内公開
+サーバー`{{ private_ip }}`をWAN側の公開IPアドレス`{{ public_ip }}`のポート
+`{{ service_port }}`から到達可能にします。SecurityルールのServiceは
+`application-default`に限定して最小公開ポートで構成し、commit後に
+NAT Policy Match・`test security-policy-match`・外部からの疎通確認の3段階で
+到達性を検証します。
+
+## 目的
+
+PAN-OSのDestination NAT(one-to-oneマッピング)において、NATルールの
+`Destination Zone`が実サーバーの所在ゾーンではなく変換前(pre-NAT)の宛先
+アドレスに対するルート検索結果で決まること、およびSecurity Policyルールの
+`Destination Address`は変換前の公開アドレスのまま指定し`Destination Zone`
+のみ変換後(post-NAT)のゾーンを指定するという非対称な組み合わせを理解した
+上で、最小公開ポートでの一対一ポートフォワードを構成できるようになることを
+目指します。あわせて、NAT Policy Matchツールと`test security-policy-match`
+を用いてNATルール・Security Policyルールそれぞれの一致状況を切り分けて検証
+し、最後に外部からの実際の到達性を確認できるようになることを目指します。
+
+## 用語解説
+
+- **Destination NAT (宛先NAT)**: パケットの宛先IPアドレスを変換するPAN-OSの
+  仕組み。`Policies > NAT`にルールを登録して構成する
+- **one-to-one mapping**: 1個の公開(変換前)IPアドレスを1個の実(変換後)IP
+  アドレスへ静的に変換する、最も基本的なDestination NATの構成パターン
+- **General / Original Packet / Translated Packet タブ**: `Policies > NAT`
+  でルールを作成・編集する際の入力タブ。`General`にはルール名、
+  `Original Packet`には変換前(pre-NAT)のパケットの一致条件、
+  `Translated Packet`には変換後の変換内容を設定する
+- **Translation Type = Static IP**: `Translated Packet`タブの
+  Destination Translationセクションで選択する変換方式。1個の宛先アドレスを
+  1個の`Translated Address`へ静的に変換する(one-to-oneマッピングに対応する
+  設定)
+- **NATルールの宛先ゾーンはルート検索で決まる**: 一次情報には「For the
+  destination IP address to be translated, a destination NAT rule from
+  zone Untrust-L3 to zone Untrust-L3 must be created」「the firewall
+  performs a route lookup for destination [translated IP] to determine
+  the egress interface」と説明されています。NATルールの`Original Packet`
+  側`Destination Zone`は、変換前(pre-NAT)の宛先アドレスに対するルート検索
+  の結果で決まるため、実サーバーが物理的に存在するゾーンではなく、送信元
+  と同じゾーン(本手順では`{{ wan_zone }}`)になります。これは
+  `{{ public_ip }}`宛のルーティングが既定ルート等で`{{ wan_zone }}`側に
+  向いている環境を前提とした結果であり、ルーティング構成が異なる環境では
+  実際に決まるゾーンも異なります
+- **Security Policyの宛先アドレス/ゾーンの扱い**: 一次情報には「The
+  addresses in the security policy also refer to the IP address in the
+  original packet (that is, the pre-NAT address)... the destination
+  zone is the zone where the end host is physically connected」と説明
+  されています。Security Policyルールの`Destination Address`は変換前
+  (pre-NAT)の公開アドレスのまま指定し、`Destination Zone`には変換後
+  (post-NAT)の実サーバーが存在するゾーン(`{{ dmz_zone }}`)を指定すると
+  いう、NATルールとは逆向きの組み合わせになります
+- **Service = application-default**: ルールが許可するアプリケーションを、
+  そのアプリケーション本来の標準ポートのみに限定する設定。ポート番号を
+  個別指定する代わりに使う既定の推奨設定
+- **NAT Policy Match(Device > Troubleshooting)**: 指定した送信元/宛先
+  アドレス・ポート・ゾーンの組み合わせが、実際にどのNATルールに一致する
+  かをGUIから確認できる診断ツール。`Select Test`で`NAT Policy Match`を
+  選び、`From`/`To`/`Source`/`Destination`/`Destination Port`/`Protocol`
+  等を入力して実行する
+- **test security-policy-match**: 指定した送信元/宛先/アプリケーションなど
+  の組み合わせが、実際にどのSecurity Policyルールに一致するかをCLIから
+  確認できるテストコマンド
+- **commit**: PAN-OSはcandidate configとrunning configを分離する二段階構成
+  モデルを採る。GUIで`OK`を押しただけの設定もcommitするまで実機の動作には
+  反映されない
+
+## シナリオ設定
+
+今回、DMZ公開サーバーへの宛先NATポートフォワードとして構成する値は次の
+とおりです。
+
+| 項目 | 値 |
+|------|-----|
+| WAN側ゾーン(wan_zone) | `{{ wan_zone }}` |
+| DMZ側ゾーン(dmz_zone) | `{{ dmz_zone }}` |
+| 公開IPアドレス(public_ip) | `{{ public_ip }}` |
+| 実サーバーのIPアドレス(private_ip) | `{{ private_ip }}` |
+| 公開IP用アドレスオブジェクト名(public_addr_obj) | `{{ public_addr_obj }}` |
+| 実IP用アドレスオブジェクト名(private_addr_obj) | `{{ private_addr_obj }}` |
+| Destination NATルール名(nat_rule_name) | `{{ nat_rule_name }}` |
+| Security Policyルール名(security_rule_name) | `{{ security_rule_name }}` |
+| 公開するアプリケーション(application) | `{{ application }}` |
+| 公開ポート番号(service_port) | {{ service_port }} |
+| 到達性検証に使う外部端末のIPアドレス(external_test_source) | `{{ external_test_source }}` |
+
+`{{ public_ip }}`宛のルーティングは、この手順の時点で`{{ wan_zone }}`側
+(既定ルート等)に向いている前提とします。`{{ wan_zone }}`/`{{ dmz_zone }}`は
+この手順書内の仮称であり、実際の環境に存在するゾーン名に読み替えてください。
+
+## 手順
+
+### 1. 現状を確認する(変更前の基準を取る)
+
+新しいオブジェクト・ルールを1件も登録する前に、現状を確認します。
+
+- `Objects > Addresses`を開き、`{{ public_addr_obj }}`・
+  `{{ private_addr_obj }}`と同名のアドレスオブジェクトが存在しないことを
+  確認します。
+- `Policies > NAT`を開き、宛先が`{{ public_ip }}`と重複する既存のNATルール
+  がないことを確認します。PAN-OSはNATルール同士の宛先重複を配置時に自動
+  検知しないため、目視での確認が必要です。
+- `Policies > Security`を開き、既存ルールの並び順(評価順)を確認します。
+
+### 2. アドレスオブジェクトを作成する(Objects > Addresses)
+
+`Objects > Addresses > Add`から、次の2件を作成します。`Type`はいずれも
+`IP Netmask`を選択します。
+
+- Name={{ public_addr_obj }} / Type=IP Netmask / value={{ public_ip }}/32(公開IPアドレス)
+- Name={{ private_addr_obj }} / Type=IP Netmask / value={{ private_ip }}/32(実サーバーのIPアドレス)
+
+入力ごとに`OK`を押して保存します。
+
+### 3. Destination NATルールを作成する(Policies > NAT)
+
+`Policies > NAT`で`Add`をクリックし、次の3タブを設定します。
+
+- General タブ: `Name`に`{{ nat_rule_name }}`を入力します。
+- Original Packet タブ: `Source Zone`に`{{ wan_zone }}`を追加し、
+  `Destination Zone`にも同じ`{{ wan_zone }}`を選択します(用語解説のとおり、
+  変換前の宛先アドレスに対するルート検索結果に基づくため、実サーバーの
+  ゾーンではなく送信元と同じゾーンになります)。`Destination Address`に
+  `{{ public_addr_obj }}`を追加します。`Destination Interface`は既定の
+  `any`のままにし、`Source Address`・`Service`も既定の`any`のままにします。
+- Translated Packet タブ: `Source Translation`は既定の`None`のままにし
+  ます。`Destination Translation`セクションで`Translation Type`を
+  `Static IP`にし、`Translated Address`に`{{ private_addr_obj }}`を選択
+  します。`Translated Port`はポート番号を変換しないため空欄のままにします。
+
+入力後は`OK`のみを行い、この時点ではまだ`Commit`は実行しません。
+
+### 4. Security Policyルールを作成する(Policies > Security)
+
+`Policies > Security`で`Add`をクリックし、次のタブを設定します。
+
+- General タブ: `Name`に`{{ security_rule_name }}`を入力します。
+- Source タブ: `Source Zone`に`{{ wan_zone }}`を設定し、`Source Address`は
+  既定の`any`のままにします。
+- Destination タブ: `Destination Zone`に`{{ dmz_zone }}`を設定します
+  (NATルールとは異なり、実サーバーが物理的に存在するゾーンを指定します)。
+  `Destination Address`に`{{ public_addr_obj }}`を追加します(変換前の公開
+  アドレスのまま指定し、実IPの`{{ private_addr_obj }}`は指定しません)。
+- Applications タブ: `Application`に`{{ application }}`を追加します。
+- Service/URL Category タブ: `Service`は`application-default`のままにし
+  ます(アプリケーション本来の標準ポートのみに限定し、最小公開ポートで
+  構成するためです)。
+- Actions タブ: `Action`を`Allow`にします。
+
+入力後は`OK`のみを行います。
+
+### 5. 変更を確定する(commit)
+
+`Commit`を実行し、候補設定(candidate config)を実行中の設定(running
+config)へ反映します。commitが完了するまで、手順2〜4で入力した内容は実機の
+動作に反映されません。
+
+### 6. NAT Policy MatchとSecurity Policy Matchで一致状況を確認する
+
+commit完了後、`Device > Troubleshooting`を開き、`Select Test`で
+`NAT Policy Match`を選び、次の値を入力して実行します。
+
+- From: {{ wan_zone }}
+- To: {{ wan_zone }}
+- Source: {{ external_test_source }}
+- Destination: {{ public_ip }}
+- Destination Port: {{ service_port }}
+- Protocol: 6
+
+`Results`に、手順3で作成した`{{ nat_rule_name }}`が一致ルールとして表示
+されることを確認します。
+
+続けてCLIから`test security-policy-match`を実行し、Security Policy側の
+一致も確認します。
+
+```bash
+test security-policy-match application {{ application }} source {{ external_test_source }} destination {{ public_ip }} destination-port {{ service_port }} protocol 6
+```
+
+出力に一致したルール名として`{{ security_rule_name }}`が表示され、Action
+が`allow`になっていることを確認します。
+
+### 7. 外部からの到達性を検証する
+
+DMZセグメントの外(WAN側、またはWAN側に見立てた別セグメント)にある端末
+から、`{{ public_ip }}`の`{{ service_port }}`番ポートへ接続します。
+
+```bash
+curl -k -m 5 -o /dev/null -w "HTTP %{http_code}\n" https://{{ public_ip }}:{{ service_port }}/
+```
+
+対象がHTTP以外のサービスの場合は、`curl`の代わりに
+`nc -zv {{ public_ip }} {{ service_port }}`等、実際のサービスに応じた
+疎通確認コマンドに読み替えてください。
+
+## 動作確認
+
+- `Device > Troubleshooting`の`NAT Policy Match`で、送信元
+  `{{ external_test_source }}`から宛先`{{ public_ip }}:{{ service_port }}`
+  への通信が`{{ nat_rule_name }}`に一致すること
+- `test security-policy-match`で、同じ通信が`{{ security_rule_name }}`に
+  一致し、Actionが`allow`であること
+- `{{ public_ip }}:{{ service_port }}`への接続が成功し、
+  `{{ private_ip }}:{{ service_port }}`で稼働する実サービスからの応答が
+  返ること
+- `Policies > NAT`の一覧で`{{ nat_rule_name }}`のSOURCE ZONE・
+  DESTINATION ZONE・DESTINATION ADDRESS・DESTINATION TRANSLATIONの各列が
+  シナリオ設定と一致していること
+- `Policies > Security`の一覧で`{{ security_rule_name }}`のZONE・
+  ADDRESS・APPLICATION・SERVICE・ACTIONの各列がシナリオ設定と一致して
+  いること
+- 手順1で確認した既存のNATルール・Security Policyルールの並び順・内容が
+  意図せず変更されていないこと
+
+## 注意事項
+
+- **NATルールの`Destination Zone`を実サーバーのゾーンにしないこと。**
+  `Original Packet`タブの`Destination Zone`は変換前の宛先アドレスに対する
+  ルート検索結果で決まるため、本手順の前提(公開IPアドレス宛の通信が既定で
+  `{{ wan_zone }}`側に向いている)では送信元と同じ`{{ wan_zone }}`を指定
+  します。実サーバーが存在する`{{ dmz_zone }}`を指定すると、ルートが一致
+  せずNATルールが機能しません。
+- **Security Policyの`Destination Address`は変換前の公開アドレスのまま
+  指定すること。** `{{ private_addr_obj }}`(実IP)を指定すると、実際に
+  評価される通信(変換前アドレス宛)と一致しなくなります。
+- **PAN-OSはNATルール同士の宛先重複を自動検知しません。** 手順1で既存
+  ルールとの重複がないことを目視確認してください。
+- `Commit`を実行するまでcandidate configはrunning configに反映されません。
+  手順2〜4で入力した内容は、手順5のcommitまで実機の動作に影響しません。
+- **Serviceを`application-default`のまま維持すること。** `ALL`に変更する
+  と、想定したアプリケーション以外のポートに対しても意図せず到達性を
+  与えるおそれがあります。
+- CLI/GUIへのログインに使う管理者パスワードやAPIキーは、本手順書やチケ
+  ット、ログに平文で残さないでください。記録が必要な場合は`********`の
+  ようにマスクし、秘密管理ツール等で別途安全に保管してください。
+- 本手順は`{{ public_ip }}`宛のルーティングが`{{ wan_zone }}`側(既定ルート
+  等)に向いている環境を前提とします。ルーティング構成が異なる環境では、
+  NATルールの`Destination Zone`をこの手順と異なる値に調整する必要があり
+  ます。

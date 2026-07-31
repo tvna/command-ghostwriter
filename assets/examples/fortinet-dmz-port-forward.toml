@@ -1,0 +1,12 @@
+wan_interface = "wan1"
+dmz_interface = "dmz1"
+vip_name = "vip-dmz-web01"
+external_ip = "203.0.113.10"
+mapped_ip = "10.0.20.10"
+protocol = "tcp"
+external_port = 8443
+mapped_port = 443
+service_name = "svc-dmz-web01-8443"
+policy_name = "in_wan1-dmz1_vip-dmz-web01"
+policy_id = 15
+allowed_source = "all"

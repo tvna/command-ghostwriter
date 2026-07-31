@@ -1,0 +1,236 @@
+# SonicWall Active/Standby HA 計画切替(フェイルオーバー)訓練
+
+既に `DEVICE | High Availability > Settings` でActive/Standby HAペアが構築済みの
+`{{ primary_host }}`(Primary)/ `{{ secondary_host }}`(Secondary)を対象に、
+`Force Active/Standby Failover` ボタンによる計画的なフェイルオーバー訓練を行い、
+切替時間・業務セッションの継続状況・Primaryへの復帰動作を実測して記録します。
+設定変更は一切行わず、`DEVICE | High Availability > Status` の表示のみを根拠に
+ロール交代と復帰を確認します。切替は実際に本番トラフィックのロールを動かす
+操作であるため、`{{ change_ticket }}` の承認と `{{ drill_window_start }}`〜
+`{{ drill_window_end }}` の訓練枠内でのみ実施します。
+
+## 目的
+
+既存のActive/Standby HAペアに対し、`Force Active/Standby Failover` を用いた
+計画切替を実際に発生させ、(1) Primary→Secondaryの切替時間、(2) 業務セッションの
+継続または再確立の挙動、(3) Secondaryへの復帰(切り戻し)にかかる時間、の3点を
+`DEVICE | High Availability > Status` の表示と外部クライアントからの継続監視で
+実測・記録できるようになることを目指します。あわせて、`Enable Preempt Mode` の
+自動復帰が「障害からの再起動後」に限定された挙動であり、本訓練のような手動切替
+には適用されないことを理解し、復帰操作を自己判断で省略しないことを身につけます。
+
+## 用語解説
+
+- **DEVICE | High Availability > Settings**: HAペアの各種設定と、手動での
+  フェイルオーバー実行ボタンが置かれた画面。本訓練ではこの画面の値を変更せず、
+  `Force Active/Standby Failover` ボタンのクリックにのみ使う
+- **Force Active/Standby Failover**: `DEVICE | High Availability > Settings`
+  にあるボタン。HA Failover機能が正しく動作するかを検証するため、Secondary
+  Security Applianceへの Active/Standby HA Failoverを試みる
+- **DEVICE | High Availability > Status**: 現在のHA状態を表示する画面。Status
+  欄には `Primary Active` / `Primary Standby` / `Primary Disabled` /
+  `Primary not in a steady state` のいずれかが表示され、Primary State欄・
+  Secondary State欄にはそれぞれ `ACTIVE` / `STANDBY` / `ELECTION` / `SYNC` /
+  `ERROR` / `REBOOT` / `NONE` のいずれかが表示される
+- **Active Up Time / Found Peer / Settings Synchronized / Stateful HA
+  Synchronized**: 同じStatus画面の項目。Active Up Timeは現在のActive機が
+  Activeになってからの経過時間、Found Peerは相手機を検出できているか、
+  Settings SynchronizedはHA設定が両機で同期済みか、Stateful HA Synchronizedは
+  ステートフル同期の設定が両機で同期済みかを、それぞれYes/Noで示す
+- **Heartbeat Interval / Failover Trigger Level**: 連動する2つのタイマー。
+  Heartbeat Intervalの既定値は1,000ミリ秒(最小1,000、最大300000)、Failover
+  Trigger Levelの既定値は5(最小4、最大99)で、両者の積が未検知の生存確認による
+  自動フェイルオーバーまでの目安時間になる。本訓練が測定する`Force Active/
+  Standby Failover`による手動切替は、このタイマーを待たずに即座に発生する点で
+  自動フェイルオーバーと異なる
+- **Probe Interval / Probe Count**: ネットワーク経路の到達性を監視する連動
+  タイマー。Probe Intervalの既定値は20秒(範囲5〜255秒)、Probe Countの既定値は
+  3(範囲3〜10)
+- **Enable Stateful Synchronization**: 有効にするとPrimaryの接続情報が
+  Secondaryへ継続的に送られ、フェイルオーバー時に既存セッションを切断せずに
+  引き継げる。無効のままだと、フェイルオーバー時にアクティブだったセッションは
+  再確立(再ネゴシエーション)が必要になる
+- **Enable Preempt Mode**: 「Primary firewallが障害から再起動した際に、自動的に
+  Primary役割を取り戻す」設定。本訓練は再起動を伴わない手動切替のため、この
+  設定が有効でも自動復帰は行われない前提で手順を進める
+- **MONITOR | Logs > System Logs**: システムイベントを閲覧する画面。切替・
+  復帰それぞれの実施時刻付近のHA関連ログを、訓練の証跡として保存する
+
+## シナリオ設定
+
+| 項目 | 値 |
+|---|---|
+| HAペア名(ha_pair_name) | {{ ha_pair_name }} |
+| Primary機(primary_host) | {{ primary_host }} |
+| Secondary機(secondary_host) | {{ secondary_host }} |
+| 管理アクセス先(mgmt_ip、Virtual Group1 IP) | {{ mgmt_ip }} |
+| Heartbeat Interval | {{ heartbeat_interval_ms }} ミリ秒 |
+| Failover Trigger Level | {{ failover_trigger_level }} |
+| Probe Interval | {{ probe_interval_sec }} 秒 |
+| Probe Count | {{ probe_count }} |
+| Enable Preempt Mode | {{ preempt_mode_enabled }} |
+| Enable Stateful Synchronization | {{ stateful_sync_enabled }} |
+| 変更管理チケット(change_ticket) | {{ change_ticket }} |
+| 訓練実施日(drill_date) | {{ drill_date }} |
+| 訓練枠(drill_window) | {{ drill_window_start }}〜{{ drill_window_end }} |
+| 実施者(operator_name) | {{ operator_name }} |
+| 承認者(approver_name) | {{ approver_name }} |
+| 許容切替時間(max_acceptable_switchover_sec) | {{ max_acceptable_switchover_sec }} 秒 |
+
+自動フェイルオーバーの目安時間(参考値、Heartbeat Interval × Failover Trigger
+Level): 約 {{ (heartbeat_interval_ms / 1000 * failover_trigger_level) | int }}
+秒。今回測定する `Force Active/Standby Failover` による手動切替は、この時間を
+待たずに発生するため、より短い時間になる見込みです。
+
+継続監視対象の業務セッション(monitored_sessions、{{ monitored_sessions | length }} 件):
+
+| name | protocol | source | destination | note |
+|---|---|---|---|---|
+{% for s in monitored_sessions %}| {{ s.name }} | {{ s.protocol }} | {{ s.source }} | {{ s.destination }} | {{ s.note }} |
+{% endfor %}
+
+## 手順
+
+### 1. HAペアが定常状態であることを確認する(訓練前のベースライン取得)
+
+`{{ mgmt_ip }}`(Virtual Group1 IP、Master Node)へログインし、
+`DEVICE | High Availability > Status` を開きます。次の値を、訓練を始める前の
+ベースラインとして記録してください。
+
+- Status: `Primary Active`(PrimaryがACTIVE状態)であること
+- Primary State: `ACTIVE`、Secondary State: `STANDBY` であること
+- Found Peer / Settings Synchronized / Stateful HA Synchronized: いずれも
+  `Yes` であること
+- Active Up Time: 現在の値を記録する(切替後との比較用)
+
+続けて `DEVICE | High Availability > Settings` を開き、Heartbeat Interval が
+{{ heartbeat_interval_ms }} ミリ秒、Failover Trigger Level が
+{{ failover_trigger_level }}、Probe Interval が {{ probe_interval_sec }} 秒、
+Probe Count が {{ probe_count }}、Enable Preempt Mode が
+{{ preempt_mode_enabled }}、Enable Stateful Synchronization が
+{{ stateful_sync_enabled }} であることを確認します(**この画面では値を一切
+変更しません**)。シナリオ設定と食い違う場合は、構成ドリフトとして扱い、
+訓練を中止して原因を確認してください。
+
+最後に、`{{ change_ticket }}` が承認済みであること、現在時刻が
+`{{ drill_window_start }}`〜`{{ drill_window_end }}` の訓練枠内であることを
+確認します。
+
+### 2. 切替前の継続監視を開始する
+
+HAペア配下の外部クライアントから、シナリオ設定の各 monitored_sessions 宛てに
+継続的な疎通確認を開始します。ここで開始した監視を、手順4・手順5の測定でも
+継続して使います。
+
+```
+{% for s in monitored_sessions %}ping {{ s.destination }}
+{% endfor %}```
+
+あわせて、{{ monitored_sessions | length }} 件それぞれの業務セッション
+(name列)が現在正常に流れていることを、アプリケーション側からも確認しておいて
+ください。
+
+### 3. 計画切替を実行する(Primary→Secondary)
+
+時刻(T0)を記録します。`{{ mgmt_ip }}` のGUIで
+`DEVICE | High Availability > Settings` を開き、`Force Active/Standby
+Failover` をクリックします。クリック後は、手順4の確認が終わるまで、この
+ボタンを再度クリックしないでください。
+
+### 4. 切替時間とセッション継続性を確認する
+
+手順2で開始した監視で、疎通が途切れてから再開するまでの時間を記録し、これを
+切替時間(T1 - T0)とします。
+
+`DEVICE | High Availability > Status` を開き、次を確認します。
+
+- Status が `Primary Standby` に変わっていること(Primaryが受動側に回った)
+- Primary State が `STANDBY`、Secondary State が `ACTIVE` に変わっていること
+- 新たにActiveになった機のActive Up Timeが、切替直後からの経過時間として
+  リセットされていること
+
+{% if stateful_sync_enabled %}`Enable Stateful Synchronization` が有効なため、
+各 monitored_sessions が切断・再ネゴシエーションなしに継続していることを
+確認してください。継続していない場合は、Stateful HA Synchronized が `Yes`
+のままだったかを含めて原因を調査します。
+{% else %}`Enable Stateful Synchronization` が無効なため、切替時にアクティブ
+だった各 monitored_sessions は再確立(再ネゴシエーション)が必要になります。
+再確立にかかった時間もあわせて記録してください。
+{% endif %}
+測定した切替時間が、シナリオ設定の許容切替時間({{ max_acceptable_switchover_sec }}
+秒)以内かどうかを判定し、記録します。
+
+### 5. 復帰(切り戻し)を実行し、復帰時間を確認する(Secondary→Primary)
+
+`Enable Preempt Mode` は「Primary firewallが障害から再起動した際に自動的に
+Primary役割を取り戻す」設定であり、本訓練のような、再起動を伴わない手動切替
+では作動しません。{{ preempt_mode_enabled }} の設定値にかかわらず、復帰は
+必ず本手順で手動により行い、`DEVICE | High Availability > Status` の表示で
+実際のロールを確認してから完了とみなしてください。
+
+時刻(T2)を記録し、`{{ mgmt_ip }}` のGUIで再度
+`DEVICE | High Availability > Settings` を開いて、`Force Active/Standby
+Failover` をもう一度クリックします。手順2の監視で疎通が再開するまでの時間を
+復帰時間(T3 - T2)として記録します。
+
+`DEVICE | High Availability > Status` を開き、手順1で記録したベースライン
+(Status: `Primary Active`、Primary State: `ACTIVE`、Secondary State:
+`STANDBY`)へ戻っていること、いずれの機も `ELECTION` / `SYNC` / `ERROR` /
+`REBOOT` に留まっていないことを確認します。復帰時間についても、許容切替時間
+({{ max_acceptable_switchover_sec }} 秒)以内かどうかを判定し、記録します。
+
+### 6. ログ証跡を取得し、訓練記録として保存する
+
+`MONITOR | Logs > System Logs` を開き、T0〜T3の時間帯に絞ってHA関連のログを
+確認します。切替(手順3・4)と復帰(手順5)それぞれに対応するログを保存し、
+測定した切替時間・復帰時間・各 monitored_sessions の継続/再確立結果とあわせて
+`{{ change_ticket }}` に添付します。
+
+## 動作確認
+
+- 手順1で確認した現在の設定値(Heartbeat Interval / Failover Trigger Level /
+  Probe Interval / Probe Count / Enable Preempt Mode / Enable Stateful
+  Synchronization)が、いずれもシナリオ設定の値と一致していること
+- 手順3・4のPrimary→Secondary切替後、`DEVICE | High Availability > Status`
+  のStatus・Primary State・Secondary Stateがロール交代を示し、新たにActiveに
+  なった機のActive Up Timeがリセットされていること
+- {{ monitored_sessions | length }} 件の monitored_sessions それぞれについて、
+  `Enable Stateful Synchronization` の設定値({{ stateful_sync_enabled }})に
+  応じた挙動(継続、または再確立)が確認・記録されていること
+- 手順5のSecondary→Primary復帰後、`DEVICE | High Availability > Status` が
+  手順1のベースラインへ戻り、いずれの機も `ELECTION` / `SYNC` / `ERROR` /
+  `REBOOT` に留まっていないこと
+- 測定した切替時間(T1 - T0)・復帰時間(T3 - T2)が、それぞれ許容切替時間
+  ({{ max_acceptable_switchover_sec }} 秒)以内かどうか判定した結果が記録され
+  ていること
+- `MONITOR | Logs > System Logs` に切替・復帰双方に対応するログが残り、
+  `{{ change_ticket }}` に証跡として添付されていること
+
+## 注意事項
+
+- `Force Active/Standby Failover` は実際に本番トラフィックのロールを切り替える
+  操作であり、シミュレーションではありません。`{{ change_ticket }}` の承認と
+  `{{ drill_window_start }}`〜`{{ drill_window_end }}` の訓練枠内でのみ実施し、
+  対象利用者への事前周知を済ませてください。
+- `Enable Stateful Synchronization` が無効な場合、切替時にアクティブだった
+  セッションは再確立が必要になります。これは仕様であり不具合ではありませんが、
+  影響範囲を事前に利用者へ周知してください。
+- `Enable Preempt Mode` の自動復帰は「障害からの再起動後」に限定された挙動
+  です。本訓練のような手動切替には適用されないため、復帰は必ず手順5の手動
+  操作で行い、自動的に戻ることを前提に手順5を省略しないでください。
+- `DEVICE | High Availability > Status` で直前の操作結果(ロール交代・復帰)を
+  確認する前に、`Force Active/Standby Failover` を連続してクリックしないで
+  ください。`ELECTION` や `SYNC` の状態のまま次の操作を重ねると、意図しない
+  状態遷移を招くおそれがあります。
+- 訓練中は Heartbeat Interval / Failover Trigger Level / Probe Interval /
+  Probe Count などのチューニング項目を変更しないでください。これらは切替
+  速度に影響する別管理の設定であり、訓練当日に変更すると測定値の比較基準が
+  崩れます。
+- Status が `ERROR` または `NONE` のまま変化しない、あるいは想定時間内に
+  切替・復帰が完了しない場合は、直ちに操作を中断し、ネットワーク運用チーム/
+  SonicWallサポートへエスカレーションしてください。手順5の復帰操作を自己
+  判断で繰り返し実行しないこと。
+- GUI管理画面へのログインパスワードは、本手順書のいずれの手順にも平文で
+  記載していません。実際の運用でもパスワードマネージャーや秘密管理ツール
+  経由で管理し、訓練記録やチケットに平文で残さないでください(記録上どうし
+  ても触れる場合は `********` のようにマスクしてください)。

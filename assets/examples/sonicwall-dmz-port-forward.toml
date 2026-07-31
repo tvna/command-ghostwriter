@@ -1,0 +1,16 @@
+wan_interface = "X1"
+dmz_interface = "X2"
+wan_zone = "WAN"
+dmz_zone = "DMZ"
+external_ip = "203.0.113.10"
+external_ip_object = "O_WAN_EXTIP_WEB01"
+mapped_ip = "172.16.60.20"
+mapped_ip_object = "H_DMZ_WEB01"
+protocol = "tcp"
+external_port = 8443
+mapped_port = 443
+original_service_object = "SVC_EXT_TCP_8443"
+translated_service_object = "SVC_INT_TCP_443"
+nat_policy_name = "NAT_WAN_TO_DMZ_WEB01"
+access_rule_name = "ACC_WAN_TO_DMZ_WEB01"
+allowed_source = "Any"

@@ -1,0 +1,124 @@
+# Palo Alto Networks(PAN-OS)のHA計画切替訓練(切替時間・セッション維持・復帰動作の測定)
+
+{{ pair_name }}を構成するPAN-OSのActive/Passive HAペアに対し、{{ drill_date }}の{{ maintenance_window }}内で、`Device > High Availability > Operational Commands`の`Suspend local device`/`Make local device functional`操作コマンドによる計画的フェイルオーバー訓練を{{ drill_iterations }}回実施します。切替前後で継続通信を監視し、`Dashboard`の`High Availability`ウィジェットで状態遷移を確認した時刻を記録することで、切替時間・セッション維持・復帰動作を測定し、目標値{{ failover_seconds_target }}秒以内に収まるかを確認します。
+
+## 目的
+
+既存のPAN-OS Active/Passive HAペアに対し、`Device > High Availability > Operational Commands`が提供する`Suspend local device`/`Make local device functional`操作コマンドを用いた計画的フェイルオーバーを{{ drill_iterations }}回実施し、切替時間が目標値{{ failover_seconds_target }}秒以内に収まること、切替前後で継続通信(セッション)が維持されること、`Make local device functional`実行後に正しく復帰すること(Preemptive有効時は元のActiveへ戻る動作を含む)を、時刻記録と観測に基づいて確認できるようになることを目指します。
+
+## 用語解説
+
+- **Device > High Availability > Operational Commands**: PAN-OS GUIでHAの手動操作(一時停止・復帰)を行うメニューの正式名称。本手順の一次情報である「Verify Failover or Suspend HA(PAN-OS)」で使用されている表記
+- **Suspend local device**: 上記メニューにあるリンク。クリックした機体を手動でPassive(非稼働)状態へ強制的に切り替える操作コマンド
+- **Make local device functional**: 同メニューにあるリンク。Suspend状態の機体を再び稼働可能な状態へ戻す操作コマンド
+- **High Availability widget**: `Dashboard`上でHAペアの状態(active/passive)を確認するためのウィジェット。本手順ではフェイルオーバー前後の状態遷移確認に使う
+- **Preemptive**: 優先度の高い機体が復旧した際にActiveを奪い返すかどうかの設定。一次情報は、有効な場合`Make local device functional`実行後「数分待ってからpreemptionが発生したことを確認する」よう案内している
+
+## シナリオ設定
+
+{{ pair_name }}のHAペアに対し、次の内容で訓練を実施します。
+
+| 項目 | 値 |
+|------|-----|
+| 訓練実施日 | {{ drill_date }} |
+| メンテナンス枠 | {{ maintenance_window }} |
+| 切替時間目標 | {{ failover_seconds_target }} 秒以内 |
+| 訓練実施回数 | {{ drill_iterations }} 回 |
+| Preemptive | {{ preemptive }} |
+| 中断・切り戻し期限 | {{ rollback_deadline }} |
+
+HAペアの構成機体:
+
+| role | hostname | mgmt_ip |
+|------|----------|---------|
+{% for m in ha_members %}| {{ m.role }} | {{ m.hostname }} | {{ m.mgmt_ip }} |
+{% endfor %}
+
+参加者:
+
+{% for p in participants %}- {{ p }}
+{% endfor %}
+
+セッション維持確認に使う継続通信の宛先:
+
+{% for t in session_verify_targets %}- {{ t.description }}(`{{ t.target }}`)
+{% endfor %}
+
+## 手順
+
+### 1. 前提を確認する(現在のHA状態と設定同期)
+
+両機のGUIに個別にログインし、`Dashboard`の`High Availability`ウィジェットを開きます。{{ ha_members[0].hostname }}が`active`、{{ ha_members[1].hostname }}が`passive`と表示され、両機とも実行中の設定が同期(synchronized)済みであることを確認します。
+
+一致していない、または同期済みと表示されない場合は訓練を開始せず、原因(未コミット、HA1/HA2リンクの断等)を解消してからやり直します。
+
+### 2. 継続通信の監視を開始する(訓練の基準ログ)
+
+作業端末から、シナリオ設定の宛先へ継続通信を開始し、切替前後の途切れを後から検証できるようにします。
+
+```bash
+{% for t in session_verify_targets %}ping -i 0.2 {{ t.target }} > session-verify-{{ loop.index }}.log &
+{% endfor %}
+```
+
+この時点で、中断判断者({{ participants[2] }})に訓練開始を告知します。
+
+### 3. Suspend local deviceを実行し、切替時間を計測する({{ drill_iterations }}回実施)
+
+現在Activeの機体({{ ha_members[0].hostname }}、{{ ha_members[0].mgmt_ip }})のGUIで`Device > High Availability > Operational Commands`を開きます。`Suspend local device`リンクをクリックする直前に、作業端末で時刻を記録します。
+
+```bash
+date +%s.%N
+```
+
+クリック後、両機の`Dashboard`の`High Availability`ウィジェットを数秒おきに更新し、{{ ha_members[1].hostname }}の表示が`active`に切り替わった時点で、再度作業端末の時刻を記録します。
+
+```bash
+date +%s.%N
+```
+
+2つの記録時刻の差分を切替時間として記録します。この差分にはGUI操作の反映遅延とウィジェット更新の確認遅延が含まれるため、参考値として扱います。{{ drill_iterations }}回実施し、毎回の切替時間が目標値{{ failover_seconds_target }}秒以内に収まるかを確認します(2回目以降は、手順5で復帰させたあとに手順3から繰り返します)。
+
+### 4. セッション維持を確認する
+
+```bash
+{% for t in session_verify_targets %}tail -n 20 session-verify-{{ loop.index }}.log
+{% endfor %}
+```
+
+各ログのタイムスタンプ・応答が、手順3で記録した切替時間の前後を通じて大きく途切れていないかを確認します。
+
+### 5. Make local device functionalで復帰し、Preemptiveの動作を確認する
+
+Suspendした機体({{ ha_members[0].hostname }})のGUIで`Device > High Availability > Operational Commands`を開き、`Make local device functional`リンクをクリックします。
+
+{% if preemptive %}Preemptiveが有効なため、一次情報の案内に従い数分待ってから、両機の`Dashboard`で{{ ha_members[0].hostname }}が再び`active`に戻り、{{ ha_members[1].hostname }}が`passive`に戻ったこと(preemptionの発生)を確認します。
+{% else %}Preemptiveが無効なため、`Make local device functional`実行後もActiveの入れ替わりは自動発生しません。{{ ha_members[1].hostname }}が`active`のまま維持されることを両機の`Dashboard`で確認します。
+{% endif %}
+
+### 6. 継続通信ログを停止し、結果を記録する
+
+全ての反復({{ drill_iterations }}回)が完了したら、継続通信を停止してログを保全します。
+
+```bash
+{% for t in session_verify_targets %}pkill -f "ping -i 0.2 {{ t.target }}"
+{% endfor %}
+```
+
+各回の切替時間・セッション維持結果・復帰確認結果を一覧化し、{{ rollback_deadline }}までに訓練完了(両機とも`Dashboard`のHA状態表示が正常)を{{ participants[2] }}へ報告します。
+
+## 動作確認
+
+- 手順1で、両機の`Dashboard > High Availability`ウィジェットにおいて{{ ha_members[0].hostname }}が`active`、{{ ha_members[1].hostname }}が`passive`と表示され、実行中の設定が同期(synchronized)済みであること
+- 手順3で記録した各回の切替時間が、目標値{{ failover_seconds_target }}秒以内に収まっていること({{ drill_iterations }}回全てで確認する)
+- 手順4のログで、切替前後を通じて継続通信が大きく途切れていないこと(セッション維持の確認)
+- 手順5で`Make local device functional`実行後、{{ ha_members[0].hostname }}と{{ ha_members[1].hostname }}のHA状態表示が正しい役割に復帰していること(Preemptive={{ preemptive }}の場合の期待動作と一致すること)
+- {{ rollback_deadline }}までに手順6の結果報告が完了していること
+
+## 注意事項
+
+- 本訓練は本番トラフィックが実際にPassive機へ切り替わる実切替訓練です。開始前に利用者・関連チームへ影響(数秒間の切替)を告知し、中断が必要な場合の判断者を{{ participants[2] }}に一本化しておくこと。
+- 手順1の前提確認で、両機のHA状態が期待どおり(active/passive、synchronized)でない場合は訓練を開始しないこと。
+- `Suspend local device`を実行したまま放置しないこと。{{ rollback_deadline }}を超えても手順5の復帰確認が完了しない場合は、中断判断者の判断で直ちに`Make local device functional`を実行し、両機の`Dashboard`でHA状態が正常に戻ったことを確認すること。
+- 手順3・手順4で記録する時刻・ログはGUI操作とウィジェット確認による手動計測であり、実際のデータプレーン切替時刻そのものではない参考値である点を、結果報告の際に明記すること。
+- 手順4でセッション維持が確認できるまで、Suspendした機体側の設定変更や再起動など、切り戻しを妨げる操作を行わないこと。

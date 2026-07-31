@@ -1,0 +1,213 @@
+# FortiGateのAddress/Serviceオブジェクトによるルール集約管理
+
+FortiOS の Address Object・Address Group・Service Object・Service Group を使い、
+CSV で定義した{{ csv_rows | length }}行のうち、オブジェクト定義行(`policy_name`
+が `-` の行)でホスト・ネットワーク・ポートを先に Policy & Objects に登録し、
+ポリシー定義行(`policy_name` が `-` 以外の行)でそれらを名前(またはグループ名)
+で参照する Firewall Policy を作成します。IPアドレスやポート番号をポリシー本体
+に直書きしないことで、対象が増減してもオブジェクト側の1箇所を編集するだけで
+済む状態を作り、最後に Ref(参照数)を使って参照関係が正しく成立していること
+を検証します。
+
+## 目的
+
+ホスト・ネットワーク・ポートを Address Object / Address Group / Service Object
+/ Service Group として先に定義し、Firewall Policy の Source・Destination・
+Service がそれらを名前で参照する構成を作れるようになることを目指します。IP
+アドレスやポート番号をポリシーに直書きしないことで、対象(Webサーバーの台数
+など)が変わってもオブジェクト側(または Group のメンバー)を1箇所編集するだけ
+で済み、複数のポリシーを1件ずつ書き換える必要がなくなることを体験します。
+あわせて、Ref列を使った参照関係の確認方法も身につけます。
+
+## 用語解説
+
+- **Address Object(アドレスオブジェクト)**: 通信のsource/destinationを表す
+  名前付きオブジェクト。Firewall Policyやその他複数の機能から共通して参照
+  できる。GUIでは `Policy & Objects > Addresses` から作成する
+- **Subnet(アドレスタイプ)**: Address Objectの`Type`の1つ。ネットワークアド
+  レスとネットマスク(またはプレフィックス長)で表現し、ホスト1台を表す場合は
+  ネットマスク`255.255.255.255`または`/32`を指定する。`Interface`欄は既定の
+  `any`のままにするか、特定のインターフェースを選択できる
+- **Address Group(アドレスグループ、Type=Group)**: 複数のAddress Objectを
+  まとめ、ポリシーへ個別に追加する手間を減らすためのオブジェクト。同一グル
+  ープ内のメンバーは同一インターフェースまたは`Any`に紐づくものに限られる
+- **Service Object(サービスオブジェクト)**: `Protocol Type`(TCP/UDP/SCTPな
+  ど)と`Destination Port`を名前付きで定義するオブジェクト。GUIでは
+  `Policy & Objects > Services`から`Create New > Service`で作成する
+- **Service Group(サービスグループ)**: 複数のService Objectをまとめたオブ
+  ジェクト。`Policy & Objects > Services`から`New > Service Group`で作成する
+- **Ref(参照数)**: `Policy & Objects > Addresses`の一覧に表示される、その
+  オブジェクトを参照しているポリシー等の件数。数字をクリックすると
+  `Usage of Address:<name>`ペインが開き、`Possible Uses`で参照元一覧を確認
+  できる
+- **Firewall Policy**: Source・Destination・ServiceにAddress Object /
+  Address Group / Service Object / Service Groupを指定して通信可否を決める
+  ルール。GUIでは`Policy & Objects > Firewall Policy`から作成する
+
+## シナリオ設定
+
+今回登録するオブジェクトとポリシーは、次の{{ csv_rows | length }}行です。
+`policy_name`が`-`の行はオブジェクト定義(Address/Address Group/Service/
+Service Group)のみを行う行、`-`以外の行はそれらのオブジェクトを参照する
+Firewall Policyを作成する行です。値が`-`の列は、その行では未使用であること
+を表します。
+
+| rule_no | policy_name | src_name | src_subnet | dst_name | dst_subnet | dst_group | svc_name | svc_protocol | svc_port | svc_group | incoming_interface | outgoing_interface | action | description |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["rule_no"] }} | {{ r["policy_name"] }} | {{ r["src_name"] }} | {{ r["src_subnet"] }} | {{ r["dst_name"] }} | {{ r["dst_subnet"] }} | {{ r["dst_group"] }} | {{ r["svc_name"] }} | {{ r["svc_protocol"] }} | {{ r["svc_port"] }} | {{ r["svc_group"] }} | {{ r["incoming_interface"] }} | {{ r["outgoing_interface"] }} | {{ r["action"] }} | {{ r["description"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 現状を確認し、名前の重複がないことを確認する(前提確認)
+
+新しいオブジェクトを1件も作成する前に、現状を確認します。
+
+- `Policy & Objects > Addresses` を開き、検索欄で表内の`src_name`/`dst_name`
+  /`dst_group`の値(`H_`/`GRP_`で始まる名前)を1件ずつ検索し、同名オブジェクト
+  が存在しないことを確認します。既に同名が存在すると、`Create new`のつもりが
+  既存オブジェクトの編集になってしまいます。
+- `Policy & Objects > Services` を開き、同様に`svc_name`/`svc_group`の値
+  (`SVC_`/`SVCGRP_`で始まる名前)が存在しないことを確認します。
+- `Policy & Objects > Firewall Policy` を開き、既存ポリシーの並び順(評価順)
+  と件数を記録しておきます(手順6で新規ポリシーを追加した後、既存ポリシーの
+  評価順序が変わっていないことの確認に使います)。
+
+### 2. Address Object(ホスト/ネットワーク)を作成する
+
+`Policy & Objects > Addresses`を開き`Address`を選択し、`Create new`から
+次の値でオブジェクトを作成します。`Type`は常に`Subnet`を選択します(ホスト
+1台を表す行は`/32`を指定しています)。`Interface`欄は既定の`any`のまま、
+`Static route configuration`も既定(無効)のまま変更しません。`Comments`欄
+には該当行の`description`を入力し、最後に`OK`をクリックします。
+
+{% for r in csv_rows %}{% if r["src_name"] != "-" and r["policy_name"] == "-" %}- Name: `{{ r["src_name"] }}` / IP/Netmask: `{{ r["src_subnet"] }}` / Comments: {{ r["description"] }}
+{% endif %}{% if r["dst_name"] != "-" and r["policy_name"] == "-" %}- Name: `{{ r["dst_name"] }}` / IP/Netmask: `{{ r["dst_subnet"] }}` / Comments: {{ r["description"] }}
+{% endif %}{% endfor %}
+
+### 3. Address Group `GRP_WEBFARM` を作成し、Webファームのメンバーをまとめる
+
+`Policy & Objects > Addresses`で`Address Group`を選択し`Create new`をクリ
+ックします。`Name`に`GRP_WEBFARM`を入力し、`Type`は`Group`を選択します。
+`Members`欄の`+`をクリックして`Select Entries`ペインを開き、次のメンバーを
+選択して追加します(複数選択可)。グループ内のメンバーは同一インターフェース
+または`Any`に紐づくものに限られるため、手順2で`Interface`を`any`のまま作成
+したことを確認してから進めます。`Static route configuration`は既定のまま
+にし、`OK`をクリックします。
+
+{% for r in csv_rows %}{% if r["dst_group"] != "-" and r["policy_name"] == "-" %}- {{ r["dst_name"] }}
+{% endif %}{% endfor %}
+
+### 4. Service Object(ポート)を作成する
+
+`Policy & Objects > Services`を開き、`Create New > Service`をクリックしま
+す。各行について次の値を入力し(`Address`欄は宛先アドレスを絞り込みたい場合
+のみ使用するため、今回は未入力のままにします)、`OK`をクリックします。
+
+{% for r in csv_rows %}{% if r["svc_name"] != "-" and r["policy_name"] == "-" %}- Name: `{{ r["svc_name"] }}` / Protocol Type: `TCP/UDP/SCTP` / Destination Port: `{{ r["svc_protocol"] }}, {{ r["svc_port"] }}`
+{% endif %}{% endfor %}
+
+同じ内容を、CLI(`config firewall service custom`)でも登録できます。
+
+```bash
+{% for r in csv_rows %}{% if r["svc_name"] != "-" and r["policy_name"] == "-" %}config firewall service custom
+    edit "{{ r["svc_name"] }}"
+{% if r["svc_protocol"] == "TCP" %}        set protocol TCP
+        set tcp-portrange {{ r["svc_port"] }}
+{% elif r["svc_protocol"] == "UDP" %}        set protocol UDP
+        set udp-portrange {{ r["svc_port"] }}
+{% endif %}    next
+end
+{% endif %}{% endfor %}```
+
+### 5. Service Group `SVCGRP_WEB` を作成し、Web用サービスをまとめる
+
+`Policy & Objects > Services`のペインで`New > Service Group`をクリックし
+ます。`Group name`に`SVCGRP_WEB`を入力し、`Members`欄で次のサービスを選択
+して追加し、`OK`をクリックします。
+
+{% for r in csv_rows %}{% if r["svc_group"] != "-" and r["policy_name"] == "-" %}- {{ r["svc_name"] }}
+{% endif %}{% endfor %}
+
+### 6. Firewall Policyを作成し、オブジェクト/グループ/サービスを参照させる
+
+`Policy & Objects > Firewall Policy`を開き`Create New`をクリックします。
+`New Policy`ペインで次の値を入力し、`Schedule`は既定の`always`のまま、
+`Action`は`ACCEPT`にして`Save`をクリックします。`Destination`は`dst_group`
+が設定されている行はグループ名を、`Service`は`svc_group`が設定されている行
+はグループ名を、それぞれ個別のオブジェクト名の代わりに指定します。
+
+{% for r in csv_rows %}{% if r["policy_name"] != "-" %}- Name: `{{ r["policy_name"] }}` / Incoming Interface: `{{ r["incoming_interface"] }}` / Outgoing Interface: `{{ r["outgoing_interface"] }}` / Source: `{{ r["src_name"] }}` / Destination: `{% if r["dst_group"] != "-" %}{{ r["dst_group"] }}{% else %}{{ r["dst_name"] }}{% endif %}` / Service: `{% if r["svc_group"] != "-" %}{{ r["svc_group"] }}{% else %}{{ r["svc_name"] }}{% endif %}`
+{% endif %}{% endfor %}
+
+同じ内容を、CLI(`config firewall policy`)でも登録できます。`edit`に続く
+ポリシーIDは`rule_no`の値をそのまま使用します。
+
+```bash
+{% for r in csv_rows %}{% if r["policy_name"] != "-" %}config firewall policy
+    edit {{ r["rule_no"] }}
+        set name "{{ r["policy_name"] }}"
+        set srcintf "{{ r["incoming_interface"] }}"
+        set dstintf "{{ r["outgoing_interface"] }}"
+        set srcaddr "{{ r["src_name"] }}"
+        set dstaddr "{% if r["dst_group"] != "-" %}{{ r["dst_group"] }}{% else %}{{ r["dst_name"] }}{% endif %}"
+        set action {{ r["action"] }}
+        set schedule "always"
+        set service "{% if r["svc_group"] != "-" %}{{ r["svc_group"] }}{% else %}{{ r["svc_name"] }}{% endif %}"
+        set logtraffic all
+    next
+end
+{% endif %}{% endfor %}```
+
+## 動作確認
+
+- `Policy & Objects > Addresses`に、手順2で作成した5件のAddress Objectが
+  意図した`IP/Netmask`で表示されること
+- `Policy & Objects > Addresses`(Address Group)に`GRP_WEBFARM`が作成され、
+  `Members`に`H_WEBSRV01`/`H_WEBSRV02`の2件が入っていること
+- `Policy & Objects > Services`に、手順4で作成した3件のService Objectが
+  意図した`Destination Port`で表示されること
+- `Policy & Objects > Services`(Service Group)に`SVCGRP_WEB`が作成され、
+  `Members`に`SVC_HTTP`/`SVC_HTTPS`の2件が入っていること
+- `Policy & Objects > Firewall Policy`に`ALLOW_LAN_TO_WEBFARM_WEB`/
+  `ALLOW_ADMIN_TO_MGMTJUMP_SSH`の2件が表示され、`Source`/`Destination`/
+  `Service`がそれぞれ意図したオブジェクト名・グループ名になっていること
+- `GRP_WEBFARM`と`SVCGRP_WEB`の`Ref`列の数字をクリックし、`Usage of
+  Address:GRP_WEBFARM`(または`Usage of Service:SVCGRP_WEB`)ペインの
+  `Possible Uses`に`ALLOW_LAN_TO_WEBFARM_WEB`が表示されること
+- 手順1で記録した既存ポリシーの並び順・内容が、意図せず変更されていないこと
+- LANユーザー端末から`172.16.30.11`/`172.16.30.12`へのHTTP/HTTPS通信が許可
+  され、管理端末(`10.0.10.50`)から`172.16.40.5`へのSSH(22番)のみが許可さ
+  れること
+
+## 注意事項
+
+- **名前の重複に注意すること。** `Create new`で指定する`Name`が既存の
+  Address Object/Address Group/Service Object/Service Groupと重複している
+  と、新規作成ではなく既存オブジェクトの編集を意図せず行ってしまう可能性が
+  あります。手順1の事前確認を必ず行ってください。
+- **Address Groupのメンバーはインターフェースを揃えること。** 異なるインタ
+  ーフェースに紐づくAddress Objectを同じAddress Groupに混在させることはで
+  きません。本手順ではメンバーを全て`Interface = any`で作成しているため、
+  この制約には抵触しません。
+- **Static route configurationは既定のままにすること。** Address Object /
+  Address Groupの作成画面にあるこのトグルの詳細な挙動は本手順書の一次情報
+  では確認できていないため、意図的に使う理由がない限り既定値(無効)から
+  変更しないでください。
+- **Address Object/Address GroupのCLI構文はこの手順書に含めていません。**
+  `config firewall address`/`config firewall addrgrp`というconfigツリー
+  自体は存在しますが、`set`パラメータの詳細な構文を一次情報で確認できな
+  かったため、推測で記載していません。CLIで投入する場合は、対象のFortiGate
+  上で`?`によるコマンド補完や`show full-configuration firewall address`等
+  を用いて、バージョンに応じた正確な構文をその場で確認してから実行してくだ
+  さい。
+- カスタムサービス(`config firewall service custom`)の`protocol`には
+  TCP/UDP/UDP-Lite/SCTPのいずれかを指定し、対応するポート範囲
+  (`set tcp-portrange`/`set udp-portrange`等)を設定してください。組み合わ
+  せを誤ると、意図したポートで一致しないサービスオブジェクトになります。
+- Firewall Policyの変更がFortiGate自身の管理アクセス(GUI/SSHログイン)を
+  経由するインターフェースに影響する場合、手順6の登録と動作確認が完了する
+  まで、既存の広めの許可ポリシーを無効化・削除しないでください。
+- CLI/GUIへのログインに使う管理者パスワードやAPIトークンは、本手順書やログ
+  に平文で残さないでください。値を記録する場合は`********`のようにマスク
+  し、秘密管理ツール等で別途安全に保管してください。

@@ -1,0 +1,10 @@
+wan_interface = "wan1"
+internal_interface = "port2"
+vip_name = "vip-dmz-web01"
+wan_ip = "203.0.113.10"
+ext_port = 8443
+int_host = "10.0.20.10"
+int_port = 443
+proto = "tcp"
+test_source = "198.51.100.5"
+trace_packet_count = 50

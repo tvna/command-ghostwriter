@@ -1,0 +1,246 @@
+# FortiGate HA計画切替訓練:フェイルオーバー時間・セッション維持の測定
+
+すでに構築済みのFortiGate FGCP HAクラスタ(Primary `{{ primary_hostname }}` /
+Secondary `{{ secondary_hostname }}`)に対し、`execute ha failover set/unset`
+(Force HA failover for testing and demonstrations)を用いた計画切替訓練を
+計画メンテナンス枠({{ maintenance_window }})内で実施します。訓練前に
+`session-pickup`の設定を確認したうえで、切替前後に
+{{ continuity_checks | length }}項目の継続監視を行い、切替時間とセッション
+維持を測定し、`get system ha status`で通常運用への復帰動作まで検証します。
+
+## 目的
+
+Group ID `{{ group_id }}`・Group name `{{ group_name }}`で構成済みのFGCP HA
+クラスタに対し、Primary機で`execute ha failover set {{ cluster_id }}`による
+強制フェイルオーバーを発生させ、切替に要した時間・既存セッションが維持
+されたか・`execute ha failover unset {{ cluster_id }}`による復帰後にクラスタ
+が通常状態(in-sync、通常のPrimary選定理由)へ戻ることを、計画メンテナンス枠
+({{ maintenance_window }})内で測定・記録できるようになることを目指します。
+
+OPNsenseはこの課題(HA冗長構成に対する計画的な切替訓練と、切替時間・セッション
+維持・復帰動作の測定)を、CARPの「Persistent CARP Maintenance Mode」(CARP
+永続メンテナンスモードによる意図的なデモート)という機構で解決しますが、
+Fortinet (FortiOS / FortiGate)には同名の機構はなく、'Force HA failover for
+testing and demonstrations' (manual FGCP failover trigger) to measure
+failover time and session persistenceで同じ課題を解決します。
+
+## 用語解説
+
+- **FGCP(FortiGate Clustering Protocol)**: FortiGate同士でHAクラスタを構成する
+  Fortinet独自のプロトコル
+- **`execute ha failover set/unset <cluster_id>`**: HA Primary機を強制的に
+  フェイルオーバー(セカンダリ)状態へ固定する/解除するコマンド。Fortinet公式
+  ドキュメントでは「testing, troubleshooting, maintenance, and
+  demonstrations」専用と明記されており、本番環境では計画メンテナンス枠の
+  外で使用しないよう注意書きがある。`<cluster_id>`はvirtual cluster
+  (vcluster)モードでない場合は常に1、vclusterモードが有効な場合は1または2を
+  取る**仮想クラスタID**であり、`get system ha status`の出力に現れる各ユニット
+  の**シリアル番号ではない**
+- **execute ha failover status**: 強制フェイルオーバーが設定されているかを
+  表示するコマンド。設定中は`failover status: set`と表示される
+- **get system ha status**: クラスタ全体の状態を表示するコマンド。
+  `Configuration Status`(ユニットごとの設定同期状態、`in-sync`/
+  `out-of-sync`)、`Primary selected using`(直近のPrimary選定理由の履歴)、
+  `ses_pickup`(session-pickupの有効/無効)などが含まれる。各行は
+  ユニットの**シリアル番号**ごとに表示される(ホスト名ではない)
+- **EXE_FAIL_OVER flag**: `execute ha failover set`によって強制的に
+  Primaryが選定された場合に、`get system ha status`の`Primary selected
+  using`欄へ記録される選定理由。「EXE_FAIL_OVER flag is set on peer
+  member `<対向ユニットのシリアル>`」という形式で表示される
+- **session-pickup**: `config system ha`の`set session-pickup enable`で
+  有効化する、HAメンバー間でセッションテーブルを同期する設定。有効な場合、
+  フェイルオーバーが発生しても既存セッションが新Primary側に引き継がれる。
+  `get system ha status`の`ses_pickup`欄に現在の有効/無効が表示される
+
+## シナリオ設定
+
+| 項目 | 値 |
+|---|---|
+| Group ID | {{ group_id }} |
+| Group name | {{ group_name }} |
+| Primary機ホスト名 | {{ primary_hostname }} |
+| Secondary機ホスト名 | {{ secondary_hostname }} |
+| 強制フェイルオーバーのcluster_id | {{ cluster_id }} |
+| session-pickupの事前設定状態 | {{ session_pickup_enabled }} |
+| 目標切替時間(秒) | {{ target_failover_time_seconds }} |
+| 実施する計画メンテナンス枠 | {{ maintenance_window }} |
+
+切替前後に継続監視する項目({{ continuity_checks | length }}件、いずれも
+切替中の許容断時間(max_allowed_drop_sec)以内であることを確認します):
+
+| # | 監視項目 | 手段 | 対象 | 許容断時間(秒) |
+|---|----------|------|------|-----------------|
+{% for c in continuity_checks %}| {{ loop.index }} | {{ c.name }} | {{ c.method }} | {{ c.target }} | {{ c.max_allowed_drop_sec }} |
+{% endfor %}
+
+## 手順
+
+### 1. クラスタの同期状態とsession-pickup設定を確認する
+
+Primary機・Secondary機いずれからでもよいので、まず現状を確認します。
+
+```bash
+get system ha status
+```
+
+`Configuration Status`欄で両ユニットとも`in-sync`と表示されていることを
+確認します(各行はユニットのシリアル番号ごとに表示されます)。あわせて
+`ses_pickup`欄を確認します。
+
+{% if session_pickup_enabled %}
+`ses_pickup: enable`と表示されていることを確認します。既にsession-pickupが
+有効化されているため、次の手順に進みます。
+{% else %}
+`ses_pickup: disable`と表示された場合、session-pickupが未設定です。訓練で
+セッション維持を測定するには事前に有効化が必要なため、次のコマンドで
+有効化します。
+
+```bash
+config system ha
+    set session-pickup enable
+end
+```
+
+再度`get system ha status`を実行し、`ses_pickup: enable`に変わったことを
+確認してから次の手順に進みます。
+{% endif %}
+
+### 2. 継続監視を開始し、切替前の基準を記録する
+
+シナリオ設定の{{ continuity_checks | length }}項目について、強制
+フェイルオーバーを実行する**前**に監視・記録用のセッションやツールを
+起動しておきます。
+
+{% for c in continuity_checks %}- {{ c.name }}: {{ c.method }}で`{{ c.target }}`
+  を監視するセッションを開始し、正常に応答/継続していることを確認します
+{% endfor %}
+
+いずれも正常な応答が確認できるまで、次の手順には進まないでください。
+
+### 3. Primary機で強制フェイルオーバーを実行する(計測開始)
+
+Primary機(`{{ primary_hostname }}`)のCLIで次のコマンドを実行します。
+
+```bash
+execute ha failover set {{ cluster_id }}
+```
+
+確認プロンプトが表示されるので`y`で応答します。
+
+```
+Caution: This command will trigger an HA failover.
+It is intended for testing purposes.
+Do you want to continue? (y/n)y
+```
+
+`y`を入力した時刻を切替開始時刻(T0)として記録します。
+
+### 4. フェイルオーバー状態を確認し、切替時間を算出する
+
+```bash
+execute ha failover status
+```
+
+`failover status: set`と表示されることを確認します。続けて、
+
+```bash
+get system ha status
+```
+
+を実行し、`Primary selected using`欄の最新の記録に「EXE_FAIL_OVER flag is
+set」という記述が現れ、`Secondary`欄が旧Primary(`{{ primary_hostname }}`)
+に、`Primary`欄が旧Secondary(`{{ secondary_hostname }}`)に入れ替わっている
+ことを確認します。この確認が取れた時刻を切替完了時刻(T1)とし、T1とT0の
+差分を切替時間として記録します。目標切替時間
+({{ target_failover_time_seconds }}秒)との比較結果も記録してください。
+
+### 5. 継続監視ログでセッション維持を確認する
+
+手順2で開始した監視ログを確認し、それぞれの項目について切替時間帯の
+断時間を測定します。
+
+{% for c in continuity_checks %}- {{ c.name }}: 許容断時間{{ c.max_allowed_drop_sec }}秒
+  以内に収まっているかを確認し、実測の断時間を記録します
+{% endfor %}
+
+許容断時間を超えた項目がある場合は、超過した項目名と実測値を必ず記録
+してください(そのまま手順6に進んでかまいませんが、後日の原因分析に
+必要な情報です)。
+
+### 6. 強制フェイルオーバーを解除し、復帰動作を確認する
+
+測定が終わったら、強制フェイルオーバー状態を解除します。強制フェイル
+オーバーは手動で解除するまで維持されるため、この手順を省略しないで
+ください。
+
+```bash
+execute ha failover unset {{ cluster_id }}
+```
+
+確認プロンプトが表示されるので`y`で応答します。
+
+```
+Caution: This command may trigger an HA failover.
+It is intended for testing purposes.
+Do you want to continue? (y/n)y
+```
+
+再度`get system ha status`を実行し、`Primary selected using`欄の選定理由
+がEXE_FAIL_OVER以外の通常条件(override priorityの比較など)に戻っている
+こと、`Configuration Status`が両ユニットとも`in-sync`のままであることを
+確認します。
+
+### 7. 測定結果を記録する
+
+手順4で算出した切替時間、手順5で確認した各継続監視項目の断時間、手順6の
+復帰確認結果を、運用記録として保存します。目標切替時間や許容断時間を
+超過した項目があれば、その値も併せて記録し、次回訓練や恒久対策の検討に
+使用してください。
+
+## 動作確認
+
+- 手順1・手順6で、`get system ha status`の`Configuration Status`が両ユニット
+  とも`in-sync`と表示されること
+- 手順1で`ses_pickup`が`enable`であることを確認できること(手順1の分岐で
+  有効化した場合を含む)
+- 手順3実行後、`execute ha failover status`が`failover status: set`を
+  返すこと
+- 手順4で、`get system ha status`の`Primary selected using`欄に「EXE_FAIL_OVER
+  flag is set」の記述が現れ、`{{ secondary_hostname }}`側がPrimaryに昇格
+  していること
+- 手順4で算出した切替時間が記録されており、
+  {{ target_failover_time_seconds }}秒という目標値との比較結果が併記されて
+  いること
+- 手順5で、継続監視{{ continuity_checks | length }}項目それぞれの断時間が
+  記録されており、許容断時間を超えた項目の有無が明らかになっていること
+- 手順6実行後、`get system ha status`の`Primary selected using`欄の選定理由
+  がEXE_FAIL_OVER以外に戻り、`{{ primary_hostname }}`が再びPrimaryとして
+  表示されること(override priorityなど通常条件による選定の場合)
+
+## 注意事項
+
+- **この手順は計画メンテナンス枠({{ maintenance_window }})内でのみ実施
+  すること。** Fortinet公式ドキュメントでも、`execute ha failover set/unset`
+  はtesting・troubleshooting・maintenance・demonstrations専用であり、
+  計画メンテナンス枠の外の本番環境では使用しないよう明記されています。
+- **強制フェイルオーバー状態は手動で`unset`するまで解除されないこと。**
+  手順3を実施したセッションでは、測定完了後に必ず手順6まで完了させて
+  ください。訓練を中断する場合も、`execute ha failover unset {{ cluster_id }}`
+  を実行してから作業を終了してください。
+- **`cluster_id`は仮想クラスタ(vcluster)IDであり、機器のシリアル番号では
+  ないこと。** `get system ha status`の出力はユニットをシリアル番号で
+  表示しますが、`execute ha failover set/unset`に渡す値は本シナリオでは
+  `{{ cluster_id }}`固定です。vclusterモードを使用していない環境では常に
+  `1`です。
+- **session-pickupが無効なまま訓練を実施しないこと。** `ses_pickup:
+  disable`のままフェイルオーバーを発生させると、既存セッションの引き継ぎ
+  が行われず、手順5のセッション維持測定が本来の目的を達成できません。
+  手順1で必ず有効化を確認してください。
+- 本ドキュメントで参照したFortinet公式ドキュメントには、この強制
+  フェイルオーバー機能に対応するGUI操作は案内されていません。手順3・6は
+  CLIでのみ実施してください(`get system ha status`相当の同期状況確認は
+  Dashboardの`HA Status`ウィジェットや`System > HA`ページでも可能です)。
+- 継続監視({{ continuity_checks | length }}項目)は、いずれもFortiGate外部
+  の監視端末・ツールから実施し、対象や許容断時間はシナリオ設定の値を
+  そのまま用いてください。実測値が許容断時間を超えた場合は、手順7で
+  必ず記録し、原因調査につなげてください。

@@ -1,0 +1,7 @@
+event_no,log_message,traffic_type,hourly_count,noise_label,treatment,description
+1,UDP broadcast packet on 255.255.255.255 dropped,Broadcast,3200,broadcast-noise,category_disable,LAN全体に定常発生するブロードキャスト遮断ログで個別確認の意味を持たない
+2,Multicast (mDNS/SSDP) packet dropped at WAN,Multicast,1800,multicast-noise,category_disable,mDNSやSSDP等のマルチキャストがWAN側で定常的に遮断され意味のある遮断ログを埋もれさせている
+3,Repeated NTP retry from misconfigured branch switch blocked,Retry,540,ntp-retry-noise,redundancy_filter,誤設定されたスイッチが同一宛先へNTPを再送し続けており件数のみ把握できればよい
+4,Repeated DNS retry to deprecated internal resolver blocked,Retry,610,dns-retry-noise,redundancy_filter,廃止済み内部リゾルバへの同一DNSクエリの再送が繰り返されており個々のログは不要
+5,Port scan attempt from external IP blocked at WAN,Attack,42,-,keep,外部からのポートスキャン遮断であり個別に記録・追跡すべき意味のある遮断ログ
+6,Unauthorized HTTPS management login attempt blocked,Unauthorized-Access,15,-,keep,管理画面への不正アクセス試行の遮断であり個別に記録すべき意味のある遮断ログ

@@ -1,0 +1,199 @@
+# Palo Alto Networks(PAN-OS)のPolicy Optimizerによるルール衛生監査
+
+`Policies > Security > Policy Optimizer`が提供する3つのビュー(No App
+Specified / Unused Apps / Rule Usage)を使い、CSVで棚卸しした
+{{ csv_rows | length }}件の既存ルールを「過剰許可("any"相当)」「アプリケー
+ション過剰許可」「無ヒットの未使用ルール」「継続使用中」の4区分に仕分けます。
+本手順では廃止候補をいきなり削除せず、まず`Disable`のみを適用して段階的に
+無効化し、Traffic logで一定期間ヒットが無いことを確認したうえで、削除の
+可否は次回監査サイクルの判断に委ねます。
+
+## 目的
+
+PAN-OSのPolicy Optimizerが提供するNo App Specified/Unused Apps/Rule Usage
+の3ビューを使い分け、Hit Count(ヒット数)とApps Seen(アプリケーション使用
+実績)からセキュリティルールベースの棚卸しができるようになることを目指し
+ます。あわせて、検出した廃止候補をいきなり削除せず、Disableによる段階的
+無効化とTraffic logでの影響確認を経てから最終判断する、安全な定期監査の型
+を身につけます。
+
+## 用語解説
+
+- **Policy Optimizer**: レガシーなSecurity policyルールベースをApp-ID
+  ベースへ移行するための機能。ポートベースルールの優先度付け、使われて
+  いないアプリケーションを許可しているルールの特定、Hit Countなどのルール
+  使用状況の分析を行う。`Policies > Security > Policy Optimizer`から開く。
+  PAN-OS 9.0以降でApp-IDが有効な環境が前提で、VM-50 Lite仮想ファイア
+  ウォールでは利用できない
+- **No App Specified**: `Policies > Security > Policy Optimizer > No App
+  Specified`に表示される、許可アプリケーションが未設定(ポートベース)の
+  ルール一覧。既定のソートは`Traffic (Bytes, 30 days)`で、ほかに
+  `Apps Seen`・`Days with No New Apps`・`Hit Count`でも並び替えられる
+- **Unused Apps**: `Policies > Security > Policy Optimizer > Unused Apps`
+  に表示される、許可アプリケーション一覧の中に実際には一致したことがない
+  (トラフィックで観測されていない)アプリケーションを含むルール一覧。
+  `Apps Allowed`・`Apps Seen`・`Days with No New Apps`・`Hit Count`・
+  `Traffic (Bytes, 30 days)`の各列を持ち、値はおよそ1時間ごとに更新される
+- **Rule Usage**: ルール単位のHit Countに基づく使用状況を、`Timeframe`
+  (または`Custom time frame`)と使用状況(rule Usage)で絞り込んで確認する
+  ビュー。対象ルールに対して`Delete`・`Enable`・`Disable`・`Tag`・`Untag`
+  を実行できる(参照元: Policy Optimizer Conceptsが引用する
+  Monitor Policy Rule Usage)
+- **Apps Allowed / Apps Seen**: `Apps Allowed`はルールで許可設定されて
+  いるアプリケーション数、`Apps Seen`はそのうち実際にトラフィックで観測
+  されたアプリケーション数。両者の差が大きいほど過剰許可の度合いが大きい
+- **Match Usage**: `Apps Seen`にあるアプリケーションをルールへ追加し、
+  一致実績のないアプリケーションを削除するボタン。一度に多くのアプリ
+  ケーションを対象にすると削除しすぎるおそれがあるため、対象アプリ数が
+  多いルールでは注意が必要
+- **Log at Session End**: Policy Optimizerは`Log at Session End`のログ
+  のみを集計に使い、一時的なアプリケーション判定を除外するため
+  `Log at Session Start`は無視する。対象ルールでこの設定が無効だと、
+  Hit CountやApps Seenの値が実態を反映しない
+- **commit**: PAN-OSのcandidate configとrunning configを分離する二段階
+  構成モデル。GUIで`OK`/`Save`した内容もcommitするまで実機の動作には
+  反映されない
+
+## シナリオ設定
+
+今回の監査対象ルールと、Policy Optimizerの各ビューから読み取った指標、
+および今回の判定(verdict)は次の{{ csv_rows | length }}件です。
+
+| rule_no | name | service_type | apps_allowed | apps_seen | hit_count(90d) | days_no_new_apps | verdict | description |
+|---------|------|--------------|--------------|-----------|-----------------|-------------------|---------|--------------|
+{% for r in csv_rows %}| {{ r["rule_no"] }} | {{ r["name"] }} | {{ r["service_type"] }} | {{ r["apps_allowed"] }} | {{ r["apps_seen"] }} | {{ r["hit_count_90d"] }} | {{ r["days_no_new_apps"] }} | {{ r["verdict"] }} | {{ r["description"] }} |
+{% endfor %}
+
+`verdict`の意味は次のとおりです。
+
+- `no_app_specified`: No App Specifiedビューで検出した、App-ID未設定の
+  ポートベース(過剰許可)ルール。今回はタグ付けのみ行い、変更しない
+- `over_permissive_app`: Unused Appsビューで検出した、Apps AllowedがApps
+  Seenを上回るルール。未使用アプリケーションのみを個別に見直す
+- `unused_rule`: Rule Usageビューで検出した、直近の期間でHit Countが0の
+  ルール。今回の主対象としてDisableで段階的に無効化する
+- `keep`: 継続的にヒットしており、今回の対象外とするルール
+
+`apps_allowed`列の`-`は「No App Specifiedのためアプリケーション一覧が
+設定されていない(値の対象外)」を表します。
+
+## 手順
+
+### 1. 前提を確認する(Log at Session EndとPAN-OSバージョン)
+
+Policy Optimizerの各指標を信頼する前に、まず前提条件を確認します。ここを
+飛ばすと、Hit CountやApps Seenが実態を反映しない状態で廃止判断をしてしまう
+おそれがあります。
+
+- ファイアウォールがPAN-OS 9.0以降でApp-IDが有効であること、および
+  VM-50 Lite仮想ファイアウォールでないことを確認します(Policy Optimizer
+  自体の利用要件)。
+- `Policies > Security`で、シナリオ設定に挙げた各ルールのActionsタブを開き、
+  `Log at Session End`が有効であることを確認します。この設定が無効な
+  ルールがあれば、そのルールのHit Count/Apps Seenは実態を反映しないため、
+  今回のverdict判定から除外し、まずログ設定の是正のみを行います。
+
+### 2. Unused Appsビューで過剰許可アプリケーションを精査する
+
+`Policies > Security > Policy Optimizer > Unused Apps`を開き、`verdict`が
+`over_permissive_app`の次のルールを確認します。
+
+{% for r in csv_rows %}{% if r["verdict"] == "over_permissive_app" %}- {{ r["name"] }}: Apps Allowed={{ r["apps_allowed"] }} / Apps Seen={{ r["apps_seen"] }} / Hit Count(90d)={{ r["hit_count_90d"] }}({{ r["description"] }})
+{% endif %}{% endfor %}
+各ルールについて、`Apps Seen`の数値または`Compare`をクリックして
+`Applications & Usage`パネルを開き、各アプリケーションの初回/最終観測日と
+7日/15日/30日/Anytimeのトラフィックを確認します。過去に季節性の利用が
+なかったかをこのパネルで確認できたアプリケーションのみ、個別に選択して
+`Delete`で許可リストから除外します。対象アプリ数が多いルールでは
+`Match Usage`は一括で削除してしまうため使用せず、個別の`Delete`のみで
+対応します。ルール自体(Action=Allow)はこの手順では無効化しません。
+
+### 3. No App Specifiedビューで過剰許可ルールを洗い出す(変更はしない)
+
+`Policies > Security > Policy Optimizer > No App Specified`を開き、
+`verdict`が`no_app_specified`の次のルールを確認します。
+
+{% for r in csv_rows %}{% if r["verdict"] == "no_app_specified" %}- {{ r["name"] }}: Apps Seen={{ r["apps_seen"] }} / Days with No New Apps={{ r["days_no_new_apps"] }} / Hit Count(90d)={{ r["hit_count_90d"] }}({{ r["description"] }})
+{% endif %}{% endfor %}
+このルールはApp-IDベースへの移行(ポートベースからの変換)によって初めて
+過剰許可が解消されますが、移行作業自体はクローンルール作成を伴う別手順
+であり、本監査の対象外とします。対象ルールを選択し`Tag`で
+`appid-migration-review`を付与するところまでに留め、`Action`や許可
+アプリケーションの設定は変更しません。
+
+### 4. Rule Usageビューで無ヒットルールを特定し、Disableで段階的に無効化する
+
+`Policies > Security > Policy Optimizer > Rule Usage`を開き、`Timeframe`
+を90日(または`Custom time frame`で同等の期間)に設定し、`rule Usage`の
+フィルタで未使用のルールに絞り込みます。ここで`verdict`が`unused_rule`の
+次のルールと一致することを確認します。
+
+{% for r in csv_rows %}{% if r["verdict"] == "unused_rule" %}- {{ r["name"] }}: Hit Count(90d)={{ r["hit_count_90d"] }} / Days with No New Apps={{ r["days_no_new_apps"] }}({{ r["description"] }})
+{% endif %}{% endfor %}
+一致を確認できたルールのみを選択し、`Tag`で`retire-candidate-2026h2`を
+付与したうえで、`Disable`を適用します。**この時点では`Delete`は実行しま
+せん。** Disableはルール定義を残したまま評価対象から外すだけの操作のため、
+誤りがあった場合は`Enable`で即座に復旧できます。
+
+### 5. 変更を確定する(commit)
+
+`Commit`を実行し、candidate configをrunning configへ反映します。手順2〜4
+で入力した内容は、このcommitが完了するまで実機の動作に影響しません。
+
+### 6. Traffic logで無効化後の影響がないことを確認する
+
+commit後、`Monitor > Logs`を開き`Traffic`ログ種別を選びます。手順4で
+Disableした各ルール名について、フィルタ欄に次の形式で入力して
+`Apply Filter`を実行します。
+
+{% for r in csv_rows %}{% if r["verdict"] == "unused_rule" %}( rule eq {{ r["name"] }} )
+{% endif %}{% endfor %}
+Disable後は当該ルール名でのヒットが増加しないこと(=無効化前から変化が
+ないこと)、また想定外の新規拒否(意図しない業務影響)が発生していない
+ことを、一定の観察期間を置いたうえで確認します。この観察期間の完了と
+問題なしの確認が取れて初めて、次回監査サイクルで削除(Delete)を検討する
+対象になります。
+
+## 動作確認
+
+- 手順1で、シナリオ設定の全ルールについて`Log at Session End`が有効で
+  あること(無効なルールは今回のverdict判定から除外されていること)
+- `Policies > Security > Policy Optimizer > Unused Apps`で、`verdict`が
+  `over_permissive_app`のルールについて、個別に確認・削除した
+  アプリケーションが`Apps Allowed`から除外されていること(ルール自体は
+  Enabledのままであること)
+- `Policies > Security > Policy Optimizer > No App Specified`で、
+  `verdict`が`no_app_specified`のルールに`appid-migration-review`タグが
+  付与されており、Action・許可アプリケーションは変更されていないこと
+- `Policies > Security`のルール一覧で、`verdict`が`unused_rule`のルールが
+  `Disabled`状態(削除されていないこと)と`retire-candidate-2026h2`タグの
+  両方を確認できること
+- `Monitor > Logs`の`Traffic`ログで、Disable後に当該ルール名でのヒットが
+  発生しておらず、かつ想定外の新規拒否が発生していないこと
+- `verdict`が`keep`のルールが変更されておらず、Hit Countが引き続き増加
+  していること
+
+## 注意事項
+
+- **`Delete`はこの手順では実行しないこと。** 廃止候補は`Disable`のみに
+  留め、Traffic logでの観察期間を経てから削除するかどうかを次回監査
+  サイクルで判断してください。Disableは`Enable`で即座に取り消せますが、
+  Deleteは復旧に設定バックアップからの復元が必要になります。
+- **`Log at Session End`が無効なルールのHit Count/Apps Seenは信頼しない
+  こと。** Policy Optimizerは`Log at Session End`のログのみを集計するため、
+  この設定が無効なルールは実際には使われていても無ヒットに見えることが
+  あります。手順1で必ず確認してください。
+- **`Match Usage`を対象アプリ数が多いルールに使わないこと。** 一致実績の
+  ないアプリケーションを一括削除するため、季節性のある利用や低頻度利用を
+  誤って削除してしまうおそれがあります。個別の`Delete`で慎重に対応して
+  ください。
+- `Apps Allowed`/`Apps Seen`の値はおよそ1時間ごとの更新のため、手順2〜4の
+  変更直後にPolicy Optimizerの画面を再確認しても反映が間に合わない場合が
+  あります。時間を置いてから再確認してください。
+- 重複ルール(内容が実質的に同じルールが複数存在する状態)の検出は
+  Policy Optimizerのネイティブ機能ではありません。シナリオ設定の
+  from_zone/to_zone・source/destination・serviceの組み合わせを目視で
+  比較し、重複が疑われる場合は本手順とは別に個別確認してください。
+- No App Specifiedで検出したポートベースルールのApp-IDベースへの移行
+  (クローンルール作成による変換)は、本監査手順の対象外です。別途、
+  移行専用の手順で実施してください。

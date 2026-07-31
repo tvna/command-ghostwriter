@@ -1,0 +1,7 @@
+kind,rule_no,name,days,start_time,end_time,from_zone,to_zone,action,schedule_ref,dest_addr,service,priority,description
+schedule,1,Business-Hours,"Mon,Tue,Wed,Thu,Fri",09:00,18:00,-,-,-,-,-,-,-,平日の業務時間帯(一般Web閲覧の許可対象)
+schedule,2,Vendor-Extended,"Mon,Tue,Wed,Thu,Fri,Sat",08:00,20:00,-,-,-,-,-,-,-,外部ベンダーポータル連携のために延長した時間帯(土曜含む)
+rule,3,ALLOW-Web-BizHours,-,-,-,LAN,WAN,Allow,Business-Hours,Any,HTTPS,1,業務時間内のみ一般Webアクセス(HTTPS)を許可
+rule,4,DENY-Web-OffHours,-,-,-,LAN,WAN,Deny,Always On,Any,HTTPS,2,業務時間外は既定のLAN→WAN許可にフォールバックさせず明示的に遮断
+rule,5,ALLOW-Vendor-Extended,-,-,-,LAN,WAN,Allow,Vendor-Extended,ext-vendor-portal,HTTPS,3,延長時間帯のみベンダーポータルへのHTTPSアクセスを許可
+rule,6,DENY-Vendor-OffHours,-,-,-,LAN,WAN,Deny,Always On,ext-vendor-portal,HTTPS,4,延長時間帯外はベンダーポータルへのアクセスを遮断

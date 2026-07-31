@@ -1,0 +1,17 @@
+fw_hostname = "fw-tokyo-branch1"
+dns_proxy_name = "dns-proxy-dot-upstream"
+proxy_location = "Shared"
+proxy_interface = "ethernet1/2"
+proxy_interface_ip = "192.168.10.1"
+primary_dot_server = "1.1.1.1"
+secondary_dot_server = "1.0.0.1"
+fallback_unencrypted_dns = false
+tcp_timeout_sec = 3
+allowed_dns_types_client = "Cleartext"
+ssl_tls_service_profile = "None"
+trust_zone = "trust"
+untrust_zone = "untrust"
+block_rule_name = "BLOCK-DIRECT-DNS-EGRESS"
+verify_client_ip = "192.168.10.50"
+verify_domain = "example.com"
+lan_networks = ["192.168.10.0/24", "192.168.20.0/24"]
