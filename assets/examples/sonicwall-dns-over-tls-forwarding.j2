@@ -1,0 +1,301 @@
+# SonicWall (SonicOS) DNSプロキシ強制による平文DNS直抜け遮断と脅威ドメインフィルタの構成
+
+SonicOS には OPNsense の Unbound DNS-over-TLS(DoT)アップストリーム転送に相当する、
+DNSクライアント自体を暗号化アップストリームへ切り替えるネイティブ機構はありません。
+本手順書は同じ「LANからの平文DNS直抜けを遮断する」という運用課題を、`NETWORK | DNS >
+DNS Proxy` の `Enforce DNS Proxy For All DNS Requests` で全クライアントのDNS問い合わせを
+{{ firewall_name }} 経由に強制し、`POLICY | Rules and Policies > Access Rules` で外部DNS
+(53番ポート)への直接通信を明示的に遮断し、`NETWORK | DNS > DNS Security` の DNS Sinkhole
+Service で既知の脅威ドメインを遮断する、3層構成で解決します。あわせて、DNS Proxy Cache
+オブジェクトとAccess RuleのTraffic Statisticsで、強制・遮断・フィルタそれぞれの挙動を検証
+します。
+
+## 目的
+
+`NETWORK | DNS > DNS Proxy` の DNS Proxy をグローバル・インターフェース単位の両方で有効化
+した上で `Enforce DNS Proxy For All DNS Requests` を有効化し、宛先を問わずすべてのDNS問い
+合わせを {{ firewall_name }} のDNSプロキシエンジンへ強制的に通す設定ができるようになること
+を目指します。あわせて、この強制設定だけに頼らない多層防御として、外部DNS(53番ポート)への
+直接通信を `Access Rules` で明示的に遮断し、`DNS Security` の Sinkhole Service で既知の
+脅威ドメインを遮断・記録できるようになることを目指します。
+
+OPNsenseのUnbound DoTアップストリーム転送とは異なり、SonicWall (SonicOS) には同名・同方式
+(DNSクライアントを暗号化アップストリームへ直接切り替える)の機構は存在しません。SonicWall
+(SonicOS) では、DNS Proxy強制(Enforce DNS Proxy for All DNS Requests)+ 外部DNS(53番
+ポート)へのAccess Rule遮断 + DNS Security(本手順書で扱うローカルの脅威/悪性ドメイン
+フィルタ、およびSonicOS 7.1以降で追加されたNeustar連携のカテゴリ/脅威フィルタ)の組み合わ
+せで、「平文DNSの直抜けを遮断する」という同じ運用課題を解決します。
+
+## 用語解説
+
+- **NETWORK | DNS > DNS Proxy**: DNS Proxy のグローバル設定・DNS Proxy Cacheの確認・削除を
+  行う管理画面のナビゲーションパス
+- **Enable DNS proxy**: `NETWORK | DNS > DNS Proxy` にあるチェックボックス。既定では無効
+  (未選択)で、DNS Proxy機能全体のグローバルスイッチにあたる。これを有効にしないと、後述の
+  インターフェース単位の `Enable DNS Proxy` 設定自体が画面に表示されない
+- **インターフェース単位の Enable DNS Proxy**: `NETWORK > System > Interfaces` で対象
+  インターフェースのEditアイコンを開き、`Advanced` タブ内にあるチェックボックス。DNS Proxy
+  をグローバルで有効にした場合にのみこの項目が表示され、インターフェースごとに個別に
+  DNS Proxy を有効化できる
+- **Enforce DNS Proxy For All DNS Requests**: `NETWORK | DNS > DNS Proxy` のチェックボックス
+  (既定では無効)。有効にすると、宛先アドレスを問わずすべてのDNS Proxy要求を許可(=強制的に
+  DNSプロキシエンジンで処理)する。無効のままだと、SonicWallアプライアンス自身宛のDNS要求
+  のみが処理され、外部DNSサーバー宛の直接問い合わせはプロキシを経由せず素通りしてしまう
+- **Enable DNS Proxy Cache**: `NETWORK | DNS > DNS Proxy` のチェックボックス(既定では無効)。
+  DNS over UDPの要求に対してのみ有効なキャッシュ機構
+- **DNS Proxy Mode / DNS Proxy protocol**: 同画面のドロップダウン。Mode の既定値は
+  `IPv4 to IPv4`、protocol の既定値は `UDP and TCP`
+- **DNS Proxy Cache Objects画面**: `NETWORK | DNS > DNS Proxy` から遷移して確認する、
+  DNSプロキシが実際に処理した問い合わせのキャッシュ一覧。`Domain Name` / `Type`
+  (`Dynamic` または `Static`) / `IP Address` / `Time to Leave` の列で構成され、動的
+  (Dynamic)キャッシュはDNS Proxy処理の過程で自動的に追加される。ここに問い合わせ対象の
+  ドメインが `Dynamic` として現れることが、DNSプロキシ経由で処理されたことの根拠になる
+- **NETWORK | DNS > DNS Security(DNS Sinkhole Service)**: 既知の悪性ドメインへの応答を
+  遮断・改変する機構を設定する管理画面のナビゲーションパス。`Enable DNS Sinkhole Service`
+  チェックボックス(既定では無効)、`Action` ドロップダウン(`Dropping with Logs` /
+  `Dropping with Negative DNS reply to Source` / `Dropping with DNS reply of Forged IP`
+  のいずれか)、`Custom Malicious Domain Name` タブ、`White List` タブで構成される
+- **POLICY | Rules and Policies > Access Rules**: Access Rule を作成・編集するための管理
+  画面のナビゲーションパス。`Zone Matrix` アイコンから開く `Zone Matrix Selector` でゾーン
+  ペア別のテーブルを表示し、テーブル下部の `+Add` から `Adding Rule` ダイアログを開いて
+  ルールを追加する
+- **the Any rule**: 各ゾーンペアのAccess Ruleテーブル最下段に存在する既定ルール。テーブルは
+  最も限定的なルールが上、限定度の低いルールほど下に並び、`Any` ルールが最後尾になる
+
+## シナリオ設定
+
+今回対象とする {{ firewall_name }}(管理IP: {{ management_ip }})の設定値は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| DNS Proxy Mode | `{{ dns_proxy_mode }}` |
+| DNS Proxy protocol | `{{ dns_proxy_protocol }}` |
+| Enable DNS Proxy Cache | {% if enable_dns_proxy_cache %}有効{% else %}無効{% endif %} |
+| Access Ruleの `Port/Services` に指定するService Object(dns_service_object) | `{{ dns_service_object }}` |
+| DNS Sinkhole Service の Action(sinkhole_action) | `{{ sinkhole_action }}` |
+| Forged IPv4 Address(forged_ipv4) | `{{ forged_ipv4 }}` |
+| Forged IPv6 Address(forged_ipv6) | `{{ forged_ipv6 }}` |
+
+`dns_service_object` は事前に `MATCH OBJECTS | Services` へ登録済みの、DNS用(UDP/TCP
+53番ポート)のService ObjectまたはService Groupの名称です。既定のオブジェクト構成は
+ファームウェアのバージョンによって異なる場合があるため、実際の一覧で名称を確認してから
+値を読み替えてください。このオブジェクト自体の新規作成は本手順書の対象外です。
+
+DNS Proxyをインターフェース単位で有効化する対象(dns_proxy_interfaces、
+{{ dns_proxy_interfaces | length }} 件)は次のとおりです。
+
+| # | インターフェース | Zone | 用途 |
+|---|-------------------|------|------|
+{% for i in dns_proxy_interfaces %}| {{ loop.index }} | {{ i.interface }} | {{ i.zone }} | {{ i.description }} |
+{% endfor %}
+
+外部DNS(53番ポート)への直接通信を遮断するAccess Rule(block_rules、
+{{ block_rules | length }} 件、いずれも宛先Zoneは `{{ wan_zone }}`)は次のとおりです。
+
+| # | 送信元Zone | My Rule Name | Description |
+|---|------------|---------------|--------------|
+{% for r in block_rules %}| {{ loop.index }} | {{ r.from_zone }} | `{{ r.rule_name }}` | {{ r.description }} |
+{% endfor %}
+
+DNS Sinkhole Serviceの `Custom Malicious Domain Name` に登録する悪性ドメイン
+(malicious_domains、{{ malicious_domains | length }} 件)は次のとおりです。
+
+| # | ドメイン名 | 登録理由 |
+|---|-----------|----------|
+{% for d in malicious_domains %}| {{ loop.index }} | `{{ d.domain }}` | {{ d.note }} |
+{% endfor %}
+
+`White List` に登録する除外ドメイン(whitelist_domains、{{ whitelist_domains | length }}
+件、誤検知を避けるためSinkhole判定の対象から外すドメイン)は次のとおりです。
+
+| # | ドメイン名 | 登録理由 |
+|---|-----------|----------|
+{% for d in whitelist_domains %}| {{ loop.index }} | `{{ d.domain }}` | {{ d.note }} |
+{% endfor %}
+
+## 手順
+
+### 1. 現状を確認する(変更前の基準を取る)
+
+新しい設定を1件も投入する前に、現状を確認します。
+
+- `NETWORK | DNS > DNS Proxy` を開き、`Enable DNS proxy` および
+  `Enforce DNS Proxy For All DNS Requests` の現在の状態(通常はいずれも未選択)を記録します。
+- `POLICY | Rules and Policies > Access Rules` を開き、`Zone Matrix Selector` から
+  シナリオ設定の各 `from_zone`({% for r in block_rules %}`{{ r.from_zone }}`{% if not loop.last %} / {% endif %}{% endfor %})
+  から `{{ wan_zone }}` へのテーブルを表示し、既存ルールとシナリオ設定の `My Rule Name`
+  ({% for r in block_rules %}`{{ r.rule_name }}`{% if not loop.last %} / {% endif %}{% endfor %})
+  が重複していないことを確認します。
+- `NETWORK | DNS > DNS Security` を開き、`Enable DNS Sinkhole Service` の現在の状態を
+  記録します。
+
+### 2. DNS Proxyをグローバルで有効化する
+
+`NETWORK | DNS > DNS Proxy` を開き、`Enable DNS proxy` にチェックを入れて `Accept` を
+クリックします。この時点ではまだ `Enforce DNS Proxy For All DNS Requests` は有効化しま
+せん(手順4で、後続のインターフェース単位の有効化とあわせて設定します)。
+
+### 3. 対象インターフェースでDNS Proxyを個別に有効化する
+
+`Enable DNS proxy` はグローバル設定であるだけでなく、インターフェースごとに個別の有効化
+が必要です。シナリオ設定の {{ dns_proxy_interfaces | length }} インターフェースについて、
+`NETWORK > System > Interfaces` を開き、対象インターフェースのEditアイコンをクリックして
+`Advanced` タブを開き、`Enable DNS Proxy` にチェックを入れて `OK` をクリックします。
+
+{% for i in dns_proxy_interfaces %}- {{ i.interface }}({{ i.zone }}、{{ i.description }})
+{% endfor %}
+すべてのインターフェースで設定したら `Accept` をクリックして反映します。
+
+### 4. Enforce DNS Proxy For All DNS Requestsを有効化する
+
+`NETWORK | DNS > DNS Proxy` に戻り、次の項目を設定します。
+
+- `DNS Proxy Mode`: `{{ dns_proxy_mode }}`(既定値のまま)
+- `DNS Proxy protocol`: `{{ dns_proxy_protocol }}`(既定値のまま)
+- `Enforce DNS Proxy For All DNS Requests`: チェックを入れる(この時点で、宛先アドレスを
+  問わずすべてのDNS問い合わせが {{ firewall_name }} のDNSプロキシエンジンで処理されるよう
+  になります)
+{% if enable_dns_proxy_cache %}- `Enable DNS Proxy Cache`: チェックを入れる
+{% else %}- `Enable DNS Proxy Cache`: チェックしないままにする
+{% endif %}
+設定後は `Accept` をクリックして保存します。
+
+### 5. DNS Proxy Cache Objectsで強制処理の挙動を確認する
+
+LANまたはWLAN側の端末から任意のドメイン名を問い合わせたうえで、`NETWORK | DNS >
+DNS Proxy` からDNS Proxy Cache Objects画面を開きます。問い合わせたドメインが `Type`
+`Dynamic` のエントリとして一覧に現れることを確認してください。これにより、DNS問い合わせが
+実際にDNSプロキシエンジンを経由して処理されたことを確認できます。この確認が取れるまで、
+手順6のAccess Rule遮断には進まないでください(先に遮断だけを有効化すると、DNSプロキシ側
+が正しく機能していない場合にLAN全体の名前解決が失われるおそれがあります)。
+
+### 6. 外部DNS(53番ポート)への直接通信を遮断するAccess Ruleを登録する
+
+DNS Proxyの強制設定だけに頼らない多層防御として、外部DNSサーバーへの直接の問い合わせ
+(53番ポート)自体を明示的に遮断します。`POLICY | Rules and Policies > Access Rules` を
+開き、`Zone Matrix Selector` からシナリオ設定の `from_zone` → `{{ wan_zone }}` の
+テーブルを表示し、テーブル下部の `+Add` から `Adding Rule` ダイアログを開いて、各行につき
+次のフィールドを設定します。
+
+- `My Rule Name`: `rule_name`
+- `Description`: `description`
+- `Action`: `Deny`
+- `IP Version`: `IPv4`
+- `Priority`: `Auto Prioritize`(最も限定的なルールほど上位に自動配置されるため、この
+  DNSサービス限定のDenyルールは、より限定度の低い `Any` ルールより上位=先に評価される
+  位置へ自動的に配置されます)
+- `Schedule`: `Always`
+- Source/Destinationタブの `Source Zone/Interface`: `from_zone`
+- Source/Destinationタブの `Destination Zone/Interface`: `{{ wan_zone }}`
+- Source/Destinationタブの Source `Address`: `Any`
+- Source/Destinationタブの Destination `Address`: `Any`
+- Source/Destinationタブの `Port/Services`: `{{ dns_service_object }}`
+
+{% for r in block_rules %}- {{ r.from_zone }} → {{ wan_zone }}: `{{ r.rule_name }}`({{ r.description }})
+{% endfor %}
+`Logging` タブは既定の有効状態(チェック済み)のまま変更しません。すべての項目を設定したら
+`Enable` を有効にし、`Save` をクリックして保存します。
+
+### 7. Zone Matrixでルールの並び順を確認する
+
+`Zone Matrix Selector` から各ゾーンペアのテーブルを再度開き、手順6で登録した
+`Deny` ルールが、その送信元Zoneの `Any` ルールより上位(評価順で先)に並んでいることを
+確認します。並び順が意図と異なる場合は、対象ルールの `Priority` 設定を見直してください。
+
+### 8. DNS Sinkhole Serviceを設定する
+
+`NETWORK | DNS > DNS Security` を開き、次の手順で設定します。
+
+1. `Enable DNS Sinkhole Service` にチェックを入れます。
+2. `Action` ドロップダウンから `{{ sinkhole_action }}` を選択します。
+{% if sinkhole_action == "Dropping with DNS reply of Forged IP" %}   選択後に表示される
+   `Forged IPv4 Address` に `{{ forged_ipv4 }}`、`Forged IPv6 Address` に
+   `{{ forged_ipv6 }}` を入力します(いずれも社内で到達不能または監視用に用意した
+   アドレスとし、実在の外部サービスに割り当てられたIPアドレスを指定しないでください)。
+{% endif %}3. `Accept` をクリックして保存します。
+4. `Custom Malicious Domain Name` タブを開き、悪性ドメイン({{ malicious_domains | length }}
+   件)を1件ずつ `+Add` から `Add One Domain Name` ダイアログで登録します。
+{% for d in malicious_domains %}   - `Domain Name`: `{{ d.domain }}`({{ d.note }})を入力し `Save`
+{% endfor %}5. `White List` タブを開き、除外ドメイン({{ whitelist_domains | length }}件)を
+   同様に `+Add` から `Domain Name` ダイアログで登録します。
+{% for d in whitelist_domains %}   - `Domain Name`: `{{ d.domain }}`({{ d.note }})を入力し `Save`
+{% endfor %}6. すべて登録したら `Update` をクリックして保存します。
+
+### 9. 強制・遮断・フィルタの3層すべてを検証する
+
+LANまたはWLAN側の端末から、次の3点を確認します。
+
+1. 通常のドメイン名の名前解決が引き続き成功すること(DNSプロキシ経由で処理され、業務に
+   支障がないこと)
+2. 端末のDNSサーバーを外部の公開DNSサーバーへ一時的に切り替えて直接問い合わせを試みた
+   場合に、応答が得られない(または遅延・失敗する)こと。あわせて `POLICY | Rules and
+   Policies > Access Rules` の該当 `Deny` ルール行左側の右矢印アイコンから Traffic
+   Statistics(`Rx Packets`)を確認し、通信発生後にカウンタが増加していることを確認する
+3. `Custom Malicious Domain Name` に登録した悪性ドメイン
+   ({% for d in malicious_domains %}`{{ d.domain }}`{% if not loop.last %} / {% endif %}{% endfor %})
+   への問い合わせが、手順8で設定した `{{ sinkhole_action }}` の挙動どおりに処理される
+   こと(`MONITOR | Logs > System Logs` で該当イベントを確認する)。あわせて、
+   `White List` に登録した除外ドメイン
+   ({% for d in whitelist_domains %}`{{ d.domain }}`{% if not loop.last %} / {% endif %}{% endfor %})
+   は Sinkhole判定の対象外として、通常どおり名前解決が成功することも確認する
+
+## 動作確認
+
+- `NETWORK | DNS > DNS Proxy` で `Enable DNS proxy` と `Enforce DNS Proxy For All DNS
+  Requests` がいずれも有効になっていること
+- シナリオ設定の全インターフェース({{ dns_proxy_interfaces | length }} 件)で、
+  `NETWORK > System > Interfaces` の `Advanced` タブの `Enable DNS Proxy` が有効に
+  なっていること
+- DNS Proxy Cache Objects画面に、実際に問い合わせたドメインが `Dynamic` エントリとして
+  記録されていること
+- `POLICY | Rules and Policies > Access Rules` の該当ゾーンペアのテーブルで、
+  {{ block_rules | length }} 件の `Deny` ルールが、それぞれの送信元Zoneの `Any` ルール
+  より上位に並んでいること
+- 該当 `Deny` ルールのTraffic Statistics(`Rx Packets`)が、外部DNSへの直接問い合わせ
+  発生後に増加すること
+- `NETWORK | DNS > DNS Security` で `Enable DNS Sinkhole Service` が有効になっており、
+  `Action` が `{{ sinkhole_action }}` に設定されていること
+- `Custom Malicious Domain Name` に登録した{{ malicious_domains | length }}件のドメイン
+  への問い合わせが、`{{ sinkhole_action }}` の挙動どおりに処理され、ログに記録されること
+- `White List` に登録した{{ whitelist_domains | length }}件のドメインは、Sinkhole判定の
+  対象とならず通常どおり名前解決が成功すること
+- 手順1で記録した既存のAccess Rule構成が、シナリオ設定にない部分では変更されていないこと
+
+## 注意事項
+
+- **手順の順序を厳守すること。** DNS Proxyのグローバル有効化・インターフェース単位の
+  有効化・`Enforce DNS Proxy For All DNS Requests` を先に済ませ、手順5でDNS Proxy Cache
+  Objectsから実際にプロキシ経由で処理されていることを確認してから、手順6のAccess Rule
+  遮断に進んでください。順序を逆にすると、DNSプロキシが正しく機能していない状態で外部
+  DNSへの直接通信だけを遮断してしまい、LAN/WLAN全体の名前解決が失われるおそれがあります。
+- **`Priority` の設定を誤らないこと。** 手順6の `Deny` ルールが対象ゾーンペアの `Any`
+  ルールより後(評価順で後)に置かれると、`Any` ルールが先にマッチしてしまい遮断が機能
+  しません。手順7のZone Matrix確認を必ず行ってください。
+- **`Dropping with DNS reply of Forged IP` を選択する場合、`Forged IPv4 Address` /
+  `Forged IPv6 Address` には社内で到達不能または監視用に用意したアドレスのみを指定して
+  ください。** 実在の外部サービスのIPアドレスを誤って指定すると、悪性ドメインへの
+  アクセスが意図せずそのサービスへ誘導されるおそれがあります。
+- OPNsenseのUnbound DoTアップストリーム転送とは異なり、本手順のいずれの設定を組み合わせ
+  ても、{{ firewall_name }} から上流DNSサーバーへの問い合わせ自体を暗号化(TLS化)する
+  ことはできません。暗号化された上流DNS転送が必須要件の場合は、DoT対応のオンプレミス
+  DNSサーバーを別途用意して {{ firewall_name }} の上流DNSに指定するか、DoT対応の
+  サードパーティDNSサービスとの連携を別途検討してください。
+- `NETWORK | DNS > DNS Security` の DNS Sinkhole Service(本手順書で確認できたローカルの
+  悪性ドメインリスト方式)とは別に、SonicOS 7.1以降ではNeustarとの連携によるDNSカテゴリ
+  分類・脅威フィルタ機能(DNS Filtering、`POLICY | DNS Security > Settings` から設定)
+  が追加されています。この機能は Gateway Services 配下でのライセンスが必要で、有効化には
+  本手順の `Enforce DNS Proxy For All DNS Requests` に加え、`OBJECT | Profile Objects >
+  DNS Filtering` でのDNS Filtering Profile作成と `POLICY | Rules and Policies > DNS
+  Rules` でのDNS Policy Rule作成(ソースインターフェースとProfileの紐付け)が前提条件
+  として必要です。カテゴリ単位のアクション設定画面の具体的なフィールド名は本セッションの
+  一次情報調査では確認できなかったため、導入する場合は最新のSonicOS DNS Securityガイドで
+  実際の画面を確認してから進めてください。
+- 本手順書は一次情報(SonicOS技術ドキュメントのDNS Proxy・DNS Security・Access Rules各
+  セクション)で確認できたGUI操作のみを扱います。SonicOS CLIやAPIによる同等の投入方法は
+  本ページでは確認できなかったため記載していません。CLIやAPIで投入する場合は、別途
+  SonicOSのリファレンスで構文を確認してから実施してください。
+- `{{ dns_service_object }}` は事前に `MATCH OBJECTS | Services` で登録済みであることを
+  前提とします。このオブジェクト自体の新規作成手順は本手順書には含まれません。
+- 管理者パスワードやAPIキーなど認証情報は、本手順書やログ、チケットに平文で残さないで
+  ください。記録が必要な場合は `********` のようにマスクし、秘密管理ツール等で別途安全に
+  保管してください。

@@ -1,0 +1,42 @@
+firewall_name = "branch-tz470-fw02"
+management_ip = "192.0.2.1"
+wan_zone = "WAN"
+dns_proxy_mode = "IPv4 to IPv4"
+dns_proxy_protocol = "UDP and TCP"
+enable_dns_proxy_cache = true
+dns_service_object = "DNS (Name Service)"
+sinkhole_action = "Dropping with DNS reply of Forged IP"
+forged_ipv4 = "192.0.2.53"
+forged_ipv6 = "2001:db8::53"
+
+[[dns_proxy_interfaces]]
+interface = "X0"
+zone = "LAN"
+description = "本社LANセグメント"
+
+[[dns_proxy_interfaces]]
+interface = "X3"
+zone = "WLAN"
+description = "社内WLANセグメント(ゲストSSIDは別Zoneのため対象外)"
+
+[[block_rules]]
+from_zone = "LAN"
+rule_name = "block-lan-direct-external-dns"
+description = "LAN発の外部向け平文DNS(53番ポート)直抜けを遮断"
+
+[[block_rules]]
+from_zone = "WLAN"
+rule_name = "block-wlan-direct-external-dns"
+description = "WLAN発の外部向け平文DNS(53番ポート)直抜けを遮断"
+
+[[malicious_domains]]
+domain = "bad-c2-example.test"
+note = "脅威インテリジェンスで確認済みのC2通信先ドメイン"
+
+[[malicious_domains]]
+domain = "phishing-brand-example.test"
+note = "ブランドなりすましフィッシングサイトとして報告されたドメイン"
+
+[[whitelist_domains]]
+domain = "partner-monitoring-example.test"
+note = "業務提携先の死活監視サーバーが参照するドメイン(誤検知除外)"

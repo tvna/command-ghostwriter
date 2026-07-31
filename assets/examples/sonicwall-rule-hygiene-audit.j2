@@ -1,0 +1,217 @@
+# SonicWall (SonicOS) Access Rulesルール衛生監査(未使用・重複・過剰許可の段階的無効化)
+
+`POLICY | Rules and Policies > Access Rules` を対象に、各ルールの Traffic
+Statistics(Rx Bytes/Rx Packets/Tx Bytes/Tx Packets)を根拠として、CSV で
+定義した{{ csv_rows | length }}件のルールから未使用(0ヒット)・重複疑い・
+過剰許可(Allowかつ Source/Destination が Any)の候補を洗い出します。管理
+アクセスや HA 同期など監査対象外のルールを先に除外したうえで、候補はその
+場で無効化せず、まず `Description` 欄へ監査記録を追記して次回監査まで経過
+観察し(第1段階)、2回連続で0ヒットと確認できたルールに限って `Enable`
+のチェックを外して無効化します(第2段階)。あわせて(Gen7限定・既知の不具合
+あり)の `Display Options > Used Rules/Unused Rules` フィルタも参考情報として
+確認しますが、動作が不安定なため本手順の無効化判定には用いません。
+
+## 目的
+
+SonicOS の Access Rules について、Traffic Statistics(Rx/Tx ヒットカウント)
+という一次情報で確認済みの標準機構だけを根拠に、未使用・重複疑い・過剰許可
+のルールを定期的かつ再現可能な手順で洗い出せるようになることを目指します。
+あわせて、廃止候補を「いきなり無効化」ではなく「Descriptionへ記録 → 次回
+監査で再確認 → 無効化」という段階を踏んで安全に整理する運用と、管理アクセス
+・HA同期など監査対象外のルールを誤って無効化しない切り分けを身につけます。
+
+OPNsenseの`Firewall > Rules`の評価カウンタ(Evaluations/States、`pfctl
+-vvsr`相当の統計)を用いたルール定期棚卸しとは異なり、SonicWall (SonicOS)
+には同名の機構は存在しません。同じ「未使用・重複・過剰許可ルールの定期監査」
+という運用課題は、`POLICY | Rules and Policies > Access Rules` の Traffic
+Statistics(Rx/Tx ヒットカウント)を用いた手動監査、および(Gen7限定・既知の
+不具合あり)`Display Options > Used Rules/Unused Rules` フィルタによって
+解決します。
+
+## 用語解説
+
+- **POLICY | Rules and Policies > Access Rules**: Access Rule を作成・編集
+  するための管理画面ナビゲーションパス。このページから Access Rule の一覧
+  表示、既存ルールの `Configure`、Traffic Statistics の確認などをすべて行う
+- **Zone Matrix / Zone Matrix Selector**: Access Rules ページ上部の
+  Zone Matrix アイコンから開く選択ダイアログ。ゾーンペア(From Zone / To
+  Zone)を選ぶと、そのペア専用の Access Rule テーブルを表示できる。Access
+  Rule はゾーンペアごとに個別のテーブルへ分類されて管理される
+- **the Any rule**: 各ゾーンペアの Access Rule テーブル最下段に存在する
+  既定ルール。ここまでに作成したどの Allow/Deny ルールにも一致しなかった
+  通信は、最終的にこの Any ルールによって扱われる。本監査では洗い出し・
+  無効化のいずれの対象にもしない
+- **Traffic Statistics(Rx Bytes/Rx Packets/Tx Bytes/Tx Packets)**:
+  `POLICY | Rules and Policies > Access Rules` ページで各ルール行左側の
+  右矢印アイコンをクリックすると表示される、そのルールに一致した通信量。
+  テーブル上部の Clear アイコンでカウンタをリセットできるが、監査の基準値
+  を失うため本手順では使用しない
+- **Configure**: Access Rules テーブル上の既存ルール行から開く編集アイコン。
+  `Description` 欄への追記や `Enable` チェックボックスのオン/オフなど、
+  ルールの各項目をここから変更できる
+- **Enable**: ルール編集ダイアログのチェックボックス。オフにすると、ルール
+  を削除せずに停止(無効化)できる。再度オンにすればいつでも復元できる
+- **Display Options > Used Rules/Unused Rules フィルタ(Gen7限定・既知の
+  不具合あり)**: `POLICY | Rules and Policies > Access Rules` ページの
+  ツールバーにある表示切り替えメニュー。指定期間内にヒットしたか否かで
+  ルール一覧を Used Rules(使用あり)/ Unused Rules(未使用)に絞り込める。
+  SonicWallコミュニティのユーザー報告では、Gen7デバイスでこのフィルタを
+  期間指定つきで使用した際に期待どおりに動作しないことが指摘されており、
+  本手順では手順1のTraffic Statistics手動確認を補強する参考情報としての
+  み扱い、無効化判定の単独の根拠にはしない
+
+## シナリオ設定
+
+今回棚卸しの対象とするAccess Ruleは次の{{ csv_rows | length }}件です。
+`rx_packets` は各ルールのTraffic Statistics(Rx Packets)の値を、
+`prior_status` は前回監査での結果(`new`=今回はじめて確認、
+`flagged-cycle1`=前回すでに第1段階の候補として記録済み)を、
+`duplicate_of_rule_no` は重複疑いの相手先(重複がなければ`-`、重複ペアの
+うち後から追加された側にのみ相手の`rule_no`を記載)を表します。
+
+| rule_no | from_zone | to_zone | rule_name | action | source_addr | dest_addr | service | rx_packets | prior_status | duplicate_of_rule_no | description |
+|---------|-----------|---------|-----------|--------|--------------|-----------|---------|------------|---------------|------------------------|--------------|
+{% for r in csv_rows %}| {{ r["rule_no"] }} | {{ r["from_zone"] }} | {{ r["to_zone"] }} | {{ r["rule_name"] }} | {{ r["action"] }} | {{ r["source_addr"] }} | {{ r["dest_addr"] }} | {{ r["service"] }} | {{ r["rx_packets"] }} | {{ r["prior_status"] }} | {{ r["duplicate_of_rule_no"] }} | {{ r["description"] }} |
+{% endfor %}
+
+`description` に「監査対象外」と記載された行は、管理アクセスやHA同期など
+業務上恒常的に必要な通信であり、ヒット数に関わらず本監査の洗い出し・
+無効化対象から除外します。
+
+## 手順
+
+### 1. 現状のAccess RulesとTraffic Statisticsを確認する(監査の前提を揃える)
+
+新しい無効化を1件も行う前に、現状を確認します。
+
+- Zone Matrix アイコンから `Zone Matrix Selector` を開き、シナリオ設定に
+  登場する `From WAN To DMZ` / `From WAN To LAN` のそれぞれのゾーンペアを
+  選択し、対応する Access Rule テーブルを表示します。
+- 各ルール行左側の右矢印アイコンをクリックし、Traffic Statisticsの
+  `Rx Packets` が、シナリオ設定の `rx_packets` とおおむね一致することを
+  確認します。この時点では **Clear アイコンを押さないでください。** 押す
+  とカウンタがリセットされ、今回の監査結果の基準そのものが失われます。
+- `prior_status` が `flagged-cycle1` の行は、前回監査で `Configure` から
+  `Description` 欄に追記した監査コメントが残っていることを確認します。
+
+### 2. 監査対象外のルールを仕分ける
+
+管理アクセスやHA同期など、業務上恒常的に必要な通信は、無効化の判断対象
+から除外します。`description` に「監査対象外」を含む行を対象外として先に
+切り分けます。
+
+{% for r in csv_rows %}{% if "監査対象外" in r["description"] %}- 対象外(除外): rule_no {{ r["rule_no"] }}(`{{ r["rule_name"] }}`) - {{ r["description"] }}
+{% endif %}{% endfor %}
+
+この後の手順3〜7は、ここで対象外と判定した行を除く、残りのルールのみに
+適用します。
+
+### 3. 重複疑いのルールを洗い出す
+
+{% for r in csv_rows %}{% if r["duplicate_of_rule_no"] != "-" %}- rule_no {{ r["rule_no"] }}(`{{ r["rule_name"] }}`)は、rule_no {{ r["duplicate_of_rule_no"] }} と From/To Zone・Source・Destination・Serviceが同一の重複疑いです。両ルールの`Configure`を突き合わせ、統合(一方の無効化)が必要かどうかを判断してください。
+{% endif %}{% endfor %}
+
+統合そのものの実施(どちらを残すか、いつ無効化するか)は運用担当者の判断に
+委ね、本手順では判断材料の提示までを行います。
+
+### 4. 過剰許可(Allowかつ Source/Destinationが Any)のルールを洗い出す
+
+{% for r in csv_rows %}{% if r["action"] == "Allow" and (r["source_addr"] == "Any" or r["dest_addr"] == "Any") and "監査対象外" not in r["description"] %}- rule_no {{ r["rule_no"] }}(`{{ r["rule_name"] }}`)はSource=`{{ r["source_addr"] }}` / Destination=`{{ r["dest_addr"] }}` で許可範囲が広く、過剰許可の疑いがあります。Rx Packetsが{{ r["rx_packets"] }}であっても、既存のAddress Object等で送信元・宛先を絞り込めないか担当者に確認してください。
+{% endif %}{% endfor %}
+
+Address Objectでスコープを絞り込む具体的な作業自体は本手順の対象外です。
+
+### 5. Used Rules/Unused Rulesフィルタを参考情報として確認する(Gen7限定・既知の不具合あり)
+
+`POLICY | Rules and Policies > Access Rules` ページのツールバーから
+`Display Options` を開き、`Unused Rules` フィルタで手順1の確認期間に
+合わせた期間を指定します。表示された結果を、手順1で確認したTraffic
+Statisticsの `Rx Packets` が0のルール一覧と突き合わせます。両者が一致
+しない場合は、既知の不具合(Gen7デバイスでの動作不良)による表示のずれ
+である可能性があるため、**手順6・7の判定はTraffic Statisticsの手動確認
+結果を優先し、本フィルタの結果だけを根拠に無効化しないでください。**
+
+### 6. 新規に0ヒットを検出したルールへ監査記録を追記する(第1段階、まだ無効化しない)
+
+`action` が `Allow`、`rx_packets` が `0`、`prior_status` が `new` の
+行を、`Configure` を開いて `Description` 欄に追記します。
+
+{% for r in csv_rows %}{% if r["action"] == "Allow" and r["rx_packets"] == 0 and r["prior_status"] == "new" and "監査対象外" not in r["description"] %}- rule_no {{ r["rule_no"] }}(`{{ r["rule_name"] }}`): `Description` 欄の末尾に「hygiene-audit <audit-date>: Rx Packets = 0 (cycle 1), monitoring only」を追記して `OK` を押す
+{% endif %}{% endfor %}
+
+`<audit-date>` は実施日(例: 2026-07-31)に読み替えてください。この段階
+では **`Enable` は変更しません。** 次回監査で改めて `Rx Packets` を確認
+し、それでも0のままであれば手順7で無効化します。
+
+### 7. 前回監査でも候補、かつ今回も0ヒットのルールを無効化する(第2段階)
+
+`action` が `Allow`、`rx_packets` が `0`、`prior_status` が
+`flagged-cycle1` の行を、`Configure` を開いて `Enable` のチェックを外し
+ます。
+
+{% for r in csv_rows %}{% if r["action"] == "Allow" and r["rx_packets"] == 0 and r["prior_status"] == "flagged-cycle1" and "監査対象外" not in r["description"] %}- rule_no {{ r["rule_no"] }}(`{{ r["rule_name"] }}`): `Description` 欄の末尾に「hygiene-audit <audit-date>: Rx Packets = 0 for 2 consecutive audits; disabled (not deleted)」を追記し、`Enable` のチェックを外して `OK` を押す
+{% endif %}{% endfor %}
+
+**削除ではなく無効化にとどめる**ため、ルールの設定自体は残り、必要になれば
+同じ手順で `Enable` を再びオンにして戻せます。
+
+### 8. Access Rulesテーブルで無効化結果とTraffic Statisticsの前提を再確認する
+
+- `Zone Matrix Selector` から手順1と同じテーブルを開き、手順7の対象ルール
+  がテーブル上で無効(グレーアウト表示)になっていることを確認します。
+- 手順6で `Description` を追記したルールについて、`Configure` を開き
+  `Description` 欄に監査コメントが反映され、`Enable` は変更されず
+  オンのままであることを確認します。
+- 手順3・4で洗い出した重複疑い・過剰許可のルールが、この監査サイクルでは
+  無効化されず、判断待ちのまま残っていることを確認します。
+- 手順2で対象外とした管理アクセス・HA同期のルールが、`Enable`・
+  `Description` ともに変更されていないことを確認します。
+
+## 動作確認
+
+- `POLICY | Rules and Policies > Access Rules` の一覧で、`action` が
+  `Allow` かつ `rx_packets` が `0` かつ `prior_status` が
+  `flagged-cycle1` の rule_no が無効(グレーアウト)として表示されること
+- `action` が `Allow` かつ `rx_packets` が `0` かつ `prior_status` が
+  `new` の rule_no について、`Description` 欄に監査コメントが追記され、
+  `Enable` が変更されていないこと
+- 手順1で確認したTraffic Statisticsの `Rx Packets` が、シナリオ設定の
+  `rx_packets` と一致していたこと(監査の前提が崩れていないこと)
+- `duplicate_of_rule_no` が `-` 以外の行、および `action` が `Allow` かつ
+  Source/Destinationが `Any` の行(監査対象外を除く)が、この監査サイクル
+  では無効化されずに残っていること
+- `description` に「監査対象外」を含む行の `Enable`・`Description` が、
+  この監査サイクルを通じて変更されていないこと
+
+## 注意事項
+
+- **削除ではなく無効化にとどめること。** `Enable` のチェックを外す操作は
+  設定を残したまま停止する操作であり、再度チェックを入れればいつでも戻せ
+  ます。誤って必要なルールを止めてしまった場合の復旧手段を残すため、本
+  手順では削除を扱いません。
+- **0ヒットが2回連続(`prior_status` が `flagged-cycle1` になってから
+  再度 `rx_packets` が `0`)で確認できたルールだけを無効化対象とするこ
+  と。** 1回の監査で0ヒットだったルールは手順6のコメント記録にとどめ、
+  即座に無効化しないでください。
+- 監査中は Traffic Statistics の `Clear` アイコンを押さないでください。
+  基準となる `Rx Packets` のデータが失われ、今回の監査結果自体が無効に
+  なります。
+- **`Display Options > Used Rules/Unused Rules` フィルタは補助的な参考
+  情報にとどめること。** Gen7デバイスでこのフィルタが期待どおりに動作
+  しないという既知の報告があるため、手順6・7の無効化判定は必ず手順1の
+  Traffic Statistics手動確認を根拠とし、本フィルタの結果のみを根拠に
+  しないでください。
+- 重複ルールの統合、過剰許可ルールのスコープ縮小は、いずれも業務影響の
+  確認が必要な人手判断であり、本手順は洗い出しと判断材料の提示までを
+  対象とします。実施は担当者の承認を得てから別途行ってください。
+- 管理アクセス・HA同期など監査対象外のルールは、ヒット数に関わらず本
+  監査の無効化対象から除外してください。誤って無効化すると管理アクセス
+  の喪失やHAフェイルオーバー不能につながるおそれがあります。
+- 本手順書は一次情報(SonicOS技術ドキュメントのAccess Rulesセクション)
+  で確認できたGUI操作のみを扱います。SonicOS CLIやAPIによる同等の
+  取得・無効化方法は本ページでは確認できなかったため記載していません。
+  CLIやAPIで実施する場合は、別途SonicOSのCLI/APIリファレンスで構文を
+  確認してから実施してください。
+- 管理者パスワードやAPIキーなど認証情報は、本手順書やDescription欄、
+  ログに平文で残さないでください。記録が必要な場合は `********` のよう
+  にマスクし、秘密管理ツール等で別途安全に保管してください。

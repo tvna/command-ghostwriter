@@ -1,0 +1,9 @@
+rule_no,from_zone,to_zone,rule_name,action,source_addr,dest_addr,service,rx_packets,prior_status,duplicate_of_rule_no,description
+1,WAN,DMZ,allow-dmz-https,Allow,Any,dmz-web-server,HTTPS,48213,new,-,DMZ Webサーバへの HTTPS 着信を許可
+2,WAN,LAN,allow-mgmt-ssh,Allow,maint-vendor-fixed-ip,jump-host,SSH,12,new,-,管理保守用SSHジャンプホストアクセス(監査対象外)
+3,WAN,DMZ,allow-legacy-ftp,Allow,legacy-ftp-clients,ftp-server-old,FTP,0,new,-,廃止予定レガシーFTPサーバへの着信許可
+4,WAN,DMZ,allow-old-partner-b,Allow,partner-b-net-old,partner-b-gateway,svc-partner-b-ipsec,0,flagged-cycle1,-,旧パートナーB向けIPsecゲートウェイ許可(前回監査で0ヒット)
+5,WAN,DMZ,allow-jump-ssh-v1,Allow,maint-segment,jump-host,SSH,54,new,-,保守セグメントからのSSHジャンプホストアクセス(旧ルール)
+6,WAN,DMZ,allow-jump-ssh-v2,Allow,maint-segment,jump-host,SSH,311,new,5,保守セグメントからのSSHジャンプホストアクセス(新ルール、5と重複疑い)
+7,WAN,DMZ,allow-any-to-dmz-web-tmp,Allow,Any,Any,HTTPS,1780,new,-,緊急対応で追加した一時許可(送信元・宛先ともAny 過剰許可疑い)
+8,WAN,LAN,ha-sync-link,Allow,ha-peer-ip,ha-local-ip,svc-ha-sync,982340,new,-,HA Active/Passive状態同期リンク(監査対象外)
