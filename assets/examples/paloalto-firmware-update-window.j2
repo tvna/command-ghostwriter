@@ -1,0 +1,114 @@
+# Palo Alto Networks(PAN-OS)ファームウェア更新のメンテナンス実施
+
+{{ current_version }} から {{ target_version }} への PAN-OS アップグレードを、PAN-OS Upgrade Checklist に沿った事前確認、`Device > Setup > Operations` の Export named configuration snapshot による設定退避、`Device > Dynamic Updates` でのコンテンツ更新、`Device > Software` の Check Now / Download / Install による本体アップグレード、切り戻し判断までを、メンテナンス時間帯({{ maintenance_window }})内で一連の変更手順として実施します。{% if ha_pair %}対象は HA Active/Passive ペア({{ firewalls | length }} 台)のため、Election Settings の Preemptive を一時的に無効化したうえで、Operational Commands の Suspend local device for high availability・アップグレード・Make local device functional for high availability による復帰を 1 台ずつ順に行います。{% else %}対象はスタンドアロン構成のため、`Device > Software` から直接アップグレードします。{% endif %}
+
+## 目的
+
+PAN-OS のアップグレードが、PAN-OS Upgrade Checklist(登録・ライセンス、ディスク空き容量、コンテンツリリースバージョン、Preferred リリースの識別、アップグレードパス、Upgrade/Downgrade Considerations の確認など)による事前確認と、`Device > Software` での Check Now / Download / Install という一連の操作から成ることを理解し、メンテナンス時間帯内で安全に完了できるようになることを目指します。あわせて、事前の設定退避(Export named configuration snapshot)と、切り戻し基準に基づく判断を、変更管理の一部として実施できるようになることを目指します。{% if ha_pair %}HA Active/Passive ペアについては、Suspend local device for high availability による片系ずつの退避・アップグレード・Make local device functional for high availability による復帰という、常にどちらか一方が稼働し続ける適用順序を実践できるようになることも目指します。{% endif %}
+
+## 用語解説
+
+- **Device > Software**: PAN-OS ソフトウェアイメージを管理する GUI ページ。行ごとに Version / Size / Release Date / Available(アップロード・ダウンロード済みか) / Currently Installed(そのバージョンが現在稼働中か) が表示され、`Check Now` で Palo Alto Networks の Update Server から利用可能なリリースを確認し、対象行の `Download` でイメージを取得、`Install` でインストールする
+- **PAN-OS Upgrade Checklist**: 一次情報にある同名のアップグレード前チェックリスト。登録・ライセンスの確認、`show system disk-space` によるディスク空き容量の確認、コンテンツリリースバージョンの最小要件確認、Preferred リリースの識別(`Device > Software` または CLI の `request system software info preferred`)、アップグレードパスの決定、Upgrade/Downgrade Considerations の確認、GlobalProtect エージェントの最小バージョン確認、インストール済みプラグインの対応バージョン確認、管理インターフェースから Update Server への疎通確認などの項目から成る
+- **Upgrade/Downgrade Considerations**: 一次情報にある、リリースごとのアップグレード・ダウングレード時の注意点をまとめたページ。今回対象のバージョン帯では、証明書が RSA 2048 bit 以上または ECDSA 256 bit 以上、かつ SHA256 以上のダイジェストを満たす必要がある点などが含まれる
+- **Export named configuration snapshot**: `Device > Setup > Operations` にある操作。アップグレード前に、稼働中の設定を名前付きの XML ファイルとしてエクスポートし、ファイアウォール本体の外へ退避する
+- **Device > High Availability > Operational Commands(Suspend local device for high availability / Make local device functional for high availability)**: HA ペアの自機を手動で一時停止・復帰させる操作。アップグレード対象機を Suspend してからアップグレードし、完了後に Make local device functional で復帰させる
+- **show system disk-space**: CLI コマンド。アップグレード先イメージを格納する空き容量があるかを確認する
+
+## シナリオ設定
+
+| 項目 | 値 |
+| --- | --- |
+| メンテナンス時間帯(maintenance_window) | {{ maintenance_window }} |
+| 更新前バージョン(current_version) | {{ current_version }} |
+| 更新後バージョン(target_version) | {{ target_version }} |
+| 最小コンテンツリリースバージョン(min_content_version) | {{ min_content_version }} |
+| HA ペア構成か(ha_pair) | {{ ha_pair }} |
+| 切り戻し基準(rollback_criteria) | {{ rollback_criteria }} |
+
+告知先チャンネルは以下のとおりです。
+
+{% for ch in notify_channels %}
+- {{ ch }}
+{% endfor %}
+
+対象ファイアウォールは次の {{ firewalls | length }} 台です。{% if ha_pair %}1 台目を現在の想定 Active、2 台目を現在の想定 Passive として手順を記載しますが、作業開始前に `Dashboard` の `High Availability` ウィジェットで実際の状態を必ず確認してください。{% endif %}
+
+| # | role | hostname | mgmt_ip |
+| --- | --- | --- | --- |
+{% for fw in firewalls %}| {{ loop.index }} | {{ fw.role }} | {{ fw.hostname }} | {{ fw.mgmt_ip }} |
+{% endfor %}
+
+## 手順
+
+### 1. PAN-OS Upgrade Checklist の事前確認を行う
+
+- 対象ファイアウォールの登録・ライセンスが有効であることを確認します。
+- CLI で `show system disk-space` を実行し、{{ target_version }} のイメージを格納できる空き容量があることを確認します。`Device > Software` の対象行の `Size` 列でも目安を確認できます。
+- 現在の Applications または Applications and Threats コンテンツバージョンが、最小コンテンツリリースバージョン({{ min_content_version }})以上であることを確認します。
+- `Device > Software` を開き、{{ target_version }} が Preferred リリースであることを確認します。CLI では `request system software info preferred` でも確認できます。
+- {{ current_version }} から {{ target_version }} までのアップグレードパスを確認し、スキップできないフィーチャーリリースがないかを Upgrade/Downgrade Considerations のページで確認します。あわせて、証明書が RSA 2048 bit 以上または ECDSA 256 bit 以上・SHA256 以上のダイジェストの要件を満たしているかも確認します。
+- GlobalProtect エージェントの最小バージョン要件を確認します(要件を満たさないと GlobalProtect ユーザーの VPN 接続が切断されるおそれがあります)。
+- インストール済みのプラグインについて、{{ target_version }} でサポートされるバージョンを事前にダウンロードしておきます。
+- `Device > Troubleshooting` で Update Server Connectivity のテストを実行し、管理インターフェースから Update Server への疎通を確認します。
+- SD-WAN のハブ・ブランチ構成が含まれる場合は、ハブ側のファイアウォールをブランチ側より先にアップグレードする順序になっているかをあわせて確認します。
+
+### 2. 変更告知を行う
+
+告知先チャンネルへ、メンテナンス時間帯({{ maintenance_window }})と作業内容({{ current_version }} から {{ target_version }} への更新)を事前に周知します。
+
+{% for ch in notify_channels %}
+- {{ ch }}
+{% endfor %}
+
+### 3. 設定バックアップを取得する
+
+各機の `Device > Setup > Operations` を開き、`Export named configuration snapshot` をクリックします。稼働中の設定を含む XML ファイルを選び、`OK` でエクスポートし、ファイアウォール本体の外(バージョン管理システムや外部ストレージなど)へ保存します。{% if ha_pair %}{{ firewalls | length }} 台とも、それぞれの機体で個別に実施してください。{% endif %}
+
+### 4. コンテンツ更新を実施する
+
+`Device > Dynamic Updates` を開き、現在の Applications または Applications and Threats のコンテンツバージョンを確認します。`Check Now` をクリックして利用可能な更新を表示し、最小コンテンツリリースバージョン({{ min_content_version }})以上のコンテンツを `Download` した後、`Install` をクリックします。
+
+### 5. PAN-OS をアップグレードする
+
+{% if ha_pair %}
+まず `Device > High Availability > Election Settings` を開き、`Preemptive` のチェックを外して `Commit` します。アップグレード中に優先度差で意図しないフェイルオーバー(フラッピング)が起きないようにするための一時的な措置です。
+
+続けて、シナリオ設定の並び順(1 台目→2 台目)のとおり、1 台ずつ次の手順を実施します。
+
+{% for fw in firewalls %}
+#### {{ loop.index }} 台目: {{ fw.hostname }}({{ fw.mgmt_ip }}、想定 {{ fw.role }})
+
+1. `Device > High Availability > Operational Commands` を開き、`Suspend local device for high availability` をクリックします。実行後、状態が `suspended` になったことを確認します。
+2. `Device > Software` を開き、`Check Now` をクリックして利用可能なリリースを表示し、{{ target_version }} の行で `Download` をクリックします。ダウンロード完了後、同じ行の `Install` をクリックします。
+3. インストール完了後にプロンプトが表示された場合はそのまま再起動し、表示されない場合は `Device > Setup > Operations` の `Reboot Device` から再起動します。
+4. 再起動後、`Dashboard` の `High Availability` ウィジェットで、Running Config の同期(synchronized)が回復していることを確認します。
+5. `Device > High Availability > Operational Commands` の `Make local device functional for high availability` をクリックして復帰させます。復帰後、状態表示が `Passive` になることを確認します。
+
+{% endfor %}
+
+両機の復帰まで確認できたら、`Device > High Availability > Election Settings` の `Preemptive` を元に戻し、`Commit` します。
+{% else %}
+`Device > Software` を開き、`Check Now` をクリックして利用可能なリリースを表示します。{{ target_version }} の行で `Download` をクリックし、ダウンロード完了後、同じ行の `Install` をクリックします。インストール完了後にプロンプトが表示された場合はそのまま再起動し、表示されない場合は `Device > Setup > Operations` の `Reboot Device` から再起動します。
+{% endif %}
+
+### 6. 切り戻しを判断する
+
+再起動後、`Device > Software` の `Currently Installed` 列で {{ target_version }} が稼働中であることを確認し、`Monitor > Session Browser` で新規セッションが正常に張られていることを確認します。切り戻し基準({{ rollback_criteria }})に該当する場合は、手順3で取得した設定バックアップを用いて切り戻します。
+
+## 動作確認
+
+- `Device > Software` の `Currently Installed` 列で、対象機の稼働バージョンが {{ target_version }} になっていること
+- `Monitor > Session Browser` で新規セッションが正常に張られていること
+{% if ha_pair %}- 2 台とも `Dashboard` の `High Availability` ウィジェットで、一方が `active`、他方が `passive`、Running Config が同期(synchronized)済みと表示されること
+- `Device > High Availability > Election Settings` の `Preemptive` が、作業開始前の値に戻っていること
+{% endif %}- 切り戻し基準({{ rollback_criteria }})に抵触していないこと
+
+## 注意事項
+
+- **設定バックアップ(手順3)を取得せずにアップグレードを開始しないこと。** `Export named configuration snapshot` で退避した XML ファイルは、ファイアウォール本体の外に保存してください。
+{% if ha_pair %}- **Preemptive を無効化してから片系ずつ作業すること。** 有効なまま片系を Suspend すると、復帰時に優先度差で意図しないフェイルオーバーが連続するおそれがあります。両機の作業が完了するまで元に戻さないでください。
+- **Suspend したまま放置しないこと。** アップグレードと再起動が完了したら、必ず `Make local device functional for high availability` で復帰させ、状態表示が `Passive` になったことを確認してから次の機体の作業に進んでください。
+{% endif %}- **アップグレードパスをスキップしないこと。** {{ current_version }} から {{ target_version }} の間に、途中のフィーチャーリリースを経由する必要がある場合、Upgrade/Downgrade Considerations の確認(手順1)を怠るとアップグレードが失敗し、切り戻しが必要になることがあります。
+- 証明書が RSA 2048 bit 以上または ECDSA 256 bit 以上、かつ SHA256 以上のダイジェストを満たしていない場合、アップグレード後に一部機能へ影響するおそれがあります。手順1の事前確認で満たしていない証明書がないか確認してください。
+- 切り戻し基準({{ rollback_criteria }})に該当するかどうかは、手順6の動作確認が完了してから判断し、確認が取れるまでは手順3で取得した設定バックアップを削除しないでください。

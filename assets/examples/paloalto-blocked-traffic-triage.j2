@@ -1,0 +1,206 @@
+# PAN-OSでの通信不可申告トリアージ
+
+「{{ dst_ip }}:{{ dst_port }}へ通信できない」という申告が{{ affected_hosts | length }}件
+({{ reported_at }}時点)寄せられた状況を想定し、PAN-OSのネイティブ機構である
+Monitor > Logs > Traffic(自動更新)→ Monitor > Session Browser →
+Device > TroubleshootingのNAT Policy Match / Security Policy Matchの順で
+原因ルールを特定します。設定変更は一切行わず、照会のみで原因ルールを
+突き止めるところまでを対象とします。
+
+## 目的
+
+「通信できない」という申告に対し、Traffic logのType列(deny/drop)で
+既に原因ルールが記録されていないかをまず確認し、記録がない場合は
+Session Browserで現在のセッション状態を確認したうえで、Device >
+TroubleshootingのNAT Policy Match / Security Policy Matchで実際に
+一致するルールを照会するという、PAN-OSの読み取り専用ツールだけで
+完結する切り分け手順を身につけることを目指します。
+
+## 用語解説
+
+- **Monitor > Logs > Traffic(Traffic log)**: 各セッションの開始と終了を
+  1エントリとして記録するログ画面。日時、送信元/宛先ゾーン、アドレスと
+  ポート、アプリケーション名、適用されたセキュリティルール名、ルールの
+  action(allow/deny/drop)、入力/出力インターフェース、バイト数、
+  セッション終了理由(session end reason)を含む
+- **Type列(deny/drop)**: Traffic logのエントリが何を表すかを示す列。
+  `deny`はルールが特定のアプリケーションを識別したうえで拒否したことを、
+  `drop`はルールがアプリケーションを`any`のまま拒否設定していたことを
+  意味する。`deny`エントリが見つかれば、そのエントリのルール名がすでに
+  遮断原因である
+- **自動更新間隔**: ログ画面上部のドロップダウンから選べる更新間隔。
+  60秒・30秒・10秒・Manual(手動)のいずれかを選択できる。申告者に通信を
+  再現してもらいながら、画面を再読み込みせずに新しいエントリの追記を
+  確認できる
+- **フィルタ(Attribute/Operator/Value)**: ログ画面上部のAdd(フィルタ追加)
+  アイコンから、Connector(and/or)・Attribute(対象列)・Operator・Value
+  を選んで検索条件を追加する。既存ログのエントリ中の値をクリックしても
+  同じ値がフィルタに追加される。Valueの文字列がOperatorのキーワード
+  (`eq`/`has`/`in`等)と一致する場合は、構文エラーを避けるため引用符で
+  囲む
+- **Monitor > Session Browser**: 現在稼働中のセッションをブラウズ・
+  フィルタする画面。フィルタの操作方法はTraffic logと同じ
+  Attribute/Operator/Value方式を用いる
+- **Device > Troubleshooting**: ファイアウォールまたはPanoramaのWeb
+  インターフェースから、接続性とポリシー一致を照会するツール。
+  Select TestでNAT Policy Match・Security Policy Match等のテスト種別を
+  選び、設定を変更せずに一致結果(Result Details)だけを確認できる
+- **NAT Policy Match**: Device > Troubleshootingのテスト種別の1つ。
+  From・To・Source・Destination・Source Port・Destination Port・
+  Protocol・To Interfaceを入力してExecuteすると、実際に一致するNAT
+  ルールをResult Detailsで確認できる
+- **Security Policy Match**: Device > Troubleshootingのテスト種別の1つ。
+  From・To・Source・Destination・Destination Port・Source User・
+  Protocol・Application・Categoryと、「Show all potential match rules
+  until first allow rule」トグルを入力してExecuteすると、最初のAllow
+  ルールまでに評価される候補ルールをResult Detailsで確認できる
+
+## シナリオ設定
+
+今回申告された通信不可の宛先・条件は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| 申告受付時刻(reported_at) | {{ reported_at }} |
+| 宛先アドレス(dst_ip) | {{ dst_ip }} |
+| 宛先ポート(dst_port) | {{ dst_port }} |
+| プロトコル番号(protocol、TCP=6) | {{ protocol }} |
+| アプリケーション(application) | {{ application }} |
+| カテゴリ(category) | {{ category }} |
+| 送信元ゾーン(from_zone) | {{ from_zone }} |
+| 宛先ゾーン(to_zone) | {{ to_zone }} |
+| 照会先インターフェース(to_interface) | {{ to_interface }} |
+| 自動更新間隔(refresh_interval_seconds) | {{ refresh_interval_seconds }}秒 |
+
+申告者一覧(affected_hosts, {{ affected_hosts | length }}件)。全員が同一の
+宛先・ポートへの通信不可を申告しています。
+
+| # | 申告者 | 送信元アドレス |
+|---|--------|----------------|
+{% for host in affected_hosts %}| {{ loop.index }} | {{ host["reporter"] }} | {{ host["src_ip"] }} |
+{% endfor %}
+
+`{{ to_interface }}`は本手順書内の例示であり、実際の環境の物理/サブ
+インターフェース名に読み替えてください。
+
+## 手順
+
+### 1. Traffic logを自動更新に設定し、申告条件でフィルタする
+
+`Monitor > Logs > Traffic`を開きます。画面上部の自動更新間隔ドロップダウン
+で`{{ refresh_interval_seconds }}秒`を選択し、申告者に通信を再現して
+もらっている間、画面を再読み込みしなくても新しいエントリが追記される
+状態にします。
+
+続けて、Add(フィルタ追加)アイコンから、宛先アドレス={{ dst_ip }}・
+宛先ポート={{ dst_port }}に相当するAttributeをOperator`eq`で条件追加
+します。送信元アドレスの条件は、申告者ごとに次の値へ切り替えて確認して
+ください。
+
+{% for host in affected_hosts %}- {{ host["reporter"] }}: 送信元アドレス={{ host["src_ip"] }}
+{% endfor %}
+
+### 2. Traffic logのType列を確認し、原因ルールが既に記録されているか判定する
+
+フィルタに一致するエントリが見つかった場合、Type列を確認します。
+
+- `deny`と記録されている場合: そのエントリのルール名が、特定のアプリ
+  ケーションを識別したうえで拒否した遮断原因のルールです。手順5で
+  Security Policy Matchの結果と突き合わせるためにルール名を控えます
+- `drop`と記録されている場合: そのルールはアプリケーションを`any`の
+  まま拒否設定しています。同様にルール名を控えます
+- 該当エントリが1件も見つからない場合: セッション自体が成立していない
+  可能性があるため、手順3に進みます
+
+### 3. Session Browserで現在のセッション状態を確認する
+
+`Monitor > Session Browser`を開き、手順1と同じAttribute/Operator/Value
+方式で、送信元アドレス・宛先アドレス({{ dst_ip }})・宛先ポート
+({{ dst_port }})の条件を申告者ごとに設定して確認します。
+
+{% for host in affected_hosts %}- {{ host["reporter"] }}({{ host["src_ip"] }} → {{ dst_ip }}:{{ dst_port }})のセッションが一覧に存在するか確認する
+{% endfor %}
+
+セッションが存在する場合はNAT変換後の到達性やアプリケーション側の応答を
+中心に、存在しない場合はNAT/Securityいずれのルールにも一致していない
+可能性を中心に、手順4・5で照会します。
+
+### 4. NAT Policy Matchで、想定するNAT変換が一致するかを照会する
+
+`Device > Troubleshooting`を開き、Select Testで`NAT Policy Match`を
+選びます。申告者ごとに次の値を入力してExecuteし、Result Detailsで
+一致したNATルール(または一致するルールがない旨)を確認します。
+
+- From: {{ from_zone }}
+- To: {{ to_zone }}
+- Source: (申告者ごとの送信元アドレス、下表を参照)
+- Destination: {{ dst_ip }}
+- Destination Port: {{ dst_port }}
+- Protocol: {{ protocol }}
+- To Interface: {{ to_interface }}
+
+{% for host in affected_hosts %}| {{ host["reporter"] }} | Source={{ host["src_ip"] }} |
+{% endfor %}
+
+Source Portは申告者側では特定できないため、空欄のままExecuteします。
+
+### 5. Security Policy Matchで、実際に一致するセキュリティルールを照会する
+
+同じ`Device > Troubleshooting`でSelect Testを`Security Policy Match`に
+切り替えます。From/To/Destination/Destination Port/Protocol/
+Application/Categoryはシナリオ設定の値を、Sourceは申告者ごとの送信元
+アドレスを入力し、「Show all potential match rules until first allow
+rule」を有効にしてExecuteします。有効にすることで、最初に一致する
+Allowルールまでの間に評価された候補ルールをすべてResult Detailsで
+確認できます。
+
+Result Detailsに表示された一致ルール名を、手順2でTraffic logから控えた
+ルール名と突き合わせます。一致すれば、そのルールが遮断原因です。手順2で
+該当エントリが見つからなかった場合は、Result Detailsに表示された一致
+ルールが、そもそも意図した通信を許可していないルールである可能性を
+確認します。
+
+### 6. 申告者ごとに原因ルールを記録する
+
+手順2・4・5で確認した内容を、申告者ごとに次の形式で記録します。
+
+{% for host in affected_hosts %}- {{ host["reporter"] }}({{ host["src_ip"] }}): Traffic logのType / NAT Policy Matchの結果 / Security Policy Matchの一致ルール名を記入
+{% endfor %}
+
+この記録をもとに、ルール変更が必要かどうかを判断します。ルールの追加・
+変更が必要な場合は、本手順の範囲外である別途の変更管理手順に従って
+ください。
+
+## 動作確認
+
+- `Monitor > Logs > Traffic`の自動更新間隔が{{ refresh_interval_seconds }}秒
+  に設定され、申告者が通信を再現している間に新しいエントリが自動的に
+  追記表示されること
+- 申告者({{ affected_hosts | length }}件)それぞれについて、Traffic logの
+  Type列(deny/drop、または該当エントリなし)が確認されていること
+- Traffic logに該当エントリがなかった申告者について、`Monitor > Session
+  Browser`でのセッション有無まで確認が完了していること
+- `NAT Policy Match`のResult Detailsで、申告者ごとに一致したNATルール
+  (またはNATなし)が判明していること
+- `Security Policy Match`のResult Detailsで一致したルール名が判明し、
+  手順2で控えたTraffic logのルール名と突き合わせ済みであること
+- 申告者ごとの原因ルール(またはセッション不在などの一次切り分け結果)が
+  記録され、変更要否の判断に引き継げる状態になっていること
+
+## 注意事項
+
+- **Device > TroubleshootingのNAT Policy Match / Security Policy Matchは
+  設定を変更しない照会専用のツールです。** 本手順のいずれの段階でも
+  Security Policyルール・NATルール自体は変更しません。ルールの追加・
+  変更が必要と判断した場合は、別途の変更管理手順に従ってください。
+- **自動更新間隔は確認に必要な時間だけ短くし、確認後はManualまたは
+  より長い間隔に戻すこと。** 10秒等の短い間隔を長時間放置すると、
+  管理プレーンへの負荷が積み重なります。
+- フィルタのValueが`eq`/`has`/`in`等のOperatorキーワードと一致する
+  文字列を含む場合は、構文エラーを避けるため引用符で囲んでください。
+- Traffic logとSession Browserの両方で該当エントリが見つからない場合、
+  原因がPAN-OS側のルールとは限りません。経路上のルーティング・スイッチ
+  やクライアント側の問題である可能性も残るため、Policy Matchの結果
+  だけで原因を断定しないでください。
+- 申告者名などの個人が特定できる情報を記録・共有する際は、社内の情報
+  取り扱いルールに従ってください。

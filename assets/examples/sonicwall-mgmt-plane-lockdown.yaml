@@ -1,0 +1,33 @@
+wan_interface_name: "X1"
+wan_zone: "WAN"
+mgmt_group_name: "mgmt-trusted-hosts"
+mgmt_hosts:
+  - name: "mgmt-hq-office"
+    type: "Host"
+    ip_address: "203.0.113.10"
+    netmask: ""
+    description: "本社NOCの固定グローバルIP"
+  - name: "mgmt-msp-jumphost"
+    type: "Host"
+    ip_address: "198.51.100.20"
+    netmask: ""
+    description: "運用委託先MSPの踏み台サーバ"
+  - name: "mgmt-branch-net"
+    type: "Network"
+    ip_address: "203.0.113.64"
+    netmask: "255.255.255.248"
+    description: "拠点VPN集約先の管理用ネットワーク"
+mgmt_services:
+  - name: "HTTPS"
+    keep_enabled: true
+    reason: "GUI管理に必要なため維持する"
+  - name: "SSH"
+    keep_enabled: true
+    reason: "CLI管理に必要なため維持する"
+  - name: "Ping"
+    keep_enabled: false
+    reason: "本手順の対象外(GUI/SSH)であり、WAN側からの死活監視も不要なため無効化する"
+  - name: "SNMP"
+    keep_enabled: false
+    reason: "WAN側からのSNMPポーリングを行っていないため無効化する"
+verification_outside_ip: "203.0.113.99"

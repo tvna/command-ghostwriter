@@ -1,0 +1,288 @@
+# FortiGateのセッション/ステートテーブル枯渇時ホスト特定とPer-IPシェイパー再発防止
+
+FortiGate (FortiOS) でセッション/ステートテーブルの使用率が急騰した際に、
+`diagnose sys session stat`/`full-stat` による全体統計の確認、FortiView
+Sessions監視画面と `diagnose sys session filter` によるCLI側の絞り込みを
+組み合わせて原因ホストを特定します。特定後は、既存のFirewall Policyには
+一切手を加えず、Policy & Objects > Traffic Shaping の Per-IP Shaper
+(`config firewall shaper per-ip-shaper` の `max-concurrent-session`)と
+Traffic Shaping Policy (`config firewall shaping-policy`) を新規追加し、
+{{ protected_srcaddr }} セグメント全体に1ホストあたりの同時セッション数の
+上限({{ shaper_max_concurrent_session }})を課すことで、特定ホストへの
+応急対応だけでなく再発そのものを防ぎます。最後に `diagnose firewall
+shaper per-ip-shaper list` と `diagnose sys session list` で適用結果を
+検証します。
+
+## 目的
+
+セッション/ステートテーブル使用率急騰という申告に対し、`diagnose sys
+session stat`/`full-stat` で全体の状況を把握したうえで、FortiView
+SessionsとCLIフィルタ(`diagnose sys session filter`)を併用して原因ホスト
+を特定できるようになることを目指します。あわせて、Per-IP Shaperの
+`max-concurrent-session` を用いて、特定した1ホストだけでなく
+{{ protected_srcaddr }} セグメント全体に同時セッション数の上限を課す
+Traffic Shaping Policyを、既存のFirewall Policyを変更せずに追加できる
+ようになることを目指します。
+
+## 用語解説
+
+- **diagnose sys session stat**: FortiOSの診断コマンド。Fortinet CLI
+  Reference(本手順書作成時点でFortiGate単体の詳細なフィールド一覧が確認
+  できなかったため、`diagnose sys session`系コマンド体系を共有する
+  [FortiProxy 7.6.4 CLI Reference](https://docs.fortinet.com/document/fortiproxy/7.6.4/cli-reference/235530229/diagnose-sys)
+  を参照)には引数を取らないコマンドとして掲載され、"Stat session."
+  (セッションの統計)と説明されています。出力に含まれる個々のフィールド名
+  の一次情報での詳細な記載は確認できなかったため、本手順では出力全体を
+  変更前後の比較記録として保存する用途に限定します
+- **diagnose sys session full-stat**: 同じくFortiProxy CLI Referenceに
+  引数を取らないコマンドとして掲載され、"Fully stat session."(詳細な
+  セッション統計)と説明されます。`stat`より詳細な内訳を持つ想定ですが、
+  個々のフィールド名は同様に一次情報で確認できていません
+- **diagnose sys session filter**: セッションテーブルの表示を絞り込む
+  CLIコマンド。一次情報([FortiView Sessions](https://docs.fortinet.com/document/fortigate/8.0.0/administration-guide/863511/fortiview-sessions))
+  には「You may also view the session data in the CLI... To view session
+  data with filters using the CLI: `# diagnose sys session filter
+  <option>`」とあります。`<option>`に指定する個別のキー名はFortiGate側の
+  一次情報には記載がありませんでしたが、`diagnose sys session`系コマンド
+  体系を共有するFortiProxy CLI Referenceには `diagnose sys session filter
+  src <xxx.xxx.xxx.xxx> <xxx.xxx.xxx.xxx>`(Source IP、fromとtoの2引数)、
+  `diagnose sys session filter clear`(フィルタ解除、引数なし)が掲載されて
+  います。1つのIPだけに絞り込む場合はfrom/toに同じIPを指定します
+- **FortiView Sessions監視画面**(`Dashboard > FortiView > Sessions`):
+  一次情報に「The Dashboard > FortiView > Sessions monitor displays Top
+  Sessions by traffic source and can be used to end sessions.」と説明
+  される画面。「You can also use a session table to investigate why there
+  are too many sessions for FortiOS to process.」ともあり、本手順の目的
+  そのものに使うことが想定された画面です。画面上部の `Add Filter` から
+  `Source IP` などのフィルタを追加して絞り込めます
+- **Per-IP Shaper**(`Policy & Objects > Traffic Shaping` の Traffic
+  Shaperタブ、type drop-downで`Per-IP`を選択): 一次情報に「With per-IP
+  traffic shaping, you can limit each IP address's behavior to avoid a
+  situation where one user uses all of the available bandwidth. In
+  addition to controlling the maximum bandwidth used per IP address, you
+  can also define the maximum number of concurrent sessions for an IP
+  address.」と説明される、送信元IPアドレス単位で上限を課す機構。GUIの
+  `Max Concurrent Connections` を有効化し値を入力すると、CLIの
+  `config firewall shaper per-ip-shaper` 配下の `set
+  max-concurrent-session` に対応します。`Max Bandwidth`
+  (`set max-bandwidth`)は独立したトグルで、本手順では有効化しません
+- **Traffic Shaping Policy**(`Policy & Objects > Traffic Shaping` の
+  Traffic Shaping Policyタブ、CLIでは`config firewall shaping-policy`):
+  Source/Destination/Service/Outgoing Interfaceの一致条件と、適用する
+  Per-IP shaperを紐づける設定単位。既存のFirewall Policy(通信を許可する
+  ポリシー本体)とは別のレイヤーで、通過が許可された通信に対して速度・
+  セッション数制限を追加適用します。一次情報のCLI例では
+  `set per-ip-shaper "<shaper名>"` でPer-IP Shaperを紐づけます
+- **diagnose firewall shaper per-ip-shaper list**: Per-IP Shaperの状態を
+  確認する診断コマンド。一次情報の出力例には `name`/`maximum-bandwidth`/
+  `maximum-concurrent-session`/`tos`/`packets dropped`/`bytes dropped`/
+  `addr=<IP> status: bps=<値> ses=<値>` の各行が示され、`ses=`が該当
+  アドレスの現在の同時セッション数です
+
+## シナリオ設定
+
+今回対応するFortiGateと、新規追加するPer-IP Shaper/Traffic Shaping Policy
+の設定は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| 対象FortiGate(fw_hostname) | `{{ fw_hostname }}` |
+| 上限を課す対象セグメント(protected_srcaddr、既存のアドレスオブジェクト) | `{{ protected_srcaddr }}` |
+| 対象とする宛先(protected_dstaddr) | `{{ protected_dstaddr }}` |
+| Outgoing Interface(outgoing_interface) | `{{ outgoing_interface }}` |
+| Per-IP Shaper名(shaper_name) | `{{ shaper_name }}` |
+| 1ホストあたりの同時セッション数上限(shaper_max_concurrent_session) | {{ shaper_max_concurrent_session }} |
+| Traffic Shaping Policy名(shaping_policy_name) | `{{ shaping_policy_name }}` |
+| Traffic Shaping Policy ID(shaping_policy_id) | {{ shaping_policy_id }} |
+| Service(shaping_policy_service) | `{{ shaping_policy_service }}` |
+
+`{{ protected_srcaddr }}` は `Policy & Objects` に事前登録済みのアドレス
+オブジェクトであることを前提とします(作成手順は本手順書の対象外です)。
+
+セッションテーブル使用率急騰の通知を受けて調査した結果、次の
+{{ top_offenders | length }} 件のホストがセッション数上位候補として
+挙がっています(`rank`昇順)。
+
+| rank | src_ip | observed_session_count | suspected_cause |
+|------|--------|------------------------|------------------|
+{% for o in top_offenders %}| {{ o["rank"] }} | {{ o["src_ip"] }} | {{ o["observed_session_count"] }} | {{ o["suspected_cause"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 変更前の基準として、全体のセッション統計を記録する
+
+Per-IP Shaperを1件も追加する前に、CLIコンソール(GUI右上の`_>`アイコン)
+またはSSH等の既存アクセス手順でFortiGate CLIに接続し、現在のセッション
+テーブル全体の統計を記録します。
+
+```bash
+diagnose sys session stat
+diagnose sys session full-stat
+```
+
+いずれも引数を取らないコマンドです。出力全体をコピーして記録し、
+手順6で追加後の出力と比較できるようにしてください。あわせて
+`Policy & Objects > Traffic Shaping` を開き、既存のTraffic Shaping
+Policy一覧(並び順・内容)も記録しておきます。
+
+### 2. FortiView SessionsとCLIフィルタで原因ホストを特定する
+
+`Dashboard > FortiView > Sessions` を開きます。この画面は「Top Sessions
+by traffic source」を表示し、「too many sessions」の調査に使うことが
+一次情報でも想定されています。`Add Filter` から `Source IP` を追加し、
+シナリオ設定の `top_offenders` の各 `src_ip` ごとに絞り込んで、現在の
+セッション表示状況を確認します。
+
+{% for o in top_offenders %}- rank {{ o["rank"] }}: Source IP={{ o["src_ip"] }} でフィルタし、表示されるセッション数を記録する(推定原因: {{ o["suspected_cause"] }})
+{% endfor %}
+
+同じ絞り込みをCLIでも行い、GUIの表示と突き合わせます。1つのIPだけに
+絞り込む場合、`diagnose sys session filter src` にはfrom/toとして同じ
+IPを2回指定します。
+
+```bash
+{% for o in top_offenders %}diagnose sys session filter clear
+diagnose sys session filter src {{ o["src_ip"] }} {{ o["src_ip"] }}
+diagnose sys session list
+{% endfor %}```
+
+`diagnose sys session list` の出力は該当ホストのセッションエントリの
+一覧です。エントリ数が `observed_session_count` の記録と大きく乖離
+しないかを確認し、乖離がある場合は記録を更新してください。確認が
+終わったら `diagnose sys session filter clear` でフィルタを解除して
+おきます。
+
+### 3. Per-IP ShaperをGUIで作成する
+
+`Policy & Objects > Traffic Shaping` を開き、Traffic Shaperタブを選択
+します。
+
+1. type drop-downで `Per-IP` を選択し、`Create new` をクリックする
+2. `Name` に `{{ shaper_name }}` を入力する
+3. `Max Concurrent Connections` を有効化し、`{{ shaper_max_concurrent_session }}`
+   を入力する
+4. `Max Bandwidth` は有効化しない(本手順は同時セッション数の上限のみを
+   対象とするため)
+5. `OK` をクリックする
+
+### 4. 同じ内容をCLIでも作成する
+
+```bash
+config firewall shaper per-ip-shaper
+    edit "{{ shaper_name }}"
+        set max-concurrent-session {{ shaper_max_concurrent_session }}
+    next
+end
+```
+
+### 5. Traffic Shaping Policyを作成し、対象セグメントに適用する
+
+`Policy & Objects > Traffic Shaping` のTraffic Shaping Policyタブで
+`Create New` をクリックします。既存のFirewall Policy(通信そのものを
+許可しているポリシー)はこの手順では一切変更しません。
+
+1. `Name` に `{{ shaping_policy_name }}` を入力する
+2. `Source` に `{{ protected_srcaddr }}` を設定する
+3. `Destination` に `{{ protected_dstaddr }}` を設定する
+4. `Service` に `{{ shaping_policy_service }}` を設定する
+5. `Outgoing Interface` に `{{ outgoing_interface }}` を設定する
+6. `Per-IP shaper` を有効化し、`{{ shaper_name }}` を選択する
+7. `OK` をクリックする
+
+CLIでは次のとおりです。
+
+```bash
+config firewall shaping-policy
+    edit {{ shaping_policy_id }}
+        set name "{{ shaping_policy_name }}"
+        set service "{{ shaping_policy_service }}"
+        set dstintf "{{ outgoing_interface }}"
+        set per-ip-shaper "{{ shaper_name }}"
+        set srcaddr "{{ protected_srcaddr }}"
+        set dstaddr "{{ protected_dstaddr }}"
+    next
+end
+```
+
+### 6. 適用結果を検証する
+
+`diagnose firewall shaper per-ip-shaper list` で、Per-IP Shaperの状態と
+原因ホストの現在の同時セッション数を確認します。
+
+```bash
+diagnose firewall shaper per-ip-shaper list
+```
+
+出力に含まれる `name {{ shaper_name }}` /
+`maximum-concurrent-session {{ shaper_max_concurrent_session }}` の行を
+確認したうえで、
+{% for o in top_offenders %}`addr={{ o["src_ip"] }} status:` の行の `ses=` が `{{ shaper_max_concurrent_session }}` 以下に収まっていること{% if not loop.last %}、{% endif %}
+{% endfor %}を確認します(`maximum-bandwidth`/`packets dropped`/
+`bytes dropped` の各行は本手順ではMax Bandwidthを有効化していないため
+参考情報に留めます)。
+
+あわせて `diagnose sys session list` で、`{{ protected_srcaddr }}`
+セグメントからの新規セッションの出力に `per_ip_shaper={{ shaper_name }}`
+が含まれることを確認し、最後に手順1で取得した `diagnose sys session
+stat`/`full-stat` を再実行して、セッションテーブル全体の使用状況が
+落ち着いていることを比較します。
+
+```bash
+diagnose sys session stat
+diagnose sys session full-stat
+```
+
+## 動作確認
+
+- 手順1で記録した `diagnose sys session stat`/`full-stat` の出力(変更前
+  の基準値)が残っていること
+- `top_offenders` の各ホストについて、FortiView SessionsとCLI
+  (`diagnose sys session filter src` + `diagnose sys session list`)の
+  両方でセッション状況を確認・記録済みであること
+- `Policy & Objects > Traffic Shaping` のTraffic Shaperタブに、
+  type `Per-IP` の `{{ shaper_name }}`
+  (`Max Concurrent Connections`={{ shaper_max_concurrent_session }})が
+  登録されていること
+- Traffic Shaping Policyタブに `{{ shaping_policy_name }}`
+  (ID: {{ shaping_policy_id }})が登録され、`Per-IP shaper` に
+  `{{ shaper_name }}` が設定されていること
+- `diagnose firewall shaper per-ip-shaper list` の出力で、
+  `{{ shaper_name }}` の `maximum-concurrent-session` が
+  {{ shaper_max_concurrent_session }} であり、`top_offenders` の各
+  `src_ip` の `addr=... status:` 行の `ses=` がその上限以下に収まって
+  いること
+- 手順1で記録した既存のFirewall Policy・既存のTraffic Shaping Policy
+  一覧の内容が、意図せず変更されていないこと
+
+## 注意事項
+
+- **Per-IP Shaperは特定の1ホストだけを狙い撃ちする機構ではありません。**
+  `{{ shaper_name }}` は `{{ shaping_policy_name }}` の一致条件
+  (`{{ protected_srcaddr }}` → `{{ protected_dstaddr }}`)に該当する
+  **すべての**送信元IPに同じ上限({{ shaper_max_concurrent_session }})を
+  適用します。特定ホストの通信のみを個別に遮断したい場合は、本手順の
+  対象外である別の対応(該当ホストを対象としたセキュリティポリシーでの
+  遮断等)を検討してください。
+- 一次情報には「Per-IP shapers apply the speed limit on both upload and
+  download operations. Only traffic through forward traffic shapers will
+  be included in FortiView; reverse and per-IP shapers are not
+  included.」とあります。Per-IP Shaperを適用した通信量そのものは
+  FortiViewの表示には反映されないため、効果測定は本手順のとおり
+  `diagnose firewall shaper per-ip-shaper list` や
+  `diagnose sys session stat`/`full-stat` を用いてください。
+- `diagnose sys session stat`/`full-stat` の出力に含まれる個々のフィールド
+  名の詳細な一次情報は本手順作成時点で確認できていません。判断が必要な
+  フィールドがある場合は、利用中のFortiOSバージョンのCLIヘルプ
+  (`diagnose sys session stat ?` 等)で確認してください。
+- `diagnose sys session filter` に指定する `src`/`clear` 等のキー名は、
+  `diagnose sys session`系コマンド体系を共有するFortiProxy CLI Reference
+  を参照したものです。FortiGate固有の差異がないか、利用中のバージョンの
+  CLIヘルプでも確認してください。
+- 本手順は新規のPer-IP ShaperとTraffic Shaping Policyの追加のみを行い、
+  既存のFirewall Policyには一切変更を加えません。既存ポリシーの内容
+  (手順1で記録)が変更後も同一であることを手順6で確認してください。
+- CLIコンソール・SSH接続に使うFortiGate管理者アカウントの認証情報
+  (パスワード、APIキー等)は本手順書に記載しません。記録が必要な場合も
+  `********` のようにマスクし、平文で本手順書やチケット・ログに残さず、
+  既存の秘密管理ツール経由で扱ってください。

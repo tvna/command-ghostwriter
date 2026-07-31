@@ -1,0 +1,21 @@
+change_ticket: "CHG-2026-0731-02"
+approver: "ネットワーク運用責任者 山田"
+observation_period: "72時間"
+rollback_trigger: "対象セグメントで新規の到達不能または応答遅延の申告が2件以上、またはForward Traffic logで意図しないdenyもしくはacceptが1件でも確認された場合"
+target_policies:
+  - policyid: 130
+    name: "stg-app-db-https"
+    srcintf: "internal_app"
+    dstintf: "internal_db"
+    srcaddr: "app-tier-net"
+    dstaddr: "db-primary-host"
+    service: "HTTPS"
+    action: "accept"
+  - policyid: 131
+    name: "stg-app-db-rdp-deny"
+    srcintf: "internal_app"
+    dstintf: "internal_db"
+    srcaddr: "app-tier-net"
+    dstaddr: "db-primary-host"
+    service: "RDP"
+    action: "deny"

@@ -1,0 +1,35 @@
+incident_id: "INC-2026-0731-014"
+allow_outbound_rule_name: quarantine-investigation-allow-out
+allow_inbound_rule_name: quarantine-investigation-allow-in
+deny_outbound_rule_name: quarantine-deny-out
+deny_inbound_rule_name: quarantine-deny-in
+
+quarantine_hosts:
+  - host_id: "gp-a1b2c3d4-endpoint-0417"
+    serial_number: "PC0001234567"
+    hostname: "hq-lt-0417"
+    owner: "経理部 佐藤"
+    detection_source: "EDRアラート(不審なプロセス起動)"
+    description: "経理端末で不審な子プロセスの連続起動をEDRが検知。C2通信の疑いがあるため隔離。"
+    release_criteria: "EDRによるマルウェア駆除完了、フォレンジック調査で他端末への横展開なしと確認、資産管理台帳への再登録完了"
+  - host_id: "gp-e5f6a7b8-endpoint-0592"
+    serial_number: "PC0009876543"
+    hostname: "hq-lt-0592"
+    owner: "営業部 鈴木"
+    detection_source: "SOCによるログ分析(未知の外部IPへの定期通信)"
+    description: "営業端末から未知の外部IPへの定期的なビーコン通信をSOCが検知。侵害の疑いがあるため隔離。"
+    release_criteria: "ビーコン通信先の分析完了、端末再イメージ化完了、承認者によるインシデントクローズ承認"
+
+investigation_targets:
+  - name: "EDR管理コンソール"
+    address: "10.20.5.20/32"
+    service: "tcp/443"
+    description: "エンドポイントのテレメトリ収集・遠隔スキャン・検体隔離操作に使用する"
+  - name: "フォレンジック証跡収集サーバ"
+    address: "10.20.5.30/32"
+    service: "tcp/443"
+    description: "メモリダンプ・ディスクイメージなど証跡ファイルの回収先"
+  - name: "パッチ配信サーバ"
+    address: "10.20.5.40/32"
+    service: "tcp/443"
+    description: "駆除・再イメージ化前後の修正プログラム配信に使用する"

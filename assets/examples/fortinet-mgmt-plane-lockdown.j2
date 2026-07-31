@@ -1,0 +1,222 @@
+# FortiGate管理プレーン(GUI/SSH)のアクセス制限強化
+
+FortiGate(FortiOS)の管理者アカウント{{ administrators | length }}件に対し、
+`System > Administrators` の `Restrict login to trusted hosts` と
+CLI(`config system admin` の `trustedhost1`〜`trustedhost10`)でログイン元を
+管理セグメント({{ trusted_networks | length }}件のネットワーク)のみに限定
+します。あわせて `Network > Interfaces` の Administrative Access
+(`allowaccess`)で、管理インターフェース(`{{ mgmt_interface }}`)以外の
+外部インターフェース({{ external_interfaces | length }}件)ではGUI/SSHへの
+応答自体を停止します。自己ロックアウトを避けるため、新しい制限を先に投入して
+別セッションで疎通を確認してから、外部インターフェースの管理アクセス無効化と
+ポート変更(`admin-sport`/`admin-ssh-port`)を最後に行います。
+
+## 目的
+
+FortiGateの管理プレーン(GUI/SSH)を、Administrator Trusted Hosts制限(`System
+> Administrators` の `Restrict login to trusted hosts` および CLI の
+`trustedhost1`〜`trustedhost10`)と、インターフェース単位の Administrative
+Access(`allowaccess`)制限を組み合わせて要塞化できるようになることを目指し
+ます。あわせて、新しい制限を検証してから既存の広い管理アクセスを閉じるという
+安全な適用順序を実践し、設定変更中に自分自身が管理画面・SSHへアクセスできなく
+なる自己ロックアウトを防げるようになることを目指します。
+
+## 用語解説
+
+- **Restrict login to trusted hosts**: `System > Administrators` で個々の
+  管理者アカウントを編集する際に有効化できるチェックボックス。有効化すると、
+  そのアカウントでのログイン元を、登録したTrusted host(最大10件)のIPアドレス
+  /サブネットのみに制限できる
+- **trustedhost1〜trustedhost10**: CLIの `config system admin` 配下、
+  `edit <administrator-name>` で選択した管理者アカウントに対して設定する
+  パラメータ。`set trustedhost1 172.25.176.23 255.255.255.255` のように
+  `<IPアドレス> <ネットマスク>` の形式で、個別ホストまたはサブネットを
+  最大10件(`trustedhost1`〜`trustedhost10`)まで登録できる
+- **Administrative Access(allowaccess)**: `Network > Interfaces` で個々の
+  インターフェースを編集する際の設定項目。HTTPS/PING/HTTP/SSH/TELNETなど、
+  そのインターフェースでどの管理プロトコルへの応答を許可するかを制御する。
+  CLIでは `config system interface` の `edit <interface-name>` 配下で
+  `set allowaccess https ssh` のように許可するプロトコルを列挙するか、
+  `unset allowaccess` ですべて無効化する
+- **admin-sport / admin-ssh-port**: `config system global` で設定する、
+  GUI(HTTPS)とSSHの管理待受ポート番号。GUIでは `System > Settings` から
+  変更でき、同じ画面には HTTP アクセスを HTTPS へリダイレクトする
+  `Redirect to HTTPS` の設定もある
+- **Local-in Policy**: FortiGate自身(local-in)宛てのトラフィックを制御し、
+  不要なポートを閉じたりアクセスを制限したりするための仕組み。一次情報では
+  「Use local-in policies to close open ports or restrict access」という
+  見出しでのみ言及されており、具体的なCLI構文はこのページには記載がありま
+  せん。本手順書はTrusted HostsとAdministrative Accessの制限のみで管理面
+  アクセスを構成し、Local-in Policyによる追加の防御は対象外とします(導入を
+  検討する場合は該当の一次情報を別途参照してください)
+
+## シナリオ設定
+
+Trusted hostsとして許可する管理セグメント({{ trusted_networks | length }}
+件、`trustedhost1`〜`trustedhost10`に対応、最大10件まで):
+
+| # | ネットワーク | IPアドレス | ネットマスク |
+|---|--------------|------------|--------------|
+{% for net in trusted_networks %}| {{ loop.index }} | {{ net.label }} | {{ net.ip }} | {{ net.netmask }} |
+{% endfor %}
+この制限を適用する管理者アカウント({{ administrators | length }}件):
+
+| # | アカウント名 |
+|---|--------------|
+{% for admin in administrators %}| {{ loop.index }} | {{ admin }} |
+{% endfor %}
+| 項目 | 値 |
+|------|-----|
+| 現在の作業セッションが属する管理セグメント(current_session_label) | {{ current_session_label }} |
+| 管理インターフェース(mgmt_interface、HTTPS/SSHのみ許可) | {{ mgmt_interface }} |
+| 外部インターフェース数(external_interfaces、管理アクセスを無効化) | {{ external_interfaces | length }} |
+| 新HTTPS管理ポート(admin_https_port) | {{ admin_https_port }} |
+| 新SSH管理ポート(admin_ssh_port) | {{ admin_ssh_port }} |
+| HTTPSへのリダイレクトを有効化するか(enable_https_redirect) | {{ enable_https_redirect }} |
+
+外部インターフェース一覧(external_interfaces):
+
+| # | インターフェース |
+|---|------------------|
+{% for ext in external_interfaces %}| {{ loop.index }} | {{ ext }} |
+{% endfor %}
+## 手順
+
+### 1. 現状を確認する(変更前の基準を取る)
+
+新しい制限を1件も投入する前に、現状を確認します。
+
+- 現在このFortiGateにログインしている作業セッションの送信元が、シナリオ
+  設定の `current_session_label`(`{{ current_session_label }}`)に対応する
+  ネットワークに属していることを確認します。属していない場合、この手順を
+  そのまま進めると手順2の完了直後に自分自身がログインできなくなるため、
+  まず現在の送信元を含むネットワークを `trusted_networks` に追加してから
+  進めてください。
+- `Network > Interfaces` で `{{ mgmt_interface }}` および
+  {% for ext in external_interfaces %}`{{ ext }}`{% if not loop.last %}・{% endif %}{% endfor %}
+  それぞれの現在の Administrative Access 設定を記録します。
+
+### 2. 対象の管理者アカウントにTrusted Hostsを設定する(GUI)
+
+`System > Administrators` を開き、次の各アカウントを編集して
+`Restrict login to trusted hosts` を有効化し、シナリオ設定のTrusted host
+一覧({{ trusted_networks | length }}件)をすべて追加します。
+
+{% for admin in administrators %}- `{{ admin }}` を編集し、`Restrict login to trusted hosts` を有効化した
+  うえで、次のTrusted hostを追加する:
+{% for net in trusted_networks %}  - {{ net.label }}: `{{ net.ip }}/{{ net.netmask }}`
+{% endfor %}{% endfor %}
+入力後は `OK` で保存します。
+
+### 3. 同じ内容をCLIでも設定する
+
+```bash
+config system admin
+{% for admin in administrators %}    edit "{{ admin }}"
+{% for net in trusted_networks %}        set trustedhost{{ loop.index }} {{ net.ip }} {{ net.netmask }}
+{% endfor %}    next
+{% endfor %}end
+```
+
+### 4. 管理インターフェースのAdministrative AccessをHTTPS/SSHのみに限定する
+
+管理セグメントが接続する `{{ mgmt_interface }}` では、GUI(HTTPS)とSSH以外の
+管理プロトコル(PING/HTTP/TELNET等)への応答を停止します。この時点では
+ポート番号(admin-sport/admin-ssh-port)は変更しません。
+
+`Network > Interfaces` で `{{ mgmt_interface }}` を編集し、Administrative
+Access の `HTTPS` と `SSH` のみにチェックを入れ、他のチェックは外します。
+
+```bash
+config system interface
+    edit "{{ mgmt_interface }}"
+        set allowaccess https ssh
+    next
+end
+```
+
+### 5. 別セッションから新しい制限下での接続を検証する(現在のセッションは維持したまま)
+
+**今使っているGUI/SSHセッションは切断せずに残したまま**、
+`{{ current_session_label }}` に属する別端末、または同じ端末の別ターミナル
+/別ブラウザタブから、手順2〜4の変更後の状態で接続できることを検証します。
+
+```bash
+# 別ターミナルで実行する。手順2〜4の制限下でもログインできることを確認する
+ssh {{ administrators[0] }}@<firewall-mgmt-ip>
+```
+
+別のブラウザタブで `https://<firewall-mgmt-ip>/` を開き、`{{ mgmt_interface }}`
+経由でGUIログイン画面が表示され、ログインできることも確認してください。
+
+**この接続確認が成功するまで、次の手順には進まないでください。** 失敗した
+場合は手順2〜4の設定(Trusted hostの登録内容、`{{ mgmt_interface }}` の
+Administrative Access)を見直し、元のセッションから修正します。
+
+### 6. 検証成功後、外部インターフェースを閉じ、ポートとリダイレクトを設定する
+
+新しい制限下での接続が確認できて初めて、外部インターフェースの管理アクセス
+を無効化し、管理ポートとHTTPSリダイレクトを変更します。
+
+```bash
+config system interface
+{% for ext in external_interfaces %}    edit "{{ ext }}"
+        unset allowaccess
+    next
+{% endfor %}end
+config system global
+{% if enable_https_redirect %}    set admin-https-redirect enable
+{% else %}    set admin-https-redirect disable
+{% endif %}    set admin-sport {{ admin_https_port }}
+    set admin-ssh-port {{ admin_ssh_port }}
+end
+```
+
+GUIで行う場合は、`Network > Interfaces` で
+{% for ext in external_interfaces %}`{{ ext }}`{% if not loop.last %}・{% endif %}{% endfor %}
+それぞれの Administrative Access のチェックをすべて外し、`System > Settings`
+で `Redirect to HTTPS` を{% if enable_https_redirect %}有効化し{% else %}設定変更せず{% endif %}、
+HTTPSポート番号欄とSSHポート番号欄をそれぞれ `{{ admin_https_port }}` と
+`{{ admin_ssh_port }}` に変更して保存します。
+
+保存後、手順5と同じ方法でもう一度、新しいポート
+(`https://<firewall-mgmt-ip>:{{ admin_https_port }}/` および
+`ssh -p {{ admin_ssh_port }}`)から接続できることを再確認してください。
+
+## 動作確認
+
+- シナリオ設定の各管理者アカウントで `Restrict login to trusted hosts` が
+  有効化され、Trusted host一覧({{ trusted_networks | length }}件)が
+  すべて登録されていること
+- `{{ mgmt_interface }}` の Administrative Access が `HTTPS`/`SSH` のみで
+  あること
+- 手順5・手順6直後の両方で、`{{ current_session_label }}` に属する別
+  セッションからログインが成功すること(手順6完了後は新ポート
+  `{{ admin_https_port }}`/`{{ admin_ssh_port }}` での成功を確認する)
+- 外部インターフェース({% for ext in external_interfaces %}`{{ ext }}`{% if not loop.last %}・{% endif %}{% endfor %})
+  で Administrative Access がすべて無効(チェックなし)になっていること
+- 手順6完了後、`enable_https_redirect` が `{{ enable_https_redirect }}` の
+  場合、HTTP(旧ポート)でのGUIアクセスがHTTPSへリダイレクトされること
+
+## 注意事項
+
+- **適用順序を厳守すること。** 先にTrusted Hosts制限と管理インターフェース
+  の絞り込みを別セッションで検証し、成功を確認してから外部インターフェース
+  の管理アクセスを無効化し、最後にポートを変更する。順序を逆にすると、新しい
+  制限下で接続できないまま旧経路(既定ポート・全インターフェース)を失い、
+  GUI/SSHともに到達不能になるおそれがある。
+- **元のセッションは、手順5・手順6の検証が終わるまで切断しないこと。**
+  検証に失敗した場合の復旧手段を残しておくため。
+- **手順1で、現在の作業セッションの送信元が `trusted_networks` に含まれる
+  ことを必ず確認すること。** 含まれないまま手順2・3で
+  `Restrict login to trusted hosts` を保存すると、以降そのアカウントでの
+  ログインができなくなるおそれがある。
+- Local-in Policyについては、一次情報内で見出しのみの言及であり具体的な
+  CLI構文は確認できていないため、本手順書には含めていません。追加の防御層
+  として導入を検討する場合は、該当の一次情報や最新のFortiOSドキュメントを
+  別途確認してください。
+- 管理者アカウントのパスワードは本手順書やログに平文で記載しないでください。
+  値を記録する場合は `********` のようにマスクし、秘密管理ツール等で別途
+  安全に保管してください。
+- ロックアウトが発生した場合に備え、シリアル/物理コンソールからのアクセス
+  手段を事前に確保しておいてください。

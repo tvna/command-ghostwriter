@@ -1,0 +1,21 @@
+administrators:
+  - "netadmin_taro"
+  - "netadmin_hanako"
+trusted_networks:
+  - label: "本社NOC"
+    ip: "172.25.176.0"
+    netmask: "255.255.255.0"
+  - label: "運用保守VPN(固定IP)"
+    ip: "172.25.177.10"
+    netmask: "255.255.255.255"
+  - label: "災対拠点"
+    ip: "172.25.178.0"
+    netmask: "255.255.255.0"
+current_session_label: "本社NOC"
+mgmt_interface: "port10"
+external_interfaces:
+  - "wan1"
+  - "wan2"
+admin_https_port: 8443
+admin_ssh_port: 2222
+enable_https_redirect: true

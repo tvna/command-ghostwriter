@@ -1,0 +1,173 @@
+# FortiGateのFirewall Policyルール衛生監査(未使用・重複・過剰許可の段階的無効化)
+
+FortiGate (FortiOS) の Firewall Policy を対象に、Hit Count 列に表示される
+seven-day rolling counter(直近7日分の日次ヒット数)を根拠として、CSV で
+定義した{{ csv_rows | length }}件のポリシーから未使用(0ヒット)・重複疑い・
+過剰許可(ACCEPTかつSource/Destinationがall)の候補を洗い出します。候補は
+その場で削除せず、まずCommentsへ監査記録を残して次回監査まで経過観察し
+(第1段階)、2回連続で未使用と判定できたポリシーに限って Status を disable
+にします(第2段階)。削除そのものと、重複の統合・スコープ縮小の実施は本
+手順の対象外とし、判断材料の提示にとどめます。
+
+## 目的
+
+FortiGateのFirewall Policyについて、Hit Count(seven-day rolling counter)
+という一次情報で確認済みの標準機構だけを根拠に、未使用・重複疑い・過剰許可
+のルールを定期的かつ再現可能な手順で洗い出せるようになることを目指します。
+あわせて、廃止候補を「いきなり削除」ではなく「Commentsへ記録 → 次回監査で
+再確認 → 無効化」という段階を踏んで安全に整理する運用を身につけます。
+
+## 用語解説
+
+- **Firewall Policy**: FortiGateでトラフィックを通過させるために必須の設定
+  単位。`Policy & Objects > Firewall Policy` から作成・編集する
+- **Hit Count 列 / seven-day rolling counter**: 各ポリシーについて、生成以来
+  の単一累積値ではなく、直近7日分の日次カウンタと当日分のアクティブカウンタ
+  (合計8個)を保持する仕組み。直近7日間の合計がポリシー一覧と編集画面に
+  表示される。「This feature is currently supported in firewall and
+  multicast policies, but not security policies.」と説明されており、
+  Security Policyでは利用できない
+- **Bytes / Packets / Hit Count のツールチップと棒グラフ**: ポリシー一覧で
+  これらの値にマウスオーバーするとツールチップが表示され、対象ポリシーを
+  `Edit` すると画面右側に7日間の棒グラフが表示される。ドロップダウンで
+  集計対象(`Bytes`/`Packets`/`Hit Count`)とポリシータイプ(`IPv4`/`IPv6`/
+  `IPv4 + IPv6`)を切り替えられる
+- **Clear Counters**: ポリシー編集画面にあるボタンで、そのポリシーのトラ
+  フィック統計(Hit Countを含む)を削除する。監査の基準値を失わないため、
+  本手順では使用しない
+- **`diagnose firewall iprope show` / `diagnose firewall iprope6 show`**:
+  CLIで同じ内訳をテキスト表示できる診断コマンド。出力例は
+  `hit count:19 (4 7 0 1 1 3 3 0)` のように、括弧内に日別の内訳(8個の数値)
+  が示される。コマンド末尾の2つの数値(公式の例では `100004 2`)が何を指す
+  かは一次情報の範囲では確認できなかったため、本手順の判定には使用せず、
+  参考情報としてのみ扱う
+- **`config firewall policy` / `set status [enable|disable]`**: CLIで
+  ポリシーを編集するブロック構文。`edit <policyid>` で対象ポリシーを選び、
+  `set status disable` で削除せずに無効化できる。`set comments {var-string}`
+  でポリシーにコメントを残せる
+
+## シナリオ設定
+
+今回棚卸しの対象とするFirewall Policyは次の{{ csv_rows | length }}件です。
+`hit_count_7d` は各ポリシーのHit Count列(直近7日間の合計)を、`prior_status`
+は前回監査での結果(`new`=今回はじめて確認、`flagged-cycle1`=前回すでに
+第1段階の候補として記録済み)を、`duplicate_of_policy_id` は重複疑いの相手
+先(重複がなければ`-`、重複ペアのうち後から追加された側にのみ相手の
+`policy_id`を記載)を表します。
+
+| policy_id | name | srcintf | dstintf | srcaddr | dstaddr | service | action | hit_count_7d | prior_status | duplicate_of_policy_id |
+|-----------|------|---------|---------|---------|---------|---------|--------|---------------|---------------|--------------------------|
+{% for r in csv_rows %}| {{ r["policy_id"] }} | {{ r["name"] }} | {{ r["srcintf"] }} | {{ r["dstintf"] }} | {{ r["srcaddr"] }} | {{ r["dstaddr"] }} | {{ r["service"] }} | {{ r["action"] }} | {{ r["hit_count_7d"] }} | {{ r["prior_status"] }} | {{ r["duplicate_of_policy_id"] }} |
+{% endfor %}
+
+`srcaddr`/`dstaddr` の `all` はFortiGateの組み込みアドレスオブジェクトを
+指し、`service` の `ALL` は既定のサービス(すべてのポート/プロトコル)を
+指します。
+
+## 手順
+
+### 1. 現状のFirewall Policy一覧とHit Countを確認する(監査の前提を揃える)
+
+- `Policy & Objects > Firewall Policy` を開き、対象ポリシーのHit Count列の
+  値が、シナリオ設定の `hit_count_7d` とおおむね一致していることを確認しま
+  す(当日分のアクティブカウンタの増分だけは差が出得ます)。
+- この時点では **`Clear Counters` を押さないでください。** 押すとカウンタ
+  がリセットされ、今回の監査結果の基準そのものが失われます。
+- `prior_status` が `flagged-cycle1` のポリシーは、前回監査で追記した
+  監査コメントが `Edit` 画面のComments欄に残っていることを確認します。
+
+### 2. 重複疑いのポリシーを洗い出す
+
+{% for r in csv_rows %}{% if r["duplicate_of_policy_id"] != "-" %}- policy_id {{ r["policy_id"] }}(`{{ r["name"] }}`)は、policy_id {{ r["duplicate_of_policy_id"] }} と Incoming/Outgoing Interface・Source・Destination・Serviceが同一の重複疑いです。両ポリシーの設定を突き合わせ、統合(一方の無効化、またはServiceの整理)が必要かどうかを判断してください。
+{% endif %}{% endfor %}
+
+統合そのものの実施(どちらを残すか、いつ無効化するか)は運用担当者の判断に
+委ね、本手順では判断材料の提示までを行います。
+
+### 3. 過剰許可(ACCEPTかつSource/Destinationがall)のポリシーを洗い出す
+
+{% for r in csv_rows %}{% if r["action"] == "accept" and (r["srcaddr"] == "all" or r["dstaddr"] == "all") %}- policy_id {{ r["policy_id"] }}(`{{ r["name"] }}`)はSource=`{{ r["srcaddr"] }}` / Destination=`{{ r["dstaddr"] }}` で許可範囲が広く、過剰許可の疑いがあります。Hit Countが{{ r["hit_count_7d"] }}であっても、必要な送信元・宛先だけに絞り込めないか担当者に確認してください。
+{% endif %}{% endfor %}
+
+アドレスオブジェクトでスコープを絞り込む具体的な作業自体は本手順の対象外
+です(オブジェクト設計は別途アドレスオブジェクト整理の手順を参照してくだ
+さい)。
+
+### 4. 新規に0ヒットを検出したポリシーへ監査コメントを記録する(第1段階、まだ無効化しない)
+
+```bash
+{% for r in csv_rows %}{% if r["action"] == "accept" and r["hit_count_7d"] == 0 and r["prior_status"] == "new" %}config firewall policy
+    edit {{ r["policy_id"] }}
+        set comments "hygiene-audit <audit-date>: 7-day hit count = 0 (cycle 1), monitoring only"
+    next
+end
+{% endif %}{% endfor %}```
+
+`<audit-date>` は実施日(例: 2026-07-31)に読み替えてください。GUIで行う
+場合は、対象ポリシーを `Edit` し、Comments欄に同じ内容を追記して保存し
+ます。この段階では **Status は変更しません。** 次回監査で改めてHit Count
+を確認し、それでも0のままであれば手順5で無効化します。
+
+### 5. 前回監査でも候補、かつ今回も0ヒットのポリシーを無効化する(第2段階)
+
+```bash
+{% for r in csv_rows %}{% if r["action"] == "accept" and r["hit_count_7d"] == 0 and r["prior_status"] == "flagged-cycle1" %}config firewall policy
+    edit {{ r["policy_id"] }}
+        set status disable
+        set comments "hygiene-audit <audit-date>: 7-day hit count = 0 for 2 consecutive audits; disabled (not deleted)"
+    next
+end
+{% endif %}{% endfor %}```
+
+GUIで行う場合は、対象ポリシーを開きStatusを無効(disable)に切り替えて保存
+します。**削除ではなく無効化にとどめる**ため、設定自体は残り、必要になれば
+同じ手順で `set status enable` に戻せます。
+
+### 6. 一覧で無効化結果とHit Countの前提を再確認する
+
+- `Policy & Objects > Firewall Policy` の一覧で、手順5の対象ポリシーが
+  無効(Disabled)として表示されることを確認します。
+- 手順4でコメントを追記したポリシーについて、`Edit` 画面のComments欄に
+  監査コメントが反映され、Statusは変更されずACCEPTのままであることを確認
+  します。
+- 手順2・3で洗い出した重複疑い・過剰許可のポリシーが、この監査サイクルで
+  は無効化されず、判断待ちのまま残っていることを確認します。
+
+## 動作確認
+
+- `Policy & Objects > Firewall Policy` の一覧で、`action` が `accept` かつ
+  `hit_count_7d` が `0` かつ `prior_status` が `flagged-cycle1` の
+  policy_idがDisabledとして表示されること
+- `action` が `accept` かつ `hit_count_7d` が `0` かつ `prior_status` が
+  `new` の policy_idについて、Comments欄に監査コメントが追記され、Statusが
+  変更されていないこと
+- 手順1で確認したHit Count列の値が、シナリオ設定の `hit_count_7d` と
+  一致していたこと(監査の前提が崩れていないこと)
+- `duplicate_of_policy_id` が `-` 以外の行、および `action` が `accept` かつ
+  Source/Destinationが `all` の行が、この監査サイクルでは無効化されずに
+  残っていること
+- 手順5以外のポリシーのStatus・並び順が変更されていないこと
+
+## 注意事項
+
+- **削除ではなく無効化にとどめること。** 無効化(`set status disable`)は
+  設定を残したまま停止する操作であり、`set status enable` でいつでも戻せ
+  ます。誤って必要なポリシーを止めてしまった場合の復旧手段を残すため、
+  本手順では削除を扱いません。
+- **0ヒットが2回連続(`prior_status` が `flagged-cycle1` になってから再度
+  `hit_count_7d` が `0`)で確認できたポリシーだけを無効化対象とすること。**
+  1回の監査で0ヒットだったポリシーは手順4のコメント記録にとどめ、即座に
+  無効化しないでください。
+- 監査中は `Clear Counters` を押さないでください。基準となるHit Countの
+  データが失われ、今回の監査結果自体が無効になります。
+- 重複ポリシーの統合、過剰許可ポリシーのスコープ縮小は、いずれも業務影響
+  の確認が必要な人手判断であり、本手順は洗い出しと判断材料の提示までを
+  対象とします。実施は担当者の承認を得てから別途行ってください。
+- `diagnose firewall iprope show` / `diagnose firewall iprope6 show` の
+  コマンド末尾の引数(公式の例では `100004 2`)の意味は一次情報の範囲では
+  確認できていません。参考情報として掲載するにとどめ、本手順の無効化判定
+  には使用しないでください。
+- CLI/GUIへのログインに使う管理者パスワードやAPIトークンは、本手順書や
+  Commentsフィールド、ログに平文で残さないでください。記録する場合は
+  `********` のようにマスクし、秘密管理ツール等で別途安全に保管してくだ
+  さい。

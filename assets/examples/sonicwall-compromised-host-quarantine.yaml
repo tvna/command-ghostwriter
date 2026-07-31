@@ -1,0 +1,24 @@
+incident_ticket: INC-2026-0731-021
+suspect_hostname: fin-ws-118
+suspect_ip: 10.30.12.58
+suspect_mac: "00:1A:2B:8C:4D:7F"
+ioc_evidence:
+  - 既知のC2ドメインへの周期的なDNS問い合わせ
+  - EDRエージェントによる不審なプロセス実行(親プロセス偽装の疑い)の検知
+  - 通常業務時間外の継続的な大量アウトバウンド通信
+isolated_zone_name: Isolated Zone
+isolated_zone_security_type: Public
+isolated_zone_label: ISO-VLAN50
+isolated_zone_parent_interface: X4
+isolated_zone_vlan_id: 50
+isolated_zone_gateway_ip: 10.30.50.1
+isolated_zone_netmask: 255.255.255.0
+enable_mgmt_on_isolated_interface: false
+investigator_zone: MGMT
+allowed_investigator_ips:
+  - 10.30.9.10
+  - 10.30.9.11
+allowed_ports:
+  - 22
+  - 8443
+soc_contact: "セキュリティオペレーションセンター (SOC, 内線 1188)"

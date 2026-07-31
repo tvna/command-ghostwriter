@@ -1,0 +1,8 @@
+policy_id,name,srcintf,dstintf,srcaddr,dstaddr,service,action,hit_count_7d,prior_status,duplicate_of_policy_id
+10,allow-partner-vpn-udp,wan1,dmz,partner-a-net,vpn-gateway,svc-partner-ipsec,accept,482,new,-
+11,allow-legacy-ftp,wan1,dmz,legacy-ftp-clients,ftp-server-old,svc-ftp,accept,0,new,-
+12,allow-old-partner-b,wan1,dmz,partner-b-net-old,partner-b-gateway,svc-partner-b-ipsec,accept,0,flagged-cycle1,-
+13,allow-jump-ssh-v1,wan1,dmz,maint-segment,jump-host,svc-jump-ssh,accept,54,new,-
+14,allow-jump-ssh-v2,wan1,dmz,maint-segment,jump-host,svc-jump-ssh,accept,311,new,13
+15,allow-any-to-dmz-web-tmp,wan1,dmz,all,all,svc-dmz-https,accept,1780,new,-
+99,explicit-default-deny,wan1,dmz,all,all,ALL,deny,233,new,-

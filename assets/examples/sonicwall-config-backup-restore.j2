@@ -1,0 +1,258 @@
+# SonicWall(SonicOS)の設定バックアップ定期取得・復元・世代管理
+
+`{{ device_hostname }}` を対象に、`Device | Settings > Firmware and Settings` での
+Local Backup(手動のみ)・Cloud Backup(手動 + Schedule Backup による定期取得)の
+使い分けと、`Device | Settings > Storage > Files` の `Configuration Backup` タブ
+(Pin/Gold Master/Boot/Download/Comment/Delete の各アイコン)による世代管理、
+`Import/Export Configuration`(`.exp`ファイル)による設定の書き出し・復元までを、
+GUI操作だけで一通り運用できるように整理します。復元(Import Configuration)は
+実行後にアプライアンスが自動再起動するため、必ずメンテナンスウィンドウ内で
+実施します。
+
+## 目的
+
+SonicOSの`Device | Settings > Firmware and Settings`画面と、`Storage > Files`の
+`Configuration Backup`タブの役割分担を理解し、ローカル/クラウドそれぞれの
+バックアップ取得・Retainによる世代保護・クラウドの定期取得スケジュール登録・
+`.exp`ファイルによるエクスポート/インポートを、GUIから一貫して実施できるように
+なることを目指します。あわせて、Import Configurationが既存設定を上書きして
+自動再起動を伴う破壊的操作であることを理解し、安全な適用順序で復元検証まで
+行えるようになることを目指します。
+
+## 用語解説
+
+- **Device | Settings > Firmware and Settings**: ローカル/クラウドのファーム
+  ウェア・設定バックアップ、ファームウェア更新、Import/Export Configurationを
+  まとめて扱うSonicOSの設定画面。一次情報の各手順はいずれもこの画面への遷移
+  から始まる
+- **Local Backup**: `Create Backup > Local Backup`から取得する、機器のローカル
+  ストレージ上のバックアップ。取得時に`Retain Local Backup`を有効にすると、
+  以降のauto/localバックアップによる上書きから保護できる。スケジュール機能は
+  対象外で、取得のたびに手順を繰り返す必要がある
+- **Cloud Backup**: `Create Backup > Cloud Backup`から取得する、クラウド側の
+  バックアップ。初回利用時はCloud Backup自体を有効化する必要がある(有効化
+  画面の具体的な項目は一次情報のこのページ群には記載がないため、実機の表示に
+  従うこと)。取得時に`Retain Cloud Backup`を有効にすると、以降のクラウド
+  バックアップ取得による上書きから保護できる
+- **Schedule Backup(Once/Recurring/Mixed)**: `Create Backup > Schedule Backup`
+  から設定する定期取得。Cloud Backupの有効化が前提で、Local Backupには
+  対応していない。`Once`は単発の日時指定、`Recurring`は曜日と開始/終了時刻を
+  指定して`Schedule List`に追加する方式、`Mixed`は両方の設定を組み合わせて
+  同一の曜日・時間帯の範囲内で繰り返す方式
+- **Configuration Backup タブ**: `Device | Settings > Storage > Files`にある
+  タブで、`Device > Firmware > Settings`側と同様の操作をファームウェア
+  バージョンごとに展開して行える。行ごとにPin(auto/localバックアップでの
+  上書きからの保護)・Bookmark(Gold Masterとしてマーク。マーク後の具体的な
+  扱いは一次情報のこのページ内には記載がない)・Boot(選択した設定ファイルで
+  起動)・Download(選択した設定ファイルのダウンロード)・Comment(コメントの
+  追加/編集)・Delete(削除)の各アイコンが並ぶ。ここで作成したバックアップは
+  Primary storageにのみ保存され、保存先を変更することはできない
+- **Import/Export Configuration**: `Import/Export Configuration`ドロップダウン
+  から選ぶ、設定全体の書き出し/読み込み。書き出しは`.exp`拡張子のファイルで、
+  同一機体への再投入や他機体への設定複製に使える。読み込みは既存設定を上書き
+  し、完了後にアプライアンスが自動的に再起動する
+- **Firmware Management & Backup テーブル(Local/Cloud)**: 取得済みバックアップ
+  の一覧。Localは`FIRMWARE VERSION` / `FIRMWARE LOAD DATE` /
+  `FIRMWARE BUILD DATE` / `CONFIGURATION DATE` / `USERNAME` / `COMMENTS` /
+  `BOOT` / `FIRMWARE ACTIONS`の列を持つ。Cloudは`Firmware Version`(同一
+  ファームウェアにつき最大3世代まで一覧表示) / `Firmware Load Date` /
+  `Firmware Build Date` / `Username` / `Comment`の列を持つ
+
+## シナリオ設定
+
+今回、`{{ device_hostname }}` に対して設定する取得・保持・スケジュールの
+パラメータは次のとおりです。
+
+| 項目 | 値 |
+| --- | --- |
+| 対象SonicWall(device_hostname) | `{{ device_hostname }}` |
+| ローカルバックアップのコメント(local_backup_comment) | `{{ local_backup_comment }}` |
+| ローカルバックアップをRetainするか(retain_local_backup) | {% if retain_local_backup %}有効(Retain Local Backup){% else %}無効{% endif %} |
+| クラウドバックアップのコメント(cloud_backup_comment) | `{{ cloud_backup_comment }}` |
+| クラウドバックアップをRetainするか(retain_cloud_backup) | {% if retain_cloud_backup %}有効(Retain Cloud Backup){% else %}無効{% endif %} |
+| スケジュール種別(schedule_type) | {{ schedule_type }} |
+| 定期取得する曜日(schedule_days) | {{ schedule_days | join(', ') }} |
+| 開始時刻(schedule_start_time) | {{ schedule_start_time }} |
+| 終了時刻(schedule_stop_time) | {{ schedule_stop_time }} |
+| エクスポートファイル名の例(export_filename_example) | `{{ export_filename_example }}` |
+
+{{ restore_drill_note }}
+
+## 手順
+
+### 1. 現状のバックアップ世代を確認する(変更前の基準を取る)
+
+新しいバックアップを1件も取得する前に、既存の世代を確認します。
+
+1. `Device | Settings > Firmware and Settings` を開く。
+2. Local側のテーブルで、`FIRMWARE VERSION` / `CONFIGURATION DATE` /
+   `COMMENTS` の各列を確認する。コメント未指定の項目は既定で
+   「This is the current firmware」または「This is the local backup」と
+   表示される。
+3. `Cloud Backups` をクリックし、Cloud側のテーブルで同一ファームウェアに
+   つき最大3世代までの一覧を確認する。
+
+### 2. ローカルバックアップを取得し、必要に応じてRetainで保護する
+
+1. `Device | Settings > Firmware and Settings` で `Create Backup > Local Backup`
+   をクリックする。
+2. Local Backupダイアログで、{% if retain_local_backup %}`Retain Local Backup`
+   を有効にする(このバックアップをauto/localバックアップによる上書きから
+   保護する){% else %}`Retain Local Backup`は有効にしない(次回のauto/local
+   バックアップ取得時に上書きされ得る){% endif %}。
+3. `Comments` フィールドに `{{ local_backup_comment }}` を入力する。
+4. `OK` をクリックする。
+
+取得したバックアップはLocalのテーブルに追加されます。Local Backupには
+スケジュール機能がないため、定期的にローカル世代を残したい場合は本手順を
+都度繰り返してください。
+
+### 3. クラウドバックアップを有効化し、手動で取得する
+
+1. `Device | Settings > Firmware and Settings` で `Cloud Backups` をクリック
+   する。
+2. Cloud Backupを一度も有効化していない場合は、ここで有効化する(有効化
+   画面の具体的な入力項目は一次情報のこのページ群には記載がないため、実機の
+   画面表示に従うこと)。
+3. `Create Backup > Cloud Backup` をクリックする。
+4. {% if retain_cloud_backup %}`Retain Cloud Backup` を有効にする(このクラウド
+   バックアップを以降のクラウドバックアップ取得による上書きから保護する)
+   {% else %}`Retain Cloud Backup`は有効にしない(以降のクラウドバックアップ
+   取得で上書きされ得る){% endif %}。
+5. `Comment` フィールドに `{{ cloud_backup_comment }}` を入力する。
+6. `OK` をクリックする。バックアップファイルの作成には数分かかることがある。
+
+### 4. クラウドバックアップの定期取得をスケジュールする
+
+Schedule BackupはCloud Backupが有効な場合にのみ利用でき、Local Backupには
+対応していません。
+
+1. `Device | Settings > Firmware and Settings` で `Cloud Backups` をクリック
+   する。
+2. `Create Backup > Schedule Backup` をクリックし、`Schedule Backup` ダイアログ
+   を開く。
+{% if schedule_type == "Recurring" %}3. `Schedule Type` で `Recurring` を選択する。
+4. `Recurring` セクションで、`{{ schedule_days | join(', ') }}` の各曜日に
+   チェックを入れる(すべての曜日を選ぶ場合は `Select All` を使う)。
+5. `Start Time` に `{{ schedule_start_time }}`、`Stop Time` に
+   `{{ schedule_stop_time }}` を24時間形式で入力する。
+6. `Add` をクリックし、`Schedule List` に登録する。
+7. `Save` をクリックする。
+{% elif schedule_type == "Once" %}3. `Schedule Type` で `Once` を選択する。
+4. `Once` セクションの `Select Range` フィールドでカレンダーアイコンを
+   クリックし、実行日を指定する。
+5. `Year` / `Month` / `Day` / `Hour` / `Minute` の各ドロップダウンで、
+   バックアップを作成する期間の開始・終了を設定する。
+6. `Save` をクリックする。
+{% endif %}
+`Mixed`を選ぶと、同じダイアログ内でOnce相当とRecurring相当の設定を組み合わせ、
+指定した曜日・時間帯の範囲内で繰り返す方式になります(具体的な入力手順は
+Once/Recurringそれぞれの手順に準じます)。
+
+登録した予定を削除する場合は、同じ`Schedule Backup`ダイアログを開き、
+`Schedule List`内の対象行のDeleteアイコン、またはヘッダー行のDeleteアイコン
+(全件削除)をクリックします。
+
+### 5. 設定をエクスポートしてオフボックス保管する
+
+ファームウェア・設定バックアップに加えて、`.exp`形式の設定エクスポートを
+別経路として取得します。
+
+1. `Device | Settings > Firmware and Settings` で
+   `Import/Export Configuration > Export Configuration` をクリックする。
+2. `Export Configuration` ウィンドウで `Export` をクリックする。現在の設定が
+   `{{ export_filename_example }}` のような `.exp` ファイルとして管理端末側に
+   保存される。
+3. `Close` をクリックする。
+
+```bash
+ls -la ~/Downloads/*.exp
+```
+
+書き出した`.exp`ファイルにはこの機体の設定全体が含まれます。他の機体設定
+バックアップと同様に、アクセス権を絞った保管場所に置いてください。
+
+### 6. Storage > Files の Configuration Backup タブで世代を管理する
+
+1. `Device | Settings > Storage > Files` を開く。
+2. `Configuration Backup` タブをクリックする。
+3. 対象のファームウェアバージョンを展開し、行ごとのアイコンで世代を管理する。
+   - Pinアイコン: 選択した設定ファイルをauto/localバックアップによる上書きから
+     保護する
+   - Bookmarkアイコン: 選択した設定ファイルをGold Masterとしてマークする
+   - Bootアイコン: 選択した設定ファイルで起動する
+   - Downloadアイコン: 選択した設定ファイルをダウンロードする
+   - Commentアイコン: コメントを追加/編集する
+   - Deleteアイコン: 選択した設定ファイルを削除する
+4. 必要な世代には`Create Backup`から新規バックアップを追加できる(手順2の
+   Local Backupと同じ`Retain Local Backup` / `Comment`の入力)。
+
+このタブで作成したバックアップはPrimary storageにのみ保存され、保存先を
+変更することはできません。
+
+### 7. 復元手順を確認する(Import Configuration)
+
+{{ restore_drill_note }}
+
+1. 復元前に、直前の設定を手順5と同じ手順で`.exp`としてエクスポートしておく
+   (復元に失敗した場合の戻し先を残すため)。
+2. `Device | Settings > Firmware and Settings` で
+   `Import/Export Configuration > Import Configuration` をクリックする。
+3. `Import Configuration` ダイアログで `Browse` をクリックし、復元したい
+   `.exp` 拡張子の設定ファイルを選択する。
+4. `Import` をクリックする。
+
+アクティブな設定はインポートしたファイルの内容で上書きされ、インポート完了後
+にアプライアンスが自動的に再起動します。再起動を待ってから、次の「動作確認」
+に進んでください。
+
+なお、`Configuration Backup`タブおよびLocal/CloudテーブルのBootアイコンからも
+選択した設定ファイルで起動できますが、確認ダイアログの具体的な選択肢は
+一次情報のこのページ群には記載がありません。本番機で使う前に、保守機で挙動を
+確認してください。
+
+## 動作確認
+
+- `Device | Settings > Firmware and Settings` のLocalテーブルに、コメント
+  `{{ local_backup_comment }}` を伴うバックアップが追加されていること
+- Cloudテーブルに、コメント`{{ cloud_backup_comment }}` を伴うバックアップが
+  追加されており、{% if retain_cloud_backup %}`Retain Cloud Backup`を有効にした
+  ため、以降のクラウドバックアップ取得でも上書きされていない{% else %}
+  `Retain Cloud Backup`を有効にしていないため、以降のクラウドバックアップ
+  取得で上書きされ得る{% endif %}こと
+- `Create Backup > Schedule Backup` の `Schedule List` に、
+  `{{ schedule_days | join(', ') }}` ・ `{{ schedule_start_time }}` -
+  `{{ schedule_stop_time }}` の予定が登録されていること
+- 次回のスケジュール実行時刻を過ぎた後、Cloudテーブルに新しい世代が追加され、
+  同一ファームウェアにつき最大3世代までの表示上限内に収まっていること
+- 手順5でエクスポートした`.exp`ファイルが管理端末側に存在すること
+- 手順7でImport Configurationを実行した場合、再起動後にアプライアンスへ
+  再ログインでき、インポート元の設定内容(比較対象の設定項目)と一致している
+  こと
+
+## 注意事項
+
+- **Import Configurationはアクティブな設定を丸ごと上書きし、完了後に
+  アプライアンスが自動再起動します。** 本番機での実施は必ず事前に周知した
+  メンテナンスウィンドウ内で行い、実施直前に手順7の1でエクスポートした
+  `.exp`ファイルを復旧用に確保してください。
+- Schedule BackupはCloud Backupが有効な場合のみ利用でき、**Local Backupは
+  スケジュール対象外**です。ローカル世代を継続的に残したい場合は、手順2を
+  定期的に手動で繰り返してください。
+- Cloudテーブルは同一ファームウェアにつき最大3世代までの一覧表示です。
+  それを超える世代が実際に保持されるかどうかは一次情報のこのページ群には
+  明記されていないため、長期保存が必要な世代は手順5の`.exp`エクスポートを
+  正式な保存先として扱ってください。
+- Retain(Local/Cloudいずれも)を有効にしなかったバックアップは、次回の
+  同種のバックアップ取得で上書きされ得ます。長期保持したい世代には必ず
+  Retainを有効にしてください。
+- ファームウェアのアップロード中はブラウザを閉じる・リンクをクリックする・
+  別ページへ遷移するなど、Webブラウザの操作を中断しないでください。中断すると
+  ファームウェアが破損するおそれがあります。
+- `.exp`エクスポートファイルにはこの機体の設定全体が含まれます。他の機体の
+  設定バックアップやAPIキー・共有鍵の管理と同様に、アクセス権を絞った保管場所
+  に置き、不要になったコピーは削除してください。
+- Configuration BackupタブのBookmark(Gold Master)アイコンは、選択した設定
+  ファイルをGold Masterとしてマークする機能ですが、マーク後の具体的な挙動
+  (上書き保護との関係等)は一次情報のこのページ内には記載がありません。運用に
+  組み込む前に実機で確認してください。

@@ -1,0 +1,218 @@
+# FortiGateキャプティブポータルによるゲストセグメント認証構築
+
+ゲスト用VLANインターフェース `{{ guest_interface }}` の Security Mode を
+Captive Portal に切り替え、ローカルユーザーグループ `{{ guest_user_group }}`
+での認証を必須にしたうえで、認証後もインターネット宛て通信のみを Firewall
+Policy で明示的に許可し、社内セグメント宛ては既定の暗黙拒否(implicit deny)
+のまま維持します。GUI(`Network > Interfaces`)と CLI(`config system
+interface`)の両方で同じ設定を投入し、認証前でも必要な最小限の通信(DNS等)
+だけを認証除外リスト(Exempt List)で許可します。ローカルユーザーの
+パスワードは本手順書に平文で記載しません。
+
+## 目的
+
+ゲストセグメントに FortiGate の Captive Portal(Interface Security Mode)
+を導入し、未認証端末をすべて認証ページへ強制的に誘導したうえで、認証後も
+社内セグメントへは到達できずインターネット宛て通信のみ許可される構成を
+構築できるようになることを目指します。あわせて、認証前でも必要な最小限の
+通信だけを認証除外リストで許可する方法と、GUI・CLI いずれからでも同じ
+設定を再現できることを身につけます。
+
+## 用語解説
+
+- **Security Mode(Interface Security Mode)**: `Network > Interfaces` の
+  インターフェース編集画面にある認証方式の設定。`none` の他に
+  `Captive Portal` を選択すると、当該インターフェース配下の未認証端末は
+  すべて認証ページへリダイレクトされる。CLI では `config system interface`
+  の `set security-mode {none | captive-portal}` に対応する
+- **User Groups(Captive Portal のユーザーグループ)**: Security Mode を
+  有効化したインターフェースで認証を要求するローカルユーザーグループの
+  指定。CLI では `set security-groups` で指定する。ユーザーおよびユーザー
+  グループ自体の作成(`System > Access > Users` / `config user local` /
+  `config user group`)は本手順書の対象外とし、事前に作成済みであることを
+  前提とする
+- **Interface Role**: `Network > Interfaces` で各インターフェースに設定
+  する役割。Captive Portal の Security Mode は Role が `LAN` または
+  `Undefined` のインターフェースでのみ有効化でき、`WAN`/`DMZ` では利用
+  できない
+- **Exempt List(認証除外リスト)**: 認証前でも到達を許可する送信元・
+  宛先・サービスの組。`config user security-exempt-list` で作成し、対象
+  インターフェースの `set security-exempt-list` に割り当てる。GUI では
+  `Network > Interfaces` のインターフェース編集画面から選択する
+- **security-redirect-url**: 認証成功後にリダイレクトさせるURLを指定する
+  CLIパラメータ。設定しない場合、ユーザーは認証前にアクセスしようとして
+  いた元のページへリダイレクトされる
+- **captive-portal-exempt**: Firewall Policy単位で、特定の通信を Captive
+  Portal 認証チャレンジの対象外にする設定(`config firewall policy` の
+  `set captive-portal-exempt enable`)。当該ポリシーに Users/Groups を
+  設定していない場合にのみ指定できる。本手順書ではインターフェース側の
+  Exempt List を主に用いるため使用しないが、既存の Firewall Policy
+  構成と組み合わせる場合の代替手段として用語解説に記載する
+
+## シナリオ設定
+
+| 項目 | 値 |
+|------|-----|
+| ゲストVLANインターフェース(guest_interface) | `{{ guest_interface }}` |
+| ゲストVLAN ID(guest_vlan_id) | {{ guest_vlan_id }} |
+| 認証対象ユーザーグループ(guest_user_group) | `{{ guest_user_group }}` |
+| ゲストサブネットのアドレスオブジェクト(guest_addr_obj) | `{{ guest_addr_obj }}` |
+| WAN側インターフェース(wan_interface) | `{{ wan_interface }}` |
+| インターネット許可ポリシーID(allow_internet_policy_id) | {{ allow_internet_policy_id }} |
+| 認証除外リスト名(exempt_list_name) | `{{ exempt_list_name }}` |
+| 認証前に許可する内部DNSサーバのアドレスオブジェクト(exempt_dns_addr_obj) | `{{ exempt_dns_addr_obj }}` |
+| 認証後リダイレクトURLをカスタム指定するか(set_custom_redirect_url) | {{ set_custom_redirect_url }} |
+{% if set_custom_redirect_url %}| 認証後リダイレクトURL(guest_redirect_url) | `{{ guest_redirect_url }}` |
+{% endif %}
+
+`{{ guest_user_group }}` に属するローカルユーザーとそのパスワードは、
+`System > Access > Users` で個別に作成済みであることを前提とします
+(作成手順・パスワードそのものは本手順書の対象外です)。
+
+## 手順
+
+### 1. 前提を確認する(Interface Role・ユーザーグループの存在)
+
+Security Mode を有効化する前に、対象インターフェースと認証対象グループが
+準備できていることを確認します。
+
+- `Network > Interfaces` を開き、`{{ guest_interface }}`(VLAN
+  {{ guest_vlan_id }})の Role が `LAN` または `Undefined` であることを
+  確認します。`WAN`/`DMZ` の場合、Security Mode を Captive Portal に
+  できません。
+- `User & Authentication > User Groups`(または `System > Access` 配下の
+  ユーザーグループ画面)を開き、`{{ guest_user_group }}` が存在し、想定
+  するローカルユーザーが所属していることを確認します。
+- `Policy & Objects > Addresses` を開き、`{{ guest_addr_obj }}` と
+  `{{ exempt_dns_addr_obj }}` が事前登録済みのアドレスオブジェクトである
+  ことを確認します(作成手順自体は本手順書の対象外です)。
+
+現時点では `{{ guest_interface }}` に Security Mode が設定されていない
+ため、ゲストセグメントは未認証のまま到達可能な状態です。手順2以降を完了
+するまでは、この前提を踏まえて作業してください。
+
+### 2. GUIで Security Mode と User Groups を設定する
+
+`Network > Interfaces` を開き、`{{ guest_interface }}` を編集します。
+
+- `Security Mode` を有効化し、`Captive Portal` を選択します。
+- `User Groups` に `{{ guest_user_group }}` を追加します。
+{% if set_custom_redirect_url %}- 認証後のリダイレクト先を `{{ guest_redirect_url }}` に指定します。
+{% endif %}- `OK`(または `Apply`)を押して保存します。
+
+### 3. CLIで同じ設定を投入する
+
+```
+config system interface
+    edit "{{ guest_interface }}"
+        set security-mode captive-portal
+        set security-groups "{{ guest_user_group }}"
+{% if set_custom_redirect_url %}        set security-redirect-url "{{ guest_redirect_url }}"
+{% endif %}    next
+end
+```
+
+### 4. 認証除外リスト(Exempt List)を作成し、インターフェースに割り当てる
+
+認証前でも内部DNSサーバへの名前解決だけは常に成立させるため、Exempt List
+を作成します。
+
+```
+config user security-exempt-list
+    edit "{{ exempt_list_name }}"
+        config rule
+            edit 1
+                set dstaddr "{{ exempt_dns_addr_obj }}"
+            next
+            edit 2
+                set service "DNS"
+            next
+        end
+    next
+end
+
+config system interface
+    edit "{{ guest_interface }}"
+        set security-exempt-list "{{ exempt_list_name }}"
+    next
+end
+```
+
+GUIから設定する場合は、`Network > Interfaces` の `{{ guest_interface }}`
+編集画面にある `Exempt List` フィールドで `{{ exempt_list_name }}` を
+選択します。
+
+### 5. インターネット宛てのみを許可する Firewall Policy を追加する
+
+`{{ guest_interface }}` から `{{ wan_interface }}` 宛ての通信のみを明示的
+に許可します。社内セグメント向けの Firewall Policy は一切追加しないため、
+既定の暗黙拒否(implicit deny)によりそれらの通信は引き続き拒否されます。
+
+```
+config firewall policy
+    edit {{ allow_internet_policy_id }}
+        set name "guest-portal-internet"
+        set srcintf "{{ guest_interface }}"
+        set dstintf "{{ wan_interface }}"
+        set srcaddr "{{ guest_addr_obj }}"
+        set dstaddr "all"
+        set action accept
+        set schedule "always"
+        set service "ALL"
+        set nat enable
+        set logtraffic all
+    next
+end
+```
+
+GUIから登録する場合は `Policy & Objects > Firewall Policy > Create New`
+で、Incoming Interface=`{{ guest_interface }}` / Outgoing Interface=
+`{{ wan_interface }}` / Source=`{{ guest_addr_obj }}` / Destination=`all`
+/ Action=`ACCEPT` / NAT=有効、として同じ内容を入力し `Save` します。
+
+## 動作確認
+
+- ゲスト端末を VLAN {{ guest_vlan_id }}(`{{ guest_interface }}`)に接続
+  し、任意のWebサイトへアクセスすると Captive Portal の認証ページへ
+  リダイレクトされること
+- `{{ guest_user_group }}` に属するユーザー名・パスワードで認証すると、
+{% if set_custom_redirect_url %}  `{{ guest_redirect_url }}` へリダイレクトされること
+{% else %}  認証前にアクセスしようとしていた元のページへリダイレクトされること
+{% endif %}- 認証前の状態でも、DNS(`{{ exempt_dns_addr_obj }}` 宛て)の名前解決だけ
+  は成立し、それ以外のWebアクセスは引き続き認証ページへ誘導されること
+- 認証後、`Policy & Objects` の Policy match(Policy Lookup)ツールで
+  Incoming Interface=`{{ guest_interface }}` / Source=
+  `{{ guest_addr_obj }}` / Outgoing Interface=`{{ wan_interface }}` を
+  指定して照会すると、`guest-portal-internet`
+  (ポリシーID {{ allow_internet_policy_id }})に一致すること
+- 認証後であっても、社内セグメント側のインターフェースを Outgoing
+  Interface として同様に照会すると、いずれの Firewall Policy にも一致
+  しない(暗黙拒否のまま)こと
+- `Network > Interfaces` の `{{ guest_interface }}` 編集画面で、Security
+  Mode が `Captive Portal` のまま維持されていること
+
+## 注意事項
+
+- **社内セグメント向けの Firewall Policy は追加しないこと。** 本手順は
+  `{{ guest_interface }}` から `{{ wan_interface }}` 宛ての許可ポリシー
+  のみを追加します。社内セグメントを Outgoing Interface とするポリシー
+  を誤って追加すると、暗黙拒否による遮断が崩れゲストから社内への到達を
+  許してしまいます。
+- **Interface Role が `LAN` または `Undefined` であることを事前に確認
+  すること。** `WAN`/`DMZ` ロールのインターフェースには Security Mode
+  を Captive Portal にできません。
+- Exempt List(手順4)は認証前にどうしても必要な最小限の宛先・サービス
+  (今回はDNS)にとどめてください。広く許可すると、認証を経ずに到達できる
+  範囲が拡大し、Captive Portal を導入した意味が薄れます。
+- 既存のゲストネットワークが認証なしで稼働している場合、手順2・3の
+  Security Mode 変更は接続中の端末に直ちに影響します。利用者への事前
+  告知や、利用者が少ない時間帯での実施を検討してください。
+- ローカルユーザーのパスワードや、CLI/GUIへのログインに使う管理者
+  パスワードは、本手順書やチケット、ログに平文で記載しないでください。
+  値を記録する場合は `********` のようにマスクし、パスワードマネージャ
+  等の秘密管理ツールで別途安全に保管してください。
+- `captive-portal-exempt`(用語解説参照)は、当該 Firewall Policy に
+  Users/Groups を設定していない場合にのみ指定できます。本手順の
+  `guest-portal-internet` ポリシーは Users/Groups を設定していないため
+  条件は満たしますが、Security Mode によるインターフェース単位の認証と
+  役割が重複するため、本手順書では使用していません。

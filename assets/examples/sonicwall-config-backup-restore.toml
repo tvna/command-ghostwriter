@@ -1,0 +1,11 @@
+device_hostname = "sonicwall-edge01"
+local_backup_comment = "monthly-verified-local"
+retain_local_backup = true
+cloud_backup_comment = "weekly-scheduled-cloud"
+retain_cloud_backup = true
+schedule_type = "Recurring"
+schedule_days = ["Mon", "Wed", "Fri"]
+schedule_start_time = "02:00"
+schedule_stop_time = "02:15"
+export_filename_example = "sonicwall-edge01-2026-07-31.exp"
+restore_drill_note = "本番機での復元手順(Import Configuration)の検証は、影響を許容できる保守機、または事前に周知したメンテナンスウィンドウ内でのみ実施する。"

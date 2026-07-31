@@ -1,0 +1,21 @@
+fw_hostname = "FGT-EDGE1"
+protected_srcaddr = "internal-lan-net"
+protected_dstaddr = "all"
+outgoing_interface = "wan1"
+shaper_name = "cap-per-ip-max-session"
+shaper_max_concurrent_session = 800
+shaping_policy_name = "shape-lan-per-ip-session-cap"
+shaping_policy_id = 10
+shaping_policy_service = "ALL"
+
+[[top_offenders]]
+rank = 1
+src_ip = "10.20.30.77"
+observed_session_count = 48211
+suspected_cause = "アプリケーションサーバーのDBコネクションプール設定不備によるTCP新規接続の急増"
+
+[[top_offenders]]
+rank = 2
+src_ip = "10.20.30.101"
+observed_session_count = 12904
+suspected_cause = "マルウェア感染が疑われる大量の外向きスキャン的通信"

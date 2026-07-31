@@ -1,0 +1,26 @@
+fw_hostname: "FGT-DC1"
+log_source: "Disk"
+central_nat_enabled: true
+time_display_fallback: "1 hour"
+reports:
+  - report_id: "INC-4021"
+    reporter: "sales-app-team"
+    protocol: "TCP"
+    src_ip: "10.10.20.15"
+    dst_ip: "203.0.113.50"
+    dst_port: 443
+    symptom: "外部決済APIへのHTTPS接続がタイムアウトする"
+  - report_id: "INC-4022"
+    reporter: "branch-office-b"
+    protocol: "TCP"
+    src_ip: "10.10.30.44"
+    dst_ip: "198.51.100.10"
+    dst_port: 3389
+    symptom: "本社DCの踏み台サーバへRDP接続できない"
+  - report_id: "INC-4023"
+    reporter: "monitoring-team"
+    protocol: "UDP"
+    src_ip: "10.10.40.7"
+    dst_ip: "198.51.100.25"
+    dst_port: 161
+    symptom: "SNMPポーリングが応答しない"

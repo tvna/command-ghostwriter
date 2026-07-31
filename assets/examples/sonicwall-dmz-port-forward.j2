@@ -1,0 +1,255 @@
+# SonicWall (SonicOS) DMZ公開サーバーポートフォワード構成
+
+SonicOS の `POLICY | Rules and Policies > NAT Rules` に one-to-one 型の
+Inbound NAT Policy を作成し、WAN側の外部IPアドレス`{{ external_ip }}`の
+ポート`{{ external_port }}`宛の通信のみを、DMZ内サーバー`{{ mapped_ip }}`の
+ポート`{{ mapped_port }}`へ転送します。NAT Policyの `Original Destination`
+/`Original Service` は事前に `MATCH OBJECTS` へ登録したアドレスオブジェク
+ト・サービスオブジェクトを参照し、NAT Policy単独では通信が許可されない
+SonicOSの仕組み上、`POLICY | Rules and Policies > Access Rules` に**NAT変換
+前(Original)の値と同じ**Source/Destination/Serviceを指定したAccess Ruleを
+対で作成することで、最小公開ポートでの構成とします。最後に外部からの
+到達性を検証します。
+
+## 目的
+
+WAN側で受け付ける公開ポートをNAT Policyの`Original Service`/
+`Translated Service`で1つの外部ポートから1つの内部ポートへ限定し、対応する
+Access RuleをNAT変換前の値で作成することで、DMZサーバーを最小公開ポートで
+安全に公開できるようになることを目指します。あわせて、NAT Policyの作成
+だけでは通信が許可されないというSonicOSの仕組みと、Access Ruleのマッチが
+NAT変換後ではなく変換前(Original)の値に対して行われるという評価順序を
+理解し、GUIから同じ構成を再現し、外部からの到達性を検証できるようになる
+ことを目指します。
+
+## 用語解説
+
+- **POLICY | Rules and Policies > NAT Rules**: NAT Policy を作成・編集する
+  ための管理画面ナビゲーションパス。このページの`+Add`から
+  `Adding NAT Rule`ダイアログを開いて作成する
+- **one-to-one NAT Policy**: SonicWallのセキュリティアプライアンスで最も
+  一般的に使われるNAT Policyの種類。外部の公開IPアドレスを内部のプライベー
+  トIPアドレスへ変換(1対1でマッピング)する
+- **Inbound Port Forwarding**: SonicOSのNATエンジンが備える機能で、WAN IP
+  アドレス配下に複数の内部サーバーを隠せるようにする。内部サーバーの実際
+  の待受ポートを外部から隠しつつ、外部からは別のポートで公開したい場合に
+  用いる。SonicWallアプライアンスは、WANインターフェース経由で接続要求が
+  届いた際に公開IPアドレスをプライベートIPアドレスへ変換し、要求された
+  プロトコル/ポートをサーバーの実際の待受ポートへ変換する
+- **Adding NAT Rule ダイアログの主なフィールド**: `Original Source`(変換
+  前の送信元)/`Translated Source`(変換後の送信元。`Original`のままなら
+  送信元アドレスは変換しない)/`Original Destination`(変換前の宛先。着信
+  NATでは外部公開IPアドレスを指すアドレスオブジェクトを指定する)/
+  `Translated Destination`(変換後の宛先。DMZサーバーのプライベートIPアド
+  レスを指すアドレスオブジェクトを指定する)/`Original Service`(変換前の
+  サービス=外部公開ポート)/`Translated Service`(変換後のサービス=内部の
+  実ポート)/`Inbound Interface`(着信インターフェース。既定値は`Any`)/
+  `Outbound Interface`(変換後のパケットが出ていくインターフェース)/
+  `Comment`(説明文)
+- **Create a reflexive policy**: 同ダイアログのチェックボックス。有効にする
+  と、作成したNAT Policyに対応する逆方向(アウトバウンド)のNAT Policyが
+  自動生成される。`Translated Source`が`Original`(送信元アドレスを変換
+  しない)設定の場合は選択できずグレーアウトする
+- **NAT PolicyとAccess Ruleの評価順序**: SonicOSではAccess Ruleの評価が
+  NAT Policyの適用より先に行われるため、Access Ruleのマッチは常にNAT変換
+  前(Original)のSource/Destination/Serviceに対して行われる。したがって
+  Access Ruleには、NAT PolicyのTranslated側ではなくOriginal側と同じ
+  Source/Destination/Serviceを指定する必要がある。あわせて、Access Rule
+  はSonicOSが宛先アドレスオブジェクトの`Zone Assignment`から判定した
+  ゾーンペア間のテーブルでのみ評価されるため、Destination Zone/Interface
+  にはDMZサーバーが属するゾーンではなく、`Original Destination`に指定した
+  アドレスオブジェクトのZone Assignment(本手順では`{{ wan_zone }}`)を
+  指定する必要がある
+- **MATCH OBJECTS | Addresses / MATCH OBJECTS | Services**: Address Object・
+  Service Object を作成・管理するSonicOSの画面。Address Objectの`Add`
+  ダイアログでは`Name`・`Zone Assignment`・`Type`(`Host`の場合は
+  `IP Address`)を、Service Objectの`Add`ダイアログでは`Name`・`Protocol`・
+  `Port Range`を入力する
+
+## シナリオ設定
+
+今回、WANからDMZへ公開するポートフォワードの設定値は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| WAN側インターフェース(wan_interface) | `{{ wan_interface }}` |
+| WANゾーン(wan_zone) | `{{ wan_zone }}` |
+| DMZ側インターフェース(dmz_interface) | `{{ dmz_interface }}` |
+| DMZゾーン(dmz_zone) | `{{ dmz_zone }}` |
+| 外部公開IPアドレス(external_ip) | `{{ external_ip }}` |
+| 外部IP用Address Object名(external_ip_object) | `{{ external_ip_object }}` |
+| マッピング先の内部IPアドレス(mapped_ip) | `{{ mapped_ip }}` |
+| 内部IP用Address Object名(mapped_ip_object) | `{{ mapped_ip_object }}` |
+| プロトコル(protocol) | `{{ protocol }}` |
+| 外部公開ポート(external_port) | {{ external_port }} |
+| マッピング先ポート(mapped_port) | {{ mapped_port }} |
+| 外部ポート用Service Object名(original_service_object) | `{{ original_service_object }}` |
+| 内部ポート用Service Object名(translated_service_object) | `{{ translated_service_object }}` |
+| NAT Policy名(nat_policy_name) | `{{ nat_policy_name }}` |
+| Access Rule名(access_rule_name) | `{{ access_rule_name }}` |
+| 許可する送信元(allowed_source) | `{{ allowed_source }}` |
+
+`allowed_source`が`Any`の場合、インターネット側の任意の送信元から
+`{{ external_ip }}:{{ external_port }}`宛の通信が対象になります。特定の
+送信元だけに絞りたい場合は、事前に`MATCH OBJECTS | Addresses`へAddress
+Objectを登録し、その名前を`allowed_source`に指定してください(このAddress
+Object自体の作成は本手順書の対象外です)。
+
+## 手順
+
+### 1. 現状のNAT Rules一覧とAccess Rules一覧を確認する(変更前の基準を取る)
+
+新しいオブジェクトやルールを1件も追加する前に、現状を確認します。
+
+- `POLICY | Rules and Policies > NAT Rules`を開き、`{{ nat_policy_name }}`
+  と同名のNAT Policyが存在しないことを確認します。あわせて既存のNAT
+  Policyと`{{ external_ip }}:{{ external_port }}`の組み合わせが重複して
+  いないことも目視で確認してください。
+- `MATCH OBJECTS | Addresses`/`MATCH OBJECTS | Services`を開き、
+  `{{ external_ip_object }}`/`{{ mapped_ip_object }}`/
+  `{{ original_service_object }}`/`{{ translated_service_object }}`と同名
+  のオブジェクトが存在しないことを確認します。
+- `POLICY | Rules and Policies > Access Rules`を開き、`{{ access_rule_name }}`
+  と同名のAccess Ruleが存在しないこと、および既存ルールの並び順を確認し
+  ます。
+
+### 2. Address Object(外部IP/内部IP)を作成する
+
+`MATCH OBJECTS | Addresses`の`Address Objects`タブで`Add`アイコンをクリック
+し、`Name`・`Zone Assignment`・`Type`(`Host`)・`IP Address`を入力して
+`Save`をクリックします。
+
+- Name: `{{ external_ip_object }}` / Zone Assignment: `{{ wan_zone }}` /
+  Type: `Host` / IP Address: `{{ external_ip }}`
+- Name: `{{ mapped_ip_object }}` / Zone Assignment: `{{ dmz_zone }}` /
+  Type: `Host` / IP Address: `{{ mapped_ip }}`
+
+### 3. Service Object(外部ポート/内部ポート)を作成する
+
+最小公開ポートで構成するため、`Port/Services`にはビルトインの`Any`を使わ
+ず、外部公開ポート・内部ポートそれぞれに一致するService Objectを作成しま
+す。`MATCH OBJECTS | Services`の`Service Objects`タブで`Add`アイコンを
+クリックし、`Name`・`Protocol`・`Port Range`を入力して`Save`をクリックし
+ます。
+
+- Name: `{{ original_service_object }}` / Protocol: `{{ protocol | upper }}` /
+  Port Range: `{{ external_port }}` - `{{ external_port }}`
+- Name: `{{ translated_service_object }}` / Protocol: `{{ protocol | upper }}` /
+  Port Range: `{{ mapped_port }}` - `{{ mapped_port }}`
+
+### 4. NAT Policyを作成する
+
+`POLICY | Rules and Policies > NAT Rules`を開き、テーブル下部の`+Add`を
+クリックして`Adding NAT Rule`ダイアログを開きます。次の値を入力して
+`Save`をクリックします。
+
+- Name: `{{ nat_policy_name }}`
+- Original Source: `Any`
+- Translated Source: `Original`(送信元アドレスは変換せず、DMZサーバー側
+  で接続元の送信元IPアドレスをそのまま確認できるようにします。この設定
+  のため`Create a reflexive policy`は選択できずグレーアウトします)
+- Original Destination: `{{ external_ip_object }}`
+- Translated Destination: `{{ mapped_ip_object }}`
+- Original Service: `{{ original_service_object }}`
+- Translated Service: `{{ translated_service_object }}`
+- Inbound Interface: `{{ wan_interface }}`
+- Outbound Interface: `{{ dmz_interface }}`
+- Comment: `{{ nat_policy_name }}`
+
+この時点ではNAT Policy(宛先アドレス/ポート変換の定義)を作成しただけで、
+通信そのものはまだ許可されていません。手順5でAccess Ruleを作成するまで、
+`{{ external_ip }}:{{ external_port }}`宛の通信はSonicWallへ到達しても
+転送されません。
+
+### 5. 対応するAccess Ruleを作成する(NAT変換前の値を指定する)
+
+SonicOSではAccess Ruleの評価がNAT Policyの適用より先に行われるため、
+Access Ruleには手順4で設定した`Original`側と同じSource/Destination/
+Serviceを指定します。`Translated Destination`(`{{ mapped_ip_object }}`)
+や`Translated Service`(`{{ translated_service_object }}`)を指定しない
+よう注意してください。
+
+`POLICY | Rules and Policies > Access Rules`を開き、テーブル下部の`+Add`
+から`Adding Rule`ダイアログを開いて次の値を設定します。
+
+- My Rule Name: `{{ access_rule_name }}`
+- Description: `{{ nat_policy_name }}`
+- Action: `Allow`
+- IP Version: `IPv4`
+- Priority: `Auto Prioritize`
+- Schedule: `Always`
+- Source/Destination タブの`Source Zone/Interface`: `{{ wan_zone }}`
+- Source/Destination タブの`Destination Zone/Interface`: `{{ wan_zone }}`
+- Source/Destination タブの Source `Address`: `{{ allowed_source }}`
+- Source/Destination タブの Destination `Address`: `{{ external_ip_object }}`
+- Source/Destination タブの`Port/Services`: `{{ original_service_object }}`
+
+`Logging`タブは既定の有効状態(チェック済み)のまま変更しません。すべて
+の項目を設定したら`Enable`を有効にし、`Save`をクリックして保存します。
+
+### 6. 外部からの到達性を検証する
+
+DMZセグメントの外(WAN側、またはWAN側に見立てた別セグメント)にある端末
+から、`{{ external_ip }}`の`{{ external_port }}`番ポートへ接続します。
+
+```bash
+curl -k -m 5 -o /dev/null -w "HTTP %{http_code}\n" https://{{ external_ip }}:{{ external_port }}/
+```
+
+対象がHTTP以外のサービスの場合は、`curl`の代わりに
+`nc -zv {{ external_ip }} {{ external_port }}`等、実際のサービスに応じた
+疎通確認コマンドに読み替えてください。
+
+## 動作確認
+
+- `{{ external_ip }}:{{ external_port }}`への接続が成功し、応答が
+  `{{ mapped_ip }}:{{ mapped_port }}`で稼働するサービスから返っていること
+  (サービス側のバナーやレスポンス内容で確認する)
+- `POLICY | Rules and Policies > NAT Rules`の一覧に`{{ nat_policy_name }}`
+  が表示され、`Original Destination`/`Translated Destination`/
+  `Original Service`/`Translated Service`の設定値がシナリオ設定と一致して
+  いること
+- `POLICY | Rules and Policies > Access Rules`の一覧に`{{ access_rule_name }}`
+  が表示され、`Destination`が`{{ external_ip_object }}`(NAT変換前の値)
+  になっていること
+- `{{ mapped_ip }}:{{ mapped_port }}`以外の内部ポート、および
+  `{{ external_port }}`以外の外部ポートへは、この設定変更後もWAN側から
+  到達できないこと(最小公開ポートが維持されていること)
+- 手順1で確認した既存のNAT Policy・Access Ruleの並び順・内容が、意図せず
+  変更されていないこと
+
+## 注意事項
+
+- **NAT Policyの作成だけでは通信は許可されません。** NAT Policyはあくまで
+  宛先アドレス/ポート変換の定義であり、実際に通信を許可するのは手順5の
+  Access Ruleです。手順4までしか実施しないまま「設定した」と判断しないで
+  ください。
+- **Access RuleにはNAT変換前(Original)の値を指定してください。** SonicOS
+  ではAccess Ruleの評価がNAT Policyの適用より先に行われるため、Access
+  Ruleのマッチは常にOriginal側のSource/Destination/Serviceに対して行われ
+  ます。誤って`Translated Destination`や`Translated Service`をAccess Rule
+  に指定すると、NAT変換前のパケットに一致せず通信が到達しません。
+- **Destination Zone/Interfaceは`{{ dmz_zone }}`ではなく`{{ wan_zone }}`を
+  指定してください。** Access RuleはSonicOSが宛先アドレスオブジェクトの
+  `Zone Assignment`から判定したゾーンペアのテーブルでのみ評価されます。
+  DMZサーバーが物理的に属するゾーン(`{{ dmz_zone }}`)を指定してしまうと、
+  `Original Destination`(`{{ external_ip_object }}`、Zone Assignment=
+  `{{ wan_zone }}`)向けの通信に対してそのAccess Ruleが評価されず、通信が
+  到達しません。
+- **最小公開ポートを維持すること。** `Port/Services`は既定の`Any`ではなく、
+  手順3で作成した外部公開ポート(`{{ external_port }}`)に一致するService
+  Objectのみを指定してください。`Any`のまま運用すると、NAT Policyで定義
+  した以外のポートに対しても意図せず広く到達性を与えるおそれがあります。
+- `Translated Source`を`Original`以外(送信元アドレスの変換=SNAT)に設定
+  する場合は、`Create a reflexive policy`を有効にするかどうかを別途検討
+  してください。今回のようにWANからDMZへの着信のみを転送し、DMZサーバー
+  側で接続元の送信元IPアドレスをそのまま確認したい場合は`Original`のまま
+  で構いません。
+- 本手順書は一次情報(SonicOS技術ドキュメントのNAT Rulesセクション)で確認
+  できたGUI操作のみを扱います。SonicOS CLIやスクリプトによる同等の投入
+  方法は本ページでは確認できなかったため記載していません。CLIで投入する
+  場合は、別途SonicOSのCLIリファレンスで構文を確認してから実施してくだ
+  さい。
+- 管理者パスワードやAPIキーなど認証情報は、本手順書やチケット、ログに
+  平文で残さないでください。記録が必要な場合は`********`のようにマスク
+  し、秘密管理ツール等で別途安全に保管してください。

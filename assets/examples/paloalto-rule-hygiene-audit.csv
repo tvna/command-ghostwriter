@@ -1,0 +1,8 @@
+rule_no,name,service_type,apps_allowed,apps_seen,hit_count_90d,days_no_new_apps,verdict,description
+1,ALLOW-ANY-LEGACY-OUT,no-app-specified,-,6,182,45,no_app_specified,内部から外部への全ポート許可ルール(App-ID未設定・「any」相当のポートベースルール)
+2,ALLOW-WEB-DMZ,app-id,5,2,940,58,over_permissive_app,DMZ向けWeb公開ルール。許可5アプリのうち直近90日で観測2アプリのみ
+3,ALLOW-FTP-LEGACY,app-id,2,0,0,90,unused_rule,旧FTPサーバー向け許可ルール。直近90日でヒットなし
+4,ALLOW-PARTNER-VPN-OLD,app-id,3,0,0,120,unused_rule,廃止済みパートナー接続向け許可ルール。直近120日でヒットなし
+5,ALLOW-DNS-INTERNAL,app-id,1,1,15230,3,keep,内部DNS名前解決。継続的に使用中のため対象外
+6,ALLOW-BACKUP-JOB,app-id,4,3,860,12,over_permissive_app,バックアップジョブ向け許可。許可4アプリのうち1アプリが未使用
+7,ALLOW-SSH-MGMT,app-id,1,1,4210,1,keep,管理アクセス向けSSH許可。継続的に使用中のため対象外

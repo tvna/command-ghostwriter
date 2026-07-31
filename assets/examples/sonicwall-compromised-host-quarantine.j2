@@ -1,0 +1,147 @@
+# SonicWall (SonicOS) のIsolated Zoneによる侵害疑いホストの隔離 — {{ suspect_hostname }}
+
+侵害の疑いがある内部ホスト `{{ suspect_hostname }}`(`{{ suspect_ip }}` / `{{ suspect_mac }}`)を、SonicWall (SonicOS) のIsolated Zone機構で封じ込めます。専用の `{{ isolated_zone_name }}` Zoneを作成し、隔離用VLAN({{ isolated_zone_label }})をこのZoneへ割り当てたうえで、対象ホストを同VLANへ移動し、`{{ investigator_zone }}` Zoneの調査担当チームからの通信のみを `POLICY | Rules and Policies | Access Rules` で明示的に許可します。SonicOSのZoneはインターフェース(VLAN)単位で構成されるため、調査担当チーム向けの許可ルールを先に登録してから対象ホストを移動することで、隔離直後に調査担当者自身がホストへ到達できなくなる事態を避けます。
+
+## 目的
+
+SonicWall (SonicOS) のIsolated Zone(`MATCH OBJECTS | Zones` の `Add Zone` から作成)を用いて、侵害疑いホスト `{{ suspect_hostname }}` をネットワーク層で封じ込め、`{{ investigator_zone }}` Zoneの調査担当チームによる調査用通信のみを許可した状態を作れるようになることを目指します。電源断やNIC無効化ではなくネットワーク隔離を選ぶことで、メモリ上のプロセスやマルウェアの展開状態など揮発性の高いフォレンジック情報を保全しながら、C2(指令サーバ)向け通信などの拡大を防ぎます。
+
+OPNsenseの検疫(quarantine)エイリアス + Floating Rulesによる手動隔離ルール構成とは異なり、SonicWall (SonicOS) ではIsolated Zone(専用ゾーンへの移動 + Access Ruleで調査用通信のみ許可)によって同じ課題を解決します。なお、エンドポイント側の自動隔離は Capture Client の Network Quarantine(`Network-Control > Configurable Network Quarantine`、別製品/ライセンス、公式ドキュメントで存在確認済み)が担う機能であり、本手順(SonicOSファイアウォール側のIsolated Zone)の対象外です。
+
+## 用語解説
+
+- **Isolated Zone**: 一次情報が示す隔離用のZone名。このZoneに割り当てたインターフェース配下のホストは、Access Ruleで明示的に許可されない限り他のインターフェース(例: 社内LAN側のX0サブネット)へ到達できません。一次情報には「Users will only be able to access Internet with the help of isolated zones and will not have access to other interfaces(eg: X0 subnet)」と説明されています(WAN方向の到達可否も含め、実際の到達範囲はAccess Ruleの設定に依存します)
+- **MATCH OBJECTS | Zones / Add Zone**: 新しいZoneを作成するメニュー。SonicOS 7.XではGUI上部の `Object` をクリックし `Match Objects | Zones` から `Add Zone` を選ぶ。SonicOS 6.5では `Manage | Network | Add zone` と経路が異なる
+- **Zone Settings(無効化するオプション)**: `Add Zone` のZone Settings画面には無効化すべきオプションが並ぶが、一次情報のこの手順ページはスクリーンショットのみでオプション名を提示しており、テキストとしては明記していない。実機で一次情報のスクリーンショット(`how-can-i-configure-isolated-zone` ページ)と照合して無効化すること。本テンプレートでは推測でオプション名を記載しない
+- **Security Type**: Zoneに設定する信頼レベル。`Trusted`(LANと同等の最高信頼度)/`Encrypted`(VPN Zone専用)/`Wireless`(WLAN Zone専用)/`Public`(TrustedよりUntrustedに近いが、Untrustedより高い信頼度。DMZなどPublicゾーンの例では既定でPublicからLANへの通信が拒否される)/`Untrusted`(最低信頼度で、既定では明示ルールがない限り他Zoneへの通信が許可されない)の5種類がある
+- **NETWORK | Interfaces(Zone = Isolated Zone / Static IP Mode)**: 隔離用インターフェースを設定する画面。対象インターフェースを編集し、`Zone` を `Isolated Zone` に選択し、`Mode/IP Assignment` を `Static IP Mode` にしたうえで、そのネットワークのゲートウェイIPとなるIPアドレスを設定する
+- **NETWORK | Interfaces / Virtual Interface**: VLANサブインターフェースを作成・編集する画面。`+Add Interface` から `Virtual Interface` を選ぶと表示される `Add Virtual Interface` ダイアログで、`Zone`・`VLAN Tag`・`Parent Interface`(物理インターフェース)を指定する
+- **POLICY | Rules and Policies | Access Rules / Zone Matrix Selector**: Zone間の通信を許可・拒否するAccess Rulesを管理する画面。`Zone Matrix Selector` で対象の `From Zone`/`To Zone` を選び、`Add` から個別ルールを追加する。1件のルールでは、許可/拒否(access to this service is allowed or denied)、Source/DestinationのZone・アドレス、Source/Destinationのサービス(ポート)、対象ユーザー(Users include/exclude)、TCP/UDP Connectivity Inactivity Timeout、Loggingの有効化などを設定する
+- **INVESTIGATE | Logs | Event Logs**: 通信の許可・遮断結果を確認するログ画面。既定拒否によって遮断された通信は、drop code(例: `Enforced Firewall Rule`)付きのイベントとして記録される
+- **Capture Client Network Quarantine(`Network-Control > Configurable Network Quarantine`)**: SonicWallのエンドポイント製品Capture Client(別製品/ライセンス)が提供する機能。脅威が実行された後にPolicy Settingsの`Disconnect from Network`オプションが発動するとエンドポイントをNetwork Quarantineへ隔離し、既定ではManagement Consoleとの通信のみを許可する。Configurable Network Quarantineのルールで「特定IPアドレスからの調査用リモートアクセスのみ許可する」といった例外を追加できる。本手順のSonicOSファイアウォール側のIsolated Zoneとは別の製品・別ライセンスで提供される機能であり、本手順の対象外
+
+## シナリオ設定
+
+| 項目 | 値 |
+|------|-----|
+| インシデントチケット(incident_ticket) | {{ incident_ticket }} |
+| 対象ホスト名(suspect_hostname) | `{{ suspect_hostname }}` |
+| 対象ホストIP(suspect_ip) | {{ suspect_ip }} |
+| 対象ホストMAC(suspect_mac) | `{{ suspect_mac }}` |
+| 作成するZone名(isolated_zone_name) | `{{ isolated_zone_name }}` |
+| Security Type(isolated_zone_security_type) | {{ isolated_zone_security_type }} |
+| 隔離用VLANの参照ラベル(isolated_zone_label、本手順書内での呼称) | {{ isolated_zone_label }} |
+| VLAN収容先の物理インターフェース(isolated_zone_parent_interface) | `{{ isolated_zone_parent_interface }}` |
+| VLAN ID(isolated_zone_vlan_id) | {{ isolated_zone_vlan_id }} |
+| 隔離ネットワークのゲートウェイIP/ネットマスク | {{ isolated_zone_gateway_ip }} / {{ isolated_zone_netmask }} |
+| サブインターフェース上の管理アクセスを有効化するか(enable_mgmt_on_isolated_interface) | {{ enable_mgmt_on_isolated_interface }} |
+| 調査担当チームのZone(investigator_zone、既存Zone) | `{{ investigator_zone }}` |
+| 調査担当チームからの許可IP(allowed_investigator_ips) | {% for ip in allowed_investigator_ips %}{{ ip }}{% if not loop.last %}, {% endif %}{% endfor %} |
+| 調査用許可ポート(allowed_ports) | {% for port in allowed_ports %}{{ port }}{% if not loop.last %}, {% endif %}{% endfor %} |
+| 通報・エスカレーション先(soc_contact) | {{ soc_contact }} |
+
+`{{ investigator_zone }}` Zoneおよびそこに属するインターフェースは既存の管理/調査用Zoneであり、本手順ではその割り当てを一切変更しません。
+
+`{{ suspect_hostname }}` について、次のIOC根拠が既に確認されています。
+
+{% for e in ioc_evidence %}- {{ e }}
+{% endfor %}
+
+## 手順
+
+### 1. 現状を確認する(変更前の基準を取る)
+
+新しい設定を投入する前に、まず現状を確認します。
+
+- 対象ホストの取り違えを防ぐため、ARPテーブルでIPとMACの対応を確認します(調査担当端末など、対象セグメントに到達できる端末から実行してください)。
+
+  ```bash
+  arp -a | grep -i "{{ suspect_mac }}"
+  ```
+
+  → `{{ suspect_ip }}` が `{{ suspect_mac }}` と一致することを確認します。一致しない場合は本手順を開始せず、対象ホストの特定をやり直してください。
+
+- `MATCH OBJECTS | Zones` を開き、`{{ isolated_zone_name }}` というZoneがまだ存在しないことを確認します(既に存在する場合は手順2を飛ばし、手順3から再開してください)。
+- `NETWORK | Interfaces` を開き、`{{ suspect_hostname }}`(`{{ suspect_ip }}`)が現在所属しているVLAN/Zoneを確認し、記録しておきます。切り戻しが必要になった際の復元先になります。
+- 今このGUIセッションを操作している管理端末、および調査担当チームが使用する端末が、`{{ investigator_zone }}` Zoneに属しており、これから作成する `{{ isolated_zone_name }}` Zoneには属していないことを確認します。
+
+### 2. Isolated Zoneを作成する(未作成の場合)
+
+`Object` メニューから `Match Objects | Zones` を開き、`Add Zone` をクリックして次の内容で新しいZoneを作成します。
+
+- Zone名: `{{ isolated_zone_name }}`
+- Security Type: `{{ isolated_zone_security_type }}`(Trustedほど無条件には信頼せず、Untrustedより高い信頼度の区分として選択します。他Zoneとの通信可否そのものは、Security Typeの既定値ではなく手順4のAccess Ruleで明示的に制御します)
+
+続けて `Zones | Zone Settings` 画面で、隔離用途に応じてオプションを無効化します。**このオプションの具体的な名称は、一次情報のこのページではスクリーンショットのみで示され、テキストとしては明記されていません。** 実機の `Zone Settings` 画面と一次情報のスクリーンショットを照合し、推測せずに確認したうえで無効化してください。
+
+### 3. 隔離用VLANインターフェースを{{ isolated_zone_name }}へ割り当てる(未作成の場合)
+
+`NETWORK | Interfaces` を開き、`+Add Interface` から `Virtual Interface` を選択し、`Add Virtual Interface` ダイアログで次のとおり指定します。
+
+- Parent Interface: `{{ isolated_zone_parent_interface }}`
+- VLAN Tag: {{ isolated_zone_vlan_id }}
+- Zone: `{{ isolated_zone_name }}`
+
+作成したインターフェース(本手順書では便宜上 `{{ isolated_zone_label }}` と呼びます)を開き、次の項目を設定して `OK` をクリックします。
+
+- Mode/IP Assignment: `Static IP Mode`
+- IP Address: `{{ isolated_zone_gateway_ip }}` / `{{ isolated_zone_netmask }}`(このネットワークのゲートウェイIPになります)
+{% if enable_mgmt_on_isolated_interface %}- このサブインターフェース上での管理アクセスを有効化します(Comment欄に用途を記載しておくことを推奨します)
+{% else %}- このサブインターフェース上での管理アクセスは有効化しません
+{% endif %}
+
+### 4. 調査担当チーム向けのAccess Ruleを、隔離より先に登録する
+
+対象ホストを実際に隔離用VLANへ移動する**前**に、`{{ investigator_zone }}` Zoneから `{{ isolated_zone_name }}` Zoneへの調査用通信を許可するAccess Ruleを先に投入します。移動直後に許可ルールが存在しない状態を作らないための予防措置です。
+
+`POLICY | Rules and Policies | Access Rules` を開き、`Zone Matrix Selector` で `From Zone` = `{{ investigator_zone }}` / `To Zone` = `{{ isolated_zone_name }}` を選択したうえで、`Add` から次のルールを追加します。
+
+{% for port in allowed_ports %}- Action: Allow / Source: {{ investigator_zone }} Zone内の調査担当端末({% for ip in allowed_investigator_ips %}{{ ip }}{% if not loop.last %}, {% endif %}{% endfor %}) / Destination: {{ suspect_ip }} / Service: TCP/{{ port }} / Logging: 有効
+{% endfor %}
+
+続けて、`{{ isolated_zone_name }}` Zoneから他Zoneへの通信を封じ込めるため、一次情報が案内する「Further access can be enabled/restricted using access rules from Isolated Zone to WAN Zone」に従い、`From Zone` = `{{ isolated_zone_name }}` / `To Zone` = `WAN` のAccess Ruleを次のとおり明示的に追加します。既定拒否だけに頼らず、封じ込め状況を監査ログに残すための明示化です。
+
+- Action: Deny / Source: any / Destination: any / Service: any / Logging: 有効
+
+同様に、`{{ isolated_zone_name }}` から `{{ investigator_zone }}` 以外の内部Zone(LAN等)への通信についても、`Zone Matrix Selector` で該当するZoneペアを選び、同じ内容(Deny・Logging有効)のAccess Ruleを追加してください。
+
+### 5. 対象ホストを隔離用VLANへ移動する
+
+手順4のAccess Ruleが投入済みであることを確認したうえで、対象ホストを `{{ isolated_zone_label }}` へ移動します。対象ホストが接続しているアクセス層スイッチのポート(またはポートVLAN)を、`{{ isolated_zone_parent_interface }}` のVLAN {{ isolated_zone_vlan_id }} へ切り替えてください。
+
+**スイッチ側のポートVLAN再割り当てに関する具体的なGUI/CLI手順は、今回参照したSonicWallのIsolated Zone構成手順(ファイアウォール側の設定に限定)には記載がありません。** 使用しているスイッチ(SonicWall Switch、または他社スイッチ)のドキュメントに従って実施してください。
+
+移動後、対象ホストは `{{ isolated_zone_gateway_ip }}` / `{{ isolated_zone_netmask }}` のネットワークに属する新しいIPアドレスを取得します(DHCPまたは手動設定)。以降の動作確認・調査では、この新しいIPアドレスを使用してください。元の `{{ suspect_ip }}` はこの時点以降、隔離前のセグメントでは応答しなくなります。
+
+### 6. Event Logsで許可・遮断の状況を確認する
+
+`INVESTIGATE | Logs | Event Logs` を開き、次の順序で確認します。
+
+1. `{{ investigator_zone }}` Zoneの調査担当端末から対象ホストの新しいIPアドレスへの通信(手順4で許可したポート)が、許可(Allow)として記録されること
+2. それ以外の宛先(社内LANや外部の疑わしい通信先を含む)への通信が、手順4の明示的なDenyルールに一致して遮断(Block/Deny)され、drop codeとともに記録されること
+
+## 動作確認
+
+- `MATCH OBJECTS | Zones` で `{{ isolated_zone_name }}` Zoneが作成され、Security Typeが `{{ isolated_zone_security_type }}` になっていること
+- `NETWORK | Interfaces` で、対象ホストが接続するVLANインターフェースのZoneが `{{ isolated_zone_name }}` になっており、Mode/IP Assignmentが `Static IP Mode`(ゲートウェイIP `{{ isolated_zone_gateway_ip }}`)になっていること
+- `POLICY | Rules and Policies | Access Rules` の `Zone Matrix Selector` で、`{{ investigator_zone }}` → `{{ isolated_zone_name }}` のAllowルールと、`{{ isolated_zone_name }}` → 他Zone(WANおよび内部Zone)のDenyルールがそれぞれ登録されていること
+- {% for ip in allowed_investigator_ips %}{{ ip }}{% if not loop.last %} / {% endif %}{% endfor %} から対象ホストの新しいIPアドレスへ、許可済みポート({% for port in allowed_ports %}{{ port }}{% if not loop.last %}, {% endif %}{% endfor %})での接続が成功すること。例えば次のようなコマンドで確認できます
+
+  ```bash
+  ssh -o ConnectTimeout=5 -o BatchMode=yes investigator@<隔離後に割り当てられたIPアドレス>
+  ```
+
+- `INVESTIGATE | Logs | Event Logs` に、許可済み通信以外の宛先への通信がdrop code付きで遮断記録として残っていること
+- 対象ホストの電源が投入されたままであること(揮発性のフォレンジック情報を保全するため)
+
+## 注意事項
+
+- **適用順序を厳守すること。** 手順4の調査担当チーム向けAccess Ruleとブロック用Access Ruleを先に登録し、手順5の対象ホスト移動は最後に行う。順序を逆にすると、移動直後に調査担当者自身がホストへ到達できない時間帯が生じ、封じ込め作業自体が継続不能になるおそれがあります。
+- 対象ホストの電源を切ったりNICを無効化したりしないこと。メモリ上のプロセスやマルウェアの展開状態など揮発性の高いフォレンジック情報が失われるため、本手順のようにネットワークを稼働させたままの隔離を選択します。
+- **`Zone Settings` で無効化すべきオプションの具体的な名称は、一次情報のこのページではスクリーンショットのみで示され、テキストとして確認できていません。** 実機の画面と一次情報のスクリーンショットを照合してから適用してください。推測でオプション名を設定しないこと。
+- 対象ホストを収容するアクセス層スイッチのポートVLAN再割り当て手順は、使用しているスイッチ製品のドキュメントに従うこと。本テンプレートはSonicWallファイアウォール(SonicOS)側の設定手順のみを対象としています。
+- `MATCH OBJECTS | Zones`・`POLICY | Rules and Policies | Access Rules`・`NETWORK | Interfaces` の正確なメニュー名やダイアログ項目は、SonicOSのバージョン(7.0/7.1/8等)により表記が異なる場合があるため、適用前に自環境のGUIで実際の項目名を確認すること。SonicOS 6.5系ではZone作成の経路が `Manage | Network | Add zone` となり、7.X系とは異なります。
+- Capture ClientのNetwork Quarantine(`Network-Control > Configurable Network Quarantine`)は、エンドポイント側の別製品・別ライセンスで提供される機能であり、本手順(SonicOSファイアウォール側のIsolated Zone)には含まれません。導入済みの環境では、本手順と併用することでエンドポイント層・ネットワーク層の双方から封じ込めできますが、その設定は本手順の対象外です。
+- 隔離解除の判断基準: (1) フォレンジック調査でマルウェアの除去・侵害範囲の特定が完了していること、(2) 隔離解除後の疎通試験で不審な外部通信が再発しないこと、(3) 資産管理・セキュリティ責任者の承認が得られていること。3点すべてを満たすまで隔離を解除しないこと。
+- 本手順で扱う認証情報(SonicWall管理画面のログイン情報、調査端末の認証情報等)は、いずれも平文で手順書やチケット、ログに残さないこと。記録する場合は `********` のようにマスクし、秘密管理ツール等で別途安全に保管すること。
+- 隔離開始の日時、対象ホストの識別情報(`{{ suspect_hostname }}` / `{{ suspect_ip }}` / `{{ suspect_mac }}`)、投入したAccess Ruleの内容、隔離後に割り当てられた新しいIPアドレス、Event Logsの抜粋を対応記録として保存し、`{{ soc_contact }}` への報告とインシデントチケット `{{ incident_ticket }}` に添付すること。

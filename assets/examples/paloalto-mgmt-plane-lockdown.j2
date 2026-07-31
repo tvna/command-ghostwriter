@@ -1,0 +1,169 @@
+# PAN-OS管理プレーンのアクセス制限強化
+
+MGTインターフェースの Permitted IP Addresses と、データプレーン
+インターフェースに紐づける Interface Management Profile を組み合わせ、
+GUI/SSHによる管理アクセスを管理セグメント({{ mgmt_permitted_ips | length }} 件の
+ネットワーク)のみに限定します。両方の設定変更は PAN-OS の Commit操作で
+一括反映されるため、Commit前に自分自身のアクセス元IPが許可リストに
+含まれていることを必ず確認し、Commit後は別セッションで疎通を検証してから
+作業を終了します。
+
+## 目的
+
+PAN-OS(Palo Alto Networks ファイアウォール)の管理プレーン(GUI/SSH)への
+アクセス経路を、MGTインターフェースとデータプレーンインターフェースの
+両方について管理セグメントのみに限定し、自己ロックアウトを防ぐ安全な
+適用手順(現状確認 → プロファイル作成 → 適用 → Commit → 検証)を実践
+できるようになることを目指します。
+
+## 用語解説
+
+- **Interface Management Profile**: `Network > Network Profiles > Interface
+  Mgmt` で作成し、データプレーンのインターフェース(Ethernet/VLAN/
+  Loopback/Tunnel)に割り当てるプロファイル。Ping・Telnet・SSH・HTTP・
+  HTTP OCSP・HTTPS・SNMPの各プロトコルと、Response Pages・User-ID・
+  User-ID Syslog Listener-SSL・User-ID Syslog Listener-UDPの各サービスを
+  個別に許可・拒否でき、あわせて Permitted IP Addresses でアクセス元IPも
+  制限できる
+- **Permitted IP Addresses(Interface Management Profile側)**: 許可する
+  送信元IPアドレス/ネットワークのリスト。一次情報には "If you don't add
+  entries to the list, the interface has no IP address restrictions."
+  (リストにエントリを追加しない場合、そのインターフェースにIPアドレス
+  制限はかからない)と明記されている
+- **MGT(Management)インターフェース**: 機器専用の管理ポート。一次情報には
+  "The management (MGT) interface does not require an Interface
+  Management profile"(MGTインターフェースはInterface Management Profile
+  を必要としない)と記載されており、アクセス制限は別画面の
+  `Device > Setup > Management` にある `Permitted IP Addresses` で行う
+  (この画面自体の詳細なUI操作手順は、本手順書が参照した一次情報の範囲には
+  含まれていないため、値を追加する操作のみを記載する)
+- **クリアテキストプロトコルへの警告**: 一次情報にはHTTP/Telnetについて
+  "never enable HTTP or Telnet access because those protocols transmit
+  in cleartext"(HTTP/Telnetは平文でやり取りされるため、絶対に有効化しない
+  こと)という趣旨の記載がある
+- **自己ロックアウト**: 管理アクセスを制限する設定変更によって、変更した
+  本人が以後アクセスできなくなる事象。PAN-OSのCommitは変更を一括で反映
+  するため、Commit前の確認とCommit後の別セッションでの検証が特に重要になる
+
+## シナリオ設定
+
+管理アクセスを許可する管理セグメントと、Interface Management Profileの
+設定内容、適用先のデータプレーンインターフェースは次のとおりです。
+
+管理セグメント一覧(mgmt_permitted_ips, {{ mgmt_permitted_ips | length }} 件):
+
+| # | ネットワーク |
+|---|--------------|
+{% for ip in mgmt_permitted_ips %}| {{ loop.index }} | {{ ip }} |
+{% endfor %}
+
+| 項目 | 値 |
+|------|-----|
+| Interface Management Profile名(interface_mgmt_profile_name) | {{ interface_mgmt_profile_name }} |
+
+許可するプロトコル(allowed_protocols, {{ allowed_protocols | length }} 件。
+HTTP・Telnetは含めない):
+
+{% for proto in allowed_protocols %}- {{ proto }}
+{% endfor %}
+
+プロファイルを割り当てるデータプレーンインターフェース
+(data_plane_interfaces, {{ data_plane_interfaces | length }} 件):
+
+| # | インターフェース種別 | インターフェース名 | ゾーン |
+|---|----------------------|--------------------|--------|
+{% for iface in data_plane_interfaces %}| {{ loop.index }} | {{ iface["type"] }} | {{ iface["name"] }} | {{ iface["zone"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 現状の管理アクセス経路を確認する(変更前の基準を取る)
+
+設定変更の前に、自分が今どの経路(MGTポート経由か、データプレーン
+インターフェース経由か)でGUI/SSHにアクセスしているかを確認し、その
+アクセス元IPが `mgmt_permitted_ips` の一覧に必ず含まれていることを確認
+します。含まれていない場合は、後続の手順に進む前に一覧を見直してください。
+
+現在使用しているGUI/SSHセッションは、手順5の検証が終わるまで切断しない
+でください。
+
+### 2. Interface Management Profileを作成する
+
+`Network > Network Profiles > Interface Mgmt > Add` から新しいプロファイル
+を作成します。
+
+- Name: `{{ interface_mgmt_profile_name }}`
+- 許可するプロトコル(チェックを入れる): {% for proto in allowed_protocols %}{{ proto }}{% if not loop.last %} / {% endif %}{% endfor %}
+- HTTP・Telnetのチェックボックスは入れない(平文プロトコルのため)
+- Permitted IP Addresses: 次のネットワークを1件ずつ追加する
+
+{% for ip in mgmt_permitted_ips %}- `{{ ip }}`
+{% endfor %}
+設定後、`OK` をクリックして保存します(この時点ではまだ `Commit` しません)。
+
+### 3. 作成したプロファイルをデータプレーンのインターフェースに割り当てる
+
+シナリオ設定の各インターフェースについて、`Network > Interfaces` から
+インターフェース種別のタブを選び、対象インターフェースを開いて
+`Advanced > Other info` タブで、手順2で作成したプロファイルを
+`Interface Management Profile` に選択します。
+
+{% for iface in data_plane_interfaces %}- {{ iface["type"] }} タブ > `{{ iface["name"] }}` > Advanced > Other info >
+  Interface Management Profile = `{{ interface_mgmt_profile_name }}` > OK
+{% endfor %}
+
+### 4. MGTインターフェースのPermitted IP Addressesを設定する
+
+`Device > Setup > Management` の `Permitted IP Addresses` に、手順2と
+同じ管理セグメントを追加します。
+
+{% for ip in mgmt_permitted_ips %}- `{{ ip }}`
+{% endfor %}
+この画面自体の詳細なUI操作(フィールドの並び順など)は、本手順書が参照
+した一次情報の範囲に含まれていないため、値を追加した後は変更内容を保存
+し、次のCommitに進む前に画面上の表示を目視で再確認してください。
+
+### 5. Commitし、管理セグメントからのアクセスを検証する
+
+`Commit` を実行し、設定を一括で反映します。反映後、手順1で使用していた
+セッションとは別に、管理セグメント内の別端末または別セッションから次を
+確認します。
+
+- MGTインターフェースのIPアドレスへ、GUI(HTTPS)/SSHでログインできること
+{% for iface in data_plane_interfaces %}- `{{ iface["name"] }}`({{ iface["zone"] }})のIPアドレスへ、許可した
+  プロトコル({% for proto in allowed_protocols %}{{ proto }}{% if not loop.last %} / {% endif %}{% endfor %})でアクセスできること
+{% endfor %}
+
+この検証がすべて成功するまで、手順1のセッションは切断しないでください。
+
+## 動作確認
+
+- 管理セグメント({{ mgmt_permitted_ips | length }} 件のネットワーク)内の
+  端末から、MGTインターフェースおよびすべてのデータプレーン管理
+  インターフェースへGUI/SSHでアクセスできること
+- 管理セグメント外の端末からは、これらのインターフェースへの
+  {{ allowed_protocols | length }} 種のプロトコルでのアクセスがいずれも
+  失敗すること
+- 各データプレーンインターフェースの `Interface Management Profile` に
+  `{{ interface_mgmt_profile_name }}` が設定されていること
+- Interface Management ProfileでHTTP・Telnetのチェックボックスがいずれも
+  オフになっていること
+
+## 注意事項
+
+- **Commit前に自分のアクセス元IPが許可リストに含まれることを必ず確認
+  すること。** PAN-OSのCommitは設定変更を一括で反映するため、段階的に
+  新経路を検証してから旧経路を無効化するような分割適用ができない。
+  Permitted IP Addressesに自分のアクセス元を入れ忘れたままCommitすると、
+  その場でロックアウトする。
+- **HTTP・Telnetは有効化しないこと。** 一次情報には、これらのプロトコルは
+  平文で通信するため有効化すべきでないと明記されている。
+- **元のセッションは、手順5の検証が終わるまで切断しないこと。** 検証に
+  失敗した場合の復旧手段を残しておくため。
+- ロックアウトが発生した場合の復旧手順(コンソール接続時の具体的な操作
+  など)は、本手順書が参照した一次情報の範囲外のため記載していない。
+  適用前に、ベンダーが公開する復旧手順を別途確認しておくこと。
+- MGTインターフェースは一次情報に "The management (MGT) interface does
+  not require an Interface Management profile" と明記されている通り
+  Interface Management Profileの対象外であり、手順4の
+  `Device > Setup > Management` 側の設定でのみ制御される。

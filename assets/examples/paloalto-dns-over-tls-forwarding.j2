@@ -1,0 +1,233 @@
+# Palo Alto Networks(PAN-OS)のDNS Proxy(DoT)による暗号化DNS上位転送構築
+
+PAN-OSのDNS Proxyオブジェクト(`Network > DNS Proxy`)を使い、LAN側{{ lan_networks | length }}件の
+ネットワークが利用する上位DNSサーバーへの問い合わせを、Encrypted DNSタブのConnection Type
+`DoT`(DNS over TLS、ポート853)による暗号化転送に切り替えます。DNS Proxy自体の設定だけでは
+LANクライアントが上位DNSサーバーへ直接(プロキシを経由せず)平文で問い合わせる経路は残った
+ままのため、`Policies > Security`に平文DNS直接発信を遮断するルールもあわせて追加します。
+ロックアウトと同様に「新しい経路(DoT転送)が動作することを確認してから、古い経路(平文直接
+発信)を遮断する」順序を守り、DNS解決そのものが止まる事態を避けます。
+
+## 目的
+
+PAN-OSにはOPNsenseのようなDNS-over-TLSクライアント専用画面はなく、DNS Proxyオブジェクト
+(`Network > DNS Proxy`)のEncrypted DNSタブがDoT/DoHによる暗号化上位転送を担うベンダー
+ネイティブ機構であることを理解した上で、Connection Type `DoT`によるプライマリ/セカンダリ
+DNSサーバーへの暗号化転送を構成できるようになることを目指します。あわせて、DNS Proxyの
+設定だけでは既存の平文DNS直接発信経路(LANクライアントがWAN上のDNSサーバーへ直接問い合わせる
+経路)が残ったままである点を理解し、Security Policyでの遮断ルール追加とあわせて初めて
+「LANからの平文DNS直抜けの遮断」が達成されることを、安全な適用順序(新経路の検証を先に、
+旧経路の遮断を後に)とともに実践します。
+
+## 用語解説
+
+- **DNS Proxy object(`Network > DNS Proxy`)**: PAN-OSがDNSプロキシ/フォワーダとして動作する
+  ための設定オブジェクト。Location(Shared/仮想システム)、待受Interface、Primary/Secondary
+  DNSサーバー、DNS Proxy Rules、Encrypted DNSなど複数タブから構成される
+- **Location = Shared**: DNS Proxyオブジェクトのスコープを仮想システム個別ではなく共有
+  (Shared)に設定するオプション。Sharedを選択した場合、Primary DNSサーバーアドレスを
+  (必須で)、Secondary DNSサーバーアドレスを(任意で)このオブジェクトの一般設定に直接
+  入力する
+- **Encrypted DNSタブ(PAN-OS 11.2.1以降)**: DNS Proxyオブジェクト内で、上位DNSサーバーへの
+  問い合わせを暗号化するための設定タブ。Server SettingsのConnection Typeで`DoT`/`DoH`/
+  `Origin`/`Cleartext`のいずれかを選択する
+- **DoT(DNS over TLS)**: Connection Typeの一つ。TLS専用のポート853を使用する。DoTを選択
+  した場合、Primary DNSサーバーアドレスが必須になり、DNS ProxyはまずPrimaryサーバーへ
+  DoTで要求を送信し、応答がなければSecondaryサーバーへ送信する。また「DNSプロキシとして
+  動作しているインターフェース上では、他のTLSサービスを使用できない」という制約がある
+- **Fallback on Unencrypted DNS**: 暗号化DNSサーバーが要求を拒否した場合に、平文DNSへ
+  フォールバックするかどうかを制御するオプション
+- **Allowed DNS Types(Encrypted DNSタブ、Client Settings)**: DNS Proxy自身がLAN側クライアント
+  からどの方式(DoH/DoT/Cleartext)の問い合わせを受け付けるかを選択する設定。本手順では
+  LANクライアント側の問い合わせ方式は変更せず(Cleartextのまま)、DNS Proxyから上位DNS
+  サーバーへの転送だけをDoTに切り替える
+- **App-ID `dns`**: PAN-OSがポート番号ではなくアプリケーション識別で通信を分類する仕組み。
+  平文DNSの直接発信を遮断するSecurity Policyルールで用いる
+- **commit**: PAN-OSはcandidate configとrunning configを分離する二段階構成モデルを採る。
+  `Commit`を実行するまで、DNS Proxy/Security Policyへの入力内容は実機の動作に反映されない
+
+## シナリオ設定
+
+今回設定するDNS Proxyオブジェクトと、平文DNS直接発信を遮断するSecurity Policyルールの
+パラメータは次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| 対象ファイアウォール(fw_hostname) | `{{ fw_hostname }}` |
+| DNS Proxyオブジェクト名(dns_proxy_name) | `{{ dns_proxy_name }}` |
+| Location(proxy_location) | `{{ proxy_location }}` |
+| プロキシ待受インターフェース(proxy_interface) | `{{ proxy_interface }}` |
+| 上記インターフェースのアドレス(proxy_interface_ip) | `{{ proxy_interface_ip }}` |
+| プライマリDNSサーバー / DoT転送先(primary_dot_server) | `{{ primary_dot_server }}` |
+| セカンダリDNSサーバー / DoT転送先(secondary_dot_server) | `{{ secondary_dot_server }}` |
+| Fallback on Unencrypted DNS(fallback_unencrypted_dns) | `{{ fallback_unencrypted_dns }}` |
+| TCP Timeout(秒)(tcp_timeout_sec) | `{{ tcp_timeout_sec }}` |
+| Allowed DNS Types, Client Settings(allowed_dns_types_client) | `{{ allowed_dns_types_client }}` |
+| SSL/TLS Service Profile(ssl_tls_service_profile) | `{{ ssl_tls_service_profile }}` |
+| LAN側ゾーン(trust_zone) | `{{ trust_zone }}` |
+| WAN側ゾーン(untrust_zone) | `{{ untrust_zone }}` |
+| 遮断ルール名(block_rule_name) | `{{ block_rule_name }}` |
+| 検証用LANクライアントIP(verify_client_ip) | `{{ verify_client_ip }}` |
+| 検証用ドメイン(verify_domain) | `{{ verify_domain }}` |
+
+DNS Proxyの対象となるLANネットワークは次の{{ lan_networks | length }}件です。
+
+| # | ネットワーク |
+|---|--------------|
+{% for net in lan_networks %}| {{ loop.index }} | {{ net }} |
+{% endfor %}
+
+## 手順
+
+### 1. 現状のLAN側DNS問い合わせを確認する(変更前の基準を取る)
+
+新しい設定を投入する前に、シナリオ設定のLANネットワークに属する端末(`{{ verify_client_ip }}`
+など)から、現在の名前解決経路を確認します。
+
+```bash
+dig {{ verify_domain }} +short
+```
+
+このコマンドが、現時点でLANクライアントがどのDNSサーバーへ(直接あるいは既存のフォワーダ
+経由で)問い合わせているかを把握するための基準になります。
+
+### 2. DNS Proxyオブジェクトの基本設定を行う
+
+`Network > DNS Proxy`を開き`Add`を選びます。
+
+- `Enable`にチェックが入っていることを確認する
+- `Name`に`{{ dns_proxy_name }}`を入力する
+- `Location`に`{{ proxy_location }}`を選択する(Sharedのため、Primary/Secondaryの
+  DNSサーバーアドレスをこのオブジェクトの一般設定に直接入力する)
+- `Primary DNS server`に`{{ primary_dot_server }}`、`Secondary DNS server`に
+  `{{ secondary_dot_server }}`を入力する
+- `Inheritance Source`は既定の`None`のまま変更しない
+- `Interface`タブで`Add`をクリックし、`{{ proxy_interface }}`(アドレス
+  `{{ proxy_interface_ip }}`)を追加する
+
+この時点ではEncrypted DNSタブをまだ有効化しないため、DNS Proxyは通常の(平文の)DNS
+フォワーダとして動作します。入力後は`OK`のみを行い、まだ`Commit`は実行しません。
+
+### 3. Encrypted DNSタブでDoTによる暗号化上位転送を有効化する
+
+同じDNS Proxyオブジェクトを開き、`Encrypted DNS`タブで次のとおり設定します。
+
+- `Enable Encrypted DNS`にチェックを入れる
+- Server Settingsの`Connection Type`に`DoT`を選択する(手順2で設定した
+  `{{ primary_dot_server }}`へDoTで送信し、応答がなければ`{{ secondary_dot_server }}`へ
+  送信する)
+{% if fallback_unencrypted_dns %}- `Fallback on Unencrypted DNS`にチェックを入れる
+{% else %}- `Fallback on Unencrypted DNS`はチェックしない(平文DNSへのフォールバックを
+  許可しない)
+{% endif %}- `TCP Timeout (sec)`に`{{ tcp_timeout_sec }}`を入力する
+- Client Settingsの`Allowed DNS Types`に`{{ allowed_dns_types_client }}`を選択する
+  (LANクライアントからDNS Proxyへの問い合わせ方式は変更しない)
+- `SSL/TLS Service Profile`は`{{ ssl_tls_service_profile }}`のままにする(Client
+  Settingsの方式をCleartextのままとするため、クライアント向けの証明書提示は不要)
+
+入力後は`OK`のみを行い、まだ`Commit`は実行しません。DoT選択時は、このDNS Proxyが
+待ち受けている`{{ proxy_interface }}`上で他のTLSサービスを併用できない点に注意して
+ください。
+
+### 4. 変更を確定し(commit)、DoT転送が機能することを検証する
+
+ここでは、まだSecurity Policyでの遮断ルールを追加していません。`Commit`を実行し、
+手順2・3で入力したDNS Proxyの変更のみを実機に反映します。
+
+反映後、シナリオ設定のLANクライアント(`{{ verify_client_ip }}`など)から通常どおり
+名前解決ができることを確認します。
+
+```bash
+dig {{ verify_domain }} +short
+```
+
+続けてPAN-OSのCLIから、DNS ProxyオブジェクトがEncrypted DNS(DoT)で動作していることを
+確認します。
+
+```bash
+show dns-proxy all
+show dns-proxy statistics all
+```
+
+`show dns-proxy all`の出力で対象オブジェクト`{{ dns_proxy_name }}`のEncrypted DNS設定が
+`DoT`になっていること、`show dns-proxy statistics all`でDoTによる問い合わせの実績が
+確認できることの両方を確認できるまで、次の手順(平文DNS直接発信の遮断)には進まないで
+ください。
+
+### 5. 検証成功後、平文DNS直接発信をSecurity Policyで遮断する
+
+DoT転送が正常に機能していることを確認できて初めて、LANから上位DNSサーバーへの直接的な
+平文DNS発信を遮断します。`Policies > Security`で`Add`を選び、ルールを作成します。
+
+- General タブ: `Name`に`{{ block_rule_name }}`を入力する
+- Source タブ: `Source Zone`に`{{ trust_zone }}`を設定する
+- Destination タブ: `Destination Zone`に`{{ untrust_zone }}`を設定する
+- Applications タブ: `Application`に`dns`を追加する
+- Service/URL Category タブ: `Service`は`application-default`のままにする
+- Actions タブ: `Action`を`Deny`にする
+
+このルールは、LAN(`{{ trust_zone }}`)からWAN(`{{ untrust_zone }}`)へ直接向かう
+DNSアプリケーションの通信のみを遮断します。LANクライアントから`{{ proxy_interface_ip }}`
+宛の問い合わせ(DNS Proxyへの問い合わせ)は同一ゾーン内の通信のため、このルールの対象には
+なりません。入力後は`OK`のみを行い、既存の広い許可ルールより上位(評価順で先)に配置した
+ことを確認したうえで`Commit`を実行します。
+
+### 6. 遮断後の最終検証を行う
+
+`Commit`の完了後、シナリオ設定のLANクライアント(`{{ verify_client_ip }}`)から、上位DNS
+サーバーへ直接(DNS Proxyを経由せず)平文で問い合わせを試み、遮断されることを確認します。
+
+```bash
+dig @{{ secondary_dot_server }} {{ verify_domain }} +short +time=3 +tries=1
+```
+
+このコマンドが応答なしでタイムアウトすることを確認します。あわせて、手順1・4と同じ
+`dig {{ verify_domain }} +short`(既定のリゾルバへの問い合わせ)は引き続き成功する
+ことを確認し、DNS Proxy経由の名前解決自体は継続して機能していることを確かめます。
+
+最後に`Monitor > Logs`を開いて`Traffic`ログ種別を選び、フィルタ欄に
+`( rule eq {{ block_rule_name }} )`と入力して`Apply Filter`を実行し、遮断された
+通信が実際に記録されていることを確認します。
+
+## 動作確認
+
+- `show dns-proxy all`で、`{{ dns_proxy_name }}`のEncrypted DNS設定がConnection Type
+  `DoT`、Primary DNSサーバーが`{{ primary_dot_server }}`、Secondary DNSサーバーが
+  `{{ secondary_dot_server }}`で登録されていること
+- `show dns-proxy statistics all`で、DoTによる問い合わせの実績が確認できること
+- シナリオ設定のLANクライアントから`dig {{ verify_domain }} +short`が引き続き成功する
+  こと(DNS Proxy経由の名前解決が維持されていること)
+- 同クライアントから`dig @{{ secondary_dot_server }} {{ verify_domain }} +short`が
+  タイムアウトし、上位DNSサーバーへの直接の平文問い合わせが遮断されていること
+- `Monitor > Logs`の`Traffic`ログで、フィルタ`( rule eq {{ block_rule_name }} )`により
+  遮断された通信が記録されていること
+- `Policies > Security`のルールベース上で、`{{ block_rule_name }}`が既存の広い許可
+  ルールより上位(評価順で先)に配置されていること
+
+## 注意事項
+
+- **DoT転送の検証(手順4)を終えてから、平文DNS直接発信の遮断(手順5)を行うこと。** 順序を
+  逆にすると、DoT転送側に設定ミスがあった場合にLAN全体でDNS解決が完全に停止するおそれが
+  あります。
+- **DoTを選択したDNS Proxyの待受インターフェース(`{{ proxy_interface }}`)上では、他の
+  TLSサービスを併用できません。** 一次情報にこの制約が明記されているため、同インターフェース
+  へ他のTLS終端サービスを追加する場合は事前に影響を確認してください。
+- 一次情報によれば、SSL復号化(SSL Decryption)ポリシーの構成が必要になるのはConnection
+  Typeが`DoH`の場合のみで、`DoT`についてはSSL復号化ポリシーへの言及はありません。本手順
+  ではSSL復号化ポリシーの追加は行いません。
+- 一次情報には、PAN-OS単体(オンボックス)でのDoT利用に関するライセンス要件の記載は
+  ありません。ライセンス要件の記載があるのはStrata Cloud Manager管理下のNGFWについてのみ
+  です。
+{% if not fallback_unencrypted_dns %}- `Fallback on Unencrypted DNS`を無効のままにしているため、`{{ primary_dot_server }}`・
+  `{{ secondary_dot_server }}`の両方がDoTで応答不能になった場合、DNS Proxy経由の名前解決
+  も停止します。上位DNSサーバーの到達性を事前に確認してください。
+{% endif %}- Security Policyルールの遮断対象はApp-ID `dns`によるLANからWANへの直接発信のみです。
+  LANクライアントからDNS Proxyの待受アドレス`{{ proxy_interface_ip }}`宛の問い合わせは
+  同一ゾーン内の通信のため遮断されません。
+- 本テンプレートが参照した一次情報のページはDNS Proxyオブジェクト単体(Encrypted DNS
+  タブ)の設定を扱うものです。手順5のSecurity Policyによる平文DNS遮断ルールの追加は、
+  PAN-OSの一般的なSecurity Policy運用(`Policies > Security`)に基づく補足であり、この
+  一次情報ページに記載された内容ではありません。
+- `Commit`を実行するまでcandidate configはrunning configに反映されません。手順2・3で
+  入力した内容は手順4のcommitまで、手順5で入力した内容は手順5内のcommitまで、実機の
+  動作に影響しません。

@@ -1,0 +1,11 @@
+wan_zone = "untrust"
+dmz_zone = "dmz"
+public_ip = "203.0.113.20"
+private_ip = "10.0.20.20"
+public_addr_obj = "addr-web02-pub"
+private_addr_obj = "addr-web02-priv"
+nat_rule_name = "DNAT-web02-https"
+security_rule_name = "ALLOW-HTTPS-DMZ-WEB02"
+application = "ssl"
+service_port = 443
+external_test_source = "198.51.100.60"

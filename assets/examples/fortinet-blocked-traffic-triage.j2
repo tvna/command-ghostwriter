@@ -1,0 +1,131 @@
+# FortiGateの通信不可申告トリアージ(ログ→セッション状態→NAT)
+
+「通信できない」という申告に対し、FortiGate (FortiOS) 上で原因ルールを迷わず特定するため、`Dashboard > FortiView > Sessions`監視画面と`Log & Report > Forward Traffic`ログでの一次切り分け(ログ)、CLI `diagnose sys session list`によるセッション状態の確認(状態)、`Policy & Objects`のVirtual IP / Central SNAT設定の確認(NAT)という順序で、{{ reports | length }}件の申告を1件ずつ切り分けます。ログ→セッション状態→NATの順を守るのは、途中の段階を確認せずに先にNAT設定へ手を入れると、原因を誤認したまま本番のVIP/Central SNAT設定を書き換えてしまうおそれがあるためです。本手順は既存設定を**読み取り・調査するだけ**にとどめ、設定変更が必要と判断した場合は別途変更チケットとして起票します。
+
+## 目的
+
+FortiGate (FortiOS) で「通信できない」という申告を受けたとき、FortiViewのSessions監視画面とForward Trafficログでの一次切り分け(ログ)、`diagnose sys session list`によるセッション状態の確認(状態)、Virtual IP / Central SNAT設定の確認(NAT)を、この順序で迷わず実施できるようになることを目指します。あわせて、各段階で「何を見れば次の段階に進むべきか」を判断できるようになり、調査結果を原因バケツ(ログ未到達/セッション異常/NAT不整合)に分類して記録できるようになることを目指します。
+
+## 用語解説
+
+- **FortiView**: `Dashboard > FortiView`のダッシュボードで、複数の監視画面(モニタ)からリアルタイムおよび履歴のトラフィック情報を確認できる機能。監視画面上部の`Time Display`で表示期間を切り替え、ログディスクまたはリモートロギングが有効な場合は履歴表示も利用できる
+- **FortiView Sessions監視画面**(`Dashboard > FortiView > Sessions`): 「The Dashboard > FortiView > Sessions monitor displays Top Sessions by traffic source and can be used to end sessions.」と説明される画面。開いている通信(コネクション)の一覧を確認する用途に使う。画面上部の`Add Filter`ボタンから`Source IP`/`Destination IP`/`Destination Port`などのフィルタを1つ以上追加して対象通信のみに絞り込める
+- **Time Display**: FortiView監視画面の表示期間切り替えドロップダウン。リアルタイム表示(`now`)と履歴表示(`1 hour`/`24 hours`/`7 days`)を切り替えられる。ディスクロギングまたはリモートロギングが有効でない場合、データはFortiGateのセッションテーブルから描画され、`Time Period`は`Now`(ライブ)に固定される。履歴表示には「Disk logging or remote logging must be enabled to view historical information.」という前提がある
+- **Drill Down to Details**: FortiView監視画面のエントリをダブルクリックまたは右クリックして選択できる操作。「Double-click or right-click an entry in a FortiView monitor and select Drill Down to Details to view additional details about the selected traffic activity.」と説明される。ドリルダウン結果からエントリを選択し`View session logs`をクリックすると、該当するセッションログの表示に遷移できる
+- **Forward Traffic ログ**(`Log & Report > Forward Traffic`): ログソース(`Memory`/`Disk`/`FortiAnalyzer`/`FortiGate Cloud`)を指定してトラフィックログを確認する画面。ログエントリを選択して`Details`をクリックすると`Log Details`ペインが開き、上部のサマリーパネルに`Date/Time`(ログの日時)・`Policy`(一致したポリシー名)などが表示される。サマリーパネルはセキュリティイベントを伴う非implicit-denyのログに対してのみ表示される
+- **diagnose sys session list**: セッションテーブルの内容をCLIで確認するコマンド。「You may also view the session data in the CLI.」の実行手段として`# diagnose sys session list`が案内される。出力が大量になるため、`# diagnose sys session filter <option>`で絞り込み条件を指定してから使う。絞り込みに使える具体的なオプション名は、利用中のFortiOSバージョンのCLIヘルプで確認すること(一次情報には`<option>`というプレースホルダのみが示されており、具体的なキー名は記載がないため本書では断定しない)
+- **CLI Console**: GUI右上の`_>`アイコンをクリックして開くCLI操作用のオーバーレイ画面。「To open a CLI console, click the _> icon in the top right corner of the GUI.」と説明される。最小化や複数起動が可能。コンソール接続やSSH等、既存の管理アクセス手順がある場合はそちらを使ってもよい
+- **Virtual IP (VIP)**(`Policy & Objects > Virtual IPs`、Central NAT有効時は`Policy & Objects > DNAT & Virtual IPs`): 「Static Virtual IPs (VIP) are used to map external IP addresses to internal IP addresses.」と説明される、宛先NAT(DNAT)の設定単位。`Virtual IP`/`IPv6 Virtual IP`タブで一覧・作成でき、CLIでは`config firewall vip`ブロックの`set extip`(外部IP)/`set extintf`(外部インターフェース)/`set mappedip`(マップ先の内部IP)で定義される。ポリシーへの適用はCLIでは`config firewall policy`の`set dstaddr`にVIP名を指定し`set nat enable`する
+- **Central SNAT**(`Policy & Objects`のCentral SNATセクション、有効化は`System > Settings > General`): 「The central SNAT table enables you to define and control (with more granularity) the address translation performed by FortiGate.」と説明される送信元NAT(SNAT)の集中管理機能。CLIでの有効/無効切り替えは`config system settings` / `set central-nat {enable | disable}`。ルールは`Type`/`Incoming Interface`/`Outgoing Interface`/`Source Address`などのフィールドを持ち、「FortiGate reads the NAT rules from the top down until it hits a matching rule for the incoming address.」という上から順の一致評価で、ポリシー一致の後に適用される
+
+## シナリオ設定
+
+今回調査対象のFortiGateと、FortiViewの表示設定は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| 対象FortiGate(fw_hostname) | `{{ fw_hostname }}` |
+| Forward Trafficログのログソース(log_source) | {{ log_source }} |
+| Central SNATが有効か(central_nat_enabled) | {% if central_nat_enabled %}有効{% else %}無効{% endif %} |
+| liveで見つからない場合のTime Display切り替え先(time_display_fallback) | {{ time_display_fallback }} |
+
+今回切り分ける通信不可申告は、次の{{ reports | length }}件です。
+
+| report_id | reporter | protocol | src_ip | dst_ip | dst_port | symptom |
+|-----------|----------|----------|--------|--------|----------|---------|
+{% for r in reports %}| {{ r["report_id"] }} | {{ r["reporter"] }} | {{ r["protocol"] }} | {{ r["src_ip"] }} | {{ r["dst_ip"] }} | {{ r["dst_port"] }} | {{ r["symptom"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 申告内容を整理し、切り分けの基準を確定する
+
+シナリオ設定の{{ reports | length }}件それぞれについて、`protocol`/`src_ip`/`dst_ip`/`dst_port`を、以降すべての段階で使う共通の検索条件として書き出します。
+
+{% for r in reports %}- {{ r["report_id"] }}({{ r["reporter"] }}): {{ r["protocol"] }} {{ r["src_ip"] }} -> {{ r["dst_ip"] }}:{{ r["dst_port"] }} / 症状: {{ r["symptom"] }}
+{% endfor %}
+
+### 2. FortiView Sessionsでlive(now)のセッションを確認する(ログ・段階1)
+
+`Dashboard > FortiView > Sessions`を開きます。`Time Display`が`now`(リアルタイム表示)になっていることを確認したうえで、申告ごとに次を行います。
+
+1. `Add Filter`をクリックし、`Source IP`に`src_ip`、`Destination IP`に`dst_ip`、`Destination Port`に`dst_port`を指定してフィルタを追加する(複数のフィルタは重ねて追加できる)
+2. フィルタ後のセッションテーブルに、該当する通信が表示されるかを確認する
+
+{% for r in reports %}- {{ r["report_id"] }}: Source IP={{ r["src_ip"] }} / Destination IP={{ r["dst_ip"] }} / Destination Port={{ r["dst_port"] }} でフィルタし、live状態を記録する
+{% endfor %}
+
+liveで何も表示されない場合は、`Time Display`を`{{ time_display_fallback }}`に切り替えて再度確認します(ディスクロギングまたはリモートロギングが有効でない場合、履歴表示は利用できません)。
+
+### 3. Forward Trafficログで一致ポリシーの有無を確認する(ログ・段階2)
+
+手順2でセッションが見つかった場合は、そのエントリをダブルクリックまたは右クリックして`Drill Down to Details`を選択し、ドリルダウン結果からエントリを選択して`View session logs`をクリックするとセッションログに遷移できます。
+
+見つからない場合、または一致したポリシーを確認したい場合は、`Log & Report > Forward Traffic`を直接開きます。
+
+1. ログソースを`{{ log_source }}`に設定する
+2. 申告ごとに`src_ip`/`dst_ip`/`dst_port`でフィルタし、該当するログエントリを探す
+3. 該当エントリを選択して`Details`をクリックし、`Log Details`ペイン上部のサマリーパネルで`Policy`(一致したポリシー名)を確認する
+
+{% for r in reports %}- {{ r["report_id"] }}: 一致した`Policy`名を記録欄に書き取る(記録欄: policy=____)
+{% endfor %}
+
+`Forward Traffic`にもエントリが一切見つからない申告は、ポリシー評価そのものに到達していない可能性があります(ルーティングやインターフェース状態の確認は本手順の対象外です)。この場合は原因バケツを「ログ未到達」とし、手順4・5には進まず別途切り分けます。
+
+### 4. diagnose sys session listでセッション状態を確認する(状態)
+
+GUI右上の`_>`アイコンをクリックしてCLI Consoleを開くか、既存のコンソール/SSHアクセス手順でFortiGateのCLIに接続します。
+
+```bash
+{% for r in reports %}# {{ r["report_id"] }}: {{ r["protocol"] }} {{ r["src_ip"] }} -> {{ r["dst_ip"] }}:{{ r["dst_port"] }}
+diagnose sys session filter <option>
+diagnose sys session list
+{% endfor %}```
+
+`<option>`には、この申告の`protocol`/`src_ip`/`dst_ip`/`dst_port`に対応する絞り込み条件を指定します。具体的なオプション名は一次情報に確定した記載がないため、`diagnose sys session list`の出力が大量になる点に留意しつつ、利用中のFortiOSバージョンのCLIヘルプで確認してください。
+
+- 該当するセッションが存在しない: 手順3で`Policy`が`accept`系のポリシーに一致していたのにセッションがない場合、NATの不整合を疑い手順5に進みます
+- 想定と異なる内容のセッションが存在する(古い/滞留している等): 手順5のNAT確認と合わせて原因を特定したうえで、`Dashboard > FortiView > Sessions`に戻り、手順2と同じフィルタ条件(`Source IP`/`Destination IP`/`Destination Port`)で対象セッションを選択し、`End Sessions > Selected only`をクリックして`OK`で確定し、セッションを終了してから申告元に再試行を依頼します(`End Sessions > All Sessions`や`End Sessions > Filtered only`は対象範囲が広いため、フィルタが正しく該当セッションのみに絞れていることを確認してから使うこと)
+
+### 5. Virtual IP / Central SNAT設定を確認する(NAT)
+
+{% if central_nat_enabled %}Central SNATが有効(central_nat_enabled)なため、`Policy & Objects > DNAT & Virtual IPs`を開きます。{% else %}`Policy & Objects > Virtual IPs`を開きます。{% endif %}
+
+1. `Virtual IP`タブ(IPv6の場合は`IPv6 Virtual IP`タブ)で、申告の`dst_ip`と一致する`extip`(外部IP)を持つエントリを探す
+2. 該当エントリを右クリックして`Edit in CLI`を選択し、`mappedip`(マップ先の内部IP)が意図した宛先であるかを確認する
+3. 手順3で記録した`Policy`のエントリを開き、`dstaddr`がこのVIP名を指しているかを照合する
+
+{% if central_nat_enabled %}Central SNATが有効なため、`Policy & Objects`のCentral SNATセクションも確認します。ルールは登録順(上から下)に評価され、最初に一致したルールが適用されます。
+
+4. `System > Settings > General`の`System Operations Settings`で`Central SNAT`のチェック状態が有効になっていることを確認する
+5. `Policy & Objects`のCentral SNATセクションで、申告の`src_ip`に対応する`Source Address`と、通信の向きに対応する`Incoming Interface`/`Outgoing Interface`を持つルールが、想定より上位の(想定外に一致してしまう)ルールより後ろに埋もれていないかを確認する
+{% endif %}
+
+{% for r in reports %}- {{ r["report_id"] }}: dst_ip={{ r["dst_ip"] }}に対応するVIPのmappedipと、Policyのdstaddrが一致することを確認する
+{% endfor %}
+
+### 6. 判定結果を記録する
+
+申告ごとに、手順2〜5で得られた結果を次のいずれかの原因バケツに分類して記録します。
+
+- **ログ未到達**: Forward Trafficにログ自体が見つからない、またはimplicit denyに一致している
+- **セッション状態異常**: ポリシーはaccept系に一致しているのに`diagnose sys session list`でセッションが確認できない、または古い/滞留したセッションが残っている
+- **NAT不整合**: VIPのmappedipやCentral SNATのルールが、申告内容や適用ポリシーの想定と一致しない
+
+いずれのバケツにも明確に分類できない場合は、本手順の対象範囲(ログ→セッション状態→NAT)を超えた原因(ルーティング、アップストリーム機器等)の可能性があるため、その旨を記録して別途エスカレーションします。
+
+## 動作確認
+
+- {{ reports | length }}件の申告すべてについて、`Dashboard > FortiView > Sessions`でのlive(またはフォールバック後の`{{ time_display_fallback }}`)確認結果が記録されていること
+- {{ reports | length }}件の申告すべてについて、`Log & Report > Forward Traffic`で一致した`Policy`名(またはログ未到達である旨)が記録されていること
+- {{ reports | length }}件の申告すべてについて、`diagnose sys session list`によるセッション状態の確認結果が記録されていること
+- Central SNATが有効な場合、`Policy & Objects`のCentral SNATセクションでのルール確認結果が記録されていること
+- {{ reports | length }}件の申告すべてに、手順6の原因バケツ(ログ未到達/セッション状態異常/NAT不整合/対象外)のいずれかが割り当てられていること
+
+## 注意事項
+
+- **本手順は調査(読み取り)のみを対象とし、Firewall Policy・VIP・Central SNATの設定変更は行いません。** 原因が判明し設定変更が必要と判断した場合は、変更内容を別途チケット化してから実施してください。特にCentral SNATのルールは上から順に評価され全トラフィックに影響するため、調査中に安易に並び順や内容を変更しないでください。
+- `diagnose sys session list`の出力は大量になるため、`diagnose sys session filter <option>`で必ず絞り込んでから確認してください。`<option>`に指定する具体的なオプション名は、利用中のFortiOSバージョンのCLIヘルプで確認し、一次情報で確認できない構文を推測で入力しないでください。
+- FortiViewの履歴表示(`1 hour`/`24 hours`/`7 days`)は、ディスクロギングまたはリモートロギングが有効な場合にのみ利用できます。無効な環境では`now`(ライブ)表示のみが頼りになるため、申告を受けたら早めに確認してください。
+- `End Sessions`でセッションを終了する操作は、対象を巻き戻せません。`Add Filter`で対象を該当セッションのみに絞り込んだことを確認してから`Selected only`を使い、`All Sessions`や`Filtered only`は対象範囲を必ず事前に確認してから使用してください。
+- CLI Console・SSH・コンソール接続に使うFortiGate管理者アカウントの認証情報(パスワード、APIキー等)は本手順書に記載しません。記録が必要な場合も`********`のようにマスクし、平文で本手順書やチケット・ログに残さず、既存の秘密管理ツール経由で扱ってください。

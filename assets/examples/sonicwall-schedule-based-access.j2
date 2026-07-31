@@ -1,0 +1,239 @@
+# SonicWall(SonicOS)のSchedule Objectによる業務時間外アクセス自動遮断
+
+`Object | Match Objects | Schedules` で作成した Schedule Object を Access Rule
+の `Schedule` フィールドに適用し、業務時間内のみ許可・業務時間外は明示的に
+遮断する構成を CSV で定義した {{ csv_rows | length }} 件(Schedule定義2件、
+Access Rule 4件)から構築します。SonicOS の Access Rule 既定動作は LAN→WAN
+セッションを常時許可するため、スケジュール限定の Allow ルールを1件追加する
+だけでは業務時間外の遮断にはならず、`Always On` の明示 Deny ルールを対で
+登録する必要があります。最後に、スケジュールの切替時刻(開始・終了)の前後で
+実際に疎通が切り替わることを検証します。検証の前提として、firewall自体の
+`Device | Settings > Time` の時刻設定(Time Zone/NTP)が正しいことを最初に
+確認します。
+
+## 目的
+
+`Object | Match Objects | Schedules` での Recurring スケジュール作成と、
+Access Rule の `Schedule` ドロップダウン(既定値 `Always On`)への適用方法を
+理解し、スケジュール限定の Allow ルールと `Always On` の Deny ルールを
+`Priority` で正しい評価順に並べることで、業務時間外の外部アクセスを既定の
+許可動作にフォールバックさせず確実に遮断できるようになることを目指します。
+あわせて、スケジュールの開始・終了という切替時刻の前後で実際に許可/遮断が
+切り替わることを Traffic Statistics とイベントログで検証し、firewall自体の
+時刻設定(Time Zone/NTP)が切替時刻の前提であることを理解します。
+
+## 用語解説
+
+- **Object | Match Objects | Schedules**: Schedule Object を作成・編集する
+  管理画面ナビゲーションパス。一次情報では「Schedule Groups are groups of
+  schedules to which you can apply firewall rules. For example, you might
+  want to block access to auction sites during business hours, but allow
+  employees to access the sites after hours.」と説明される
+- **Schedule Type(Once / Recurring / Mixed)**: `Add` ボタンで開く作成画面の
+  項目。一次情報では「In the Schedule Type section, select if the schedule
+  will occur Once, Recurring or Mixed」と説明される。`Once` は年月日時分を
+  指定する単発スケジュール、`Recurring` は曜日チェックボックスと時刻を
+  指定する繰り返しスケジュール、`Mixed` は両者を同一スケジュール内で併用
+  できる
+- **Recurring スケジュールの Start Time / End Time**: 一次情報では
+  「select the check boxes for each day the schedule applies. Enter the
+  start time for the recurring schedule in the Start Time field and also
+  the End Time field. Make sure to use the 24-hour format for both of
+  them.」と説明される。時刻は24時間表記で入力する
+- **Access Rule の Schedule フィールド**: SonicOS 7.1 の技術ドキュメントでは
+  `POLICY | Rules and Policies > Security Policy`(一部ドキュメントでは
+  `Access Rules` とも表記)の `Adding Rule` ダイアログに `Schedule`
+  ドロップダウンがあり、一次情報では「Specify when the rule is applied by
+  selecting a schedule or Schedule Group from the Schedule drop-down menu.
+  If the rule is always applied, select Always On. If the schedule does not
+  exist, refer to Configuring Schedules.」と説明される。既定値は
+  `Always On`(常時適用)であり、スケジュールを限定したいルールにのみ
+  作成済みの Schedule Object を選択する
+- **Enable チェックボックス**: 同ダイアログの項目。一次情報では「Click
+  Enable to activate the policy schedule and enable logging.」と説明され、
+  これを有効にしないとスケジュール適用自体もログ記録も機能しない
+- **Priorityの数値**: 同ダイアログの `Priority` 項目。一次情報では
+  「Higher numbers indicate lower priority. ... Lower priority rules should
+  be more general than rules with higher priorities. If a higher priority
+  rule does not match all the attributes, then the next rule is evaluated」
+  と説明される。数値が小さいほど優先度が高く先に評価され、より限定的な
+  ルールほど小さい数値(高優先度)を設定する
+- **Device | Settings > Time**: firewall自体の時刻を設定する管理画面。
+  一次情報では「Navigate to Device | Settings > Time... select the time
+  zone you are in from the Time Zone drop-down list... To set the time
+  automatically, select Set time automatically using NTP... This option is
+  selected by default... To enable automatic adjustments for daylight
+  savings time, select Automatically adjust clock for daylight saving
+  time. For those areas that observe daylight savings time, this option is
+  selected by default.」と説明される。Schedule Objectの開始・終了時刻は
+  この画面の時刻設定を基準に評価されるため、切替時刻の検証前に必ず確認する
+- **Access Rule の Traffic Statistics**: `POLICY | Rules and Policies >
+  Access Rules` ページで、対象ルール左側の右矢印アイコンをクリックすると
+  表示される受信(Rx)/送信(Tx)の通信量
+- **INVESTIGATE | Logs | Event Logs**: 通信の許可・遮断結果を確認するログ
+  画面。Access Ruleによって遮断された通信は `Enforced Firewall Rule` の
+  drop code付きイベントとして記録される
+
+## シナリオ設定
+
+今回作成する Schedule Object は次の2件です。
+
+| rule_no | name | days | start_time | end_time | description |
+|---------|------|------|------------|----------|--------------|
+{% for r in csv_rows %}{% if r["kind"] == "schedule" %}| {{ r["rule_no"] }} | {{ r["name"] }} | {{ r["days"] }} | {{ r["start_time"] }} | {{ r["end_time"] }} | {{ r["description"] }} |
+{% endif %}{% endfor %}
+
+これらの Schedule Object を適用する Access Rule は次の4件です。`schedule_ref`
+が `Always On` の行は、対応する Schedule 限定 Allow ルールの適用時間外を
+明示的に遮断するための固定ルールです。
+
+| rule_no | name | from_zone | to_zone | action | schedule_ref | dest_addr | service | priority | description |
+|---------|------|-----------|---------|--------|--------------|-----------|---------|----------|--------------|
+{% for r in csv_rows %}{% if r["kind"] == "rule" %}| {{ r["rule_no"] }} | {{ r["name"] }} | {{ r["from_zone"] }} | {{ r["to_zone"] }} | {{ r["action"] }} | {{ r["schedule_ref"] }} | {{ r["dest_addr"] }} | {{ r["service"] }} | {{ r["priority"] }} | {{ r["description"] }} |
+{% endif %}{% endfor %}
+
+`priority` の数値が小さいほど評価順が先(高優先度)です。各 `dest_addr` の
+ペア(`Any` / `ext-vendor-portal`)ごとに、Schedule限定の `Allow` ルールを
+`Always On` の `Deny` ルールより必ず小さい `priority` 値で登録します。
+
+## 手順
+
+### 1. 現状の Access Rules と firewall の時刻設定を確認する(前提確認)
+
+新しい Schedule Object・Access Ruleを1件も追加する前に、現状を確認します。
+
+- `POLICY | Rules and Policies > Access Rules` を開き、LAN→WAN の既存ルール
+  構成をメモまたはスクリーンショットとして記録します。
+- `Device | Settings > Time` を開き、`Time Zone` が実際の運用地域と一致して
+  いること、`Set time automatically using NTP` が有効(既定で有効)である
+  ことを確認します。時刻がずれていると、後述する切替時刻の検証結果が
+  信頼できなくなります。
+
+### 2. Schedule Objects を作成する
+
+`Object | Match Objects | Schedules` を開き、`Add` からシナリオ設定の
+Schedule Object を1件ずつ作成します。`Schedule Type` は `Recurring` を選択
+し、各行の `days` に記載した曜日のチェックボックスを入れ、`Start Time` /
+`End Time` に24時間表記で時刻を入力します。
+
+{% for r in csv_rows %}{% if r["kind"] == "schedule" %}- {{ r["name"] }}: {{ r["days"] }} の {{ r["start_time"] }}-{{ r["end_time"] }}({{ r["description"] }})
+{% endif %}{% endfor %}
+入力後は `Add` をクリックして保存します。
+
+### 3. スケジュール限定の Allow ルールを登録する
+
+`POLICY | Rules and Policies > Access Rules` の一覧下部にある `+Add` から
+`Adding Rule` ダイアログを開き、シナリオ設定の `action` が `Allow` の行を
+`rule_no` の昇順で1件ずつ登録します。各行につき次のフィールドを表の値の
+まま設定します。
+
+- `Name`: `name`
+- `Description`: `description`
+- `Action`: `Allow`
+- `Type`: `IPv4`
+- `Priority`: `priority`
+- `Schedule`: `schedule_ref`(手順2で作成した Schedule Object)
+- Source/Destination の Source zone: `from_zone`
+- Source/Destination の Destination zone: `to_zone`
+- Source/Destination の Destination address: `dest_addr`
+- Source/Destination の Port/Services: `service`
+
+{% for r in csv_rows %}{% if r["kind"] == "rule" and r["action"] == "Allow" %}- rule_no {{ r["rule_no"] }}: `{{ r["name"] }}` / {{ r["from_zone"] }}→{{ r["to_zone"] }} / Schedule={{ r["schedule_ref"] }} / Destination={{ r["dest_addr"] }} / Service={{ r["service"] }} / Priority={{ r["priority"] }}({{ r["description"] }})
+{% endif %}{% endfor %}
+すべての項目を設定したら `Enable` を有効にし(これを有効にしないと
+スケジュール適用自体もログ記録も機能しません)、`Add` をクリックして保存
+します。
+
+### 4. Always On の Deny ルールを登録する(業務時間外を明示的に遮断)
+
+同じく `+Add` から、シナリオ設定の `action` が `Deny` の行を登録します。
+これらは手順3の Allow ルールが適用対象外となる時間帯(スケジュール範囲外)
+に、既定の LAN→WAN 許可動作へフォールバックさせず明示的に遮断するための
+ルールです。同じ `dest_addr` の Allow ルールより**必ず大きい** `priority`
+数値(=より低い優先度=後で評価される)を設定してください。
+
+- `Name`: `name`
+- `Description`: `description`
+- `Action`: `Deny`
+- `Type`: `IPv4`
+- `Priority`: `priority`
+- `Schedule`: `Always On`
+- Source/Destination の Source zone: `from_zone`
+- Source/Destination の Destination zone: `to_zone`
+- Source/Destination の Destination address: `dest_addr`
+- Source/Destination の Port/Services: `service`
+
+{% for r in csv_rows %}{% if r["kind"] == "rule" and r["action"] == "Deny" %}- rule_no {{ r["rule_no"] }}: `{{ r["name"] }}` / {{ r["from_zone"] }}→{{ r["to_zone"] }} / Schedule=Always On / Destination={{ r["dest_addr"] }} / Service={{ r["service"] }} / Priority={{ r["priority"] }}({{ r["description"] }})
+{% endif %}{% endfor %}
+`Enable` を有効にし、`Add` をクリックして保存します。
+
+### 5. Priority の並び順を確認する
+
+`POLICY | Rules and Policies > Access Rules` の一覧に戻り、各 `dest_addr`
+ペアについて、シナリオ設定どおり Allow ルールが Deny ルールより小さい
+`Priority` 数値(先に評価される側)で登録されていることを確認します。
+並び順が誤っていると、常時有効な Deny ルールが先に一致し、業務時間内でも
+Allow ルールへ到達しません。
+
+### 6. 切替時刻の前後で疎通を検証する
+
+Schedule Object の `start_time` / `end_time` の前後で、対象の通信を実際に
+発生させて疎通が切り替わることを確認します。少なくとも、開始・終了時刻の
+1分前と1分後の2時点ずつを比較してください。
+
+- スケジュール適用時間内(例: `Business-Hours` の 09:00〜18:00 の間)に
+  `Any` 宛て(またはベンダーポータル宛て)の HTTPS 通信を発生させ、対応する
+  `Allow` ルールの Traffic Statistics(Rx)が増加することを確認する
+- スケジュール適用時間外(開始1分前・終了1分後)に同じ通信を発生させ、
+  `Allow` ルールの Traffic Statistics が増加せず、代わりに `Deny` ルールの
+  Traffic Statistics が増加することを確認する
+- `INVESTIGATE | Logs | Event Logs` を開き、時間外に遮断された通信が
+  `Enforced Firewall Rule` の drop code付きイベントとして記録されている
+  ことを確認する
+
+## 動作確認
+
+- `Object | Match Objects | Schedules` にシナリオ設定どおり2件の
+  Schedule Object(`Recurring`、指定した曜日・時刻)が存在すること
+- `POLICY | Rules and Policies > Access Rules` に、各 `dest_addr` ペアごとに
+  Allow(スケジュール限定)ルールが Deny(`Always On`)ルールより小さい
+  `Priority` で登録されていること
+- スケジュール適用時間内は対象の通信が許可され、Allow ルールの
+  Traffic Statistics(Rx)が増加すること
+- スケジュール適用時間外(開始1分前・終了1分後を含む)は対象の通信が遮断
+  され、Deny ルールの Traffic Statistics(Rx)が増加すること
+- 時間外に遮断された通信が `INVESTIGATE | Logs | Event Logs` に
+  `Enforced Firewall Rule` として記録されること
+- `Device | Settings > Time` の `Time Zone` が検証中に変更されておらず、
+  検証結果の時刻と一致していること
+
+## 注意事項
+
+- **Allow ルール単独では業務時間外を遮断できません。** SonicOS の
+  LAN→WAN セッションは既定で常時許可されるため、スケジュール限定の
+  Allow ルールを追加しただけでは、スケジュール範囲外の通信は既定の許可
+  動作にフォールバックしてしまいます。必ず `Always On` の Deny ルールを
+  対で登録してください。
+- **Priority の大小関係を誤らないこと。** Allow ルールより大きい
+  `Priority` 数値(低優先度)を Deny ルールに設定すると、Deny が先に評価
+  されて業務時間内でも通信が遮断されます。手順5で並び順を必ず確認して
+  ください。
+- **`Enable` を有効にし忘れないこと。** 一次情報のとおり `Enable` は
+  スケジュール適用とログ記録の両方を有効化する項目です。無効のままだと
+  ルール自体が機能しません。
+- **firewall自体の時刻設定を切替検証の前提として確認すること。** Schedule
+  Objectの開始・終了時刻は `Device | Settings > Time` の設定を基準に評価
+  されます。Time ZoneがずれていたりNTPが無効な場合、想定した時刻に切替が
+  発生せず、検証結果を誤って解釈するおそれがあります。
+- 本手順書は一次情報(SonicOS技術ドキュメントのSchedule設定セクションおよび
+  Access Rule/Security Policyセクション)で確認できたGUI操作のみを扱い
+  ます。SonicOS CLI(E-CLI)による同等の投入方法は本手順書の一次情報では
+  確認できなかったため記載していません。CLIで投入する場合は、別途SonicOS
+  のCLIリファレンスで構文を確認してから実施してください。
+- `POLICY | Rules and Policies > Access Rules` / `Security Policy` の
+  正確なメニュー名やダイアログ項目名は、SonicOSのバージョン(7.0/7.1/8等)
+  やモード(Policy Mode/Classic Mode)により表記が異なる場合があるため、
+  適用前に自環境のGUIで実際の項目名を確認してください。
+- 管理者パスワードやAPIキーなど認証情報は、本手順書やログに平文で残さない
+  でください。記録が必要な場合は `********` のようにマスクし、秘密管理
+  ツール等で別途安全に保管してください。
