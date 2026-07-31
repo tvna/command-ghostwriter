@@ -77,7 +77,7 @@ export const RAIL: RailEntry[] = [
     group: 'サーバ',
     filter: (t) => t.category === 'server' && t.subCategory === 'RHEL系',
   },
-  { id: 'dns', label: 'DNS', icon: 'ethernet-port', group: 'その他', filter: (t) => t.category === 'dns' },
+  { id: 'middleware', label: 'ミドルウェア', icon: 'ethernet-port', group: 'その他', filter: (t) => t.category === 'middleware' },
   { id: 'ai', label: 'AIインフラ', icon: 'terminal', group: 'その他', filter: (t) => t.category === 'ai' },
   { id: 'ops', label: '運用共通', icon: 'config-file', group: 'その他', filter: (t) => t.category === 'ops' },
   { id: 'facility', label: '物理設備', icon: 'server', group: 'その他', filter: (t) => t.category === 'facility' },
@@ -100,7 +100,7 @@ const activityOf = (t: Template): TemplateActivity => t.activity ?? 'build';
 const FMT_TONE: Record<Format, 'brand' | 'info' | 'warning'> = { toml: 'brand', yaml: 'info', csv: 'warning' };
 const OUT_LABEL: Record<TemplateOutput, string> = { cli: 'CLI', config: 'config', markdown: 'Markdown' };
 
-const DOMAIN_ORDER: TemplateCategory[] = ['network', 'server', 'dns', 'ai', 'ops', 'facility'];
+const DOMAIN_ORDER: TemplateCategory[] = ['network', 'server', 'middleware', 'ai', 'ops', 'facility'];
 
 // Group templates into ordered sub-category sections. Groups are ordered by
 // their category (so same-category sub-categories stay adjacent, even in the
@@ -139,7 +139,7 @@ function CatIcon({ name, size, color }: { name: string; size: number; color?: st
 const CATEGORY_ICON: Record<TemplateCategory, string> = {
   network: 'router',
   server: 'server',
-  dns: 'ethernet-port',
+  middleware: 'ethernet-port',
   ai: 'terminal',
   ops: 'config-file',
   facility: 'server',
