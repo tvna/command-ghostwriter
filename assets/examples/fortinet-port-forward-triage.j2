@@ -1,0 +1,214 @@
+# FortiGateポートフォワード不通の切り分け手順
+
+外部から公開サーバ(`{{ int_host }}:{{ int_port }}`/{{ proto }})へ通信が届か
+ない事象を、`diagnose debug flow`によるパケットフロートレースを軸に、
+Virtual IP(VIP/NAT)設定 → ファイアウォールポリシー一致 → セッション確立
+→ 戻り経路(ルーティング)の順に切り分けます。FortiGate CLIへはSSHまたは
+コンソール、CLI Consoleから管理者権限で実行してください。本手順は既存の
+VIP・ポリシー設定を読み取り・調査するだけにとどめ、設定変更が必要と判断
+した場合は別途変更手順として実施します。
+
+## 目的
+
+外部公開サーバへの通信不通事象について、`diagnose debug flow`のトレース
+出力からVIPによる宛先NAT変換・ファイアウォールポリシー一致・セッション
+確立・戻り経路のどの段階で止まっているかを順に切り分け、原因箇所を特定
+できるようになることを目指します。
+
+## 用語解説
+
+- **diagnose debug flow**: 「Debug the packet flow when network traffic is
+  not entering and leaving the FortiGate as expected. When debugging the
+  packet flow in the CLI, each command configures a part of the debug
+  action. The final command starts the debug.」と説明される、FortiGate
+  CLIで実パケットの処理過程(受信→ルート検索→NAT→ポリシー一致→送信)を
+  1パケット単位で記録するトレース機能。基本形は`# diagnose debug flow
+  trace start`、記録するパケット数を指定する場合は`# diagnose debug flow
+  trace start <N>`、任意のタイミングで停止する場合は`# diagnose debug
+  flow trace stop`を使う。GUI版の同等機能は一次情報内の別ページで案内
+  されているが、本手順ではCLI手順のみを扱う
+- **diagnose debug flow filter / filter6**: `# diagnose debug flow
+  {filter | filter6} <option>`でトレース対象を絞り込む。IPv4環境では
+  `filter`、IPv6環境では`filter6`を使う。`<option>`に指定できる変数は
+  `addr`(IPv4 or IPv6 address)、`clear`(clear filter)、`daddr`
+  (destination IPv4 or IPv6 address)、`dport`(destination port)、
+  `negate`(inverse IPv4 or IPv6 filter)、`port`(port)、`proto`(protocol
+  number)、`saddr`(source address)、`sport`(source port)、`vd`(index of
+  virtual domain; -1 matches all)
+- **Virtual IP (VIP)**: `Policy & Objects > Virtual IPs`で定義する、外部
+  向けIP/ポート宛の通信を内部ホストのIP/ポートへ変換する宛先NAT
+  (Destination NAT)オブジェクト
+- **diagnose sys session list**: 確立済みセッション(NAT変換後のIP/ポート
+  を含む)をCLIで一覧表示するコマンド。出力は大量になりうるため、対象を
+  絞ったテスト通信の直後に実行し、目視で該当エントリを探す
+- **get router info routing-table all**: FortiGateが保持する全ルーティン
+  グテーブルをCLIで表示するコマンド
+- **トレース出力のメッセージパターン**(サンプル出力から確認できるもの):
+  ルート検索は`msg="find a route: gw-<ゲートウェイ> via <インター
+  フェース>"`、宛先NAT変換は`msg="DNAT <変換前IP:ポート>-><変換後
+  IP:ポート>"`、ポリシー一致は`msg="Allowed by Policy-<番号>:
+  <コメント>"`という形式で出力される
+
+## シナリオ設定
+
+今回調査対象のFortiGateと、公開サーバの構成は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| WAN側インターフェース(wan_interface) | `{{ wan_interface }}` |
+| 内部側インターフェース(internal_interface) | `{{ internal_interface }}` |
+| VIPオブジェクト名(vip_name) | `{{ vip_name }}` |
+| VIP外部IP(wan_ip) | {{ wan_ip }} |
+| 外部公開ポート(ext_port) | {{ ext_port }}/{{ proto }} |
+| 転送先内部ホスト(int_host) | {{ int_host }} |
+| 転送先内部ポート(int_port) | {{ int_port }}/{{ proto }} |
+| 切り分け用テスト送信元(test_source) | {{ test_source }} |
+| トレース取得パケット数(trace_packet_count) | {{ trace_packet_count }} |
+
+## 手順
+
+### 1. VIPと関連ポリシーの現状を確認する(トレース前の基準を取る)
+
+`diagnose debug flow`を実行する前に、対象のVIPオブジェクトと、それを
+参照するポリシーが有効な状態であることを確認します。ここでは設定を
+変更しません。
+
+- `Policy & Objects > Virtual IPs`を開き、VIPオブジェクト`{{ vip_name }}`
+  の外部IP({{ wan_ip }})・外部ポート({{ ext_port }}/{{ proto }})と、
+  マッピング先の内部IP({{ int_host }})・内部ポート({{ int_port }}/
+  {{ proto }})の対応関係が意図どおりであることを確認します。
+- 同じ`Policy & Objects`配下で、このVIPを宛先(Destination)に持つ
+  ポリシーが有効(Enable)になっていることを確認します。
+
+### 2. トレースフィルタを設定し、diagnose debug flowを開始する
+
+既存のフィルタが残っていると意図しない通信まで拾ってしまうため、必ず
+`clear`で初期化してから、テスト送信元(`{{ test_source }}`)からの通信
+だけに絞ってトレースします。
+
+```bash
+# diagnose debug flow filter clear
+# diagnose debug enable
+# diagnose debug flow filter addr {{ test_source }}
+# diagnose debug flow show function-name enable
+# diagnose debug flow trace start {{ trace_packet_count }}
+```
+
+`diagnose debug flow trace start {{ trace_packet_count }}`は指定した
+パケット数を記録した時点で自動的に停止します。途中で止めたい場合は
+`diagnose debug flow trace stop`を実行してください。
+
+### 3. 外部からテスト通信を発生させ、トレース出力を確認する
+
+トレース開始後、`{{ test_source }}`から`{{ wan_ip }}:{{ ext_port }}`
+へ向けてテスト通信を発生させます。
+
+```bash
+curl -v telnet://{{ wan_ip }}:{{ ext_port }}
+```
+
+トレース出力を、パケット受信→ルート検索→NAT→ポリシー一致→送信の順に
+確認し、特に次の2種類の行の有無を確認します。
+
+- 宛先が`{{ wan_ip }}:{{ ext_port }}`から`{{ int_host }}:{{ int_port }}`
+  へ変換されている`msg="DNAT ..."`行(VIPによる宛先NAT変換)
+- `msg="Allowed by Policy-<番号>: ..."`を含む行(この通信を許可した
+  ポリシーを示す)
+
+`Allowed by Policy-<番号>`の行が出力されない場合、一致するポリシーが
+存在しない(暗黙拒否)ことを意味します。手順1で確認したポリシーの
+Source/Destination/Serviceの条件を見直してください。`DNAT`行が出力
+されない場合は、手順1のVIP設定(外部IP/ポートと内部IP/ポートの対応)
+を見直してください。
+
+### 4. diagnose sys session listでセッション確立を確認する
+
+```bash
+# diagnose sys session list
+```
+
+出力の中から、`{{ wan_ip }}:{{ ext_port }}`と`{{ int_host }}:
+{{ int_port }}`の組み合わせを含むセッションエントリを確認します。
+該当エントリが見つからない場合、手順2・3のトレースをやり直すか、
+テスト通信のタイミングとセッションのタイムアウトを確認してください。
+
+### 5. get router info routing-table allで戻り経路を確認する
+
+```bash
+# get router info routing-table all
+```
+
+出力から、次の2方向の経路が想定どおりのインターフェースを指している
+ことを確認します。
+
+- `{{ int_host }}`が属するサブネット宛の経路が`{{ internal_interface }}`
+  経由になっていること(FortiGateから内部サーバへの往路)
+- `{{ test_source }}`が属するネットワーク宛(既定経路を含む)の経路が
+  `{{ wan_interface }}`経由になっていること(内部サーバからの戻り
+  パケットがFortiGateへ戻ってくるための復路)
+
+内部サーバ(`{{ int_host }}`)のデフォルトゲートウェイがFortiGateの
+`{{ internal_interface }}`側アドレス以外を指している場合、戻りパケット
+が非対称経路になり、手順4で確認したセッションテーブルと矛盾して破棄
+されます。サーバ側のルーティング設定もあわせて確認してください。
+
+### 6. トレースを終了し、フィルタを解除する
+
+調査が終わったら、トレースを停止し、次の調査に影響しないようフィルタ
+を解除します。
+
+```bash
+# diagnose debug flow trace stop
+# diagnose debug flow filter clear
+```
+
+## 動作確認
+
+- `diagnose debug flow`のトレース出力に、`{{ wan_ip }}:{{ ext_port }}`
+  から`{{ int_host }}:{{ int_port }}`への`DNAT`行と、`Allowed by
+  Policy-<番号>`を含む行の両方が記録されていること
+- `diagnose sys session list`の出力に、`{{ wan_ip }}:{{ ext_port }}`と
+  `{{ int_host }}:{{ int_port }}`の組み合わせを含むセッションエントリが
+  存在すること
+- `get router info routing-table all`の出力で、`{{ int_host }}`宛の経路
+  が`{{ internal_interface }}`経由、`{{ test_source }}`宛(既定経路を
+  含む)の経路が`{{ wan_interface }}`経由になっていること
+- `{{ test_source }}`など外部相当のホストから`curl -v telnet://
+  {{ wan_ip }}:{{ ext_port }}`で接続が確立すること
+- 調査終了後、`diagnose debug flow trace stop`と`diagnose debug flow
+  filter clear`が実行され、トレースとフィルタが残置されていないこと
+
+## 注意事項
+
+- **`diagnose debug flow`は必要な時間だけ実行すること。** 「If FortiGate
+  is connected to FortiAnalyzer or FortiCloud, the diagnose debug flow
+  output will be recorded as event log messages and then sent to the
+  devices. Do not run this command longer than necessary, as it
+  generates a significant amount of data.」と説明されており、FortiAnalyzer
+  /FortiCloud接続環境では長時間の実行が大量のデータ送信につながります。
+  調査後は必ず手順6で`diagnose debug flow trace stop`と`diagnose debug
+  flow filter clear`を実行してください。
+- **NP6/NP7プロセッサへオフロードされた通信は追跡できません。**
+  「Flow monitoring does not work for traffic offloaded to NP6 or NP7
+  processors. To use the diagnose debug flow commands with sessions
+  offloaded to NP6 or NP7 processors you can test the traffic flow using
+  ICMP (ICMP traffic is not offloaded) or you can disable NP6 or NP7
+  offloading.」と説明されている。対象通信がハードウェアオフロードされ
+  ているモデルでトレースに何も記録されない場合は、ICMPで代替テストする
+  か、`diagnose npu {np6 | np6xlite | np6lite} fastpath disable`で該当
+  NP6オフロードを一時的に無効化してから再試行する(NP7の無効化は当該
+  ポリシー側の設定が必要であり、いずれも調査用の一時措置として確認後は
+  元に戻すこと)。
+- 手順1で確認した既存のVIP・ポリシーは、原因が確定するまで無効化・削除
+  しないでください。切り分け中に一時的な変更が必要な場合も、既存の本番
+  設定とは別に追加し、確認後は速やかに元の状態へ戻してください。
+- `diagnose sys session list`の出力は大量になりうるため、対象を絞った
+  テスト通信の直後に実行し、目視で該当エントリを探してください。
+- よくある原因: (1) VIPの外部ポートと内部ポートの対応が意図と異なる、
+  (2) VIPを宛先に持つポリシーが無効化されているか、Source/Destination/
+  Serviceの条件が一致しない、(3) 内部サーバのデフォルトゲートウェイが
+  FortiGate以外を指しており戻り経路が非対称になっている。
+- CLI Console・SSH・コンソール接続に使うFortiGate管理者アカウントの
+  認証情報(パスワード、APIキー等)は本手順書に記載しません。記録が
+  必要な場合も`********`のようにマスクし、平文で本手順書やチケット・
+  ログに残さず、既存の秘密管理ツール経由で扱ってください。
