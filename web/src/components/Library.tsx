@@ -77,10 +77,10 @@ export const RAIL: RailEntry[] = [
     group: 'サーバ',
     filter: (t) => t.category === 'server' && t.subCategory === 'RHEL系',
   },
-  { id: 'dns', label: 'DNS', icon: 'ethernet-port', filter: (t) => t.category === 'dns' },
-  { id: 'ai', label: 'AIインフラ', icon: 'terminal', filter: (t) => t.category === 'ai' },
-  { id: 'ops', label: '運用共通', icon: 'config-file', filter: (t) => t.category === 'ops' },
-  { id: 'facility', label: '物理設備', icon: 'server', filter: (t) => t.category === 'facility' },
+  { id: 'dns', label: 'DNS', icon: 'ethernet-port', group: 'その他', filter: (t) => t.category === 'dns' },
+  { id: 'ai', label: 'AIインフラ', icon: 'terminal', group: 'その他', filter: (t) => t.category === 'ai' },
+  { id: 'ops', label: '運用共通', icon: 'config-file', group: 'その他', filter: (t) => t.category === 'ops' },
+  { id: 'facility', label: '物理設備', icon: 'server', group: 'その他', filter: (t) => t.category === 'facility' },
 ];
 
 // Activity axis (orthogonal to the domain category). "すべて" clears the filter.
