@@ -319,10 +319,19 @@ with:
 Run: `uv run pytest tests/unit/test_template_taxonomy.py -v`
 Expected: 2 passed
 
-- [ ] **Step 7: Confirm TypeScript compiles (green)**
+- [ ] **Step 7: Confirm TypeScript compiles, modulo known Task 4/5 scope**
 
 Run: `cd /home/user/command-ghostwriter/web && bunx tsc -b`
-Expected: no errors
+Expected: **exactly 4 errors, all in `web/src/components/Library.tsx` and `web/src/components/Library.test.tsx`** (that file's `'dns'` rail entry, `DOMAIN_ORDER` entry, `CATEGORY_ICON` entry, and test assertion still reference the old `dns` literal — that's Task 4/5's job, not this task's). `tsc -b` compiles the whole project, not just the files this task touches, so these 4 errors are expected at this point:
+
+```
+src/components/Library.test.tsx(76,41): error TS2367: ...
+src/components/Library.tsx(80,82): error TS2367: ...
+src/components/Library.tsx(103,64): error TS2322: ...
+src/components/Library.tsx(142,3): error TS2353: ...
+```
+
+If you see any error outside these two files (in particular, any error in `templates.ts`/`types.ts`), stop and report BLOCKED — that would mean Steps 1-6 have a real bug. If you see exactly these 4, proceed to Step 8.
 
 - [ ] **Step 8: Commit the taxonomy migration**
 
@@ -619,7 +628,7 @@ Call `subscribe_pr_activity` for the newly opened PR immediately after creation,
 
 - Every `category`/`subCategory` change traces to a row in the design doc's
   migration mapping table — if `git diff` after Task 2 doesn't match that
-  table exactly (88 lines, 25 of which also change `subCategory`), stop and
+  table exactly (88 lines, 26 of which also change `subCategory`), stop and
   re-check the design doc before continuing.
 - Task 2's migration script is intentionally not committed as a permanent
   repo script — it is a one-time id-anchored data migration, not a reusable

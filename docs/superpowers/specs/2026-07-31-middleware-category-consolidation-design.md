@@ -150,10 +150,10 @@ All 51 current `dns` templates move as-is: `dns-zone`,
 | db-connection-failure-triage | データベース | データベース (category only) |
 | db-slow-query-triage | データベース | データベース (category only) |
 
-Total: 51 + 21 + 16 = 88 templates change `category`; of those, 25 also
+Total: 51 + 21 + 16 = 88 templates change `category`; of those, 26 also
 change `subCategory` (the 21 renamed `プロキシ / Web` → `プロキシ`, plus
-`squid-forward-proxy`, `apache-vhost-setup`, `haproxy-load-balancer`,
-`postfix-send-only`).
+`squid-forward-proxy`, `nginx-reverse-proxy`, `apache-vhost-setup`,
+`haproxy-load-balancer`, `postfix-send-only`).
 
 No other `server`/`network` templates are affected — in particular, `VPN`
 (`openvpn-server-setup`, `wireguard-vpn-server`, both `Debian系`),
