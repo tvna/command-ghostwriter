@@ -434,7 +434,7 @@ EOF
 - Modify: `web/src/components/Library.tsx` (add constants; replace the `ai` entry)
 - Test: `web/src/components/Library.test.tsx`
 
-- [ ] **Step 1: Update the failing test**
+- [x] **Step 1: Update the failing test**
 
 In `Library.test.tsx`, add a new const alongside `MIDDLEWARE_RAIL`:
 
@@ -476,12 +476,12 @@ with:
     "ai-ops": 32,
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cd web && bun run test -- Library.test.tsx`
 Expected: FAIL — `AI_RAIL` has length 0 (not 3); the new exhaustiveness test fails with every ai template matching 0 entries.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `Library.tsx`, after the `MIDDLEWARE_DNS_COMMON` constant added in Task 3, add:
 
@@ -524,17 +524,17 @@ with:
   },
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd web && bun run test -- Library.test.tsx`
 Expected: PASS — all tests in the file green, including the full `EXPECTED` table (all 34 rail entries now accounted for).
 
-- [ ] **Step 5: Type-check**
+- [x] **Step 5: Type-check**
 
 Run: `cd web && bunx tsc -b`
 Expected: exit 0.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add web/src/components/Library.tsx web/src/components/Library.test.tsx
