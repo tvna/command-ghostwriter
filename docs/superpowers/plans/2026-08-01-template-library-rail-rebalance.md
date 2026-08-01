@@ -28,7 +28,7 @@ No other file changes. Confirmed by grep: no other source file under `web/src` o
 - Modify: `web/src/components/Library.tsx:39-40` (add constants), `:53-59` (replace one entry with three)
 - Test: `web/src/components/Library.test.tsx:109-133` (exclusivity/exhaustiveness), `:135-170` (EXPECTED counts)
 
-- [ ] **Step 1: Update the failing test — network rail count and EXPECTED table**
+- [x] **Step 1: Update the failing test — network rail count and EXPECTED table**
 
 In `web/src/components/Library.test.tsx`, inside `describe("RAIL predicate exclusivity and exhaustiveness", ...)`, replace the combined length assertion with one `it` per category (this also prepares slots for Task 2-4 without touching them yet):
 
@@ -65,12 +65,12 @@ with:
     "network-common-other": 35,
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cd web && bun run test -- Library.test.tsx`
 Expected: FAIL — `NETWORK_RAIL` has length 15 (not 17); `no expected count recorded for rail entry "network-common"` (the old id no longer has a matching `EXPECTED` key once Library.tsx changes, but right now Library.tsx is unchanged, so instead the failure is `countByCategory(...)` for the now-undefined `EXPECTED["network-common"]` — confirm the actual reported failure mentions `network-common-security`/`network-common-vpn`/`network-common-other` not being defined, or the length-17 assertion failing with actual 15.
 
-- [ ] **Step 3: Implement — add cluster constants and split the rail entry**
+- [x] **Step 3: Implement — add cluster constants and split the rail entry**
 
 In `web/src/components/Library.tsx`, after line 40 (`const SERVER_SPLIT_LABELS = new Set(['Debian系', 'RHEL系', 'コンテナ']);`), add:
 
@@ -125,17 +125,17 @@ with:
   },
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd web && bun run test -- Library.test.tsx`
 Expected: PASS (all tests in the file, including the still-unmodified server/middleware/ai assertions, which are untouched by this task).
 
-- [ ] **Step 5: Type-check**
+- [x] **Step 5: Type-check**
 
 Run: `cd web && bunx tsc -b`
 Expected: exit 0, no errors.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add web/src/components/Library.tsx web/src/components/Library.test.tsx
