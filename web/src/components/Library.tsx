@@ -72,6 +72,11 @@ const MIDDLEWARE_DNS_COMMON = new Set([
   '監視',
 ]);
 
+// ai sub-clusters. AIインフラ (運用・ガバナンス) is the residual catch-all
+// for every ai subCategory not in the two sets below.
+const AI_INFRA = new Set(['GPUクラスタ', 'GPU基盤', 'GPU監視', 'NVIDIA DGX', 'データ基盤', 'ベクトルDB']);
+const AI_MODEL = new Set(['モデル管理', '推論サーバ', 'MLOps', 'エージェント基盤']);
+
 export const RAIL: RailEntry[] = [
   { id: 'all', label: 'すべて', icon: 'topology', filter: () => true },
   ...NETWORK_VENDORS.map(
@@ -194,7 +199,27 @@ export const RAIL: RailEntry[] = [
       t.subCategory !== 'Unbound' &&
       !MIDDLEWARE_DNS_COMMON.has(t.subCategory),
   },
-  { id: 'ai', label: 'AIインフラ', icon: 'terminal', group: 'その他', filter: (t) => t.category === 'ai' },
+  {
+    id: 'ai-infra',
+    label: 'AIインフラ (基盤・GPU)',
+    icon: 'terminal',
+    group: 'AIインフラ',
+    filter: (t) => t.category === 'ai' && AI_INFRA.has(t.subCategory),
+  },
+  {
+    id: 'ai-model',
+    label: 'AIインフラ (モデル・推論)',
+    icon: 'terminal',
+    group: 'AIインフラ',
+    filter: (t) => t.category === 'ai' && AI_MODEL.has(t.subCategory),
+  },
+  {
+    id: 'ai-ops',
+    label: 'AIインフラ (運用・ガバナンス)',
+    icon: 'terminal',
+    group: 'AIインフラ',
+    filter: (t) => t.category === 'ai' && !AI_INFRA.has(t.subCategory) && !AI_MODEL.has(t.subCategory),
+  },
   { id: 'ops', label: '運用共通', icon: 'config-file', group: 'その他', filter: (t) => t.category === 'ops' },
   { id: 'facility', label: '物理設備', icon: 'server', group: 'その他', filter: (t) => t.category === 'facility' },
 ];

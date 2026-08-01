@@ -110,6 +110,7 @@ describe("RAIL predicate exclusivity and exhaustiveness", () => {
   const NETWORK_RAIL = RAIL.filter((r) => r.id.startsWith("network-"));
   const SERVER_RAIL = RAIL.filter((r) => r.id.startsWith("server-"));
   const MIDDLEWARE_RAIL = RAIL.filter((r) => r.id.startsWith("middleware-"));
+  const AI_RAIL = RAIL.filter((r) => r.id.startsWith("ai-"));
 
   it("has exactly 17 network entries", () => {
     expect(NETWORK_RAIL).toHaveLength(17);
@@ -121,6 +122,10 @@ describe("RAIL predicate exclusivity and exhaustiveness", () => {
 
   it("has exactly 3 middleware entries", () => {
     expect(MIDDLEWARE_RAIL).toHaveLength(3);
+  });
+
+  it("has exactly 3 ai entries", () => {
+    expect(AI_RAIL).toHaveLength(3);
   });
 
   it("every network template matches exactly one network rail entry", () => {
@@ -144,6 +149,14 @@ describe("RAIL predicate exclusivity and exhaustiveness", () => {
     for (const t of middlewareTemplates) {
       const matches = MIDDLEWARE_RAIL.filter((r) => r.filter(t));
       expect(matches, `template ${t.id} (subCategory "${t.subCategory}") matched ${matches.length} middleware rail entries, want 1`).toHaveLength(1);
+    }
+  });
+
+  it("every ai template matches exactly one ai rail entry", () => {
+    const aiTemplates = CGTemplates.filter((t) => t.category === "ai");
+    for (const t of aiTemplates) {
+      const matches = AI_RAIL.filter((r) => r.filter(t));
+      expect(matches, `template ${t.id} (subCategory "${t.subCategory}") matched ${matches.length} ai rail entries, want 1`).toHaveLength(1);
     }
   });
 });
@@ -179,7 +192,9 @@ describe("RAIL counts against real template data", () => {
     "middleware-unbound": 21,
     "middleware-dns": 30,
     "middleware-services": 37,
-    ai: 114,
+    "ai-infra": 34,
+    "ai-model": 48,
+    "ai-ops": 32,
     ops: 43,
     facility: 20,
   };
