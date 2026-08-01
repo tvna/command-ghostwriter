@@ -1,0 +1,144 @@
+# SonicWall (SonicOS) 複数拠点ファイアウォールの一元管理コンソール登録
+
+複数拠点に配置した {{ firewalls | length }} 台のSonicWallファイアウォールを、
+MySonicWallアカウント配下にシリアル番号で登録したうえでZero Touch (ZT) を
+有効化し、Network Security Manager (NSM) のテナント `{{ nsm_tenant_name }}`
+配下へオンボーディングします。オンボーディング後は、Unified Policy
+Managementによってテナント配下のファイアウォール群へポリシーを一元配信
+できる状態にします。
+
+## 目的
+
+拠点ごとに個別管理していた複数のSonicWallファイアウォールを、シリアル
+番号によるMySonicWall登録とZero Touchによって手作業のVPN/トンネル設定
+なしにNSMのテナントへ収容し、ポリシー配布・設定変更をテナント単位で
+一元管理できる状態にすることを目指します。あわせて、オンボーディングが
+正しく完了したことをNSM側の接続ステータスで確認する手順を身につけます。
+
+## 用語解説
+
+- **MySonicWallアカウント**: SonicWall製品のシリアル番号を登録し、
+  ライセンスやサポート契約、管理方式(Managed By)を紐づけるベンダー
+  提供のオンラインアカウント。ファイアウォールをNSMで一元管理する
+  第一歩として、対象機器をこのアカウント配下にシリアル番号で登録する
+  必要がある
+- **Managed By(On-Box / Cloud)**: MySonicWallアカウント上の機器詳細
+  ページにあるフィールドで、その機器をローカル(On-Box)で管理するか
+  クラウド側(NSM)から管理するかを切り替える。`On-Box` から `Cloud`
+  へ変更することがZero Touch有効化の操作にあたる
+- **Zero Touch (ZT)**: `Managed By` を `Cloud` に切り替えた機器が、
+  電源投入とインターネット接続後に現地での事前設定なしでNSMへ
+  アウトバウンドの管理トンネル({{ zt_management_ports }})を自動確立し、
+  自身をNSM側の管理対象として登録させる仕組み
+- **NSM テナント**: NSM上でファイアウォール群をグループ化する管理単位。
+  Zero Touchで接続してきたファイアウォールは、いずれかのテナント配下に
+  割り当てることで、そのテナントのポリシーやテンプレートの適用対象になる
+- **Firewalls > Inventory(ZERO TOUCH列)**: NSMの管理画面でテナント
+  配下のファイアウォール一覧を表示する画面。各行の `ZERO TOUCH` 列に
+  管理トンネルの接続状況(`Not Connected` / `Connected` など)が表示される
+- **Unified Policy Management**: NSMが提供する、テナント配下の複数
+  ファイアウォールに対してL3〜L7のルールを一元的に管理・配信する機能。
+  個々のファイアウォールにログインして設定を反映する代わりに、テナント
+  側で管理したポリシーをまとめて対象機器群に配信できる
+
+## シナリオ設定
+
+MySonicWallアカウント(`{{ mysonicwall_account_email }}`)配下に登録し、
+NSMテナント `{{ nsm_tenant_name }}` へオンボーディングする対象は次の
+{{ firewalls | length }} 台です。
+
+| # | 拠点 | モデル | シリアル番号 | 現在のManaged By | オンボーディング前のZero Touch状態 |
+|---|------|--------|--------------|-------------------|--------------------------------------|
+{% for f in firewalls %}| {{ loop.index }} | {{ f["site_name"] }} | {{ f["model"] }} | {{ f["serial_number"] }} | {{ f["current_managed_by"] }} | {{ f["zero_touch_status_before"] }} |
+{% endfor %}
+
+オンボーディング完了後は、テナント配下のこの{{ firewalls | length }}台に
+対して `{{ policy_baseline_name }}` を共通のベースラインポリシーとして
+Unified Policy Managementから配信します。
+
+## 手順
+
+### 1. 対象ファイアウォールをMySonicWallアカウントにシリアル番号で登録する
+
+MySonicWallアカウント(`{{ mysonicwall_account_email }}`)にログインし、
+下記{{ firewalls | length }}台それぞれのシリアル番号で機器登録を行います。
+ログインパスワードはテンプレートやログに平文で残さず、`********` の
+ようにマスクして扱ってください。
+
+{% for f in firewalls %}- {{ loop.index }}台目: {{ f["site_name"] }} / {{ f["model"] }} / シリアル番号 {{ f["serial_number"] }}
+{% endfor %}
+
+### 2. 各ファイアウォールのManaged ByをOn-BoxからCloudへ変更してZero Touchを有効化する
+
+MySonicWallアカウント上で対象機器のシリアル番号をクリックして機器詳細
+ページを開き、`Managed By` を `{{ firewalls[0]["current_managed_by"] }}`
+から `Cloud` へ変更します。
+
+{% for f in firewalls %}- {{ f["site_name"] }}({{ f["serial_number"] }}): Managed By を `{{ f["current_managed_by"] }}` から `Cloud` へ変更
+{% endfor %}
+
+変更後、対象ファイアウォール本体の電源を投入し、インターネットに接続
+された状態にします。現地での事前設定は不要です。
+
+### 3. NSMのテナントにファイアウォールを割り当てる
+
+Managed ByをCloudへ変更した機器は、電源投入とインターネット接続後、
+{{ zt_management_ports }} を用いたアウトバウンドの管理トンネルをNSMへ
+自動的に確立しようとします。NSM側でこのトンネルの接続先として
+テナント `{{ nsm_tenant_name }}` を割り当て、{{ firewalls | length }}台
+すべてがこのテナント配下に収容されるようにします。
+
+### 4. NSMのFirewalls > Inventory でZero Touch接続状況を確認する
+
+NSMでテナント `{{ nsm_tenant_name }}` を開き、`Firewalls > Inventory`
+画面の一覧に{{ firewalls | length }}台すべてが表示されていること、
+各行の `ZERO TOUCH` 列がオンボーディング前の状態
+(`{{ firewalls[0]["zero_touch_status_before"] }}`)から接続済みの状態へ
+変わっていることを確認します。
+
+{% for f in firewalls %}- {{ f["site_name"] }}({{ f["serial_number"] }}): `ZERO TOUCH` 列が `{{ f["zero_touch_status_before"] }}` から接続済みへ変わっていることを確認
+{% endfor %}
+
+### 5. Unified Policy Managementでベースラインポリシーをテナント配下へ一元配信する
+
+テナント `{{ nsm_tenant_name }}` のUnified Policy Managementから、
+`{{ policy_baseline_name }}` をテナント配下の{{ firewalls | length }}台
+全てに対する共通ポリシーとして配信します。配信対象は手順4で接続確認が
+取れた機器のみとし、未接続の機器が残っている場合は先に手順3・4に戻って
+接続を確認してください。具体的な配信操作のメニュー名・ボタン名は
+NSMのバージョンや導入形態(On-Prem / SaaS)によって異なるため、お使いの
+NSM管理者ガイドのUnified Policy関連章を参照して実施してください。
+
+## 動作確認
+
+- MySonicWallアカウント上で、{{ firewalls | length }}台すべての
+  `Managed By` が `Cloud` になっていること
+- NSMのテナント `{{ nsm_tenant_name }}` の `Firewalls > Inventory` に
+  {{ firewalls | length }}台すべてが表示され、各行の `ZERO TOUCH` 列が
+  オンボーディング前の `{{ firewalls[0]["zero_touch_status_before"] }}`
+  から接続済みの状態に変わっていること
+- テナント配下の{{ firewalls | length }}台全てに `{{ policy_baseline_name }}`
+  が共通ポリシーとして配信され、各機器で同一のベースライン設定が
+  適用されていること
+
+## 注意事項
+
+- 本手順書は、SonicWall NSMのファイアウォールオンボーディングに関する
+  一次情報ページ(NSM On-Prem管理者ガイドの該当章)への直接アクセスを
+  試みましたが、本セッションの環境からは同ページの本文を取得できません
+  でした。そのため、本手順書は課題文で提示されたネイティブ機構の説明
+  (シリアル番号によるMySonicWall登録、Zero Touch有効化、NSMテナントへの
+  収容、Unified Policy Managementによるポリシー一元配信)の範囲内で、
+  実在が確認できる一般的な操作のみを記載しています。手順5の具体的な
+  配信メニュー名など、確認できなかった細部は断定せず、お使いのNSM
+  管理者ガイドで最終確認してから実施してください。
+- `Managed By` を `Cloud` に変更した直後は、ファイアウォールがNSMへの
+  管理トンネルを確立するまで数分程度かかる場合があります。手順4の
+  接続確認は時間をおいてから行ってください。
+- 同一シリアル番号の機器を誤って複数のテナントに割り当てないよう、
+  手順3でテナントを割り当てる前に、対象機器がどのテナントにも未割り当て
+  であることを確認してください。
+- MySonicWallアカウントのログインパスワードやAPIキーなどの認証情報は、
+  本手順書やログに平文で残さないでください。記録が必要な場合は
+  `********` のようにマスクし、秘密管理ツール等で別途安全に保管して
+  ください。

@@ -1,0 +1,29 @@
+fw_gui_host = "fw.example.com"
+fw_gui_port = 443
+acme_ca_name = "Let's Encrypt"
+acme_validation_method = "HTTP-01"
+acme_cert_descr = "ACME-GUI-fw.example.com"
+automation_descr = "Reload-WebGUI-After-Issue"
+automation_action = "Restart OPNsense Web UI"
+vpn_ca_descr = "Internal-VPN-CA"
+vpn_server_cert_descr = "OpenVPN-Server-Cert"
+vpn_crl_descr = "Internal-VPN-CRL"
+vpn_interface_descr = "OpenVPN Remote Access"
+
+[[vpn_client_certs]]
+name = "vpn-client-tanaka"
+descr = "T.Tanaka notebook"
+status = "valid"
+reason = "-"
+
+[[vpn_client_certs]]
+name = "vpn-client-sato"
+descr = "S.Sato notebook (lost device, reported 2026-07-28)"
+status = "revoke"
+reason = "Key Compromise"
+
+[[vpn_client_certs]]
+name = "vpn-client-suzuki"
+descr = "K.Suzuki tablet"
+status = "valid"
+reason = "-"

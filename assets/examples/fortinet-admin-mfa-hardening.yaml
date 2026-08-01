@@ -1,0 +1,13 @@
+target_administrators:
+  - username: "netadmin_taro"
+    email: "netadmin.taro@example.co.jp"
+    token_serial: "FTKMOB0A12345678"
+  - username: "netadmin_hanako"
+    email: "netadmin.hanako@example.co.jp"
+    token_serial: "FTKMOB0A12345679"
+auth_type: "fortitoken"
+backup_administrator:
+  username: "netadmin_failsafe"
+  accprofile: "super_admin"
+  vdom: "root"
+ntp_server: "ntp.nict.jp"

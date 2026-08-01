@@ -1,0 +1,27 @@
+otp_method: "TOTP"
+authenticator_apps:
+  - "Google Authenticator"
+  - "Microsoft Authenticator"
+  - "Duo"
+  - "Free-OTP"
+target_admins:
+  - username: "admin"
+    role: "スーパー管理者(既定admin)"
+    is_verification: false
+    reason: "GUI/CLI双方のフル管理権限を持つため最優先でTOTPを必須化する"
+  - username: "noc-oncall"
+    role: "運用チーム当番管理者"
+    is_verification: true
+    reason: "夜間・休日の一次対応でログインするアカウントであり、影響範囲が小さいためまずこのアカウントで検証する"
+  - username: "msp-support"
+    role: "運用委託先MSPの限定管理者"
+    is_verification: false
+    reason: "リモート保守作業でログインするため、検証完了後に展開する"
+scratch_code_storage:
+  - custodian: "情報システム部(パスワードマネージャー管理者)"
+    location: "組織共有Vaultの「SonicWall-Emergency-TOTP」専用エントリ"
+    review_cycle: "四半期ごとにエントリへのアクセス権を棚卸しする"
+  - custodian: "本社NOC責任者(施錠保管庫)"
+    location: "封印済み封筒に印字して二重化保管する"
+    review_cycle: "半期ごとにTOTP再登録を行い封筒の中身を差し替える"
+cli_recovery_kb_title: "How to remove 2FA for admin using CLI"

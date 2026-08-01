@@ -1,0 +1,20 @@
+proxy_zone_name: proxy-client-zone
+current_proxy_type: Transparent Proxy
+target_proxy_type: Explicit Proxy
+client_segments:
+  - name: 本社PCセグメント(MDM管理下)
+    network: 10.20.0.0/24
+    note: PACファイル配布はMDM経由で設定済み
+  - name: 会議室ゲストWi-Fiセグメント
+    network: 10.20.50.0/24
+    note: "-"
+listening_interface_name: ethernet1/3
+listening_interface_zone: proxy-client-zone
+upstream_loopback_interface_name: loopback.10
+proxy_ip: 192.0.2.10
+dns_proxy_profile_name: proxy-dns-profile
+authentication_service_type: Kerberos SSO
+connect_timeout_seconds: 30
+decryption_profile_name: proxy-decrypt-profile
+security_policy_rule_name: allow-explicit-proxy-egress
+transparent_dnat_rule_name: transparent-proxy-dnat

@@ -1,0 +1,173 @@
+# FortiGate管理者アカウントのMFA必須化とロックアウト対策
+
+FortiGate(FortiOS)の管理者アカウント{{ target_administrators | length }}件に、
+`System > Administrators` の Two-factor Authentication と FortiToken/
+FortiToken Cloudを使った多要素認証(MFA)を必須化します。ただしMFA対象の
+アカウントを先に変更してしまうと、トークン紛失や端末故障で当人がログイン
+できなくなった際に復旧手段を失うため、公式ドキュメントが明示的に推奨する
+とおり、MFAを有効化する**前**にFortiGateへのアクセスを保証する予備の管理者
+アカウント(`{{ backup_administrator.username }}`)を先に作成しておきます。
+
+## 目的
+
+FortiGateの管理者アカウントに対し、`System > Administrators` の
+Two-factor AuthenticationとAuthentication Type(FortiToken/FortiToken
+Cloud)を用いてMFAを必須化できるようになることを目指します。あわせて、
+MFA対象アカウントで認証できなくなった場合に備え、事前に予備の管理者
+アカウントを用意しておくというフェイルセーフの適用順序を実践し、MFA
+デバイス紛失等の緊急時にもFortiGateの管理アクセスを失わない体制を構築
+できるようになることを目指します。
+
+## 用語解説
+
+- **Two-factor Authentication**: `System > Administrators` で個々の管理者
+  アカウントを編集する際に有効化できるチェックボックス。有効化すると、
+  ユーザー名/パスワードでのログインに加えてトークンコードの入力が必要に
+  なる
+- **Authentication Type**: Two-factor Authenticationを有効化すると表示
+  される選択項目。ローカルで払い出す「FortiToken」(モバイルアプリで
+  ワンタイムパスワードを生成)と、Fortinetのクラウドサービスでトークンを
+  管理する「FortiToken Cloud」のいずれかを選択する。CLIでは
+  `config system admin` の `edit <administrator-name>` 配下で、前者は
+  `set two-factor fortitoken`、後者は `set two-factor fortitoken-cloud`
+  に対応する
+- **Token(ドロップダウン)/ fortitoken(CLI)**: Authentication Typeで
+  「FortiToken」を選んだ場合に表示される、そのアカウントに割り当てる
+  トークンのシリアル番号を選択するドロップダウン。CLIでは
+  `set fortitoken <シリアル番号>` に対応する
+- **Email Address / email-to**: 有効化コードやワンタイムパスワードの通知
+  を送るメールアドレス。GUIのEmail Address欄、CLIの
+  `set email-to <メールアドレス>` に対応する
+- **予備管理者アカウント(フェイルセーフ用)**: 一次情報が明示的に推奨する、
+  MFAを有効化する前に作成しておく別の管理者アカウント。MFA対象アカウント
+  で認証できなくなった場合(トークン紛失・端末故障等)でもFortiGateへの
+  アクセスを保証するために用意する。本手順書ではこのアカウントには
+  Two-factor Authenticationを有効化せず、緊急時の復旧経路として温存する
+- **accprofile**: 管理者アカウントに割り当てるアクセスプロファイル名。CLI
+  で新規に管理者アカウントを作成する際、`config system admin` の `edit`
+  配下で `set accprofile <プロファイル名>` として指定する項目
+
+## シナリオ設定
+
+MFAを必須化する対象の管理者アカウント({{ target_administrators | length }}件):
+
+| # | アカウント名 | Email Address | Token(シリアル番号) |
+|---|--------------|----------------|----------------------|
+{% for admin in target_administrators %}| {{ loop.index }} | {{ admin.username }} | {{ admin.email }} | {{ admin.token_serial }} |
+{% endfor %}
+| 項目 | 値 |
+|------|-----|
+| Authentication Type(auth_type) | {{ auth_type }} |
+| 予備管理者アカウント名(backup_administrator.username) | {{ backup_administrator.username }} |
+| 予備管理者アカウントのAdministrator Profile(backup_administrator.accprofile) | {{ backup_administrator.accprofile }} |
+| 予備管理者アカウントのVDOM(backup_administrator.vdom) | {{ backup_administrator.vdom }} |
+| 確認対象のNTPサーバー(ntp_server) | {{ ntp_server }} |
+
+## 手順
+
+### 1. フェイルセーフ用の予備管理者アカウントを作成する(MFA対象アカウントの設定より先に実施)
+
+対象アカウントのMFAを有効化する前に、緊急時にFortiGateへアクセスできる
+予備アカウントを用意します。`System > Administrators` で `Create New` から
+`Administrator` を選び、ユーザー名 `{{ backup_administrator.username }}`、
+Administrator Profileに `{{ backup_administrator.accprofile }}` を設定して
+作成します。**このアカウントにはTwo-factor Authenticationを有効化しません。**
+
+```bash
+config system admin
+    edit "{{ backup_administrator.username }}"
+        set accprofile "{{ backup_administrator.accprofile }}"
+        set vdom "{{ backup_administrator.vdom }}"
+    next
+end
+```
+
+パスワードはGUI/CLIの対話操作でその場で入力し、本手順書や作業ログには
+記載しません(マスク表記の例: `****`)。
+
+### 2. NTPの同期状態を確認する
+
+ワンタイムパスワードの検証にはFortiGateとトークン側の時刻同期が必須です。
+`System > Settings` を開き、NTPサーバーが `{{ ntp_server }}` に設定されて
+おり、同期(Synchronized)していることを確認します。ズレがある場合は
+トークンコードの検証に失敗するため、後続の手順に進む前に同期させて
+ください。
+
+### 3. 対象の管理者アカウントでTwo-factor Authenticationを有効化する(GUI)
+
+`System > Administrators` を開き、次の各アカウントを編集します。
+
+{% for admin in target_administrators %}- `{{ admin.username }}` を編集し、Email Address欄に `{{ admin.email }}` を
+  設定したうえで `Two-factor Authentication` を有効化し、Authentication
+  Typeで{% if auth_type == "fortitoken" %}「FortiToken」を選択し、Tokenドロップダウンでシリアル番号
+  `{{ admin.token_serial }}` を割り当てる{% else %}「FortiToken Cloud」を選択する{% endif %}。
+{% endfor %}
+入力後は `OK` で保存します。
+
+### 4. 同じ内容をCLIでも設定する
+
+```bash
+config system admin
+{% for admin in target_administrators %}    edit "{{ admin.username }}"
+        set email-to "{{ admin.email }}"
+{% if auth_type == "fortitoken" %}        set two-factor fortitoken
+        set fortitoken {{ admin.token_serial }}
+{% else %}        set two-factor fortitoken-cloud
+{% endif %}    next
+{% endfor %}end
+```
+
+### 5. 予備管理者アカウントでログインできることを検証する(現在のセッションは維持したまま)
+
+**今使っているGUI/SSHセッションは切断せずに残したまま**、別端末または
+同じ端末の別ターミナル/別ブラウザタブから、`{{ backup_administrator.username }}`
+でログインできることを確認します。このアカウントにはTwo-factor
+Authenticationを有効化していないため、ユーザー名/パスワードのみで
+ログインできるはずです。
+
+```bash
+# 別ターミナルで実行する。トークンコードなしでログインできることを確認する
+ssh {{ backup_administrator.username }}@<firewall-mgmt-ip>
+```
+
+**この接続確認が成功するまで、次の手順には進まないでください。** 失敗した
+場合は手順1の予備アカウント作成内容を見直し、元のセッションから修正します。
+
+### 6. 対象アカウントでトークンコード入力を伴うログインを検証する
+
+{% for admin in target_administrators %}- `{{ admin.username }}`: {% if auth_type == "fortitoken" %}モバイルアプリでFortiTokenをアクティベートしたうえで{% else %}`{{ admin.email }}` 宛のFortiToken Cloud案内メールに従って有効化したうえで{% endif %}
+  ログインし、ユーザー名/パスワード入力後にトークンコードの入力画面が
+  表示され、正しいコードでログインが完了することを確認します。
+{% endfor %}
+
+## 動作確認
+
+- 予備管理者アカウント(`{{ backup_administrator.username }}`)が作成済みで、
+  Two-factor Authenticationを有効化していないこと、かつ手順5でログインが
+  成功していること
+- シナリオ設定の各管理者アカウント({{ target_administrators | length }}件)
+  で `Two-factor Authentication` が有効化され、Authentication Typeが
+  `{{ auth_type }}` に設定されていること
+- `System > Settings` のNTPサーバーが `{{ ntp_server }}` で同期
+  (Synchronized)していること
+- 手順6で、対象アカウントそれぞれがトークンコード入力を伴うログインに
+  成功すること
+
+## 注意事項
+
+- **適用順序を厳守すること。** 予備管理者アカウントを作成し、手順5で
+  ログインできることを確認してから、対象アカウントのMFAを有効化する。
+  順序を逆にすると、MFA対象アカウントが認証不能になった際に復旧手段が
+  なくFortiGateへアクセスできなくなるおそれがある。
+- 予備管理者アカウント(`{{ backup_administrator.username }}`)には
+  Two-factor Authenticationを有効化しないこと。緊急時の復旧経路として
+  機能させるための唯一の例外である。
+- 予備管理者アカウントのパスワードも通常のアカウントと同様に厳重に管理し、
+  平常運用では使用しないこと。パスワードの値は本手順書やログに平文で
+  記載せず、`****` のようにマスクして扱う。
+- トークンのアクティベーションには有効期限があるため、Tokenの割当て後は
+  速やかにモバイルアプリまたは案内メールの手順でアクティベーションを
+  完了させること。
+- NTPが同期していない状態でトークンを割り当てると、正しいコードを入力
+  してもログインに失敗する場合があるため、手順2の確認を必ず先に行う
+  こと。

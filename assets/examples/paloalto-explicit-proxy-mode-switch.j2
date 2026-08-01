@@ -1,0 +1,187 @@
+# PAN-OS プロキシ動作モードの切り替え(透過型 → 明示的プロキシ)
+
+PAN-OS の Web Proxy機能は `Network > Proxy` の Proxy Enablement設定にある
+Proxy Typeで「{{ current_proxy_type }}」と「{{ target_proxy_type }}」を
+切り替えられます。クライアント側の設定変更なしに使える
+{{ current_proxy_type }}のみで運用してきた `{{ proxy_zone_name }}` ゾーンに
+ついて、PACファイル配布が完了した{{ client_segments | length }} 件の
+セグメントを対象に {{ target_proxy_type }}へ切り替え、認証方式
+({{ authentication_service_type }})によるユーザー単位の可視化を有効に
+します。Proxy Typeは同一プロキシインスタンス内で排他的な設定のため、
+切り替え後は{{ current_proxy_type }}前提で組んでいた既存設定
+(`{{ transparent_dnat_rule_name }}` のDNATルールなど)の要否を必ず見直します。
+
+## 目的
+
+PAN-OSのWeb Proxy機能が備える {{ current_proxy_type }}と
+{{ target_proxy_type }}という2つの動作モードの違いを理解し、クライアント
+側にプロキシ設定(PACファイル等)が可能になったセグメントを対象に、
+運用課題である「状況に応じたプロキシモードの使い分け」を安全な手順
+(現状確認 → 新モードに必要な要素の準備 → Proxy Type切り替え → Commit →
+検証)で実践できるようになることを目指します。
+
+## 用語解説
+
+- **Proxy Type({{ current_proxy_type }} / {{ target_proxy_type }})**:
+  `Network > Proxy` の Proxy Enablement設定で選択する、Web Proxy機能の
+  動作モード。一次情報には "Select Explicit Proxy as the Proxy Type" と
+  あり、この項目でどちらのモードを有効にするかを選択する
+- **{{ target_proxy_type }}(明示的プロキシ)**: 一次情報には "the request
+  contains the destination IP address of the configured proxy and the
+  client browser sends requests to the proxy directly" と記載されており、
+  クライアント側でプロキシ宛先(PACファイル等)を設定する必要がある方式。
+  ブラウザがプロキシの存在を認識しているため、トラブルシューティングが
+  しやすいという特徴も一次情報に記載されている
+- **{{ current_proxy_type }}(透過型プロキシ)**: 一次情報には "the request
+  contains the destination IP address of the web server and the proxy
+  transparently intercepts the client request" および "There is no client
+  configuration" と記載されており、クライアント側の設定変更が不要な方式。
+  ループバックインターフェース、プロキシゾーンでのUser-ID設定、および
+  専用のDNAT(Destination NAT)ルールが必要になると一次情報に記載されている
+- **Listening Interface / Upstream Interface / Proxy IP**:
+  {{ target_proxy_type }}の設定項目。Listening Interfaceはクライアントからの
+  接続を受け付けるインターフェース、Upstream Interfaceは折り返し用の
+  インターフェース(ループバックインターフェースを指定可能)、Proxy IPは
+  一次情報に "Enter the IP address of the interface you created in an
+  earlier step" とある通り、Upstream Interfaceに設定したIPアドレスを指定する
+- **Authentication Service**: {{ target_proxy_type }}で選択する認証方式の
+  設定項目。一次情報には選択肢として SAML/CAS と Kerberos Single Sign On が
+  挙げられている
+- **Decryption Profile の Block sessions on SNI mismatch**: 一次情報には
+  "Select Objects → Decryption Profile and select Block sessions on SNI
+  mismatch" と記載されている、ドメインフロンティング対策の設定
+
+## シナリオ設定
+
+現在の運用と、切り替え対象・切り替え後に必要な設定値は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| 対象ゾーン(proxy_zone_name) | {{ proxy_zone_name }} |
+| 現在のProxy Type(current_proxy_type) | {{ current_proxy_type }} |
+| 切り替え後のProxy Type(target_proxy_type) | {{ target_proxy_type }} |
+
+切り替え対象セグメント一覧(client_segments、{{ client_segments | length }} 件):
+
+| # | セグメント名 | ネットワーク | 備考 |
+|---|--------------|--------------|------|
+{% for seg in client_segments %}| {{ loop.index }} | {{ seg["name"] }} | {{ seg["network"] }} | {% if seg["note"] != "-" %}{{ seg["note"] }}{% else %}(特記事項なし){% endif %} |
+{% endfor %}
+
+{{ target_proxy_type }}側で新規に用意するネットワーク要素:
+
+| 項目 | 値 |
+|------|-----|
+| Listening Interface(listening_interface_name) | {{ listening_interface_name }} |
+| Listening Interfaceのゾーン(listening_interface_zone) | {{ listening_interface_zone }} |
+| Upstream Interface(upstream_loopback_interface_name) | {{ upstream_loopback_interface_name }} |
+| Proxy IP(proxy_ip) | {{ proxy_ip }} |
+| DNS Proxyオブジェクト名(dns_proxy_profile_name) | {{ dns_proxy_profile_name }} |
+| Authentication Service(authentication_service_type) | {{ authentication_service_type }} |
+| Connect Timeout(connect_timeout_seconds) | {{ connect_timeout_seconds }} 秒 |
+| Decryption Profile名(decryption_profile_name) | {{ decryption_profile_name }} |
+| セキュリティポリシールール名(security_policy_rule_name) | {{ security_policy_rule_name }} |
+
+見直し対象となる既存({{ current_proxy_type }}用)の設定:
+
+| 項目 | 値 |
+|------|-----|
+| DNATルール名(transparent_dnat_rule_name) | {{ transparent_dnat_rule_name }} |
+
+## 手順
+
+### 1. 現在のProxy Typeと対象セグメントを確認する(切り替え前の基準を取る)
+
+`Network > Proxy` の Proxy Enablement設定を開き、現在のProxy Typeが
+`{{ current_proxy_type }}` になっていることを確認します。あわせて、
+切り替え対象セグメントのうち、PACファイル配布(またはブラウザへの
+プロキシ設定)が完了しているセグメントを次の一覧で確認します。
+
+{% for seg in client_segments %}{% if seg["note"] != "-" %}- {{ seg["name"] }}({{ seg["network"] }}): {{ seg["note"] }}
+{% endif %}{% endfor %}
+上記に含まれないセグメントは、クライアント側の準備が整うまで
+`{{ target_proxy_type }}`への切り替え対象に含めないでください。
+
+### 2. {{ target_proxy_type }}用のネットワーク要素を準備する
+
+`Network > Interfaces` で、クライアント接続用のインターフェースと
+折り返し用のインターフェースを用意します。
+
+- Listening Interface: `{{ listening_interface_name }}`(ゾーン:
+  `{{ listening_interface_zone }}`)
+- Upstream Interface: `{{ upstream_loopback_interface_name }}`
+  (ループバックインターフェース)
+- Proxy IP: `{{ proxy_ip }}`(Upstream Interfaceに設定したIPアドレス)
+
+`Network > DNS Proxy` で、DNS Proxyオブジェクト `{{ dns_proxy_profile_name }}`
+を作成します。
+
+### 3. Decryption ProfileとAuthentication Serviceを設定する
+
+`Objects > Decryption Profile` で `{{ decryption_profile_name }}` を作成し、
+`Block sessions on SNI mismatch` を選択します。
+
+`Network > Proxy` の Explicit Proxy Configurationで、次のとおり設定します。
+
+- Authentication Service: `{{ authentication_service_type }}`
+- Connect Timeout: `{{ connect_timeout_seconds }}` 秒
+
+設定後、対象トラフィックを許可するセキュリティポリシールール
+`{{ security_policy_rule_name }}` を `Policies > Security` に作成します。
+この時点ではまだ `Commit` しません。
+
+### 4. Proxy Typeを{{ target_proxy_type }}に切り替える
+
+`Network > Proxy` の Proxy Enablement設定を開き、Proxy Typeを
+`{{ current_proxy_type }}` から `{{ target_proxy_type }}` に変更し、
+手順2・3で用意した各設定値(Listening Interface / Upstream Interface /
+Proxy IP / DNS Proxyオブジェクト / Authentication Service / Connect
+Timeout)を Explicit Proxy Configurationに反映します。
+
+既存の `{{ transparent_dnat_rule_name }}`({{ current_proxy_type }}用の
+DNATルール)は、切り替え対象セグメントのトラフィックを引き続き含むかを
+確認したうえで、対象外にする、または無効化を検討してください。
+
+### 5. Commitし、切り替え対象セグメントからの動作を検証する
+
+`Commit` を実行し、設定を一括で反映します。反映後、切り替え対象の各
+セグメントから次を確認します。
+
+{% for seg in client_segments %}{% if seg["note"] != "-" %}- {{ seg["name"] }}({{ seg["network"] }})の端末から、`{{ listening_interface_name }}`
+  経由で {{ target_proxy_type }}にアクセスでき、{{ authentication_service_type }}
+  による認証が行われること
+{% endif %}{% endfor %}
+検証に失敗した場合に備え、切り替え対象外のセグメントが
+`{{ current_proxy_type }}`のまま影響を受けていないこともあわせて確認します。
+
+## 動作確認
+
+- `Network > Proxy` の Proxy Typeが `{{ target_proxy_type }}` に
+  なっていること
+- 切り替え対象セグメント({{ client_segments | length }} 件)の端末が、
+  Listening Interface `{{ listening_interface_name }}` 経由でプロキシに
+  アクセスでき、`{{ authentication_service_type }}` による認証を経て
+  通信できること
+- Decryption Profile `{{ decryption_profile_name }}` で
+  `Block sessions on SNI mismatch` が有効になっていること
+- 切り替え対象外のセグメントの通信に影響が出ていないこと
+
+## 注意事項
+
+- **Proxy Typeは1つのプロキシインスタンス内で排他的な設定です。**
+  一次情報の "Select Explicit Proxy as the Proxy Type" という表現の
+  とおり、Proxy Enablement設定はどちらか一方のモードを選択する項目
+  であり、{{ current_proxy_type }}と{{ target_proxy_type }}を同一
+  インスタンスで同時に使い分けることはできません。両方のモードを
+  同時に使い分けたい場合は、対象を分離した別インスタンス(別の
+  仮想システムなど)での構成が必要になりますが、その具体的な構成
+  手順は本手順書が参照した一次情報の範囲外のため記載していません。
+- **PACファイル配布・ブラウザ側のプロキシ設定は、PAN-OS側の操作範囲
+  外です。** {{ target_proxy_type }}への切り替え対象は、クライアント側の
+  準備(PACファイル配布など)が完了しているセグメントに限定してください。
+- **切り替え後は、既存の{{ current_proxy_type }}用設定(DNATルール
+  `{{ transparent_dnat_rule_name }}` など)の要否を必ず見直すこと。**
+  見直さずに残すと、意図しないトラフィックが旧モードの経路を通り続ける
+  おそれがあります。
+- Commitは設定変更を一括で反映するため、切り替え対象外のセグメントの
+  通信を、手順5の検証が終わるまで別途監視しておくこと。

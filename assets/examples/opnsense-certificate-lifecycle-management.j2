@@ -1,0 +1,150 @@
+# OPNsenseによるTLS証明書ライフサイクル管理
+
+管理画面(webConfigurator)とリモートアクセスVPNで使用するTLS証明書について、
+発行・自動更新・失効を *System > Trust* 配下の Certificate Manager と、公式
+ACME Client プラグイン(os-acme-client)で一元管理し、有効期限切れによる
+サービス断や、失効すべきクライアント証明書の失念を防ぎます。
+
+## 目的
+
+管理画面用証明書は ACME Client プラグインで自動発行・自動更新まで到達させ、
+以後の手動更新作業を不要にします。あわせて内部PKIで発行しているVPNのクライアント
+証明書について、CRL(Certificate Revocation List)による失効管理の運用を
+定着させ、紛失・退職等が発生した端末の証明書を確実に失効させられる状態を
+目指します。
+
+## 用語解説
+
+- **Certificate Manager(証明書管理)**: *System > Trust > Certificates* で
+  クライアント/サーバー/CA証明書の発行・インポートを行うOPNsense標準機能
+- **Trust Authorities(認証局管理)**: *System > Trust > Authorities* で内部CA
+  の管理やOCSP署名証明書の生成を行う機能
+- **CRL(Certificate Revocation List)**: 認証局が失効させた証明書の一覧。
+  *System > Trust > Revocation* でCA行の「+」から新規CRLを作成し、失効させたい
+  証明書をリストへ追加する
+- **OCSP(Online Certificate Status Protocol)**: CRLと同様に失効状態を確認する
+  仕組みで、オンラインでの照会かつホワイトリスト方式である点がCRLと異なる
+- **ACME Client(os-acme-client)**: OPNsense公式プラグイン。{{ acme_ca_name | safe }}
+  等のACME対応CAへドメイン検証を行い証明書を自動発行・自動更新した上で、発行結果を
+  Certificate Managerのストレージへ自動的に登録・更新する
+- **Automations(ACME Client)**: 証明書の発行・更新が完了した後に実行する後続処理
+  (対象サービスの再起動など)を定義するACME Clientの機能
+
+## シナリオ設定
+
+管理画面 `{{ fw_gui_host }}:{{ fw_gui_port }}` の証明書は ACME Client
+プラグインで `{{ acme_ca_name | safe }}` から `{{ acme_validation_method }}` 検証で
+自動発行し、証明書の説明名は `{{ acme_cert_descr }}` とします。発行・更新完了後は
+Automations `{{ automation_descr }}` により `{{ automation_action }}` を自動実行し、
+証明書更新のたびに手動でGUIへ再割り当てする作業をなくします。
+
+リモートアクセスVPN(`{{ vpn_interface_descr }}`)は内部CA `{{ vpn_ca_descr }}` が
+発行するサーバー証明書 `{{ vpn_server_cert_descr }}` と、以下 {{ vpn_client_certs | length }}
+件のクライアント証明書を使用します。失効対象の端末は `{{ vpn_crl_descr }}` へ
+登録します。
+
+| 証明書名 | 説明 | 状態 |
+|---|---|---|
+{% for c in vpn_client_certs %}| {{ c["name"] }} | {{ c["descr"] }} | {{ c["status"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 現状の証明書と有効期限を確認する
+
+作業前に、管理画面が現在提示している証明書の発行者と有効期限を外部から確認
+します。
+
+```bash
+# 管理画面のTLS証明書を外部から確認(発行者と有効期限)
+openssl s_client -connect {{ fw_gui_host }}:{{ fw_gui_port }} -servername {{ fw_gui_host }} </dev/null 2>/dev/null \
+  | openssl x509 -noout -issuer -enddate
+```
+
+OPNsense側では *System > Trust > Certificates* を開き、現在使用中の証明書と、
+`{{ vpn_ca_descr }}` が発行済みのクライアント証明書一覧を確認します。
+
+### 2. ACME Clientで管理画面証明書の自動発行を設定する
+
+*Services > ACME Client > Certificates* で **Add** を押し、以下の内容で
+証明書エントリを作成します。
+
+- Common Name: `{{ fw_gui_host }}`
+- Automatic CA: `{{ acme_ca_name | safe }}`
+- Validation method: `{{ acme_validation_method }}`
+- Descriptive name: `{{ acme_cert_descr }}`
+
+保存後、対象エントリの発行/更新操作(Issue/Renew)を実行します。検証と発行が
+成功すると、証明書は自動的に *System > Trust > Certificates* のストレージへ
+登録されます。
+
+### 3. 証明書発行後の自動反映(Automations)を設定する
+
+*Services > ACME Client > Automations* で **Add** を押し、以下の内容で
+自動化アクションを作成します。
+
+- Enabled: チェックする
+- Description: `{{ automation_descr }}`
+- Run Command: `{{ automation_action }}`
+
+作成した `{{ automation_descr }}` を、手順2で作成した証明書エントリ
+`{{ acme_cert_descr }}` の Automations に紐づけます。これにより、以後の
+自動更新のたびに `{{ automation_action }}` が実行され、GUIへの証明書再割り当てを
+手作業でやり直す必要がなくなります。
+
+### 4. 内部PKI用サーバー証明書を発行し、CRLで失効管理を有効化する
+
+*System > Trust > Authorities* で内部CA `{{ vpn_ca_descr }}` を確認し、
+*System > Trust > Certificates* で `{{ vpn_ca_descr }}` を発行元としたサーバー
+証明書 `{{ vpn_server_cert_descr }}` を発行します。
+
+続いて *System > Trust > Revocation* を開き、`{{ vpn_ca_descr }}` の行にある
+「+」から新規CRL `{{ vpn_crl_descr }}` を作成します。以下のクライアント証明書は
+状態が失効対象のため、作成したCRLへ追加し、理由を設定します。
+
+{% for c in vpn_client_certs %}{% if c["status"] != "valid" %}- `{{ c["name"] }}`({{ c["descr"] }}): Reason = `{{ c["reason"] }}`
+{% endif %}{% endfor %}
+
+### 5. 発行済み証明書をGUI/VPNサービスへ割り当てて反映する
+
+*System > Settings > Administration* を開き、TLS certificate に
+`{{ acme_cert_descr }}` を選択して保存します。
+
+*VPN > OpenVPN > Instances* で `{{ vpn_interface_descr }}` インスタンスを開き、
+Server certificate に `{{ vpn_server_cert_descr }}` を、Certificate Revocation
+list に `{{ vpn_crl_descr }}` を選択して保存します。保存後、画面上部の
+**Apply changes** を押して反映します。
+
+## 動作確認
+
+```bash
+# 管理画面証明書がACME発行CAで、有効期限が将来日であることを確認
+openssl s_client -connect {{ fw_gui_host }}:{{ fw_gui_port }} -servername {{ fw_gui_host }} </dev/null 2>/dev/null \
+  | openssl x509 -noout -issuer -enddate
+```
+
+- 上記コマンドの issuer に `{{ acme_ca_name | safe }}` 系の中間CAが含まれ、証明書の
+  Descriptive name欄で `{{ acme_cert_descr }}` が *System > Settings >
+  Administration* のTLS certificateとして使用中(in use)になっていること
+- `{{ vpn_crl_descr }}` に登録した失効対象のクライアント証明書
+{% for c in vpn_client_certs %}{% if c["status"] != "valid" %}(`{{ c["name"] }}`)
+{% endif %}{% endfor %}を使った端末からVPN接続を試み、ハンドシェイクが拒否され
+  *VPN > OpenVPN > Connection Status* にも接続として現れないこと
+- 失効対象ではないクライアント証明書
+{% for c in vpn_client_certs %}{% if c["status"] == "valid" %}(`{{ c["name"] }}`)
+{% endif %}{% endfor %}が引き続き正常にVPN接続できること
+
+## 注意事項
+
+- ACME Clientの証明書エントリにAutomations(`{{ automation_descr }}`)を必ず
+  紐づけておくこと。紐づけを忘れると、自動更新自体は成功しても
+  `{{ automation_action }}` が実行されず、GUIが古い証明書を提示し続ける
+  (実質的に自動更新の意味がなくなる)。
+- `{{ vpn_crl_descr }}` へ証明書を追加しただけでは失効は反映されない。手順5で
+  `VPN > OpenVPN > Instances` の対象インスタンスに同じCRLが選択されていることを
+  必ず確認する。
+- 証明書やCRLの変更を行う前に、*System > Configuration > Backups* から
+  config.xmlのバックアップを取得し、意図しない管理画面/VPNへのアクセス断が
+  発生した場合に切り戻せるようにしておく。
+- 紛失・退職等で失効が必要になった端末は判明次第すみやかに手順4のCRLへ追加し、
+  棚卸しのタイミング(手順1)まで放置しないこと。

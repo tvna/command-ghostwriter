@@ -1,0 +1,196 @@
+# OPNCentralによる複数拠点ファイアウォールの一元管理登録
+
+複数拠点に配置した OPNsense ファイアウォール({{ managed_hosts | length }} 台)を
+Central Host `{{ central_host_fqdn }}` の OPNCentral に登録し、ポリシー
+(エイリアス・ルール・NAT等)の配布と設定変更を一元管理コンソールから
+行える状態にします。
+
+## 目的
+
+Deciso製の集中管理プラグイン OPNCentral を用いて、複数のOPNsenseを
+Central Hostの管理下に登録し、Provisioning classesで同期対象を定義した上で
+Management > Provisioning から設定を配布(push)できる状態を作ることを
+目指します。あわせて、定期配布(Cron)と集中バックアップの有効化まで
+一連の流れとして実施します。
+
+## 用語解説
+
+- **OPNCentral**: OPNsense Business Edition向けにDeciso社が提供する集中管理
+  プラグイン(`os-OPNcentral`)。**OPNsense本体とは別売りのBusiness Edition
+  限定機能であり、無料版(Community Edition)ではこのプラグイン自体を
+  インストールできない**
+- **Central Host**: 他のOPNsenseへ配布する設定の「鋳型」となる、中央管理側の
+  OPNsense自身
+- **Managed host(node)**: Central Hostの管理下に登録される側のOPNsense
+- **Provisioning classes**: 同期対象の設定カテゴリ。`System > High
+  Availability > Settings` と同じ選択肢を、ホストごとの
+  `Management > Host > Configuration` 画面で指定する。本手順では
+  `Users & Groups` や `WebGui (Administration)` は対象外とし、ポリシー配布
+  に関わる `Aliases (Firewall)` / `Firewall rules` / `NAT (Firewall)` /
+  `Firewall categories` のみを同期対象とする
+- **Host Groups**: `Management > Host > Groups` で提供される、ホストを
+  グルーピングしてアクセス範囲を制限するマルチテナント機能
+- **Reconfigure**: `Management > Provisioning` 画面でチェックしたホストへ、
+  設定されたProvisioning classesの内容を配布(push)するボタン
+- **ステータス文言**: Provisioning画面に表示される同期状態。
+  `Class equals this machine (nothing todo)`(差分なし)、
+  `Changes ready to commit`(配布待ちの差分あり)、
+  `Unable to connect`(接続不可)などがある
+- **Validate SSL**: ホスト設定内にある、管理対象ホストのTLS証明書検証を
+  有効/無効にする項目
+
+## シナリオ設定
+
+今回、Central Hostと登録対象ホスト、同期方針は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| Central Host(central_host_fqdn) | {{ central_host_fqdn }} |
+| Host Group名(host_group_name) | {{ host_group_name }} |
+| 集中バックアップ有効化(enable_centralized_backups) | {{ enable_centralized_backups }} |
+| バックアップ保持世代数(backup_sequential_count) | {{ backup_sequential_count }} |
+| 定期配布Cron登録(provisioning_cron_enabled) | {{ provisioning_cron_enabled }} |
+
+同期対象のProvisioning classes({{ provisioning_classes | length }} 件):
+
+| # | クラス名 |
+|---|----------|
+{% for c in provisioning_classes %}| {{ loop.index }} | {{ c }} |
+{% endfor %}
+
+登録対象ホスト一覧({{ managed_hosts | length }} 台):
+
+| # | ホスト名 | FQDN | APIキー | Validate SSL |
+|---|----------|------|---------|--------------|
+{% for h in managed_hosts %}| {{ loop.index }} | {{ h.name }} | {{ h.fqdn }} | {{ h.api_key_masked }} | {{ h.validate_ssl }} |
+{% endfor %}
+
+## 手順
+
+### 1. 各管理対象ホストでAPIキー/シークレットを発行する
+
+登録の前に、登録対象それぞれの OPNsense(管理対象ホスト側)で、
+User Manager(`system_usermanager.php`)を開き、専用の管理アカウントの
+API欄で `+` を押してAPIキー/シークレットを発行します。発行時にダウンロード
+される ini 形式のファイルは一度きりしか取得できないため、安全な秘密管理
+ツールへ即座に格納し、リポジトリやチャット、ログには平文で残さないで
+ください。以降の手順で扱う値は、シナリオ設定の表のとおりマスク表記
+(`****`)として記載します。
+
+{% for h in managed_hosts %}- {{ h.name }}({{ h.fqdn }}): API key/secretを発行し、
+  マスク済み値({{ h.api_key_masked }})として安全に保管する
+{% endfor %}
+
+### 2. Central Hostにホストを登録する(Management > Host > Configuration)
+
+Central Host `{{ central_host_fqdn }}` の `Management > Host >
+Configuration` を開き、`+` で登録対象ホストを1台ずつ追加します。
+
+{% for h in managed_hosts %}- **{{ h.name }}**: URLに `https://{{ h.fqdn }}` を入力し、手順1で発行した
+  API key/secretを貼り付ける。`Validate SSL` は{% if h.validate_ssl %}有効のままにする(正規の証明書を使用){% else %}自己署名証明書のため無効にする(可能であれば正規証明書へ切り替えを推奨){% endif %}
+
+{% endfor %}
+Central Host自身をこの一覧に登録しないでください。Central Hostを自分自身の
+管理対象に加えると、設定配布ループの原因になります。
+
+### 3. ホストをHost Group({{ host_group_name }})にまとめる
+
+`Management > Host > Groups` を開き、グループ `{{ host_group_name }}` を
+作成(または選択)し、手順2で登録した以下のホストをすべて所属させます。
+
+{% for h in managed_hosts %}- {{ h.name }}
+{% endfor %}
+
+同じホストを複数のHost Groupに同時に所属させる場合、アクセス制限は
+所属する全グループに対して個別に絞り込む必要があります。一部のグループ
+だけ絞り込むと、絞り込んでいないグループ経由で意図しないアクセスが
+残る点に注意してください。
+
+### 4. 同期するProvisioning classesを設定する
+
+登録した各ホストの `Management > Host > Configuration` で編集画面を開き、
+`Provision classes` に以下のクラスのみを選択します(`System > High
+Availability > Settings` と同じ選択肢です)。
+
+{% for c in provisioning_classes %}- {{ c }}
+{% endfor %}
+
+`Certificates` と `WebGui (Administration)` を同時に同期対象へ加えては
+いけません。証明書ストアが意図せず上書きされる可能性があるためです。今回
+はいずれも対象外としています。
+
+ファイアウォール/ルーティングに関わる設定は、配布先のセッションを切断
+しうる変更です。Central Hostは配布先で接続不能になる設定かどうかを事前に
+判定できないため、配布内容(エイリアス・ルール・NAT・カテゴリ)は事前に
+Central Host側で内容を確認してから次の手順に進んでください。
+
+### 5. Provisioning画面でステータスを確認し、Reconfigureで配布する
+
+`Management > Provisioning` を開くと、登録済みホストごとにProvisioning
+classesの同期状態が一覧表示されます。
+
+- `Unable to connect` と表示されているホストがあれば、先に手順2の登録
+  内容(URL・API key/secret・Validate SSL)を見直す
+- 同期待ちの差分があるホストは `Changes ready to commit` と表示される
+- 配布対象のホストにチェックを入れ、`Reconfigure` ボタンを押す
+
+配布後、対象ホストのステータスが `Class equals this machine (nothing
+todo)` に変わることを確認します。
+
+{% if provisioning_cron_enabled %}
+### 6. 定期配布をCronに登録する
+
+`System > Settings > Cron` を開き、タスク `OPNcentral - provision /
+reconfigure remote hosts` を毎日1回のスケジュールで追加します。これにより、
+手順4で設定したProvisioning classesの差分が日次で自動配布されます。
+{% endif %}
+{% if enable_centralized_backups %}
+### 7. 集中バックアップを有効化する
+
+`Management > Host > Configuration` の2番目のタブ(generic host settings)
+で、`Enable backups` を有効化し、`Backups: Sequential count` に
+{{ backup_sequential_count }} を設定します。これにより、登録済みホスト
+それぞれの設定が夜間に自動バックアップされ、ホストあたり
+{{ backup_sequential_count }} 世代まで保持されます。
+
+即時に動作確認したい場合は、同画面の各ホスト行にある `Execute backup`
+ボタンで手動実行できます。より高頻度のバックアップが必要な場合は、
+`System > Settings > Cron` にタスク `OPNcentral - backup remote hosts` を
+追加してください。
+{% endif %}
+
+## 動作確認
+
+- `Management > Host > Configuration` に登録した{{ managed_hosts | length }} 台
+  すべてが一覧表示され、いずれも `Unable to connect` になっていないこと
+- `Management > Provisioning` で、手順5のReconfigure実行後に対象ホストの
+  ステータスが `Class equals this machine (nothing todo)` になっていること
+- `Management > Host > Groups` で `{{ host_group_name }}` を開き、
+  登録した{{ managed_hosts | length }} 台がすべて所属していること
+{% if provisioning_cron_enabled %}- `System > Settings > Cron` に `OPNcentral - provision / reconfigure
+  remote hosts` タスクが有効な状態で登録されていること
+{% endif %}{% if enable_centralized_backups %}- `Execute backup` を手動実行した直後、`Management > Host > Configuration`
+  のホスト一覧に各ホストのバックアップ件数・サイズ・更新日時が表示される
+  こと
+{% endif %}
+
+## 注意事項
+
+- OPNCentralは**OPNsense Business Edition限定のDeciso製プラグイン**であり、
+  無料版(Community Edition)では `System > Firmware > Plugins` に
+  `os-OPNcentral` 自体が表示されず、インストールできません。導入前に対象の
+  全ホストがBusiness Editionであることを確認してください。
+- ファイアウォール/ルーティングに関わる設定をReconfigureで配布する際は
+  特に注意してください。Central Hostは、配布内容が配布先を接続不能にする
+  かどうかを事前に判定できません。
+- `Certificates` と `WebGui (Administration)` を同時にProvisioning classes
+  へ加えないでください。証明書ストアが意図せず上書きされるおそれが
+  あります。
+- Central Host自身を自分自身の管理対象ホストとして登録しないでください。
+  設定配布のループを引き起こします。
+- 同じホストを複数のHost Groupに所属させてアクセスを制限する場合は、
+  所属する全グループを絞り込んでください。一部だけの絞り込みでは、他の
+  グループ経由で意図しないアクセスが残ります。
+- APIキー/シークレットは平文でリポジトリやログに残さず、発行直後に秘密
+  管理ツールへ格納してください。本手順書中の値はすべてマスク表記
+  (`****`)です。

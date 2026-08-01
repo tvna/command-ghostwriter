@@ -1,0 +1,140 @@
+# Panoramaによるファイアウォールの一元管理登録
+
+Panoramaの Managed Devices 機能を使い、{{ firewalls | length }} 拠点のファイアウォールを
+一元管理デバイスとして登録します。登録時に Associate Devices を有効にして
+Device Group・Template Stack・Log Collector・Collector Group をまとめて割り当て、
+Auto Push on 1st Connect により初回接続時の設定プッシュまで自動化します。
+
+## 目的
+
+複数拠点/多数のファイアウォールを一元管理コンソールに登録し、ポリシー配布・
+設定変更を集中管理したいという運用課題に対し、Panoramaの Managed Devices
+機能で各ファイアウォールを登録し、初回接続時に Device Group / Template
+Stack / Log Collector / Collector Group への関連付けと設定プッシュまでを
+一括で終わらせる手順を実践できるようになることを目指します。
+
+## 用語解説
+
+- **Managed Devices**: `Panorama > Managed Devices > Summary` の
+  "Add a new firewall" から、ファイアウォールをシリアル番号で登録する画面。
+  複数台をまとめて追加する場合は、シリアル番号を1行ずつ入力する
+- **Auth key(Device registration authentication key)**: 登録時に入力する
+  デバイス登録用の認証キー。値そのものは本手順書に記載せず、`****` として
+  扱う。実際の値は登録直前に安全な方法で払い出すこと
+- **Associate Devices**: Managed Devicesへの追加時に選択できるチェック
+  ボックス。有効にすると、ファイアウォールを Device Group・Template
+  Stack・Log Collector・Collector Group の各ドロップダウンから割り当てる
+  ことができる
+- **Auto Push on 1st Connect**: Associate Devicesと合わせて有効にする
+  チェックボックス。有効にすると、割り当てた Device Group と Template
+  Stackの設定を初回接続時に自動でプッシュする
+- **To SW Version**: Managed Devicesの一覧に表示される列で、初回接続時に
+  自動アップグレードするPAN-OSのリリースバージョンを指定できる
+- **Managed By(ファイアウォール側)**: ファイアウォール側の
+  `Device > Setup > Management` で編集する Panorama Settings 内の項目。
+  "Panorama" を選択し、Panorama IP addressを設定することで、当該
+  ファイアウォールをPanorama配下として動作させる
+
+## シナリオ設定
+
+Panorama管理サーバのIPアドレス(panorama_ip): `{{ panorama_ip }}`
+
+Auto Push on 1st Connect(auto_push_on_1st_connect): {% if auto_push_on_1st_connect %}有効{% else %}無効{% endif %}
+
+登録対象ファイアウォール一覧(firewalls, {{ firewalls | length }} 拠点):
+
+| # | 拠点 | ホスト名 | シリアル番号 | Device Group | Template Stack | Log Collector | Collector Group | To SW Version |
+|---|------|----------|--------------|--------------|-----------------|----------------|------------------|---------------|
+{% for fw in firewalls %}| {{ loop.index }} | {{ fw["site"] }} | {{ fw["hostname"] }} | {{ fw["serial"] }} | {{ fw["device_group"] }} | {{ fw["template_stack"] }} | {{ fw["log_collector"] }} | {{ fw["collector_group"] }} | {% if fw["to_sw_version"] != "-" %}{{ fw["to_sw_version"] }}{% else %}(指定なし){% endif %} |
+{% endfor %}
+
+## 手順
+
+### 1. Auth keyを準備し、登録対象のシリアル番号を確認する
+
+Panorama管理者がデバイス登録用のAuth keyを払い出します。払い出し画面自体の
+詳細なUI操作は、本手順書が参照した一次情報の範囲に含まれていないため、
+払い出したAuth key(`****`)と、シナリオ設定の各ファイアウォールの
+シリアル番号を手元に用意する操作のみを記載します。
+
+{% for fw in firewalls %}- {{ fw["site"] }}: `{{ fw["hostname"] }}` / シリアル番号 `{{ fw["serial"] }}`
+{% endfor %}
+
+### 2. Panoramaで各ファイアウォールをManaged Devicesとして追加する
+
+Panoramaの管理コンソールで `Panorama > Managed Devices > Summary` を開き、
+"Add a new firewall" から次を入力します。
+
+- Serial number: 手順1で確認したシリアル番号を1行ずつ入力
+- Auth key: 手順1で払い出したAuth key(`****`)
+
+### 3. Associate DevicesでDevice Group・Template Stack・Log Collector・Collector Groupを割り当てる
+
+追加画面で Associate Devices を選択し、表示されるドロップダウンに
+シナリオ設定の値をファイアウォールごとに割り当てます。
+
+{% for fw in firewalls %}- `{{ fw["hostname"] }}`: Device Group = `{{ fw["device_group"] }}` /
+  Template Stack = `{{ fw["template_stack"] }}` /
+  Log Collector = `{{ fw["log_collector"] }}` /
+  Collector Group = `{{ fw["collector_group"] }}`
+{% endfor %}
+
+### 4. Auto Push on 1st Connectを設定する
+
+Associate Devicesの設定と合わせて、Auto Push on 1st Connectのチェック
+ボックスを次のとおり設定します。
+
+- Auto Push on 1st Connect: {% if auto_push_on_1st_connect %}有効(チェックを入れる){% else %}無効(チェックを外す){% endif %}
+
+{% if auto_push_on_1st_connect %}併せて、自動アップグレード対象のファイアウォールについては To SW Version
+列に対象バージョンを指定します。
+
+{% for fw in firewalls %}{% if fw["to_sw_version"] != "-" %}- `{{ fw["hostname"] }}`: To SW Version = `{{ fw["to_sw_version"] }}`
+{% endif %}{% endfor %}{% endif %}
+設定後、Panorama側で保存します。
+
+### 5. ファイアウォール側でPanorama管理を有効にする
+
+各ファイアウォールにログインし、`Device > Setup > Management` の
+Panorama Settings を編集して次を設定します。
+
+- Managed By: `Panorama`
+- Panorama IP address: `{{ panorama_ip }}`
+
+{% for fw in firewalls %}- `{{ fw["hostname"] }}` で上記を設定し、保存する
+{% endfor %}
+
+### 6. 初回接続を確立し、自動プッシュが行われたことを確認する
+
+ファイアウォール側の設定保存後、Panoramaへの初回接続が確立されるのを
+待ちます。接続後、Panoramaの `Managed Devices` 一覧で各ファイアウォールの
+接続状態(Connected)を確認し、Auto Push on 1st Connectを有効にした
+ファイアウォールについては、割り当てたDevice GroupとTemplate Stackの
+設定が実際にプッシュされていることを確認します。
+
+## 動作確認
+
+- Panoramaの `Managed Devices` 一覧に、{{ firewalls | length }} 拠点すべての
+  ファイアウォールが接続済みの状態で表示されること
+{% for fw in firewalls %}- `{{ fw["hostname"] }}` が Device Group `{{ fw["device_group"] }}` /
+  Template Stack `{{ fw["template_stack"] }}` / Log Collector
+  `{{ fw["log_collector"] }}` / Collector Group `{{ fw["collector_group"] }}`
+  に関連付けられていること
+{% endfor %}{% if auto_push_on_1st_connect %}- Auto Push on 1st Connectを有効にした各ファイアウォールに、割り当てた
+  Device GroupとTemplate Stackの設定が実際に反映されていること
+{% endif %}
+
+## 注意事項
+
+- **Auth keyの値は本手順書に記載していません。** 登録直前に安全な方法で
+  払い出し、共有・記録する際もマスク(`****`)された状態でのみ扱うこと。
+- Auto Push on 1st Connectは、シナリオ設定の Device Group / Template
+  Stack を初回接続時にプッシュする機能である旨が一次情報に記載されている。
+  既存の接続済みファイアウォールに対する再割り当ての挙動は、本手順書が
+  参照した一次情報の範囲には含まれていないため記載していない。
+- Auth keyの払い出し画面自体の詳細なUI操作(フィールドの並び順など)は、
+  本手順書が参照した一次情報の範囲に含まれていないため、払い出した値を
+  入力する操作のみを記載している。
+- Device Group・Template Stack・Log Collector・Collector Groupの中身
+  (ポリシー内容やネットワーク設定など)そのものの作成手順は、本手順書の
+  対象外(既に作成済みであることを前提とする)。

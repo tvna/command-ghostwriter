@@ -1,0 +1,21 @@
+radius_server_profile_name: mfa-radius-duo
+radius_servers:
+  - name: duo-radius-proxy-1
+    server: 10.0.50.11
+    port: 1812
+  - name: duo-radius-proxy-2
+    server: 10.0.50.12
+    port: 1812
+radius_timeout_seconds: 5
+radius_retries: 2
+mfa_auth_profile_name: mfa-admin-auth
+fallback_auth_profile_name: local-admin-failsafe
+auth_sequence_name: admin-mfa-failsafe-seq
+exit_on_failed_auth: true
+admin_accounts:
+  - name: admin01
+    dynamic_role: Superuser
+  - name: admin02
+    dynamic_role: Superuser
+  - name: netops01
+    dynamic_role: Superreader

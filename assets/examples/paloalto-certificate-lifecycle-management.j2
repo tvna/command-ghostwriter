@@ -1,0 +1,235 @@
+# Palo Alto Networks(PAN-OS)のTLS証明書ライフサイクル管理(発行・更新・失効)
+
+`Device > Certificate Management > Certificates`で管理画面(Device > Setup >
+Management)とGlobalProtectゲートウェイ`{{ gp_gateway_name }}`が使用するTLS
+サーバー証明書を対象に、新規証明書`{{ new_cert_name }}`の発行(Generate)、
+有効期限が近い既存証明書`{{ gui_cert_name }}`の更新(Renew)、退役証明書
+`{{ retired_cert_name }}`の失効(Revoke)という3つのライフサイクル操作を行い、
+それぞれをSSL/TLS Service Profile(`{{ gp_ssl_profile_name }}`/
+`{{ gui_ssl_profile_name }}`)経由でサービスに割り当てます。最後にGUIの
+Status列と`openssl s_client`による外部からの実証明書確認の2段階で結果を
+検証し、有効期限切れによるサービス断を防ぎます。
+
+## 目的
+
+PAN-OSの証明書ライフサイクル管理が`Device > Certificate Management >
+Certificates`という単一の管理画面に集約されており、発行(Generate)・
+更新(Renew)・失効(Revoke)のいずれもこの画面から証明書を選択して実行する
+操作であること、更新には`New Expiration Interval`(日数)の入力と
+`OK and Commit`が必要な一方、失効は選択して`Revoke`をクリックするだけで
+commitなしに即座にステータスへ反映されるという非対称性を理解した上で、
+証明書を実際に使用するサービス側にはSSL/TLS Service Profileという別の
+オブジェクトを介して割り当てる二段構成(証明書オブジェクト → SSL/TLS
+Service Profile → 管理画面/GlobalProtectゲートウェイ)を構成できるように
+なることを目指します。あわせて、GUI上のStatus表示だけでなく
+`openssl s_client`で外部から実際に提示される証明書を確認し、設定が実際に
+サービスへ反映されていることまで検証できるようになることを目指します。
+
+## 用語解説
+
+- **Certificate Management (Device > Certificate Management >
+  Certificates)**: 証明書の発行・インポート・更新・失効を一元管理する画面。
+  PAN-OSのバージョンにより`Custom Certificates`タブ(PAN-OS 12.1.0以降)
+  または`Device Certificates`タブ(PAN-OS 11.2以前)に証明書一覧が表示
+  されます
+- **Generate(証明書の発行)**: `Custom Certificates`セクションで`Generate`
+  をクリックして行う証明書発行操作。一次情報には、大文字小文字を区別し
+  63文字以内・英数字とハイフン・アンダースコアのみで構成する一意な
+  `Certificate Name`と、証明書を使用するサービスのFQDN(推奨)または
+  IPアドレスを入力する`Common Name`が必要と説明されています。証明書の
+  発行には、あらかじめ社内の自己署名ルートCA証明書を作成またはインポート
+  しておく必要があります
+- **Location(vsys / Shared)**: 複数vsys環境の場合に、証明書の発行・更新
+  対象となるvsysまたは`Shared`を指定するドロップダウン
+- **Renew(証明書の更新)**: 対象の証明書を選択して`Renew`をクリックし、
+  `New Expiration Interval`(日数)を入力後`OK and Commit`を行う操作。
+  一次情報には、外部CAが署名した証明書はOCSPステータス確認により更新され、
+  内部発行の証明書は同じ属性のまま別のシリアル番号を持つ証明書に置き換え
+  られると説明されています
+- **Revoke(証明書の失効)**: 対象の証明書を選択して`Revoke`をクリックする
+  操作。一次情報には、実行すると証明書のステータスが直ちに`revoked`になり、
+  シリアル番号がOCSP responderのキャッシュまたはCRL(証明書失効リスト)に
+  追加されると説明されています。この操作にcommitは不要です
+- **SSL/TLS Service Profile**: `Device > Certificate Management > SSL/TLS
+  Service Profile`で`Add`をクリックして作成するプロファイル。名前と
+  使用する証明書を選択し、`Protocol Settings`で`Min Version`/
+  `Max Version`を設定します。一次情報には、管理アクセスやGlobalProtect
+  サービスでは`Min Version`と`Max Version`をともに`TLSv1.3`にすることが
+  推奨されると説明されています。また、SSL/TLS Service Profileには
+  署名済みの証明書(CA証明書ではなく)のみを使用すべきと説明されています
+- **管理インターフェースへの割り当て(Device > Setup > Management >
+  General Settings)**: `SSL/TLS Service Profile`欄を編集して割り当てます。
+  一次情報には、commit後に新しいSSL/TLS ServiceプロファイルがWeb GUIへ
+  適用されるため、既存の管理接続が切断され新しい証明書で再ログインが
+  必要になる場合があると説明されています
+- **GlobalProtectゲートウェイへの割り当て**: ゲートウェイ設定の
+  `Authentication`タブで`SSL/TLS Service Profile`を選択して割り当てます
+- **commit**: PAN-OSはcandidate configとrunning configを分離する二段階構成
+  モデルを採る。GUIで`OK`を押しただけの設定もcommitするまで実機の動作には
+  反映されない(ただしRevokeは例外でcommit不要)
+
+## シナリオ設定
+
+今回、TLS証明書のライフサイクル管理として構成する値は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| 対象vsys/Shared(vsys_location) | `{{ vsys_location }}` |
+| 署名に使う社内CAオブジェクト名(signing_ca_name) | `{{ signing_ca_name }}` |
+| 新規発行する証明書名(new_cert_name) | `{{ new_cert_name }}` |
+| 新規証明書のCommon Name(new_cert_common_name) | `{{ new_cert_common_name }}` |
+| GlobalProtect用SSL/TLS Service Profile名(gp_ssl_profile_name) | `{{ gp_ssl_profile_name }}` |
+| 対象GlobalProtectゲートウェイ名(gp_gateway_name) | `{{ gp_gateway_name }}` |
+| GUI管理用SSL/TLS Service Profile名(gui_ssl_profile_name) | `{{ gui_ssl_profile_name }}` |
+| 更新対象の既存証明書名(gui_cert_name) | `{{ gui_cert_name }}` |
+| 既存証明書のCommon Name(gui_cert_common_name) | `{{ gui_cert_common_name }}` |
+| 更新後の有効期間・日数(gui_cert_new_expiration_days) | {{ gui_cert_new_expiration_days }} |
+| SSL/TLS Service ProfileのMin Version(min_tls_version) | `{{ min_tls_version }}` |
+| SSL/TLS Service ProfileのMax Version(max_tls_version) | `{{ max_tls_version }}` |
+| 失効させる退役証明書名(retired_cert_name) | `{{ retired_cert_name }}` |
+| 外部からの疎通確認に使う端末(verification_client_host) | `{{ verification_client_host }}` |
+
+`{{ signing_ca_name }}`は、この手順を始める時点ですでにファイアウォールへ
+インポート済みの社内CA証明書であることを前提とします。
+
+## 手順
+
+### 1. 現状を確認する(変更前の基準を取る)
+
+新しい証明書を1件も発行・更新・失効する前に、現状を確認します。
+
+- `Device > Certificate Management > Certificates`の`Custom Certificates`
+  タブを開き、`{{ gui_cert_name }}`の`Expires`列(有効期限)と`Status`列を
+  確認し、更新前の値を記録します。
+- 同じ一覧で`{{ new_cert_name }}`と同名の証明書がまだ存在しないことを
+  確認します。
+- `{{ retired_cert_name }}`の`Status`が、この時点でまだ`valid`のままである
+  ことを確認します。
+
+### 2. 新規サービス用の証明書を発行する(Generate)
+
+`Device > Certificate Management > Certificates`の`Custom Certificates`
+タブで`Generate`をクリックし、次の値を入力します。
+
+- Certificate Name: {{ new_cert_name }}
+- Common Name: {{ new_cert_common_name }}
+- Signed By: {{ signing_ca_name }}
+- Location(複数vsys環境の場合): {{ vsys_location }}
+
+入力後`Generate`を押して発行します。
+
+### 3. 新規証明書用のSSL/TLS Service Profileを作成する
+
+`Device > Certificate Management > SSL/TLS Service Profile`で`Add`を
+クリックし、次の値を設定します。
+
+- Name: {{ gp_ssl_profile_name }}
+- Certificate: {{ new_cert_name }}
+- Min Version: {{ min_tls_version }}
+- Max Version: {{ max_tls_version }}
+
+入力後`OK`を押します。
+
+### 4. GlobalProtectゲートウェイに新規SSL/TLS Service Profileを割り当てる
+
+`Network > GlobalProtect > Gateways`で`{{ gp_gateway_name }}`を開き、
+`Authentication`タブで`SSL/TLS Service Profile`に
+`{{ gp_ssl_profile_name }}`を選択します。入力後`OK`を押します。
+
+### 5. 有効期限が近い既存証明書を更新する(Renew)
+
+`Device > Certificate Management > Certificates`の`Custom Certificates`
+タブで`{{ gui_cert_name }}`を選択し、`Renew`をクリックします。
+`New Expiration Interval`に{{ gui_cert_new_expiration_days }}(日数)を
+入力し、`OK`を押します。一次情報のとおり、内部発行の証明書は同じ属性を
+保ったまま別のシリアル番号を持つ証明書に置き換えられます。
+
+### 6. 変更を確定する(commit)
+
+`Commit`を実行し、候補設定(candidate config)を実行中の設定(running
+config)へ反映します。手順2〜5で入力した内容(発行・SSL/TLS Service
+Profile作成・ゲートウェイへの割り当て・更新)は、このcommitが完了するまで
+実機の動作に反映されません。
+
+### 7. 退役証明書を失効させる(Revoke)
+
+`{{ gui_ssl_profile_name }}`や他のいずれのSSL/TLS Service Profileからも
+参照されていないことを確認したうえで、`Custom Certificates`タブで
+`{{ retired_cert_name }}`を選択し、`Revoke`をクリックします。一次情報の
+とおり、この操作にcommitは不要で、`Status`が直ちに`revoked`へ変わり、
+シリアル番号がOCSP responderのキャッシュまたはCRLに追加されます。
+
+### 8. GUI上でステータスと有効期限を確認する
+
+`Device > Certificate Management > Certificates`の`Custom Certificates`
+タブを再度開き、次を確認します。
+
+- `{{ new_cert_name }}`が一覧に追加され、`Status`が`valid`であること
+- `{{ gui_cert_name }}`の`Expires`列が手順1で記録した値より延長されて
+  いること
+- `{{ retired_cert_name }}`の`Status`が`revoked`になっていること
+
+### 9. 外部から実際に提示される証明書を検証する
+
+`{{ verification_client_host }}`から、更新後のGUI管理用証明書と新規発行
+したGlobalProtectゲートウェイ用証明書を、それぞれ外部から実際に確認
+します。
+
+```bash
+openssl s_client -connect {{ gui_cert_common_name }}:443 -servername {{ gui_cert_common_name }} </dev/null 2>/dev/null | openssl x509 -noout -subject -enddate
+```
+
+```bash
+openssl s_client -connect {{ new_cert_common_name }}:443 -servername {{ new_cert_common_name }} </dev/null 2>/dev/null | openssl x509 -noout -subject -issuer -enddate
+```
+
+前者の`enddate`が手順5で入力した{{ gui_cert_new_expiration_days }}日後
+まで延長されていること、後者の`subject`に`{{ new_cert_common_name }}`が
+含まれ`issuer`に社内CA`{{ signing_ca_name }}`に対応する発行者名が含まれる
+ことを確認します。
+
+## 動作確認
+
+- `Device > Certificate Management > Certificates`で`{{ new_cert_name }}`
+  が新規に発行され、`Status`が`valid`であること
+- `{{ gui_cert_name }}`の`Expires`列が更新前より延長され、`Status`が
+  `valid`のままであること
+- `{{ retired_cert_name }}`の`Status`が`revoked`であること
+- `Device > Certificate Management > SSL/TLS Service Profile`で
+  `{{ gp_ssl_profile_name }}`の`Certificate`列が`{{ new_cert_name }}`を
+  参照していること
+- `Network > GlobalProtect > Gateways`の`{{ gp_gateway_name }}`で
+  `Authentication`タブの`SSL/TLS Service Profile`が
+  `{{ gp_ssl_profile_name }}`になっていること
+- `openssl s_client`による外部からの確認で、`{{ gui_cert_common_name }}`と
+  `{{ new_cert_common_name }}`のいずれも意図した証明書・有効期限を実際に
+  提示していること
+
+## 注意事項
+
+- **GUI管理用のSSL/TLS Service Profileを変更してcommitすると、既存の
+  管理接続が切断される場合があります。** 一次情報のとおり、commit後は
+  新しいSSL/TLS Serviceプロファイルが直ちにWeb GUIへ適用されるため、
+  `{{ gui_ssl_profile_name }}`側の証明書を差し替えるcommitを実行する際は、
+  再ログインが必要になることを想定して作業してください。
+- **Revokeにcommitは不要です。** 手順7の失効操作は選択して`Revoke`を
+  クリックした時点で即座に反映されるため、他の未確定の変更と一緒に
+  commitするタイミングを待つ必要はありません。
+- **退役証明書を失効させる前に、SSL/TLS Service Profileから参照されて
+  いないことを確認すること。** `{{ retired_cert_name }}`が何らかの
+  SSL/TLS Service Profileから参照されたままRevokeすると、そのプロファイル
+  を使うサービスに影響するおそれがあります。
+- **SSL/TLS Service Profileには署名済みの証明書のみを使用すること。**
+  一次情報のとおり、CA証明書自体をSSL/TLS Service Profileに指定すべきでは
+  ありません。
+- 手順2の`Generate`には、あらかじめ社内CA`{{ signing_ca_name }}`が
+  ファイアウォールへインポート済みであることが前提です。CA証明書が
+  存在しない場合は先にCA証明書のインポートが必要です。
+- CLI/GUIへのログインに使う管理者パスワードやAPIキー、証明書の秘密鍵の
+  パスフレーズは、本手順書やチケット、ログに平文で残さないでください。
+  記録が必要な場合は`****`のようにマスクし、秘密管理ツール等で別途安全に
+  保管してください。
+- 本手順は`{{ new_cert_name }}`・`{{ gui_cert_name }}`・
+  `{{ retired_cert_name }}`という3件の証明書を対象としており、他の証明書
+  やSSL/TLS Service Profileには影響しない前提です。実際の環境では、対象
+  範囲を必ず事前に確認してください。

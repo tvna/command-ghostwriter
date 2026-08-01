@@ -1,0 +1,27 @@
+panorama_ip: 10.10.50.5
+auto_push_on_1st_connect: true
+firewalls:
+  - site: 東京本社
+    hostname: fw-tokyo-01
+    serial: "0011012345678"
+    device_group: dg-tokyo
+    template_stack: ts-tokyo-edge
+    log_collector: lc-tokyo-01
+    collector_group: cg-tokyo
+    to_sw_version: "11.1.4"
+  - site: 大阪支社
+    hostname: fw-osaka-01
+    serial: "0011012345679"
+    device_group: dg-osaka
+    template_stack: ts-osaka-edge
+    log_collector: lc-osaka-01
+    collector_group: cg-osaka
+    to_sw_version: "-"
+  - site: 名古屋支社
+    hostname: fw-nagoya-01
+    serial: "0011012345680"
+    device_group: dg-nagoya
+    template_stack: ts-nagoya-edge
+    log_collector: lc-nagoya-01
+    collector_group: cg-nagoya
+    to_sw_version: "-"

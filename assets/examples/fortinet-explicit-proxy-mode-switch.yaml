@@ -1,0 +1,27 @@
+wan_interface: "wan1"
+explicit_http_port: 8080
+enable_ftp_over_http: true
+enable_socks: false
+explicit_proxy_policy_id: 10
+explicit_proxy_policy_name: "proxy-explicit-corp"
+transparent_policy_id: 20
+transparent_policy_name: "fw-transparent-guest"
+webfilter_profile: "corp-webfilter-proxy"
+protocol_options_profile: "corp-proxy-options"
+ssl_ssh_profile: "deep-inspection-corp"
+enable_deep_inspection: true
+client_proxy_hostname: "proxy.example.local"
+explicit_segments:
+  - label: "本社PC(GPOでPAC/プロキシ設定を配布可能)"
+    interface: "port5"
+    network: "172.20.10.0/24"
+  - label: "開発部PC(同上)"
+    interface: "port6"
+    network: "172.20.11.0/24"
+transparent_segments:
+  - label: "来訪者Wi-Fi(BYOD、プロキシ設定不可)"
+    interface: "port7"
+    network: "172.20.20.0/24"
+  - label: "IoT/複合機セグメント(プロキシ設定不可)"
+    interface: "port8"
+    network: "172.20.21.0/24"
