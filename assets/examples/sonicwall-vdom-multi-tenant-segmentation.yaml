@@ -7,7 +7,7 @@ reserved_front_panel_ports:
 tenants:
   - organization_name: "Acme Retail Holdings"
     tenant_name: "acme-retail"
-    aci_version: "SonicOSX 7.0.1-5165"
+    firmware_version: "SonicOSX 7.0.1-5165"
     mgmt_cores: 1
     dp_cores: 2
     ha_enabled: false
@@ -22,7 +22,7 @@ tenants:
     description: "小売部門テナント。POS/在庫システム系トラフィックを収容する"
   - organization_name: "Acme Logistics Division"
     tenant_name: "acme-logistics"
-    aci_version: "SonicOSX 7.0.1-5165"
+    firmware_version: "SonicOSX 7.0.1-5165"
     mgmt_cores: 1
     dp_cores: 2
     ha_enabled: false
@@ -37,7 +37,7 @@ tenants:
     description: "物流部門テナント。倉庫管理システム系トラフィックを収容する"
   - organization_name: "Acme Financial Services"
     tenant_name: "acme-finance"
-    aci_version: "SonicOSX 7.0.1-5165"
+    firmware_version: "SonicOSX 7.0.1-5165"
     mgmt_cores: 2
     dp_cores: 4
     ha_enabled: true

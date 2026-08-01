@@ -4,7 +4,7 @@
 Logical Blade を {{ logical_blades_reserved }} 枚予約したうえで、
 {{ tenants | length }} 件のテナント/部門ごとに独立した SonicOSX コンテナ
 インスタンス(Tenant Instance)を作成します。各インスタンスは
-Organization Name / Tenant Name / ACI Version / コア割当 / インタフェース
+Organization Name / Tenant Name / Firmware Version / コア割当 / インタフェース
 (VLAN)割当を個別に持ち、Firmware・Instance License・ログもテナント単位
 で分離されます。
 
@@ -38,7 +38,7 @@ Blade・Front Panel Portの予約からテナントインスタンスの作成�
   Logical Blade数を設定し、対応するFront Panel Portを予約したうえで、
   設定を反映するために `{{ appliance_model }}` を再起動する
 - **Instances タブ(Add Instance)**: テナントインスタンスを作成する
-  タブ。`Add` から `Organization Name` / `Tenant Name` / `ACI Version`
+  タブ。`Add` から `Organization Name` / `Tenant Name` / `Firmware Version`
   / `Management Cores`(Control Plane用コア数、インスタンスあたり最大
   2コア)/ `Data Processing Cores`(データプレーン用コア数、インスタンス
   あたり最大8コア)/ HA有無を設定して1件のTenant Instanceを作成する
@@ -64,9 +64,9 @@ Blade・Front Panel Portの予約からテナントインスタンスの作成�
 
 作成する Tenant Instance は次の {{ tenants | length }} 件です。
 
-| # | Organization Name | Tenant Name | ACI Version | Mgmt Cores | DP Cores | HA | Front Panel Port | VLAN ID |
-|---|--------------------|-------------|--------------|------------|----------|----|--------------------|---------|
-{% for t in tenants %}| {{ loop.index }} | {{ t["organization_name"] }} | {{ t["tenant_name"] }} | {{ t["aci_version"] }} | {{ t["mgmt_cores"] }} | {{ t["dp_cores"] }} | {% if t["ha_enabled"] %}有効{% else %}無効{% endif %} | {{ t["front_panel_port"] }} | {{ t["vlan_id"] }} |
+| # | Organization Name | Tenant Name | Firmware Version | Mgmt Cores | DP Cores | HA | Front Panel Port | VLAN ID |
+|---|--------------------|-------------|-------------------|------------|----------|----|--------------------|---------|
+{% for t in tenants %}| {{ loop.index }} | {{ t["organization_name"] }} | {{ t["tenant_name"] }} | {{ t["firmware_version"] }} | {{ t["mgmt_cores"] }} | {{ t["dp_cores"] }} | {% if t["ha_enabled"] %}有効{% else %}無効{% endif %} | {{ t["front_panel_port"] }} | {{ t["vlan_id"] }} |
 {% endfor %}
 
 各Tenant Instanceの管理用インタフェース(X0/X1)と用途は次のとおりです。
@@ -99,12 +99,12 @@ Tenant Instanceを作成します。
 
 - `Organization Name`: `organization_name`
 - `Tenant Name`: `tenant_name`
-- `ACI Version`: `aci_version`
+- `Firmware Version`: `firmware_version`
 - `Management Cores`: `mgmt_cores`
 - `Data Processing Cores`: `dp_cores`
 - HA: `ha_enabled` が有効なテナントのみチェックを入れる
 
-{% for t in tenants %}- {{ loop.index }}件目: Organization Name={{ t["organization_name"] }} / Tenant Name={{ t["tenant_name"] }} / ACI Version={{ t["aci_version"] }} / Management Cores={{ t["mgmt_cores"] }} / Data Processing Cores={{ t["dp_cores"] }} / HA={% if t["ha_enabled"] %}有効{% else %}無効{% endif %}
+{% for t in tenants %}- {{ loop.index }}件目: Organization Name={{ t["organization_name"] }} / Tenant Name={{ t["tenant_name"] }} / Firmware Version={{ t["firmware_version"] }} / Management Cores={{ t["mgmt_cores"] }} / Data Processing Cores={{ t["dp_cores"] }} / HA={% if t["ha_enabled"] %}有効{% else %}無効{% endif %}
 {% endfor %}
 
 ### 3. 各Tenant InstanceのFront Panel Port/VLANマッピングを設定する
@@ -157,7 +157,7 @@ Front Panel PortとVLAN IDを割り当てます。
 
 - `DEVICE | Multi-Instance` の `Instances` タブに、{{ tenants | length }}
   件すべてのTenant Instanceが `Start` 済みの状態で表示されていること
-- 各Tenant Instanceの `Organization Name` / `Tenant Name` / `ACI Version`
+- 各Tenant Instanceの `Organization Name` / `Tenant Name` / `Firmware Version`
   / `Management Cores` / `Data Processing Cores` がシナリオ設定のとおり
   であること
 - `Firmware` タブで、各テナントの `firmware_file` がRoot Instanceの
