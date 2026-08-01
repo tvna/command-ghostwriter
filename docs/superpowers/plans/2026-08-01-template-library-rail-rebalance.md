@@ -155,7 +155,7 @@ EOF
 - Modify: `web/src/components/Library.tsx` (add constants after the Task 1 constants; replace the `server-common` entry)
 - Test: `web/src/components/Library.test.tsx` (server rail count, EXPECTED counts)
 
-- [ ] **Step 1: Update the failing test**
+- [x] **Step 1: Update the failing test**
 
 In `Library.test.tsx`, replace:
 
@@ -189,12 +189,12 @@ with:
     "server-common-ops": 47,
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cd web && bun run test -- Library.test.tsx`
 Expected: FAIL — `SERVER_RAIL` has length 4 (not 8); `EXPECTED["server-common-identity"]` etc. undefined while `RAIL` still has an entry with id `server-common`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `Library.tsx`, after the `NETWORK_VPN` constant added in Task 1, add:
 
@@ -268,17 +268,17 @@ with:
 
 (`server-debian` / `server-rhel` / `server-container` entries immediately following stay unchanged.)
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd web && bun run test -- Library.test.tsx`
 Expected: PASS.
 
-- [ ] **Step 5: Type-check**
+- [x] **Step 5: Type-check**
 
 Run: `cd web && bunx tsc -b`
 Expected: exit 0.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add web/src/components/Library.tsx web/src/components/Library.test.tsx
