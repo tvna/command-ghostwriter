@@ -128,6 +128,23 @@ describe("RAIL predicate exclusivity and exhaustiveness", () => {
     expect(AI_RAIL).toHaveLength(3);
   });
 
+  it("has no duplicate ids across the full RAIL array", () => {
+    const ids = RAIL.map((r) => r.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("renders each group heading exactly once, contiguously", () => {
+    const seen = new Set<string>();
+    let prev: string | undefined;
+    for (const entry of RAIL) {
+      if (entry.group !== prev && entry.group !== undefined) {
+        expect(seen.has(entry.group), `group "${entry.group}" is non-contiguous`).toBe(false);
+        seen.add(entry.group);
+      }
+      prev = entry.group;
+    }
+  });
+
   it("every network template matches exactly one network rail entry", () => {
     const networkTemplates = CGTemplates.filter((t) => t.category === "network");
     for (const t of networkTemplates) {
