@@ -1,0 +1,31 @@
+sysinfo:
+  status: true
+  description: "HQ-FortiGate-SNMP-Monitoring"
+  contact_info: "netops@example.co.jp"
+  location: "Tokyo-HQ-DC-Rack12"
+  cpu_threshold: 80
+  memory_threshold: 80
+  log_full_threshold: 90
+communities:
+  - label: "本社Zabbix監視"
+    community_string: "****"
+    hosts:
+      - label: "Zabbixサーバ(本社)"
+        ip: "172.25.180.50"
+        netmask: "255.255.255.255"
+    query_v2c_enabled: true
+    trap_v2c_enabled: true
+  - label: "災対Zabbix監視"
+    community_string: "****"
+    hosts:
+      - label: "Zabbixサーバ(災対拠点)"
+        ip: "172.25.190.50"
+        netmask: "255.255.255.255"
+    query_v2c_enabled: true
+    trap_v2c_enabled: false
+query_port: 161
+trap_port: 162
+snmp_interface: "port12"
+disabled_snmp_interfaces:
+  - "wan1"
+  - "wan2"

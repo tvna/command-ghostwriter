@@ -1,0 +1,145 @@
+# Palo Alto Networks(PAN-OS)におけるCIS Benchmark準拠監査とハードニング是正(BPA活用)
+
+CIS Benchmark等の公開されたハードニング基準に基づき、PAN-OSの管理設定
+{{ csv_rows | length }}項目の準拠状況を監査し、逸脱が見つかった項目のみを
+`Device > Setup > Management`のGUIおよびCLIで是正します。CIS Benchmark
+自体はCIS(サードパーティ)が発行する基準でありPAN-OSのネイティブ機能では
+ありませんが、Palo Alto Networks公式の「Best Practice Assessment
+(BPA)」ツールがTech Support File(TSF)を解析して200以上の設定チェックを
+実行し、その結果をCIS Critical Security ControlsやNIST等の業界標準に
+マッピングしたレポートを提供します。本書ではこのBPAレポートを起点に、
+是正後に再度TSFを取得してBPAで再評価するところまでを扱います。
+
+## 目的
+
+CIS Benchmark等の公開されたハードニング基準に基づきPAN-OSの管理設定の
+準拠状況を監査し、検出された逸脱をGUI/CLIで是正できるようになることを
+目指します。他ベンダーのネイティブ機能とは異なり、Palo Alto Networks
+(PAN-OS)ではCIS Benchmark自体はCIS(サードパーティ)が発行するものでPAN-OS
+のネイティブ機能ではないが、Palo Alto Networks公式の「Best Practice
+Assessment(BPA)」ツールが200以上の設定チェックを実行し、その結果をCIS
+Critical Security ControlsやNIST等の業界標準にマッピングしたレポートを
+提供するという別機構で同じ運用課題を解決することを理解した上で、BPA
+レポートの指摘事項を実際の設定変更へ変換し、是正後の再評価まで一貫して
+実施できるようになることを目指します。
+
+## 用語解説
+
+- **Best Practice Assessment(BPA)**: Palo Alto Networks公式の設定監査
+  サービス。Tech Support File(TSF)を解析して200以上の設定チェックを実行し
+  Pass/Fail形式で評価し、CIS Critical Security ControlsやNISTなど業界
+  標準へのマッピングを含むヒートマップレポートを生成する。Customer
+  Support Portal(CSP)からセルフサービスで実行するか、営業担当やパート
+  ナーSEに依頼して実行してもらう
+- **Tech Support File(TSF)**: `Device > Support`画面の`Generate Tech
+  Support File`で生成する診断用ファイル。設定ファイルや管理/データ
+  プレーンのプログラムファイル、一部のコマンド出力などを含み、BPAはこの
+  ファイルを入力としてレポートを生成する
+- **CIS Benchmark**: CIS(Center for Internet Security、Palo Alto
+  Networksとは別のサードパーティ団体)が発行する公開ハードニング基準。
+  PAN-OSにこの基準自体を直接読み込んで判定するネイティブ機能はなく、BPA
+  レポートが結果をこの基準へマッピングする形で参照する
+- **candidate config / running config**: PAN-OSが採る二段階構成モデル。
+  GUI/CLIで入力した設定は`commit`を実行するまで実機の動作に反映されない
+- **Device > Setup > Management(General Settings / Authentication
+  Settings)**: ホスト名やログインバナー(General Settings)、アイドル
+  タイムアウトやログイン失敗時のロックアウト条件(Authentication
+  Settings)などを設定するGUI画面
+
+## シナリオ設定
+
+BPAレポートおよび今回取得したTech Support Fileに基づく{{ csv_rows | length }}
+件のチェック項目を次のとおり管理します。`status`が`deviation`の行が是正
+対象、`compliant`の行はすでに基準を満たしているため変更しません。
+
+| check_no | category | cis_item | gui_field | current_value | target_value | status |
+|---|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["check_no"] }} | {{ r["category"] }} | {{ r["cis_item"] | safe }} | {{ r["gui_field"] }} | {{ r["current_value"] }} | {{ r["target_value"] }} | {{ r["status"] }} |
+{% endfor %}
+
+`cis_item`はCIS Benchmarkのルールタイトルをそのまま用いています。章番号は
+Benchmarkのバージョンによって変動するため、この手順書では章番号ではなく
+ルールタイトルで管理します。
+
+## 手順
+
+### 1. Tech Support Fileを生成する
+
+`Device > Support`を開き、`Generate Tech Support File`をクリックします。
+生成が完了したら、一覧に表示されたファイルをダウンロードします。
+
+### 2. Customer Support PortalのBest Practice AssessmentへTech Support Fileをアップロードする
+
+Customer Support Portal(CSP)でセルフサービスのBest Practice Assessment
+を開き、手順1でダウンロードしたTech Support Fileをアップロードします。
+レポート生成が完了したら、ヒートマップおよびCIS Critical Security
+ControlsやNISTへのマッピングを含むレポートをダウンロードします。
+
+### 3. BPAレポートの指摘事項をシナリオ設定の是正対象と突き合わせる
+
+BPAレポートでFail(未達)と判定された項目が、シナリオ設定の`status`が
+`deviation`の行と一致することを確認します。
+
+{% for r in csv_rows %}{% if r["status"] == "deviation" %}- check_no {{ r["check_no"] }}({{ r["cis_item"] | safe }}): 現状 `{{ r["current_value"] }}` から目標 `{{ r["target_value"] }}` へ
+{% endif %}{% endfor %}
+
+### 4. 是正対象の項目をDevice > Setup > Managementで修正する(GUI)
+
+各行の`gui_menu`が示す画面を開き、対応する`gui_field`を`target_value`の
+値へ変更します。`General Settings`と`Authentication Settings`は、それぞれ
+右上の編集(鉛筆)アイコンから設定ダイアログを開いて値を入力します。
+
+{% for r in csv_rows %}{% if r["status"] == "deviation" %}- {{ r["gui_menu"] | safe }} の `{{ r["gui_field"] }}` を `{{ r["current_value"] }}` から `{{ r["target_value"] }}` へ変更する({{ r["remediation_note"] }})
+{% endif %}{% endfor %}
+
+### 5. 変更をCLIでまとめて確認し、commitで確定する
+
+GUIでの変更内容は、configuration modeで次のCLIコマンドを実行しても同様に
+設定できます。最後に`commit`を実行し、候補設定(candidate config)を実行中
+の設定(running config)へ反映します。
+
+```bash
+{% for r in csv_rows %}{% if r["status"] == "deviation" %}{{ r["cli_command"] | safe }}
+{% endif %}{% endfor %}commit
+```
+
+`commit`が完了するまで、GUI・CLIいずれで入力した内容も実機の動作には
+反映されません。
+
+### 6. Tech Support Fileを再取得しBPAで再評価する
+
+`commit`完了後、手順1と同じ操作で新しいTech Support Fileを生成し、手順2
+と同じ手順でBest Practice Assessmentへ再アップロードします。新しいレポート
+で、手順3で確認した`deviation`行がPass(是正済み)に変わっていることを
+確認します。
+
+## 動作確認
+
+- 再評価後のBPAレポートで、シナリオ設定の`status`が`deviation`だった項目
+  ({% for r in csv_rows %}{% if r["status"] == "deviation" %}check_no {{ r["check_no"] }} {% endif %}{% endfor %})がPass判定に変わっていること
+- `Device > Setup > Management`の`Authentication Settings`で、`Idle
+  Timeout`・`Failed Attempts`・`Lockout Time`がそれぞれシナリオ設定の
+  `target_value`と一致していること
+- `Device > Setup > Management`の`General Settings`で、`Login Banner`に
+  設定した文言がログイン画面のName/Passwordフィールド下に表示されること
+- `status`が`compliant`の行(check_no 5、`Certificate Expiration Check`)
+  が変更されていないこと
+- commit後、GUI上に未反映(pending)の変更が残っていないこと
+
+## 注意事項
+
+- CIS Benchmarkの章番号はバージョンにより異なるため、本書では章番号では
+  なくルールタイトル(`cis_item`)で管理しています。実際に参照する
+  Benchmarkのバージョンにおける章番号は別途確認してください。
+- `Failed Attempts`・`Lockout Time`を変更すると、変更を行った管理者自身の
+  セッションも以後のログイン失敗でロックアウトの対象になります。作業前に
+  ロックアウト時にも接続できる別経路(コンソールポート等)を確保してください。
+- `Idle Timeout`を短くしすぎると、作業中の正当な管理者もセッション切断の
+  対象になります。目標値の10分はCIS Benchmarkの一般的な推奨値であり、実際
+  の運用に合わせて調整してください。
+- `Login Banner`の文言は法務・コンプライアンス部門が承認した文言に差し
+  替えてください。本書のサンプル文言をそのまま利用しないでください。
+- BPAはCIS Benchmarkそのものを実行するわけではなく、PAN-OSの200以上の
+  設定チェックをCIS Critical Security ControlsやNIST等へマッピングした
+  レポートを提供するものです。CIS Benchmark全項目を網羅している保証は
+  ないため、必要に応じてCIS Benchmark原本とも突き合わせてください。

@@ -1,0 +1,25 @@
+lan_dmz_interfaces:
+  - name: "port5"
+    segment_label: "本社LAN(ユーザーセグメント)"
+  - name: "port6"
+    segment_label: "DMZ(公開Webサーバーセグメント)"
+
+known_fabric_devices:
+  - name: "FS1E24-officefloor1"
+    device_type: "FortiSwitch"
+    model: "FS-124E"
+    connected_interface: "port5"
+  - name: "FAP-lobby-01"
+    device_type: "FortiAP"
+    model: "FAP-231F"
+    connected_interface: "port5"
+  - name: "FAP-dmz-roof-01"
+    device_type: "FortiAP"
+    model: "FAP-231F"
+    connected_interface: "port6"
+
+wids_profile_name: "corp-rogue-ap-detection"
+wids_sensor_mode: "both"
+fortiap_profile_name: "corp-indoor-fortiap-profile"
+baseline_asset_count: 42
+primary_reviewer: "netadmin_hanako"

@@ -1,0 +1,12 @@
+wan_interface = "wan1"
+interface_select_method = "specify"
+source_ip = "10.0.0.1"
+primary_server_ip = "192.0.2.50"
+primary_server_port = 6514
+secondary_server_ip = "192.0.2.60"
+secondary_server_port = 6514
+mode = "legacy-reliable"
+facility = "local0"
+log_format = "csv"
+max_log_rate = 0
+enc_algorithm = "disable"

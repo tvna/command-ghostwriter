@@ -1,0 +1,28 @@
+wan_interface = "wan"
+lan_network = "10.0.20.0/24"
+legacy_destination_descr = "LEGACY-SIEM-UDP-NOTLS"
+legacy_hostname = "siem-legacy.example.internal"
+legacy_port = 514
+test_marker = "SIEM-FWD-VERIFY-20260801"
+
+[[destinations]]
+role = "primary"
+descr = "SIEM-PRIMARY-TLS"
+hostname = "siem1.example.internal"
+port = 6514
+transport = "tls"
+certificate = "siem-forwarder-tls"
+facilities = ["local0", "auth"]
+levels = ["warning", "notice", "info"]
+applications = "-"
+
+[[destinations]]
+role = "secondary"
+descr = "SIEM-SECONDARY-TLS"
+hostname = "siem2.example.internal"
+port = 6514
+transport = "tls"
+certificate = "siem-forwarder-tls"
+facilities = ["local0", "auth"]
+levels = ["warning", "notice", "info"]
+applications = "-"

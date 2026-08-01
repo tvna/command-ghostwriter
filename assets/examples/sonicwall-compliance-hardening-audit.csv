@@ -1,0 +1,6 @@
+check_no,baseline_ref,category,check_item,setting_name,expected_value,current_value,audit_result,description
+1,HARDEN-ADM-01,Admin Access,管理コンソールのアイドルタイムアウトが既定より延長されている,Log out the Admin after inactivity of (mins),5,30,Fail,放置セッション悪用のリスクを抑えるため既定値へ是正する
+2,HARDEN-ADM-02,Admin Access,管理者パスワードの複雑性ポリシーが無効化されている,Enforce password complexity,Alphanumeric and symbolic,Disabled,Fail,脆弱な管理者パスワードの使用を防ぐため複雑性ポリシーを有効化する
+3,HARDEN-ADM-03,Admin Access,ログイン失敗時のロックアウトが有効化されている,Admin/user lockout,Enabled,Enabled,Pass,既に是正不要であることを確認済み
+4,HARDEN-SNMP-01,SNMP,SNMPv3必須化が未設定でSNMPv1/v2が許可されている,Mandatory Require SNMPv3,Enabled,Disabled,Fail,盗聴・なりすまし対策としてSNMPv3必須化へ是正しGet Community Nameも変更する
+5,HARDEN-TIME-01,NTP,NTPによる時刻同期が無効で手動設定のままである,Set time automatically using NTP,Enabled,Disabled,Fail,ログのタイムスタンプ整合性を確保するためNTP同期を有効化する

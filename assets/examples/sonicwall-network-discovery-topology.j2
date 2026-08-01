@@ -1,0 +1,160 @@
+# SonicWall (SonicOS) ネットワーク自動検出とトポロジ可視化
+
+`HOME | Dashboard > Topology` を用いて、`{{ firewall_model }}` 配下の
+ホスト・SonicWall Switch・Access Point の物理/論理接続をL2/L3で自動
+可視化し、ポップアップに表示される IP アドレス・MAC アドレス・デバイス
+種別・トラフィック統計を、事前に把握している {{ topology_devices | length }}
+台の想定デバイス一覧と突き合わせて未知のデバイスを洗い出します。あわせて、
+無線領域については `DEVICE | Access Points > IDS` の Rogue Access Point
+Detection で未許可 Access Point をパッシブ/アクティブスキャンにより検出し、
+BSSID ベースの許可リストで管理します。
+
+## 目的
+
+ネットワーク上のデバイスを自動検出してL2/L3トポロジを可視化し、未許可
+デバイスの接続を検知できるようになることを目指します。他ベンダーの
+ネイティブ機能とは異なり、SonicWall (SonicOS)では `HOME | Dashboard >
+Topology` 機能がファイアウォール配下のホスト・Access Point・SonicWall
+Switch等の物理/論理接続をL2/L3で自動可視化し、IPアドレス・MACアドレス・
+デバイス種別・トラフィック統計をポップアップ表示するという別機構で同じ
+運用課題を解決します。この可視化と、無線領域限定のRogue Access Point
+Detectionを組み合わせて運用する手順を身につけます。
+
+## 用語解説
+
+- **HOME | Dashboard > Topology**: ファイアウォール配下のホスト・Access
+  Point・SonicWall Switch等の物理/論理接続をL2/L3で自動可視化する管理
+  画面ナビゲーションパス。TZ/NSa/NSvシリーズでサポートされる
+- **デバイスのポップアップ表示**: Topology画面上でデバイスのアイコンに
+  マウスを重ねると表示されるツールチップ。デバイス種別・IPアドレス・
+  MACアドレス・トラフィック統計を確認できる
+- **DEVICE | Access Points > IDS**: 無線Intrusion Detection/Prevention
+  を設定する管理画面ナビゲーションパス。`Enable Wireless Intrusion
+  Detection and Prevention` を有効にすると、検出されたAccess Pointが
+  `Discovered Access Points` テーブルに一覧表示される
+- **Enable ARP cache search to detect connected rogue AP**: IDS設定
+  内のチェックボックス。ARPキャッシュ内のクライアントMACアドレスを
+  検索し、接続先のAPが未許可であればRogueと判定する検出方式
+- **Enable active probe to detect connected rogue AP**: IDS設定内の
+  もう一方のチェックボックス。SonicPoint/SonicWaveが疑わしいデバイスに
+  接続してLAN/DMZ/WLAN各インターフェースへプローブを送信し、
+  ファイアウォールがそのプローブを受信した場合にRogueと判定する検出
+  方式
+- **Discovered Access Points テーブルの Authorize 列**: 検出された各
+  Access Pointの行にある編集アイコンから、MACアドレス(BSSID)と任意の
+  コメントを指定して許可(Authorize)できる一覧
+- **Authorized Access Points(Address Object Group)**: 許可された
+  Access Pointの割り当て先となるAddress Object Groupの選択欄。既定値は
+  `All Authorized Access Points`
+
+## シナリオ設定
+
+`{{ firewall_model }}` 配下で `HOME | Dashboard > Topology` に表示される
+ことを期待する既知デバイスは次の {{ topology_devices | length }} 台です。
+
+| # | Label | Device Type | 想定IP | 想定MAC | 備考 |
+|---|-------|-------------|--------|---------|------|
+{% for d in topology_devices %}| {{ loop.index }} | {{ d["label"] }} | {{ d["device_type"] }} | {{ d["expected_ip"] }} | {{ d["expected_mac"] }} | {{ d["note"] }} |
+{% endfor %}
+
+無線領域の許可リストとして `DEVICE | Access Points > IDS` の
+`Discovered Access Points` テーブルで判定する Access Point は次の
+{{ discovered_access_points | length }} 件です。
+
+| # | AP Label | BSSID | コメント | 判定 |
+|---|----------|-------|----------|------|
+{% for a in discovered_access_points %}| {{ loop.index }} | {{ a["ap_label"] }} | {{ a["bssid"] }} | {% if a["comment"] != "-" %}{{ a["comment"] }}{% else %}(なし){% endif %} | {% if a["decision"] == "authorize" %}Authorize(許可){% else %}未許可のまま(Rogue扱い){% endif %} |
+{% endfor %}
+
+IDSの検出方式として、`Enable ARP cache search to detect connected
+rogue AP` は{% if enable_arp_cache_search %}有効{% else %}無効{% endif %}、
+`Enable active probe to detect connected rogue AP` は
+{% if enable_active_probe %}有効{% else %}無効{% endif %}にします。
+`Authorized Access Points` のAddress Object Groupは既定値の
+`{{ wireless_idp_group }}` を使用します。
+
+検証用に、許可リストに含めない未許可Access Pointの候補として BSSID
+`{{ rogue_test_bssid }}` を使用します。
+
+## 手順
+
+### 1. Topology画面で現在のネットワーク構成を表示する
+
+`HOME | Dashboard > Topology` を開き、`{{ firewall_model }}` 配下に
+描画されているホスト・SonicWall Switch・Access Pointのアイコンを確認
+します。
+
+### 2. 各デバイスのポップアップ情報を想定デバイス一覧と突き合わせる
+
+Topology画面上の各アイコンにマウスを重ね、ポップアップに表示される
+デバイス種別・IPアドレス・MACアドレスを、シナリオ設定の一覧と1件ずつ
+突き合わせます。
+
+{% for d in topology_devices %}- {{ loop.index }}件目: `{{ d["label"] }}`({{ d["device_type"] }})— ポップアップのIPアドレスが `{{ d["expected_ip"] }}`、MACアドレスが `{{ d["expected_mac"] }}` と一致することを確認({{ d["note"] }})
+{% endfor %}
+
+一覧のいずれにも該当しないアイコンがTopology画面上に存在する場合は、
+その場でIPアドレス・MACアドレス・デバイス種別・トラフィック統計を
+記録し、未許可デバイスの疑いがあるものとして手順5の記録に追加して
+ください。
+
+### 3. Access PointのIDS(Wireless Intrusion Detection and Prevention)を有効化する
+
+`DEVICE | Access Points > IDS` を開き、`Enable Wireless Intrusion
+Detection and Prevention` を有効にします。検出方式として、`Enable ARP
+cache search to detect connected rogue AP` を{% if enable_arp_cache_search %}有効に{% else %}無効のままに{% endif %}、
+`Enable active probe to detect connected rogue AP` を
+{% if enable_active_probe %}有効に{% else %}無効のままに{% endif %}
+設定し、`Authorized Access Points` のAddress Object Groupは
+`{{ wireless_idp_group }}` を選択したまま保存します。
+
+### 4. Discovered Access Pointsテーブルで検出結果を確認し許可リストを設定する
+
+`Scan Now` をクリックしてスキャンを実行したのち、`Discovered Access
+Points` テーブルに表示される各Access Pointについて、シナリオ設定の
+判定に従って `Authorize` 列の編集アイコンからBSSIDとコメントを設定
+します。
+
+{% for a in discovered_access_points %}{% if a["decision"] == "authorize" %}- `{{ a["ap_label"] }}`(BSSID: `{{ a["bssid"] }}`)を Authorize します{% if a["comment"] != "-" %}(コメント: {{ a["comment"] }}){% endif %}
+
+{% else %}- `{{ a["ap_label"] }}`(BSSID: `{{ a["bssid"] }}`)はAuthorizeせず、Rogue判定のままにします
+
+{% endif %}{% endfor %}
+
+### 5. 未許可の疑いがあるデバイスを記録する
+
+手順2でTopology画面上に想定デバイス一覧にない項目が見つかった場合は、
+そのIPアドレス・MACアドレス・デバイス種別・接続先スイッチポート等を
+記録し、ネットワーク管理者へ調査を依頼します。無線のAccess Pointに
+ついては、手順4で `Discovered Access Points` テーブルのRogue判定と
+突き合わせて確認します。
+
+## 動作確認
+
+- `HOME | Dashboard > Topology` に、シナリオ設定の {{ topology_devices | length }}
+  台すべてが表示され、各ポップアップのIPアドレス・MACアドレスが想定
+  どおりであること
+- `DEVICE | Access Points > IDS` の `Discovered Access Points` テーブル
+  で、{% for a in discovered_access_points %}{% if a["decision"] == "authorize" %}`{{ a["ap_label"] }}` がAuthorize済みであること{% if not loop.last %}、{% endif %}{% endif %}{% endfor %}
+  を確認すること
+- BSSID `{{ rogue_test_bssid }}` のAccess Pointを許可リストに含めない
+  状態でスキャンし、`Discovered Access Points` テーブル上でRogueとして
+  未許可のまま表示され続けること
+
+## 注意事項
+
+- `HOME | Dashboard > Topology` はTZ/NSa/NSvシリーズでのサポートで
+  あり、また可視化とポップアップ表示による目視確認の機能であって、
+  未許可の有線デバイスを自動的に遮断する機構ではありません。手順2で
+  見つかった未許可の疑いがあるデバイスは、別途Access Ruleやポート
+  セキュリティ設定等で対処する必要があります。
+- Rogue Access Point Detectionは無線(Access Point)領域限定の機構
+  です。有線スイッチポートに直接接続された未許可デバイスは、この
+  機構では検知できません。
+- パッシブスキャンはAccess PointがAP動作モードのときに単一チャネル
+  で行われ、アクティブスキャンは起動時および `Scan Now` クリック時に
+  全チャネルで行われます。検出のタイミングにはこの違いを踏まえて
+  ください。
+- 管理者パスワードやAPIキーなどの認証情報は、本手順書やログに平文で
+  残さないでください。記録が必要な場合は `********` のようにマスク
+  してください。

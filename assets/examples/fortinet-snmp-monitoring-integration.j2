@@ -1,0 +1,210 @@
+# FortiGate SNMPヘルスチェック連携(Zabbix等の外部監視基盤向け)
+
+FortiGate(FortiOS)の `config system snmp sysinfo` でSNMPエージェントの基本
+情報としきい値を設定したうえで、`config system snmp community` にSNMP v2c
+コミュニティを{{ communities | length }}件作成し、外部監視基盤(Zabbix等)
+からCPU/メモリ/インターフェース状態のポーリングとトラップ受信ができるように
+します。ポーリング元は各コミュニティの `hosts` サブテーブルでIPアドレスを
+限定し、SNMPの応答自体も監視セグメントが接続する `{{ snmp_interface }}` の
+Administrative Access(`allowaccess`)にのみ追加します。
+
+## 目的
+
+FortiGateのSNMPエージェント(`config system snmp sysinfo`)としきい値通知を
+構成し、SNMP v2cコミュニティ(`config system snmp community`)を用いて外部
+監視基盤(Zabbix等)からCPU/メモリ/インターフェース状態のヘルスチェックが
+行えるようになることを目指します。あわせて、ポーリング元ホストの限定
+(`hosts` サブテーブル)とインターフェース単位のSNMP応答制御
+(`allowaccess`)を組み合わせ、SNMPの応答範囲を監視基盤のみに絞り込む
+安全な構成を実践できるようになることを目指します。
+
+## 用語解説
+
+- **config system snmp sysinfo**: SNMPエージェント全体の基本設定を行うCLI
+  コンテキスト。`status`(SNMPエージェントの有効/無効)、`description`
+  (システム説明文)、`contact-info`(管理者連絡先)、`location`(設置場所)
+  に加え、`trap-high-cpu-threshold`・`trap-low-memory-threshold`・
+  `trap-log-full-threshold` で、CPU使用率/メモリ使用率/ログ容量が指定した
+  しきい値(%)を超えた際にトラップを送信するかどうかのしきい値を設定できる
+- **config system snmp community**: SNMP v1/v2c(コミュニティ)によるポーリ
+  ングとトラップ送信を設定するCLIコンテキスト。`edit <id>` でコミュニティ
+  ごとの設定を作成し、`name` にコミュニティ文字列、`query-v1-status` /
+  `query-v2c-status` と `query-v1-port` / `query-v2c-port` でポーリング
+  応答の有効/無効とポート、`trap-v1-status` / `trap-v2c-status` と
+  `trap-v1-rport` / `trap-v2c-rport` でトラップ送信の有効/無効と送信先
+  ポートを設定する
+- **hosts サブテーブル**: `config system snmp community` の各コミュニティ
+  配下にある `config hosts` で、そのコミュニティでのポーリング/トラップ
+  を許可する送信元(または送信先)ホストを `edit <id>` ごとに `ip` (IP
+  アドレスとネットマスク)で登録する
+- **events**: `config system snmp community` の各コミュニティで、どの種類
+  の事象が発生した際にトラップを送信するかを選択する項目。具体的に選択
+  できる値の一覧はFortiOSのバージョンによって異なり、本手順書の一次情報
+  では列挙を確認できなかったため、値を本手順書には記載していません。
+  カスタマイズする場合は対象FortiGateのCLIで `set events ?` を実行して
+  利用可能な値を確認してください
+- **Administrative Access(allowaccess)の `snmp`**: `Network >
+  Interfaces` およびCLIの `config system interface` の `edit
+  <interface-name>` 配下、`set allowaccess` に列挙するプロトコルの一つ。
+  そのインターフェースでSNMPポーリングへの応答を許可するかどうかを制御
+  する
+
+## シナリオ設定
+
+SNMPエージェントの基本情報としきい値(sysinfo):
+
+| 項目 | 値 |
+|------|-----|
+| SNMPエージェント有効化(status) | {{ sysinfo.status }} |
+| システム説明(description) | {{ sysinfo.description }} |
+| 管理者連絡先(contact_info) | {{ sysinfo.contact_info }} |
+| 設置場所(location) | {{ sysinfo.location }} |
+| CPU使用率しきい値(cpu_threshold、%) | {{ sysinfo.cpu_threshold }} |
+| メモリ使用率しきい値(memory_threshold、%) | {{ sysinfo.memory_threshold }} |
+| ログ容量しきい値(log_full_threshold、%) | {{ sysinfo.log_full_threshold }} |
+
+作成するSNMP v2cコミュニティ({{ communities | length }}件):
+
+| # | コミュニティ | ポーリング元ホスト | v2cクエリ | v2cトラップ |
+|---|--------------|--------------------|-----------|-------------|
+{% for c in communities %}| {{ loop.index }} | {{ c.label }} | {% for h in c.hosts %}{{ h.label }}({{ h.ip }}){% if not loop.last %}、{% endif %}{% endfor %} | {{ c.query_v2c_enabled }} | {{ c.trap_v2c_enabled }} |
+{% endfor %}
+| 項目 | 値 |
+|------|-----|
+| クエリ待受ポート(query_port) | {{ query_port }} |
+| トラップ送信先ポート(trap_port) | {{ trap_port }} |
+| SNMP応答を許可するインターフェース(snmp_interface) | {{ snmp_interface }} |
+| SNMP応答を許可しないインターフェース数(disabled_snmp_interfaces) | {{ disabled_snmp_interfaces | length }} |
+
+SNMP応答を許可しないインターフェース一覧(disabled_snmp_interfaces):
+
+| # | インターフェース |
+|---|------------------|
+{% for ifc in disabled_snmp_interfaces %}| {{ loop.index }} | {{ ifc }} |
+{% endfor %}
+## 手順
+
+### 1. SNMPエージェントの基本情報としきい値を設定する
+
+`System > SNMP` を開き、SNMP Agentを有効化したうえで、Description・
+Contact Info・Locationに、シナリオ設定の値をそれぞれ入力します。CPU/
+メモリ/ログ容量のしきい値も同じ画面で設定できます。
+
+```bash
+config system snmp sysinfo
+    set status {% if sysinfo.status %}enable{% else %}disable{% endif %}
+
+    set description "{{ sysinfo.description }}"
+    set contact-info "{{ sysinfo.contact_info }}"
+    set location "{{ sysinfo.location }}"
+    set trap-high-cpu-threshold {{ sysinfo.cpu_threshold }}
+    set trap-low-memory-threshold {{ sysinfo.memory_threshold }}
+    set trap-log-full-threshold {{ sysinfo.log_full_threshold }}
+end
+```
+
+### 2. 監視対象ごとにSNMP v2cコミュニティを作成する(GUI)
+
+`System > SNMP` の SNMP v1/v2c 一覧で `Create New` から、次の各コミュニ
+ティを作成します。コミュニティ文字列(`name`)は、この手順書には記載
+していない値を別途安全な方法で管理者間共有し、GUI上でのみ入力してくだ
+さい(下記CLI例の `****` は実際の値ではありません)。
+
+{% for c in communities %}- `{{ c.label }}`: Hosts に{% for h in c.hosts %}{{ h.label }}(`{{ h.ip }}/{{ h.netmask }}`){% if not loop.last %}、{% endif %}{% endfor %}を追加し、
+  Queries の v2c を{% if c.query_v2c_enabled %}有効化し、Port欄に `{{ query_port }}` を設定{% else %}無効のまま{% endif %}します。
+  Traps の v2c は{% if c.trap_v2c_enabled %}有効化し、Remote port欄に `{{ trap_port }}` を設定{% else %}無効のまま{% endif %}します。
+{% endfor %}
+### 3. 同じ内容をCLIで設定する
+
+```bash
+config system snmp community
+{% for c in communities %}    edit {{ loop.index }}
+        set name ****
+        config hosts
+{% for h in c.hosts %}            edit {{ loop.index }}
+                set ip {{ h.ip }} {{ h.netmask }}
+            next
+{% endfor %}        end
+        set query-v2c-status {% if c.query_v2c_enabled %}enable{% else %}disable{% endif %}
+
+        set query-v2c-port {{ query_port }}
+        set trap-v2c-status {% if c.trap_v2c_enabled %}enable{% else %}disable{% endif %}
+
+        set trap-v2c-rport {{ trap_port }}
+    next
+{% endfor %}end
+```
+
+### 4. SNMP応答を許可するインターフェースを限定する
+
+監視基盤が接続する `{{ snmp_interface }}` にのみ、既存のAdministrative
+Accessを維持したまま `snmp` を追加します。既存の許可プロトコルを消さない
+よう、`set` ではなく `append` を使います。
+
+```bash
+config system interface
+    edit "{{ snmp_interface }}"
+        append allowaccess snmp
+    next
+end
+```
+
+{% for ifc in disabled_snmp_interfaces %}`{{ ifc }}`{% if not loop.last %}・{% endif %}{% endfor %}
+については、`Network > Interfaces` でAdministrative Accessを開き、`SNMP`
+のチェックボックスが入っていないことを確認します。既に他のチェックが
+入っている場合でも、`SNMP` のチェックのみを外せば他の許可設定には影響
+しません。CLIで確認する場合は、変更前に現在の設定を必ず確認してから
+判断してください。
+
+```bash
+show system interface "{{ disabled_snmp_interfaces[0] }}"
+```
+
+### 5. Zabbix側から疎通を確認する
+
+Zabbix(または他の監視基盤)のサーバから、各コミュニティのポーリング元
+ホストに対応するIPアドレスを送信元として、`{{ snmp_interface }}` 宛てに
+SNMP GETが成功することを確認します。
+
+```bash
+# Zabbixサーバ上、または同じセグメントの検証端末から実行する
+snmpget -v2c -c **** -p {{ query_port }} <firewall-mgmt-ip> sysUpTime.0
+```
+
+## 動作確認
+
+- `config system snmp sysinfo` の `status` が `enable` になっていること
+- シナリオ設定の各コミュニティ({{ communities | length }}件)について、
+  `hosts` に登録したポーリング元ホストからのみSNMP GETが成功し、それ以外
+  の送信元からは応答がないこと
+- `query_v2c_enabled` が `true` のコミュニティで、ポート`{{ query_port }}`
+  へのSNMP GETが成功すること
+- `trap_v2c_enabled` が `true` のコミュニティ宛てに、CPU/メモリしきい値
+  超過時のトラップがポート`{{ trap_port }}`で受信できること
+- `{{ snmp_interface }}` のAdministrative Accessに `SNMP` が追加されて
+  いること
+- {% for ifc in disabled_snmp_interfaces %}`{{ ifc }}`{% if not loop.last %}・{% endif %}{% endfor %}
+  のAdministrative Accessに `SNMP` が含まれていないこと
+
+## 注意事項
+
+- **コミュニティ文字列(`name`)を本手順書やログ、チケットに平文で記載し
+  ないこと。** 本手順書中の `****` はすべてマスク表記であり、実際の値
+  ではありません。値は秘密管理ツール等で別途安全に共有してください。
+- **`events` の具体的な設定値はこの手順書に含めていません。** 一次情報
+  で選択可能な値の一覧を確認できなかったため、カスタマイズする場合は
+  対象FortiGateのCLIで `set events ?` を実行し、利用可能な値をその場で
+  確認してから設定してください。実在が未確認の値を推測で設定しないで
+  ください。
+- SNMP v1/v2cはコミュニティ文字列が平文でネットワークを流れるため、
+  可能であれば認証・暗号化に対応したSNMP v3の利用もあわせて検討して
+  ください。本手順書はZabbix等での広い互換性を優先し、v2cを対象として
+  います。
+- `hosts` サブテーブルでポーリング元ホストを限定していても、`
+  {{ snmp_interface }}` 以外のインターフェースでAdministrative Accessに
+  `SNMP` が入っていると、そのインターフェース経由でも応答してしまう
+  おそれがあります。手順4の確認を必ず行ってください。
+- CLIで `append`/`unset` を使う前に、対象インターフェースの現在の
+  Administrative Access設定を必ず確認し、意図しないプロトコルの停止
+  (管理者自身のGUI/SSHアクセス経路を含む)が発生しないようにして
+  ください。

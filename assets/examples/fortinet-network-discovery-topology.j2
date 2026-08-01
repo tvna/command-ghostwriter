@@ -1,0 +1,222 @@
+# ネットワークデバイスの自動検出とL2/L3トポロジ可視化、未許可デバイス検知(FortiOS)
+
+FortiGate(FortiOS)配下のネットワーク上のデバイスを自動検出してL2/L3トポロジを
+可視化するとともに、未許可デバイスの接続を検知できるようにします。対象のLAN/
+DMZインターフェース({{ lan_dmz_interfaces | length }}件)でDevice Detection
+とLLDPレセプションを有効化し、`Security Fabric` の Physical Topology /
+Logical Topology で自動検出結果を確認します。あわせて Asset Identity Center
+(`Assets & Identities`)でデバイス一覧を棚卸しし、WiFi側では WIDS Profile に
+よる Rogue AP検知(オンワイヤ相関)を有効化します。既知のファブリック対応機器
+({{ known_fabric_devices | length }}台)以外がグレー表示された場合は
+Authorizeせず調査対象とします。
+
+## 目的
+
+ネットワーク上のデバイスを自動検出してL2/L3トポロジを可視化し、未許可デバイス
+の接続を検知できるようになることを目指します。他ベンダーのネイティブ機能とは
+異なり、Fortinet (FortiOS)では単一機能ではなく、Security FabricのTopology表示・
+LLDPレセプション・Asset Identity Center・Rogue AP検知という複数のネイティブ
+機構の組み合わせで実現するという別機構で同じ運用課題を解決します。あわせて、
+自動検出された新規デバイスをAuthorize(承認)する前に、既知のファブリック
+対応機器一覧({{ known_fabric_devices | length }}台)と接続インターフェースを
+突き合わせて確認する、安全な棚卸し運用を実践できるようになることも目指します。
+
+## 用語解説
+
+- **Physical Topology / Logical Topology**: `Security Fabric` メニュー配下の
+  トポロジ表示画面。Physical TopologyはFortiSwitch/FortiAP等ファブリック対応
+  機器の物理的な接続構造を、Logical Topologyは各機器がSecurity Fabricに接続
+  するインターフェース単位の情報を表示する。新規に検出された未承認の機器は
+  アイコンがグレーで表示され、アイコンをクリックして `Authorize` を選択すると
+  承認され、アイコンが青色に変わる
+- **LLDPレセプション(lldp-reception)**: `Network > Interfaces` のインター
+  フェース編集画面、またはCLIの `config system interface` 配下 `edit
+  <interface-name>` で `set lldp-reception enable` として有効化する設定。
+  有効化すると、ベンダーを問わずL2隣接デバイスから受信したLLDPメッセージを
+  学習・保存し、その情報をCLI(`diagnose lldprx neighbor summary` 等)/REST
+  API/SNMPから参照できるようになる。有効化には、同じインターフェースで
+  Device Detection(`device-identification`)が先に有効になっている必要がある
+- **Device Detection / Asset Identity Center**: Device Detectionは
+  `Network > Interfaces` のインターフェース編集画面、またはCLIの
+  `config system interface` 配下で `set device-identification enable` として
+  LAN/DMZロールのインターフェース単位に有効化する機能で、WANロールの
+  インターフェースには適用されない。有効化すると、そのインターフェースに
+  接続されたデバイスの情報が `Dashboard > Assets & Identities`(Asset
+  Identity Center)の Assets ウィジェットに集約表示される
+- **WIDS Profile / Rogue AP検知**: `WiFi and Switch Controller > WIDS
+  Profiles` で作成・編集するプロファイル。CLIでは `config wireless-controller
+  wids-profile` 配下で、Sensor mode(`set sensor-mode {disable | foreign |
+  both}`)とRogue AP検知(`set ap-scan enable`)を設定する。Rogue AP検知を
+  有効化すると、FortiGateが有線LAN上で観測したMACアドレスと無線側で観測した
+  MACアドレスを突き合わせるオンワイヤ相関検出が自動的に働き、不正APの一覧に
+  On-wireの状態が表示される
+
+## シナリオ設定
+
+Device DetectionとLLDPレセプションを有効化する対象インターフェース
+({{ lan_dmz_interfaces | length }}件):
+
+| # | インターフェース | セグメント |
+|---|-------------------|------------|
+{% for iface in lan_dmz_interfaces %}| {{ loop.index }} | {{ iface.name }} | {{ iface.segment_label }} |
+{% endfor %}
+既知のファブリック対応機器一覧({{ known_fabric_devices | length }}台、
+Physical Topologyでの検出時にAuthorizeしてよい機器):
+
+| # | 機器名 | 種別 | 型番 | 接続インターフェース |
+|---|--------|------|------|------------------------|
+{% for dev in known_fabric_devices %}| {{ loop.index }} | {{ dev.name }} | {{ dev.device_type }} | {{ dev.model }} | {{ dev.connected_interface }} |
+{% endfor %}
+| 項目 | 値 |
+|------|-----|
+| Rogue AP検知プロファイル名(wids_profile_name) | {{ wids_profile_name }} |
+| Sensor mode(wids_sensor_mode) | {{ wids_sensor_mode }} |
+| 適用先FortiAPプロファイル(fortiap_profile_name) | {{ fortiap_profile_name }} |
+| 棚卸し前の既知資産数の基準値(baseline_asset_count) | {{ baseline_asset_count }} |
+| 本手順の実施担当者(primary_reviewer) | {{ primary_reviewer }} |
+
+## 手順
+
+### 1. 現状を確認する(基準値を記録する)
+
+新しい設定を投入する前に、現状を記録します。
+
+- `Dashboard > Assets & Identities` を開き、Assetsウィジェットに表示されて
+  いる現在のデバイス数を確認し、シナリオ設定の基準値
+  (`{{ baseline_asset_count }}`)と大きく乖離していないか記録します。
+- `Security Fabric` の Physical Topology / Logical Topology を開き、現状で
+  グレー表示(未承認)の機器が存在しないかを確認します。既に存在する場合は、
+  この手順を進める前にその機器が既知のものかどうかを先に確認してください。
+
+### 2. 対象インターフェースでDevice Detectionを有効化する
+
+`Network > Interfaces` で、シナリオ設定のLAN/DMZインターフェース
+({{ lan_dmz_interfaces | length }}件)を編集し、Device Detectionを有効化
+します。Device DetectionはLAN/DMZロールのインターフェースのみに適用できる
+機能で、WANロールのインターフェースには設定できません。
+
+```bash
+config system interface
+{% for iface in lan_dmz_interfaces %}    edit "{{ iface.name }}"
+        set device-identification enable
+    next
+{% endfor %}end
+```
+
+### 3. 同じインターフェースでLLDPレセプションを有効化する
+
+手順2でDevice Detectionを有効化した後、同じインターフェースでLLDPレセプション
+を有効化します。LLDPレセプションはDevice Detectionが有効なインターフェースで
+のみ有効化できます。
+
+```bash
+config system interface
+{% for iface in lan_dmz_interfaces %}    edit "{{ iface.name }}"
+        set lldp-reception enable
+    next
+{% endfor %}end
+```
+
+有効化後、CLIから学習済みのLLDP隣接情報を確認できます。
+
+```bash
+diagnose lldprx neighbor summary
+```
+
+### 4. Physical Topology / Logical Topologyで自動検出結果を確認し、既知の機器をAuthorizeする
+
+`Security Fabric` の Physical Topology を開きます。手順2・3の設定後、
+ファブリック対応機器が新規に検出されるとグレーのアイコンで表示されます。
+
+シナリオ設定の既知のファブリック対応機器一覧({{ known_fabric_devices | length }}台)
+について、次の手順で1台ずつ確認します。
+
+{% for dev in known_fabric_devices %}- `{{ dev.name }}`({{ dev.device_type }} /
+  {{ dev.model }}): グレー表示の機器のうち、接続インターフェースが
+  `{{ dev.connected_interface }}` であるものが、配線台帳や現物のシリアル
+  ラベルと一致することを確認したうえで、アイコンをクリックして `Authorize`
+  を選択します。承認後、アイコンが青色に変わることを確認します。
+{% endfor %}
+上記一覧に該当しない機器がグレー表示された場合は、`Authorize` を選択せず、
+後述の注意事項に従って調査してください。
+
+Logical Topologyも開き、承認した各機器がどのインターフェース経由で
+Security Fabricに接続しているかをあわせて確認します。
+
+### 5. Asset Identity CenterでDevice Inventoryを棚卸しする
+
+`Dashboard > Assets & Identities` を開き、Assetsウィジェットを展開して
+デバイス一覧を確認します。手順2で有効化したインターフェース
+({% for iface in lan_dmz_interfaces %}`{{ iface.name }}`{% if not loop.last %}・{% endif %}{% endfor %})
+経由で検出されたデバイスについて、デバイス種別・ベンダー情報が想定と一致
+しているかを確認し、手順1で記録した基準値(`{{ baseline_asset_count }}`)
+との差分を{{ primary_reviewer }}が確認します。
+
+### 6. WIDS Profileを作成し、対象FortiAPプロファイルへ適用してRogue AP検知を有効化する
+
+`WiFi and Switch Controller > WIDS Profiles` を開き、`{{ wids_profile_name }}`
+という名前でプロファイルを作成(または編集)し、Sensor modeを設定して
+Rogue AP検知を有効化します。
+
+```bash
+config wireless-controller wids-profile
+    edit "{{ wids_profile_name }}"
+        set sensor-mode {{ wids_sensor_mode }}
+        set ap-scan enable
+    next
+end
+```
+
+続いて `WiFi and Switch Controller > FortiAP Profiles` で
+`{{ fortiap_profile_name }}` を編集し、Radio 1の設定で作成したWIDS Profile
+(`{{ wids_profile_name }}`)を選択します。
+
+```bash
+config wireless-controller wtp-profile
+    edit "{{ fortiap_profile_name }}"
+        config radio-1
+            set wids-profile "{{ wids_profile_name }}"
+        end
+    next
+end
+```
+
+## 動作確認
+
+- シナリオ設定のLAN/DMZインターフェース({{ lan_dmz_interfaces | length }}件)
+  すべてで、`device-identification` と `lldp-reception` が有効になっている
+  こと
+- `diagnose lldprx neighbor summary` で、対象インターフェースに接続された
+  隣接デバイスの学習結果が表示されること
+- Physical Topologyで、既知のファブリック対応機器({{ known_fabric_devices | length }}台)
+  のアイコンがすべて青色(Authorize済み)になっていること
+- `Dashboard > Assets & Identities` のAssetsウィジェットで、手順2の対象
+  インターフェース経由のデバイスが一覧表示され、基準値
+  (`{{ baseline_asset_count }}`)との差分が{{ primary_reviewer }}によって
+  確認されていること
+- `WiFi and Switch Controller > WIDS Profiles` で `{{ wids_profile_name }}`
+  のSensor modeが `{{ wids_sensor_mode }}`、Rogue AP検知が有効になっている
+  こと、および `{{ fortiap_profile_name }}` のRadio 1に同プロファイルが
+  適用されていること
+
+## 注意事項
+
+- **既知のファブリック対応機器一覧にない機器がグレー表示された場合は
+  Authorizeしないこと。** 接続インターフェースやシリアル/型番が一致しない
+  未知の機器は、まず配線を物理的に確認し、必要に応じてケーブルを抜線して
+  から原因を調査してください。安易にAuthorizeすると、未許可デバイスが
+  Security Fabricの一員として扱われてしまいます。
+- Device Detection(`device-identification`)はLAN/DMZロールのインター
+  フェースにのみ設定できます。WANロールのインターフェースに設定しようと
+  しても反映されないため、対象インターフェースのロールを事前に確認して
+  ください。
+- LLDPレセプションはDevice Detectionが有効なインターフェースでのみ有効化
+  できます。手順2(Device Detection)を先に完了させてから手順3(LLDP
+  レセプション)を実施してください。
+- Rogue AP検知のオンワイヤ相関は、Sensor modeとRogue AP検知の両方を有効化
+  して初めて自動的に働きます。検知後に該当APを無効化(Suppress)する場合は、
+  不正ANPが本当に自社管理外であることを確認したうえで実施してください。
+  誤って自社管理下のAPを抑制すると、そのAPのサービスに影響するおそれが
+  あります。
+- 本手順書に記載のインターフェース名・機器名・プロファイル名はシナリオ
+  設定の例であり、実際の環境の命名規則に合わせて置き換えてください。

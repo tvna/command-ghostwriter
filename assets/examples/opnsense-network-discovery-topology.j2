@@ -1,0 +1,171 @@
+# OPNsenseによるネットワーク自動検出とL2/L3トポロジ把握
+
+OPNsenseの Host Discovery service(`Interfaces > Neighbors > Automatic
+Discovery`、デーモン名 `hostwatch`)を有効化し、ARP/NDPメッセージの
+パッシブ監視によってネットワーク上のデバイスを自動検出します。検出結果は
+IP-MACマッピングのデータベース(Discovered Hosts)とマッピング変更ログ
+(Discovery Log)として蓄積され、既知デバイス台帳({{ known_devices | length }}
+件)と突き合わせることで未許可デバイスの接続を検知します。
+
+## 目的
+
+対象インターフェース({{ discovery_interfaces | length }} 件)上のデバイスを
+OPNsenseのHost Discovery serviceで自動検出し、IP-MACマッピングに基づく
+L2/L3トポロジの把握と、既知デバイス台帳に存在しない未許可デバイスの
+接続検知を運用できるようになることを目指します。他ベンダーのネイティブ
+機能とは異なり、OPNsenseではOPNsense の Host Discovery service(Neighbors:
+docs 上は manual/neighbors.html)は ARP/NDP メッセージをパッシブに監視し、
+IP-MACマッピングのデータベースを構築、マッピング変更(＝未知の新規ホスト
+の出現など)をログするという別機構で同じ運用課題を解決します。
+
+## 用語解説
+
+- **Host Discovery service(`hostwatch`)**: ARP(IPv4)/NDP(IPv6)メッセージを
+  パッシブに監視してネットワーク上のホストを検出するデーモン。イーサネット
+  インターフェースのみを対象とし、トンネルやループバックなど類似の
+  インターフェースは対象外
+- **Automatic Discovery**: `Interfaces > Neighbors > Automatic Discovery`
+  画面。`Settings`・`Discovered Hosts`・`Discovery Log`・
+  `Static Assignments` の4セクションで構成される
+- **Settings**: サービスの動作設定。`Enable`(サービス有効化)、
+  `Interfaces`(監視対象インターフェース)、`Promiscuous mode`(自身宛て
+  以外のパケットも監視するモード)、`Verbose logging`(詳細ログ)、
+  `Ignore networks`(監視・ログ対象から除外するネットワーク)の各項目を持つ
+- **Discovered Hosts**: サービス有効時に表示される、現在把握している
+  IP-MACマッピングの一覧。`Last Seen` 列は直近に出現した、または一定期間
+  出現していないホストを見分ける手がかりになる
+- **Discovery Log**: 新規ホスト(new stations)の出現やマッピング変更
+  (movements)のログ。構造が単純なため、外部syslogサーバーで新規ホスト
+  検知のアラート等に利用できるとされている
+- **Static Assignments**: 既知のIPv4/IPv6-MACマッピングを手動で登録する
+  区画。登録内容はARP/NDPテーブルへ反映される。DHCPなど他の経路に由来する
+  エントリはここでは編集できない場合がある
+
+## シナリオ設定
+
+今回、自動検出を有効化する対象と既知デバイス台帳は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| Promiscuous mode(promiscuous_mode) | {{ promiscuous_mode }} |
+| Verbose logging(verbose_logging) | {{ verbose_logging }} |
+| Discovery Log の確認間隔(review_interval_hours) | {{ review_interval_hours }} 時間ごと |
+
+監視対象インターフェース一覧(discovery_interfaces、
+{{ discovery_interfaces | length }} 件):
+
+| # | インターフェース |
+|---|-------------------|
+{% for iface in discovery_interfaces %}| {{ loop.index }} | {{ iface }} |
+{% endfor %}
+
+監視・ログ対象から除外するネットワーク(ignore_networks、
+{{ ignore_networks | length }} 件):
+
+| # | ネットワーク |
+|---|--------------|
+{% for net in ignore_networks %}| {{ loop.index }} | {{ net }} |
+{% endfor %}
+
+既知デバイス台帳(known_devices、{{ known_devices | length }} 件、
+Static Assignmentsに登録する):
+
+| # | MACアドレス | IPアドレス | 説明 |
+|---|-------------|-----------|------|
+{% for dev in known_devices %}| {{ loop.index }} | {{ dev.mac }} | {{ dev.ip }} | {{ dev.description }} |
+{% endfor %}
+
+## 手順
+
+### 1. 現状の設定をバックアップする
+
+Automatic Discoveryの設定変更前に、`config.xml` をAPI経由で退避します。
+`$OPNSENSE_API_KEY` / `$OPNSENSE_API_SECRET` には、
+`System > Access > Users` で発行したAPIキー/シークレットをそれぞれ
+環境変数として設定してください(値は `****` のようにマスクし、平文で
+コミット・ログ出力しないこと)。
+
+```bash
+export FW_HOST="10.0.0.1"
+curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" \
+  "https://${FW_HOST}/api/core/backup/download/this" \
+  -o "opnsense-config-backup-$(date +%Y%m%d%H%M).xml"
+```
+
+### 2. Automatic Discoveryを有効化する
+
+`Interfaces > Neighbors > Automatic Discovery` の `Settings` セクションで
+次のとおり設定し、`Save` を押します。
+
+- `Enable`: チェックを入れてサービス(`hostwatch`)を有効化する
+- `Interfaces`: 以下のインターフェースを選択する
+{% for iface in discovery_interfaces %}  - `{{ iface }}`
+{% endfor %}- `Promiscuous mode`: {% if promiscuous_mode %}チェックを入れる(自身宛て
+  以外のパケットも監視し、他ホスト間の通信からも新規デバイスを検出する){% else %}チェックしない{% endif %}
+
+- `Verbose logging`: {% if verbose_logging %}チェックを入れる(Discovery Log
+  に詳細な情報を記録する){% else %}チェックしない{% endif %}
+
+- `Ignore networks`: 以下のネットワークを入力する(ループバック・
+  リンクローカルなど、検出・ログ対象から除外したい範囲)
+{% for net in ignore_networks %}  - `{{ net }}`
+{% endfor %}
+### 3. 既知デバイスをStatic Assignmentsに登録する
+
+同じ `Interfaces > Neighbors > Automatic Discovery` 画面の
+`Static Assignments` セクションで、既知デバイス台帳({{ known_devices | length }}
+件)を1件ずつ登録します。ここに登録したエントリは、未許可デバイスの
+判定基準(既知/未知の境界線)になります。
+
+{% for dev in known_devices %}- `Ether Address`: `{{ dev.mac }}` / `IP address`: `{{ dev.ip }}` /
+  `Description`: `{{ dev.description }}` を入力し `Save` を押す
+{% endfor %}
+### 4. Discovered Hostsでベースラインを確認する
+
+`Discovered Hosts` セクションを開き、手順2・3の設定が反映され、
+監視対象インターフェース上のホストがIP-MACマッピングとして一覧表示
+されることを確認します。この時点の一覧を、L2/L3トポロジ把握の
+ベースラインとして記録してください。`Last Seen` 列で、直近に出現した
+ホストと、しばらく出現していないホストを見分けられます。
+
+### 5. Discovery Logを定期的に確認し、未許可デバイスを検知する
+
+{{ review_interval_hours }} 時間ごとを目安に `Discovery Log` セクションを
+確認し、新規ホスト(new stations)の出現やマッピング変更(movements)の
+エントリを、既知デバイス台帳(known_devices、手順3で登録したMAC)と
+突き合わせます。台帳に存在しないMACアドレスが新規ホストとして記録されて
+いた場合、それを未許可デバイスの候補として扱い、接続元インターフェースと
+物理的な接続箇所を確認してください。
+
+## 動作確認
+
+- `Interfaces > Neighbors > Automatic Discovery` の `Settings` で
+  `Enable` がチェックされ、`Interfaces` に
+  {% for iface in discovery_interfaces %}`{{ iface }}`{% if not loop.last %}・{% endif %}{% endfor %}
+  が選択されていること
+- `Discovered Hosts` に、監視対象インターフェース上のホストが
+  IP-MACマッピングとして表示されること
+- `Static Assignments` に、既知デバイス台帳({{ known_devices | length }}
+  件)ぶんのエントリが登録されていること
+- 監視対象インターフェースに未登録のデバイスを試験的に接続し、
+  `Discovery Log` に新規ホスト(new station)として記録されること
+- `ignore_networks` に指定したネットワークからの通信が、
+  `Discovery Log` の新規ホスト記録対象になっていないこと
+
+## 注意事項
+
+- **Host Discovery serviceはイーサネットインターフェースのみを監視対象と
+  します。** トンネル(VPN等)やループバックなど類似のインターフェースは
+  対象外のため、それらの経路から接続するデバイスは本手順では検出でき
+  ません。
+- **本機構は受動的な検出・ログ記録にとどまり、検知に応じた自動遮断・自動
+  隔離は行いません。** 未許可デバイスをDiscovery Logで検知した場合の
+  ネットワーク遮断・隔離対応は、本手順の範囲外として別途ファイアウォール
+  ルール等で実施してください。
+- `Static Assignments` のうち、DHCPなど他の経路に由来するエントリは
+  この画面で編集できない場合があります。編集できない場合は、当該
+  エントリの発行元(DHCPサーバー設定など)側で見直してください。
+- 既知デバイス台帳(known_devices)は、デバイスの入れ替え・廃棄・新規
+  追加のたびに更新し、`Static Assignments` の内容と乖離させないこと。
+- APIキー/シークレットは平文でリポジトリやログに残さず、環境変数や
+  秘密管理ツール経由で扱うこと。

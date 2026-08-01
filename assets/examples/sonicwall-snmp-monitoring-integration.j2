@@ -1,0 +1,208 @@
+# SonicWall (SonicOS) の外部SNMP監視基盤連携
+
+`Device | Settings > SNMP` 画面で SNMP を有効化し、System情報・Get
+Community・Trap Community・SNMPv3 ユーザーを設定したうえで、
+Zabbix 等の外部監視基盤からファイアウォールの CPU / メモリ / インター
+フェース状態をポーリングし、あわせて障害発生時の Trap 通知を受信できる
+ようにします。SNMP応答は監視サーバが接続される LAN 側インターフェース
+のみに限定し、WAN側には公開しません。
+
+## 目的
+
+SonicOS の `Device | Settings > SNMP` 画面のネイティブ機構(MIB-II 応答
+・SonicWall独自MIBに基づくTrap通知)を用いて、外部監視基盤からの
+ヘルスチェックを受け付けられるようにすることを目指します。あわせて、
+SNMP応答を必要なインターフェースのみに絞り込み、ポーリング用の認証情報
+を安全に扱う考え方を身につけます。
+
+## 用語解説
+
+- **Device | Settings > SNMP**: SNMPの有効化・設定を行う管理画面
+  ナビゲーションパス。`Enable SNMP` にチェックを入れて `Accept` を押すと
+  `Configure` ボタンが有効になり、そこから詳細設定を行える
+- **Configure SNMP ダイアログ(General タブ)**: `System Name` /
+  `System Contact` / `System Location` のほか、`Get Community Name`
+  (SNMPデータを閲覧できる管理者グループ名)と `Trap Community Name`
+  (Trapを閲覧できる管理者グループ名)を設定するタブ。`Get Community
+  Name` は認証情報(secret key)に相当するため、複雑な値を設定する
+- **Host 1 / Host 2 / Host 3 / Host 4**: Configure SNMP ダイアログで、
+  Trap の送信先となる SNMP マネージャ(監視サーバ)のIPアドレスまたは
+  ホスト名を入力するフィールド。少なくとも1件の設定が必要
+- **User/Group(SNMPv3ユーザー)**: `Device | Settings > SNMP` から
+  `User/Group` を開き `Add User` で作成する SNMPv3 ユーザー設定。
+  `User Name` に加え、`Security Level` を `Authentication and
+  Privacy` にすると `Authentication Method`(`MD5` / `SHA1`)と
+  `Authentication Key`、`Encryption Method`(`AES` / `DES`)と
+  `Privacy Key` を設定できる
+- **MIB-II 応答**: 一次情報では、SonicWallは MIB-II の `egp` と `at`
+  を除く関連グループへの Get 応答をサポートすると説明されている。
+  インターフェースの Up/Down やトラフィックカウンタ(`ifOperStatus`
+  など)はこのMIB-II応答から取得する
+- **SonicWall独自MIB**: CPU使用率・メモリ使用率などSonicWall固有の
+  監視項目は、SonicWall独自MIBに定義されている。このMIBファイルは
+  ファームウェアの版数ごとに内容が異なるため、対象機器で稼働している
+  ファームウェア版数に対応するMIBファイルをダウンロードして監視基盤
+  (Zabbix等)に取り込む必要がある
+- **Network | System | Interfaces の Management 欄(SNMP)**: 各
+  インターフェースの `Configure` から `General` タブの `Management`
+  欄にある `SNMP` チェックボックスを有効化すると、そのインターフェース
+  宛のSNMP Get/Trapへの応答が有効になる
+
+## シナリオ設定
+
+SNMP応答を有効化するインターフェースは次のとおりです。
+
+| # | Interface | Zone | SNMP | 理由 |
+|---|-----------|------|------|------|
+{% for i in snmp_interfaces %}| {{ loop.index }} | {{ i["name"] }} | {{ i["zone"] }} | {% if i["enable_snmp"] %}有効化{% else %}無効のまま{% endif %} | {{ i["reason"] }} |
+{% endfor %}
+
+Configure SNMP ダイアログ(General タブ)には次の値を設定します。
+
+- `System Name`: `{{ system_name }}`
+- `System Contact`: `{{ system_contact }}`
+- `System Location`: `{{ system_location }}`
+- `Get Community Name`: `{{ get_community_name_masked }}`(実際の値は
+  秘密管理ツールに保管し、本手順書には記載しません)
+- `Trap Community Name`: `{{ trap_community_name_masked }}`(同上)
+
+Trap送信先として設定する Host は次の {{ trap_hosts | length }} 件です。
+
+| # | フィールド | IP Address | 用途 |
+|---|-----------|------------|------|
+{% for h in trap_hosts %}| {{ loop.index }} | {{ h["slot"] }} | {{ h["ip_address"] }} | {{ h["description"] }} |
+{% endfor %}
+
+Zabbixからのポーリングには、コミュニティ文字列を平文でネットワーク上に
+流さないよう SNMPv3 ユーザーを使用します。
+
+- `User Name`: `{{ snmpv3_user_name }}`
+- `Security Level`: `{{ snmpv3_security_level }}`
+- `Authentication Method`: `{{ snmpv3_auth_method }}`
+- `Authentication Key`: `{{ snmpv3_auth_key_masked }}`(秘密管理ツール
+  に保管)
+- `Encryption Method`: `{{ snmpv3_privacy_encryption }}`
+- `Privacy Key`: `{{ snmpv3_privacy_key_masked }}`(秘密管理ツールに
+  保管)
+
+Zabbix側で監視する項目とその取得元MIBは次のとおりです。
+
+| # | 監視項目 | 取得元 |
+|---|----------|--------|
+{% for c in zabbix_checks %}| {{ loop.index }} | {{ c["item_name"] }} | {{ c["mib_source"] }} |
+{% endfor %}
+
+対象機器で稼働しているファームウェア版数は `{{ mib_firmware_version }}`
+です。この版数に対応するSonicWall独自MIBファイルをダウンロードして
+Zabbixに取り込みます。
+
+Trap通知の疎通確認には、監視対象外の予備インターフェース
+`{{ verification_test_interface }}`(Zone: `{{
+verification_test_interface_zone }}`)のリンク断・復旧を利用します。
+
+## 手順
+
+### 1. 現状のSNMP設定を確認する(変更前の基準を取る)
+
+`Device | Settings > SNMP` を開き、`Enable SNMP` が現在無効になって
+いること、および `Network | System | Interfaces` の各インターフェース
+の `Management` 欄で `SNMP` チェックボックスがいずれも無効であることを
+記録します。
+
+### 2. SNMPを有効化する
+
+`Device | Settings > SNMP` 画面で `Enable SNMP` にチェックを入れ、
+`Accept` をクリックします。`Configure` ボタンが有効になります。
+
+### 3. General タブでSystem情報とCommunity名を設定する
+
+`Configure` をクリックして開くダイアログの `General` タブで、シナリオ
+設定のとおり値を設定します。
+
+- `System Name`: `{{ system_name }}`
+- `System Contact`: `{{ system_contact }}`
+- `System Location`: `{{ system_location }}`
+- `Get Community Name`: シナリオ設定の値(秘密管理ツールから取得)
+- `Trap Community Name`: シナリオ設定の値(秘密管理ツールから取得)
+
+### 4. Trap送信先ホストを設定する
+
+同じ `General` タブで、シナリオ設定の {{ trap_hosts | length }} 件を
+`Host` フィールドに設定します。
+
+{% for h in trap_hosts %}- {{ h["slot"] }}: `{{ h["ip_address"] }}`({{ h["description"] }})
+{% endfor %}
+
+### 5. SNMPv3ユーザーを作成する
+
+`Device | Settings > SNMP` の `User/Group` を開き、`Add User` から
+次のとおり設定して保存します。
+
+- `User Name`: `{{ snmpv3_user_name }}`
+- `Security Level`: `{{ snmpv3_security_level }}`
+- `Authentication Method`: `{{ snmpv3_auth_method }}`
+- `Authentication Key`: シナリオ設定の値(秘密管理ツールから取得)
+- `Encryption Method`: `{{ snmpv3_privacy_encryption }}`
+- `Privacy Key`: シナリオ設定の値(秘密管理ツールから取得)
+
+### 6. 監視サーバが接続されるインターフェースのSNMP応答を有効化する
+
+`Network | System | Interfaces` で、シナリオ設定の各インターフェース
+について `Configure` から `General` タブの `Management` 欄の `SNMP`
+チェックボックスを設定します。
+
+{% for i in snmp_interfaces %}- `{{ i["name"] }}`(Zone: {{ i["zone"] }}): {% if i["enable_snmp"] %}チェックを入れる(有効化){% else %}チェックを外したまま(無効)にする{% endif %} — {{ i["reason"] }}
+{% endfor %}
+
+設定後、`OK` をクリックして保存します。
+
+### 7. ファームウェア版数に対応するSonicWall独自MIBをZabbixへ取り込む
+
+稼働中のファームウェア版数 `{{ mib_firmware_version }}` に対応する
+SonicWall独自MIBファイルを mysonicwall.com からダウンロードし、
+Zabbixのポーリング/Trapレシーバ双方に取り込みます。バージョン違いの
+MIBを取り込むと、シナリオ設定の監視項目(CPU使用率・メモリ使用率など)
+が正しく解決されないおそれがあります。
+
+### 8. Zabbix側でポーリングとTrap受信を設定する
+
+Zabbix側に、手順5で作成したSNMPv3ユーザー(`{{ snmpv3_user_name }}`)
+を用いたポーリング設定と、手順4のTrap送信先ホストで受信したTrapを
+処理するTrapレシーバ設定を行い、シナリオ設定の監視項目を登録します。
+
+## 動作確認
+
+- `Device | Settings > SNMP` で `Enable SNMP` が有効になっていること
+- `Network | System | Interfaces` で、シナリオ設定のとおり
+  `{{ snmp_interfaces[0]["name"] }}` のみ `SNMP` が有効で、他の
+  インターフェースでは無効のままであること
+- Zabbixから SNMPv3ユーザー `{{ snmpv3_user_name }}` でポーリングし、
+  シナリオ設定の監視項目(CPU使用率・メモリ使用率・インターフェース
+  状態・トラフィック量)の値が取得できること
+- 予備インターフェース `{{ verification_test_interface }}` の
+  リンクを一時的に切断・復旧し、Trap送信先ホスト
+  ({{ trap_hosts | map(attribute="ip_address") | join(" / ") }})に
+  Trapが届くこと
+
+## 注意事項
+
+- `Get Community Name` / `Trap Community Name` / SNMPv3の
+  `Authentication Key` / `Privacy Key` は本手順書に平文で記載せず、
+  `****` のようにマスクしたうえで秘密管理ツールに別途安全に保管して
+  ください。
+- SNMP応答はシナリオ設定のとおり監視サーバが接続されるLAN側インター
+  フェースのみに限定し、WAN側では有効化しないでください。WAN側での
+  有効化はインターネットからのSNMPアクセスを許してしまうおそれが
+  あります。
+- SonicWall独自MIBファイルはファームウェア版数ごとに内容が異なります。
+  対象機器のファームウェア版数(`{{ mib_firmware_version }}`)と異なる
+  版数のMIBファイルを取り込むと、監視項目が正しく解決できないおそれが
+  あります。
+- 本手順書は一次情報(SonicOS 7技術ドキュメントの当該ナレッジベース
+  記事)で確認できた `Device | Settings > SNMP` 配下のGUI操作のみを
+  扱います。SonicOS 6.5以前は `MANAGE | Appliance | SNMP` など
+  メニュー名称が異なるため、該当バージョンを使用している場合は別途
+  そちらのドキュメントを参照してください。
+- Trap通知を確実に受信できることが確認できるまで、Community名や
+  SNMPv3キーの変更・SNMPの無効化など、Trap経路に影響する設定変更は
+  避けてください。

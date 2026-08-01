@@ -1,0 +1,13 @@
+target_firewall = "FW-EDGE-01"
+change_ticket_id = "CHG-2026-0801-014"
+log_category_scope = "監査ログおよびセキュリティイベント"
+siem_platform = "SplunkのHeavy Forwarder"
+syslog_server_ip = "10.20.30.50"
+syslog_server_port = 6514
+syslog_protocol = "TLS"
+tls_min_version = "TLS 1.2"
+heartbeat_interval_sec = 60
+missed_heartbeat_down_threshold = 3
+monitoring_console = "NSM"
+capture_duration_sec = 120
+verification_lookback_min = 15

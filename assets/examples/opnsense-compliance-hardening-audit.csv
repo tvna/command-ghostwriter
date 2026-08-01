@@ -1,0 +1,9 @@
+control_no,cis_ref,category,title,opnsense_menu,check_item,expected_value,observed_value,status,remediation_menu,remediation_action
+1,CIS-1.1,config_hardening,管理画面へのアクセスをHTTPSのみに制限,System > Settings > Administration,Protocol,HTTPS,HTTPS,compliant,-,-
+2,CIS-1.2,config_hardening,管理画面アクセスを信頼済みインターフェースのみに制限,System > Settings > Administration,Listen Interfaces,LANおよびVPN管理セグメントのみ,LANとWANの両方,non-compliant,System > Settings > Administration,Listen InterfacesからWANのチェックを外しLANとVPN管理セグメントのみに絞る
+3,CIS-1.3,config_hardening,管理者アカウントに二要素認証を必須化,System > Access > Users,OTP seed,TOTPのOTP seedを生成済み,OTP seed未生成,non-compliant,System > Access > Users,対象ユーザーでOTP seedのGenerate new (160bit) secretを実行しAuthenticatorアプリに登録する
+4,CIS-1.4,config_hardening,不要なプラグインを無効化,System > Firmware > Plugins,インストール済みプラグイン一覧,業務上必要なプラグインのみインストール,未使用のos-net-snmpがインストール済み,non-compliant,System > Firmware > Plugins,os-net-snmpをアンインストールする
+5,CIS-1.5,config_hardening,バックアップ設定変更権限をフル管理者のみに制限,System > Access > Groups,Configuration: Backups 権限の割当先グループ,フル管理者グループのみ,フル管理者グループのみ,compliant,-,-
+6,CIS-1.6,config_hardening,リモートログ転送によるロギング監視を有効化,System > Settings > Logging / Targets,Destinations の Enabled 設定,外部Destinationが有効,Destination未登録,non-compliant,System > Settings > Logging / Targets,DestinationsタブでSyslog宛先を追加しEnabledをチェックする
+7,CIS-1.7,config_hardening,設定バックアップをパスワード保護付きで取得,System > Configuration > Backups,Password protect export,毎回パスワード保護してエクスポート,パスワード保護してエクスポート,compliant,-,-
+8,pkg-audit,pkg_audit,pkgレベル既知脆弱性監査(CIS対象外・別機能),System > Firmware > Status,Run an Audit の実行結果,0 problem(s) found,0 problem(s) found,compliant,-,-

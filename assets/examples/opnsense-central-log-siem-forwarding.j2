@@ -1,0 +1,150 @@
+# OPNsenseによるファイアウォールログのSIEM転送(冗長化・TLS化)
+
+ファイアウォールのログを外部SIEMへ確実に転送し、転送遅延・欠落を防ぐことを
+目的に、OPNsenseの syslog-ng ベースのロギング基盤で複数の転送先(Destinations)
+をTLSトランスポートで構成します。GUI操作と、確認用のCLIコマンドを併記します。
+
+## 目的
+
+System > Settings > Logging の **Remote** タブでプライマリ/セカンダリの転送先
+(Destinations)をTLSトランスポートで追加し、Facilities/Levelsで対象を絞り込んだ
+上で、既存のUDPベースの暫定転送先 `{{ legacy_destination_descr }}` から新しい
+TLS転送先へ安全に切り替えられるようになることを目指します。
+
+## 用語解説
+
+- **syslog-ng**: OPNsenseのロギング基盤(syslogデーモン)。System > Settings >
+  Logging の **Local** タブ(ローカル保存設定)と **Remote** タブ(リモート転送先
+  設定)を分けて設定する
+- **Destinations(Remote)**: **Remote** タブで定義する外部へのログ転送先設定
+  単位。1台のOPNsenseから複数のDestinationsを同時に有効化できる
+- **Transport**: Destinationsごとに選択する転送プロトコル("Protocol to use
+  for syslog")。UDP/TCPに加え、syslog over TLSにも対応する
+- **Applications / Levels / Facilities**: Destinationsごとの絞り込みフィルタ。
+  Applicationsは対象アプリケーション、Levelsは重大度、Facilitiesは
+  syslogファシリティを指定し、いずれも未指定(空欄)であればすべてが対象になる
+- **UDPトランスポートのリスク**: UDPはコネクションレスのため、転送先が
+  ダウンしていてもエラーが返らず、届かなかったログが黙って失われる
+  (fire-and-forget)。TCP/TLSはコネクション指向のため、転送先への到達不能を
+  検知しやすい
+- **Certificate**: Destinationsのtransportとして`tls`を選んだ場合に指定する
+  証明書。公式ドキュメントでも「certificate errors are quite common」と
+  注意喚起されており、双方の証明書・ホスト名の整合を事前に確認する必要がある
+
+## シナリオ設定
+
+`{{ wan_interface|upper }}`インターフェース側のファイアウォールログを、
+LANセグメント(`{{ lan_network }}`)内で運用する外部SIEMへ、以下
+{{ destinations | length }}件のDestinationsとして転送します。
+
+| 役割 | Description | Hostname | Port | Transport | Facilities | Levels |
+|---|---|---|---|---|---|---|
+{% for d in destinations %}| {{ d["role"] }} | {{ d["descr"] }} | {{ d["hostname"] }} | {{ d["port"] }} | {{ d["transport"] }} | {% for f in d["facilities"] %}{{ f }}{% if not loop.last %}, {% endif %}{% endfor %} | {% for l in d["levels"] %}{{ l }}{% if not loop.last %}, {% endif %}{% endfor %} |
+{% endfor %}
+
+現在は暫定でUDP・平文の単一転送先 `{{ legacy_destination_descr }}`
+(`{{ legacy_hostname }}:{{ legacy_port }}`)のみが有効になっています。この
+暫定転送先は、新しいTLS転送先の双方(プライマリ・セカンダリ)への到達が
+確認できるまで無効化しません。
+
+## 手順
+
+### 1. 現状のログ設定と暫定転送先を確認する
+
+作業前に、GUIの *System > Settings > Logging* を開き、**Local** タブで
+ローカル保存設定を確認します。続けて **Remote** タブを開き、暫定転送先
+`{{ legacy_destination_descr }}` が Enabled のまま残っていることを確認します。
+このDestinationsは、手順5で新設定の到達確認が完了するまで無効化しません。
+
+OPNsense本体では、ローカルのログファイルが標準パターン
+`/var/log/<application>/<application>_YYYYMMDD.log` で保存されていることを
+*System > Log Files* の統合ビューで確認しておきます。
+
+### 2. TLS用証明書を証明書ストアに登録する
+
+*System > Trust > Certificates* に、Destinationsで使用するTLS証明書
+`{{ destinations[0]["certificate"] }}` をインポートします。証明書自体の値は
+ここには記載しません(登録後は `****` として扱い、実際の鍵・証明書ファイルは
+安全な経路で配布してください)。
+
+### 3. プライマリ・セカンダリのDestinationsを追加する
+
+*System > Settings > Logging* の **Remote** タブで **Add** を押し、以下の
+内容でDestinationsを{{ destinations | length }}件作成します。
+
+{% for d in destinations %}#### 3-{{ loop.index }}. {{ d["descr"] }}({{ d["role"] }})
+
+- Enabled: 有効化
+- Transport: `{{ d["transport"] }}`
+- Hostname: `{{ d["hostname"] }}`
+- Port: `{{ d["port"] }}`
+- Certificate: `{{ d["certificate"] }}`
+- Applications: {% if d["applications"] != "-" %}`{{ d["applications"] }}`{% else %}空欄(すべてのアプリケーションを対象){% endif %}
+- Levels: {% for l in d["levels"] %}`{{ l }}`{% if not loop.last %}, {% endif %}{% endfor %}
+- Facilities: {% for f in d["facilities"] %}`{{ f }}`{% if not loop.last %}, {% endif %}{% endfor %}
+- Description: `{{ d["descr"] }}`
+
+{% endfor %}
+保存後、画面上部の **Apply** を必ず押して反映します。プライマリ・セカンダリの
+両方を有効化しておくことで、一方の転送先が到達不能になってもログの取りこぼしを
+減らせます。
+
+### 4. テストログを生成し、両Destinationsへの到達を確認する
+
+OPNsense本体でテスト用のマーカー付きログを生成します。
+
+```bash
+logger -p local0.warning "{{ test_marker }}"
+```
+
+続けて、各Destinationsのホスト・ポートへTLSで到達できることを確認します。
+
+```bash
+{% for d in destinations %}openssl s_client -connect {{ d["hostname"] }}:{{ d["port"] }} -brief
+{% endfor %}
+```
+
+各SIEM側の受信ログ(検索クエリはSIEM製品ごとに異なるため個別に確認)で、
+マーカー `{{ test_marker }}` が付いたイベントがプライマリ・セカンダリの
+両方に到達していることを確認します。
+
+### 5. 暫定のUDP転送先を無効化する
+
+手順4でプライマリ・セカンダリの両方への到達が確認できたら、*System >
+Settings > Logging* の **Remote** タブを開き、暫定転送先
+`{{ legacy_destination_descr }}` を Enabled のチェックを外して無効化し、
+**Apply** を押して反映します。
+
+## 動作確認
+
+- *System > Settings > Logging* の **Remote** タブに、{{ destinations | length }}件の
+  Destinationsが Enabled の状態で存在していること
+{% for d in destinations %}- `{{ d["descr"] }}`(`{{ d["hostname"] }}:{{ d["port"] }}`)向けの
+  `openssl s_client -connect {{ d["hostname"] }}:{{ d["port"] }} -brief` が
+  TLSハンドシェイクに成功すること
+{% endfor %}
+- `logger -p local0.warning "{{ test_marker }}"` で生成したテストログが、
+  プライマリ・セカンダリ両方のSIEM側で受信できていること
+- *System > Log Files* の統合ビュー、または該当する
+  `/var/log/<application>/<application>_YYYYMMDD.log` で、OPNsense側でも
+  同じイベントがローカルに記録されていること(ローカル側の記録が確認できない
+  場合、転送以前にログ生成自体が停止している可能性がある)
+- 暫定転送先 `{{ legacy_destination_descr }}` が Disabled になっていること
+
+## 注意事項
+
+- UDPトランスポートは転送先ダウン時にもエラーが返らず、ログが黙って失われる
+  (fire-and-forget)。転送遅延・欠落の検知を組み込みたい場合は、コネクション
+  指向のTCP、またはTLSトランスポートを選択すること。
+- syslog over TLSでは証明書エラーが起きやすい。双方のホスト名・証明書の整合を
+  事前に確認してから運用に入ること。証明書やその他の認証情報の値は、設定手順書
+  や記録に平文で残さず、`****` のようにマスクして扱うこと。
+- Applications/Levels/Facilitiesを空欄のまま(すべて対象)にすると、想定外に
+  広範なログを転送してしまいSIEM側の処理負荷や保存コストが増える。必要な
+  範囲に絞り込んで設定すること。
+- プライマリ・セカンダリの両方への到達を確認する前に、暫定転送先
+  `{{ legacy_destination_descr }}` を無効化しないこと。先に無効化すると、
+  新しい転送先に不備があった場合にログが一時的にどこにも転送されなくなる
+  おそれがある。
+- 設定変更前に *System > Configuration > Backups* からconfig.xmlのバックアップ
+  を取得し、意図しないログ欠落が発生した場合に切り戻せるようにしておく。

@@ -1,0 +1,20 @@
+discovery_interfaces:
+  - lan
+  - vlan_iot
+  - vlan_guest
+promiscuous_mode: true
+verbose_logging: true
+ignore_networks:
+  - 127.0.0.0/8
+  - 169.254.0.0/16
+known_devices:
+  - mac: "00:1a:2b:3c:4d:5e"
+    ip: "10.0.10.11"
+    description: "core-switch-01"
+  - mac: "00:1a:2b:3c:4d:6f"
+    ip: "10.0.10.20"
+    description: "nas-backup-01"
+  - mac: "3c:7c:3f:11:22:33"
+    ip: "10.0.20.15"
+    description: "iot-gateway-01"
+review_interval_hours: 24
