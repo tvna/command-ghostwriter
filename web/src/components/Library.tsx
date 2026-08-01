@@ -46,6 +46,14 @@ const SERVER_SPLIT_LABELS = new Set(['Debian系', 'RHEL系', 'コンテナ']);
 const NETWORK_SECURITY = new Set(['IDS・IPS', 'トラフィック分析', 'パケット解析', '監視']);
 const NETWORK_VPN = new Set(['オーバーレイVPN', 'ZTNAオーバーレイ', 'トンネリング']);
 
+// server-common sub-clusters — same disjoint-with-residual-catch-all pattern.
+// サーバ (基盤運用) is the residual catch-all for every server subCategory not
+// in SERVER_SPLIT_LABELS and not in the four sets below.
+const SERVER_IDENTITY = new Set(['IAM・SSO', '認証', '証明書', 'sudo', 'パーミッション', 'ユーザー管理']);
+const SERVER_PREVENTION = new Set(['侵入対策', 'シークレット管理', 'SELinux', 'AppArmor']);
+const SERVER_DETECTION = new Set(['SIEM・HIDS', 'EDR・フォレンジック']);
+const SERVER_AUDIT = new Set(['適合性監査', '資産・状態管理', 'ディスク管理', 'バックアップ', 'ログ運用']);
+
 export const RAIL: RailEntry[] = [
   { id: 'all', label: 'すべて', icon: 'topology', filter: () => true },
   ...NETWORK_VENDORS.map(
@@ -83,11 +91,45 @@ export const RAIL: RailEntry[] = [
       !NETWORK_VPN.has(t.subCategory),
   },
   {
-    id: 'server-common',
-    label: 'サーバ (共通)',
+    id: 'server-common-identity',
+    label: 'サーバ (ID・アクセス管理)',
     icon: 'server',
     group: 'サーバ',
-    filter: (t) => t.category === 'server' && !SERVER_SPLIT_LABELS.has(t.subCategory),
+    filter: (t) => t.category === 'server' && SERVER_IDENTITY.has(t.subCategory),
+  },
+  {
+    id: 'server-common-prevention',
+    label: 'サーバ (予防・防御)',
+    icon: 'server',
+    group: 'サーバ',
+    filter: (t) => t.category === 'server' && SERVER_PREVENTION.has(t.subCategory),
+  },
+  {
+    id: 'server-common-detection',
+    label: 'サーバ (検知・対応)',
+    icon: 'server',
+    group: 'サーバ',
+    filter: (t) => t.category === 'server' && SERVER_DETECTION.has(t.subCategory),
+  },
+  {
+    id: 'server-common-audit',
+    label: 'サーバ (監査・資産)',
+    icon: 'server',
+    group: 'サーバ',
+    filter: (t) => t.category === 'server' && SERVER_AUDIT.has(t.subCategory),
+  },
+  {
+    id: 'server-common-ops',
+    label: 'サーバ (基盤運用)',
+    icon: 'server',
+    group: 'サーバ',
+    filter: (t) =>
+      t.category === 'server' &&
+      !SERVER_SPLIT_LABELS.has(t.subCategory) &&
+      !SERVER_IDENTITY.has(t.subCategory) &&
+      !SERVER_PREVENTION.has(t.subCategory) &&
+      !SERVER_DETECTION.has(t.subCategory) &&
+      !SERVER_AUDIT.has(t.subCategory),
   },
   {
     id: 'server-debian',

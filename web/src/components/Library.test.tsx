@@ -114,8 +114,8 @@ describe("RAIL predicate exclusivity and exhaustiveness", () => {
     expect(NETWORK_RAIL).toHaveLength(17);
   });
 
-  it("has exactly 4 server entries", () => {
-    expect(SERVER_RAIL).toHaveLength(4);
+  it("has exactly 8 server entries", () => {
+    expect(SERVER_RAIL).toHaveLength(8);
   });
 
   it("every network template matches exactly one network rail entry", () => {
@@ -155,7 +155,11 @@ describe("RAIL counts against real template data", () => {
     "network-common-security": 47,
     "network-common-vpn": 41,
     "network-common-other": 35,
-    "server-common": 216,
+    "server-common-identity": 38,
+    "server-common-prevention": 43,
+    "server-common-detection": 39,
+    "server-common-audit": 49,
+    "server-common-ops": 47,
     "server-debian": 18,
     "server-rhel": 5,
     "server-container": 15,
