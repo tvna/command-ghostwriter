@@ -6,4 +6,4 @@ control_no,cis_ref,category,title,opnsense_menu,check_item,expected_value,observ
 5,CIS-1.5,config_hardening,バックアップ設定変更権限をフル管理者のみに制限,System > Access > Groups,Configuration: Backups 権限の割当先グループ,フル管理者グループのみ,フル管理者グループのみ,compliant,-,-
 6,CIS-1.6,config_hardening,リモートログ転送によるロギング監視を有効化,System > Settings > Logging / Targets,Destinations の Enabled 設定,外部Destinationが有効,Destination未登録,non-compliant,System > Settings > Logging / Targets,DestinationsタブでSyslog宛先を追加しEnabledをチェックする
 7,CIS-1.7,config_hardening,設定バックアップをパスワード保護付きで取得,System > Configuration > Backups,Password protect export,毎回パスワード保護してエクスポート,パスワード保護してエクスポート,compliant,-,-
-8,pkg-audit,pkg_audit,pkgレベル既知脆弱性監査(CIS対象外・別機能),System > Firmware > Status,Run an Audit の実行結果,0 problem(s) found,0 problem(s) found,compliant,-,-
+8,-,pkg_audit,pkgレベル既知脆弱性監査(CIS対象外・別機能),System > Firmware > Status,Run an Audit の実行結果,0 problem(s) found,0 problem(s) found,compliant,-,-

@@ -105,11 +105,10 @@ SNMP Trapへ転送する重大度(forwarded_log_severities,
 ### 1. MGTインターフェースのSNMPサービスを有効化する
 
 `Device > Setup > Interfaces` を開き、Managementインターフェースの
-設定を開いて `SNMP` のチェックボックスを有効化します。
-{% if mgmt_interface_snmp_enabled %}(mgmt_interface_snmp_enabled =
-{{ mgmt_interface_snmp_enabled }} のため、この手順を実施します。)
-{% endif %}
-`OK` をクリックして保存します(この時点ではまだ `Commit` しません)。
+設定を開いて `SNMP` のチェックボックスを有効化します(シナリオ設定の
+`mgmt_interface_snmp_enabled` が `{{ mgmt_interface_snmp_enabled }}` の
+状態です)。`OK` をクリックして保存します(この時点ではまだ `Commit`
+しません)。
 
 ### 2. データプレーンインターフェース向けにInterface Management Profileを作成・割り当てる
 

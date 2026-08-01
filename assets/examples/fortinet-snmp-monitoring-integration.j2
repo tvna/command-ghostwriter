@@ -119,7 +119,7 @@ end
 ```bash
 config system snmp community
 {% for c in communities %}    edit {{ loop.index }}
-        set name ****
+        set name {{ c.community_string }}
         config hosts
 {% for h in c.hosts %}            edit {{ loop.index }}
                 set ip {{ h.ip }} {{ h.netmask }}
@@ -168,7 +168,7 @@ SNMP GETが成功することを確認します。
 
 ```bash
 # Zabbixサーバ上、または同じセグメントの検証端末から実行する
-snmpget -v2c -c **** -p {{ query_port }} <firewall-mgmt-ip> sysUpTime.0
+snmpget -v2c -c {{ communities[0].community_string }} -p {{ query_port }} <firewall-mgmt-ip> sysUpTime.0
 ```
 
 ## 動作確認
