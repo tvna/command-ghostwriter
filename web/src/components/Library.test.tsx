@@ -109,10 +109,40 @@ describe("countByActivity", () => {
 describe("RAIL predicate exclusivity and exhaustiveness", () => {
   const NETWORK_RAIL = RAIL.filter((r) => r.id.startsWith("network-"));
   const SERVER_RAIL = RAIL.filter((r) => r.id.startsWith("server-"));
+  const MIDDLEWARE_RAIL = RAIL.filter((r) => r.id.startsWith("middleware-"));
+  const AI_RAIL = RAIL.filter((r) => r.id.startsWith("ai-"));
 
-  it("has exactly 15 network entries and 4 server entries", () => {
-    expect(NETWORK_RAIL).toHaveLength(15);
-    expect(SERVER_RAIL).toHaveLength(4);
+  it("has exactly 17 network entries", () => {
+    expect(NETWORK_RAIL).toHaveLength(17);
+  });
+
+  it("has exactly 8 server entries", () => {
+    expect(SERVER_RAIL).toHaveLength(8);
+  });
+
+  it("has exactly 3 middleware entries", () => {
+    expect(MIDDLEWARE_RAIL).toHaveLength(3);
+  });
+
+  it("has exactly 3 ai entries", () => {
+    expect(AI_RAIL).toHaveLength(3);
+  });
+
+  it("has no duplicate ids across the full RAIL array", () => {
+    const ids = RAIL.map((r) => r.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("renders each group heading exactly once, contiguously", () => {
+    const seen = new Set<string>();
+    let prev: string | undefined;
+    for (const entry of RAIL) {
+      if (entry.group !== prev && entry.group !== undefined) {
+        expect(seen.has(entry.group), `group "${entry.group}" is non-contiguous`).toBe(false);
+        seen.add(entry.group);
+      }
+      prev = entry.group;
+    }
   });
 
   it("every network template matches exactly one network rail entry", () => {
@@ -128,6 +158,22 @@ describe("RAIL predicate exclusivity and exhaustiveness", () => {
     for (const t of serverTemplates) {
       const matches = SERVER_RAIL.filter((r) => r.filter(t));
       expect(matches, `template ${t.id} (subCategory "${t.subCategory}") matched ${matches.length} server rail entries, want 1`).toHaveLength(1);
+    }
+  });
+
+  it("every middleware template matches exactly one middleware rail entry", () => {
+    const middlewareTemplates = CGTemplates.filter((t) => t.category === "middleware");
+    for (const t of middlewareTemplates) {
+      const matches = MIDDLEWARE_RAIL.filter((r) => r.filter(t));
+      expect(matches, `template ${t.id} (subCategory "${t.subCategory}") matched ${matches.length} middleware rail entries, want 1`).toHaveLength(1);
+    }
+  });
+
+  it("every ai template matches exactly one ai rail entry", () => {
+    const aiTemplates = CGTemplates.filter((t) => t.category === "ai");
+    for (const t of aiTemplates) {
+      const matches = AI_RAIL.filter((r) => r.filter(t));
+      expect(matches, `template ${t.id} (subCategory "${t.subCategory}") matched ${matches.length} ai rail entries, want 1`).toHaveLength(1);
     }
   });
 });
@@ -149,13 +195,23 @@ describe("RAIL counts against real template data", () => {
     "network-palo-alto": 51,
     "network-sonicwall": 51,
     "network-ubiquiti": 1,
-    "network-common": 123,
-    "server-common": 216,
+    "network-common-security": 46,
+    "network-common-vpn": 41,
+    "network-common-other": 36,
+    "server-common-identity": 38,
+    "server-common-prevention": 43,
+    "server-common-detection": 39,
+    "server-common-audit": 49,
+    "server-common-ops": 47,
     "server-debian": 18,
     "server-rhel": 5,
     "server-container": 15,
-    middleware: 88,
-    ai: 114,
+    "middleware-unbound": 21,
+    "middleware-dns": 30,
+    "middleware-services": 37,
+    "ai-infra": 34,
+    "ai-model": 48,
+    "ai-ops": 32,
     ops: 43,
     facility: 20,
   };

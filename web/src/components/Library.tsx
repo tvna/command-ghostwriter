@@ -39,6 +39,47 @@ const NETWORK_VENDORS: { id: string; label: string }[] = [
 const NETWORK_VENDOR_LABELS = new Set(NETWORK_VENDORS.map((v) => v.label));
 const SERVER_SPLIT_LABELS = new Set(['Debian系', 'RHEL系', 'コンテナ']);
 
+// network-common sub-clusters (each < 50 templates; see
+// docs/superpowers/specs/2026-08-01-template-library-rail-rebalance-design.md).
+// Disjoint by construction; ネットワーク機器 (基盤・その他) is the residual
+// catch-all for every non-vendor subCategory not in the two sets below.
+// "監視" is deliberately excluded: its sole network member (snmp-device-monitoring)
+// is general SNMP device-health polling, not security monitoring — it falls
+// through to ネットワーク機器 (基盤・その他) instead.
+const NETWORK_SECURITY = new Set(['IDS・IPS', 'トラフィック分析', 'パケット解析']);
+const NETWORK_VPN = new Set(['オーバーレイVPN', 'ZTNAオーバーレイ', 'トンネリング']);
+
+// server-common sub-clusters — same disjoint-with-residual-catch-all pattern.
+// サーバ (基盤運用) is the residual catch-all for every server subCategory not
+// in SERVER_SPLIT_LABELS and not in the four sets below.
+const SERVER_IDENTITY = new Set(['IAM・SSO', '認証', '証明書', 'sudo', 'パーミッション', 'ユーザー管理']);
+const SERVER_PREVENTION = new Set(['侵入対策', 'シークレット管理', 'SELinux', 'AppArmor']);
+const SERVER_DETECTION = new Set(['SIEM・HIDS', 'EDR・フォレンジック']);
+const SERVER_AUDIT = new Set(['適合性監査', '資産・状態管理', 'ディスク管理', 'バックアップ', 'ログ運用']);
+
+// middleware sub-clusters. Unbound (21 templates) is large enough to need
+// its own entry; ミドルウェア (DNS共通) covers the rest of the DNS
+// product/ops subCategories; ミドルウェア (ネットワークサービス) is the
+// residual catch-all (プロキシ/Webサーバ/ロードバランサ/メール/データベース).
+const MIDDLEWARE_DNS_COMMON = new Set([
+  'BIND',
+  'BIND冗長化',
+  'DNSSEC',
+  'DNS切り分け',
+  'DNS切替',
+  'PowerDNS',
+  'dnsmasq',
+  'レコード管理',
+  '動的更新',
+  '暗号化DNS',
+  '監視',
+]);
+
+// ai sub-clusters. AIインフラ (運用・ガバナンス) is the residual catch-all
+// for every ai subCategory not in the two sets below.
+const AI_INFRA = new Set(['GPUクラスタ', 'GPU基盤', 'GPU監視', 'NVIDIA DGX', 'データ基盤', 'ベクトルDB']);
+const AI_MODEL = new Set(['モデル管理', '推論サーバ', 'MLOps', 'エージェント基盤']);
+
 export const RAIL: RailEntry[] = [
   { id: 'all', label: 'すべて', icon: 'topology', filter: () => true },
   ...NETWORK_VENDORS.map(
@@ -51,18 +92,70 @@ export const RAIL: RailEntry[] = [
     }),
   ),
   {
-    id: 'network-common',
-    label: 'ネットワーク機器 (共通)',
+    id: 'network-common-security',
+    label: 'ネットワーク機器 (セキュリティ監視)',
     icon: 'router',
     group: 'ネットワーク機器',
-    filter: (t) => t.category === 'network' && !NETWORK_VENDOR_LABELS.has(t.subCategory),
+    filter: (t) => t.category === 'network' && NETWORK_SECURITY.has(t.subCategory),
   },
   {
-    id: 'server-common',
-    label: 'サーバ (共通)',
+    id: 'network-common-vpn',
+    label: 'ネットワーク機器 (VPN・オーバーレイ)',
+    icon: 'router',
+    group: 'ネットワーク機器',
+    filter: (t) => t.category === 'network' && NETWORK_VPN.has(t.subCategory),
+  },
+  {
+    id: 'network-common-other',
+    label: 'ネットワーク機器 (基盤・その他)',
+    icon: 'router',
+    group: 'ネットワーク機器',
+    filter: (t) =>
+      t.category === 'network' &&
+      !NETWORK_VENDOR_LABELS.has(t.subCategory) &&
+      !NETWORK_SECURITY.has(t.subCategory) &&
+      !NETWORK_VPN.has(t.subCategory),
+  },
+  {
+    id: 'server-common-identity',
+    label: 'サーバ (ID・アクセス管理)',
     icon: 'server',
     group: 'サーバ',
-    filter: (t) => t.category === 'server' && !SERVER_SPLIT_LABELS.has(t.subCategory),
+    filter: (t) => t.category === 'server' && SERVER_IDENTITY.has(t.subCategory),
+  },
+  {
+    id: 'server-common-prevention',
+    label: 'サーバ (予防・防御)',
+    icon: 'server',
+    group: 'サーバ',
+    filter: (t) => t.category === 'server' && SERVER_PREVENTION.has(t.subCategory),
+  },
+  {
+    id: 'server-common-detection',
+    label: 'サーバ (検知・対応)',
+    icon: 'server',
+    group: 'サーバ',
+    filter: (t) => t.category === 'server' && SERVER_DETECTION.has(t.subCategory),
+  },
+  {
+    id: 'server-common-audit',
+    label: 'サーバ (監査・資産)',
+    icon: 'server',
+    group: 'サーバ',
+    filter: (t) => t.category === 'server' && SERVER_AUDIT.has(t.subCategory),
+  },
+  {
+    id: 'server-common-ops',
+    label: 'サーバ (基盤運用)',
+    icon: 'server',
+    group: 'サーバ',
+    filter: (t) =>
+      t.category === 'server' &&
+      !SERVER_SPLIT_LABELS.has(t.subCategory) &&
+      !SERVER_IDENTITY.has(t.subCategory) &&
+      !SERVER_PREVENTION.has(t.subCategory) &&
+      !SERVER_DETECTION.has(t.subCategory) &&
+      !SERVER_AUDIT.has(t.subCategory),
   },
   {
     id: 'server-debian',
@@ -85,8 +178,51 @@ export const RAIL: RailEntry[] = [
     group: 'サーバ',
     filter: (t) => t.category === 'server' && t.subCategory === 'コンテナ',
   },
-  { id: 'middleware', label: 'ミドルウェア', icon: 'ethernet-port', group: 'その他', filter: (t) => t.category === 'middleware' },
-  { id: 'ai', label: 'AIインフラ', icon: 'terminal', group: 'その他', filter: (t) => t.category === 'ai' },
+  {
+    id: 'middleware-unbound',
+    label: 'ミドルウェア (Unbound)',
+    icon: 'ethernet-port',
+    group: 'ミドルウェア',
+    filter: (t) => t.category === 'middleware' && t.subCategory === 'Unbound',
+  },
+  {
+    id: 'middleware-dns',
+    label: 'ミドルウェア (DNS共通)',
+    icon: 'ethernet-port',
+    group: 'ミドルウェア',
+    filter: (t) => t.category === 'middleware' && MIDDLEWARE_DNS_COMMON.has(t.subCategory),
+  },
+  {
+    id: 'middleware-services',
+    label: 'ミドルウェア (ネットワークサービス)',
+    icon: 'ethernet-port',
+    group: 'ミドルウェア',
+    filter: (t) =>
+      t.category === 'middleware' &&
+      t.subCategory !== 'Unbound' &&
+      !MIDDLEWARE_DNS_COMMON.has(t.subCategory),
+  },
+  {
+    id: 'ai-infra',
+    label: 'AIインフラ (基盤・GPU)',
+    icon: 'terminal',
+    group: 'AIインフラ',
+    filter: (t) => t.category === 'ai' && AI_INFRA.has(t.subCategory),
+  },
+  {
+    id: 'ai-model',
+    label: 'AIインフラ (モデル・推論)',
+    icon: 'terminal',
+    group: 'AIインフラ',
+    filter: (t) => t.category === 'ai' && AI_MODEL.has(t.subCategory),
+  },
+  {
+    id: 'ai-ops',
+    label: 'AIインフラ (運用・ガバナンス)',
+    icon: 'terminal',
+    group: 'AIインフラ',
+    filter: (t) => t.category === 'ai' && !AI_INFRA.has(t.subCategory) && !AI_MODEL.has(t.subCategory),
+  },
   { id: 'ops', label: '運用共通', icon: 'config-file', group: 'その他', filter: (t) => t.category === 'ops' },
   { id: 'facility', label: '物理設備', icon: 'server', group: 'その他', filter: (t) => t.category === 'facility' },
 ];
