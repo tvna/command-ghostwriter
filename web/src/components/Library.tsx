@@ -54,6 +54,24 @@ const SERVER_PREVENTION = new Set(['侵入対策', 'シークレット管理', '
 const SERVER_DETECTION = new Set(['SIEM・HIDS', 'EDR・フォレンジック']);
 const SERVER_AUDIT = new Set(['適合性監査', '資産・状態管理', 'ディスク管理', 'バックアップ', 'ログ運用']);
 
+// middleware sub-clusters. Unbound (21 templates) is large enough to need
+// its own entry; ミドルウェア (DNS共通) covers the rest of the DNS
+// product/ops subCategories; ミドルウェア (ネットワークサービス) is the
+// residual catch-all (プロキシ/Webサーバ/ロードバランサ/メール/データベース).
+const MIDDLEWARE_DNS_COMMON = new Set([
+  'BIND',
+  'BIND冗長化',
+  'DNSSEC',
+  'DNS切り分け',
+  'DNS切替',
+  'PowerDNS',
+  'dnsmasq',
+  'レコード管理',
+  '動的更新',
+  '暗号化DNS',
+  '監視',
+]);
+
 export const RAIL: RailEntry[] = [
   { id: 'all', label: 'すべて', icon: 'topology', filter: () => true },
   ...NETWORK_VENDORS.map(
@@ -152,7 +170,30 @@ export const RAIL: RailEntry[] = [
     group: 'サーバ',
     filter: (t) => t.category === 'server' && t.subCategory === 'コンテナ',
   },
-  { id: 'middleware', label: 'ミドルウェア', icon: 'ethernet-port', group: 'その他', filter: (t) => t.category === 'middleware' },
+  {
+    id: 'middleware-unbound',
+    label: 'ミドルウェア (Unbound)',
+    icon: 'ethernet-port',
+    group: 'ミドルウェア',
+    filter: (t) => t.category === 'middleware' && t.subCategory === 'Unbound',
+  },
+  {
+    id: 'middleware-dns',
+    label: 'ミドルウェア (DNS共通)',
+    icon: 'ethernet-port',
+    group: 'ミドルウェア',
+    filter: (t) => t.category === 'middleware' && MIDDLEWARE_DNS_COMMON.has(t.subCategory),
+  },
+  {
+    id: 'middleware-services',
+    label: 'ミドルウェア (ネットワークサービス)',
+    icon: 'ethernet-port',
+    group: 'ミドルウェア',
+    filter: (t) =>
+      t.category === 'middleware' &&
+      t.subCategory !== 'Unbound' &&
+      !MIDDLEWARE_DNS_COMMON.has(t.subCategory),
+  },
   { id: 'ai', label: 'AIインフラ', icon: 'terminal', group: 'その他', filter: (t) => t.category === 'ai' },
   { id: 'ops', label: '運用共通', icon: 'config-file', group: 'その他', filter: (t) => t.category === 'ops' },
   { id: 'facility', label: '物理設備', icon: 'server', group: 'その他', filter: (t) => t.category === 'facility' },
