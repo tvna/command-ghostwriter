@@ -552,7 +552,7 @@ EOF
 
 **Files:** none (verification only).
 
-- [ ] **Step 1: Light content spot-check (not a full audit — see design doc §6 risk note)**
+- [x] **Step 1: Light content spot-check (not a full audit — see design doc §6 risk note)**
 
 Cluster assignment in Tasks 1-4 was derived from `subCategory` names, not individually verified against `.j2` content. Spot-check one template per new cluster (14 total) to catch a grossly wrong grouping before it ships. For each id below, read the listed template's `.j2` body and confirm it plausibly matches the cluster theme:
 
@@ -575,22 +575,22 @@ Cluster assignment in Tasks 1-4 was derived from `subCategory` names, not indivi
 
 Expected: all 14 spot-checks read as thematically consistent with their cluster. If one is clearly wrong, fix that single template's cluster assignment (move it between the relevant `Set`s in `Library.tsx`) before continuing — do not silently proceed on a known mismatch.
 
-- [ ] **Step 2: Full web test suite**
+- [x] **Step 2: Full web test suite**
 
 Run: `cd web && bun run test`
 Expected: all files pass (existing suite + updated `Library.test.tsx`), no regressions in unrelated files.
 
-- [ ] **Step 3: Full type check**
+- [x] **Step 3: Full type check**
 
 Run: `cd web && bunx tsc -b`
 Expected: exit 0.
 
-- [ ] **Step 4: Python regression suite**
+- [x] **Step 4: Python regression suite**
 
 Run: `uv run pytest -k 'not e2e'`
 Expected: all pass, no change expected (`test_template_taxonomy.py` is untouched — this run is a regression safety net per the design doc).
 
-- [ ] **Step 5: Manual browser smoke test**
+- [x] **Step 5: Manual browser smoke test**
 
 Start the dev server in the background, then drive it with Playwright (Chromium is pre-installed at `/opt/pw-browsers/chromium`) to open the Library, click every one of the 13 new rail entries, and confirm the displayed count matches this table:
 
@@ -617,7 +617,7 @@ Run: `cd web && bun run dev &` (background), then drive a Playwright script agai
 
 Expected: every count matches the table above; screenshot evidence saved for the task record.
 
-- [ ] **Step 6: Confirm no stray changes**
+- [x] **Step 6: Confirm no stray changes**
 
 Run: `git status --short && git diff --stat origin/develop...HEAD`
 Expected: only `web/src/components/Library.tsx` and `web/src/components/Library.test.tsx` differ from `develop` (across all 4 task commits combined).
