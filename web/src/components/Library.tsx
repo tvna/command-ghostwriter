@@ -43,7 +43,10 @@ const SERVER_SPLIT_LABELS = new Set(['Debian系', 'RHEL系', 'コンテナ']);
 // docs/superpowers/specs/2026-08-01-template-library-rail-rebalance-design.md).
 // Disjoint by construction; ネットワーク機器 (基盤・その他) is the residual
 // catch-all for every non-vendor subCategory not in the two sets below.
-const NETWORK_SECURITY = new Set(['IDS・IPS', 'トラフィック分析', 'パケット解析', '監視']);
+// "監視" is deliberately excluded: its sole network member (snmp-device-monitoring)
+// is general SNMP device-health polling, not security monitoring — it falls
+// through to ネットワーク機器 (基盤・その他) instead.
+const NETWORK_SECURITY = new Set(['IDS・IPS', 'トラフィック分析', 'パケット解析']);
 const NETWORK_VPN = new Set(['オーバーレイVPN', 'ZTNAオーバーレイ', 'トンネリング']);
 
 // server-common sub-clusters — same disjoint-with-residual-catch-all pattern.

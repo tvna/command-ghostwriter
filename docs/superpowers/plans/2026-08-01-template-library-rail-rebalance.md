@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Split the 4 template-library left-rail labels that are >= 50 items (`server-common` 216, `network-common` 123, `ai` 114, `middleware` 88) into 13 smaller sub-labels, all under 50, without touching template data.
+**Goal:** Split the 4 template-library left-rail labels that are >= 50 items (`server-common` 216, `network-common` 123, `ai` 114, `middleware` 88) into 14 smaller sub-labels, all under 50, without touching template data.
 
 **Architecture:** Pure `web/src/components/Library.tsx` presentation change. Each new rail entry is a `RailEntry.filter` predicate combining `t.category === '<domain>'` with `Set`-membership (or, for one bucket per bucket, negation) checks against the existing `t.subCategory` string — the same mechanism `NETWORK_VENDORS`/`SERVER_SPLIT_LABELS` already use. `templates.ts`, `types.ts`, and `tests/unit/test_template_taxonomy.py` are not modified.
 
@@ -15,7 +15,7 @@
 
 ## File Structure
 
-- Modify: `web/src/components/Library.tsx` — add cluster `Set` constants, replace 4 flat `RailEntry` objects with 13 grouped ones, add 2 new rail `group` headings (`AIインフラ`, `ミドルウェア`).
+- Modify: `web/src/components/Library.tsx` — add cluster `Set` constants, replace 4 flat `RailEntry` objects with 14 grouped ones, add 2 new rail `group` headings (`AIインフラ`, `ミドルウェア`).
 - Modify: `web/src/components/Library.test.tsx` — update `EXPECTED` count table, extend "RAIL predicate exclusivity and exhaustiveness" coverage to `middleware`/`ai`.
 
 No other file changes. Confirmed by grep: no other source file under `web/src` or `web/e2e` references the rail ids/labels being changed.
@@ -592,7 +592,7 @@ Expected: all pass, no change expected (`test_template_taxonomy.py` is untouched
 
 - [x] **Step 5: Manual browser smoke test**
 
-Start the dev server in the background, then drive it with Playwright (Chromium is pre-installed at `/opt/pw-browsers/chromium`) to open the Library, click every one of the 13 new rail entries, and confirm the displayed count matches this table:
+Start the dev server in the background, then drive it with Playwright (Chromium is pre-installed at `/opt/pw-browsers/chromium`) to open the Library, click every one of the 14 new rail entries, and confirm the displayed count matches this table:
 
 | id | expected count |
 |---|---|
@@ -613,7 +613,7 @@ Start the dev server in the background, then drive it with Playwright (Chromium 
 
 Also confirm: no empty section grid, no duplicate group heading (`ネットワーク機器`/`サーバ`/`ミドルウェア`/`AIインフラ`/`その他` each render exactly once above their first entry), and the `すべて` entry still reads 794.
 
-Run: `cd web && bun run dev &` (background), then drive a Playwright script against `http://localhost:5173` that opens the template library view, iterates the 13 new rail button labels, clicks each, and reads the count badge text next to the active button plus the section grid. Kill the dev server when done.
+Run: `cd web && bun run dev &` (background), then drive a Playwright script against `http://localhost:5173` that opens the template library view, iterates the 14 new rail button labels, clicks each, and reads the count badge text next to the active button plus the section grid. Kill the dev server when done.
 
 Expected: every count matches the table above; screenshot evidence saved for the task record.
 
