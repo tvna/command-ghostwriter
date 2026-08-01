@@ -1,0 +1,234 @@
+# Palo Alto Networks(PAN-OS)のクラウドVM-SeriesファイアウォールAuto Scaleデプロイとライセンス自動化構成
+
+GCP上にVM-SeriesファイアウォールをAuto Scaleモデル(Managed Instance Group)で
+展開し、ライセンス形態にはBYOLを選択します。Panorama plugin for Google Cloud
+Platformの`AutoScaling`機能でデプロイメント`{{ deployment_name }}`を作成して
+Device Group`{{ device_group_name }}`・Template Stack`{{ template_stack_name }}`
+を新規起動ファイアウォールへ紐づけ、Panorama Software Firewall License
+プラグインのLicense Manager`{{ license_manager_name }}`によってスケール
+アウト時のライセンス自動発行、スケールイン時の自動失効(切断から
+{{ deactivation_timeout_hours }}時間後)を実現します。設定後はPanoramaの
+Managed DevicesとLicense Managersの画面で、新規ファイアウォールの自動登録と
+ライセンスの自動発行・自動失効を確認します。
+
+## 目的
+
+VM-SeriesファイアウォールのBYOL/PAYGライセンスのうち、スケールダウン
+イベントに応じた自動ライセンス非アクティブ化はBYOLを選択した場合にのみ
+可能であり、PAYGでは利用できないことを理解した上で、Panorama plugin for
+Google Cloud Platformの`AutoScaling`デプロイメントがDevice Group・Template
+Stackの構成配信とライセンス管理をどう結び付けているか、また
+Panorama Software Firewall Licenseプラグインの`License Manager`が
+接続断からの経過時間に基づいてライセンスを自動的に非アクティブ化する
+仕組みを理解した上で構成できるようになることを目指します。あわせて、
+外部の監視スクリプトやcronジョブ等を自作せず、ベンダーが提供する
+既存の設定項目(Deactivation Timeout等)のみでスケールイン/アウト時の
+ライセンス自動化を完結できることを確認します。
+
+## 用語解説
+
+- **VM-Seriesファイアウォール**: AWS/GCP/Azure等のクラウド環境に仮想
+  アプライアンスとして展開するPAN-OSファイアウォール
+- **BYOL (Bring Your Own License) / PAYG (Pay-As-You-Go)**: 一次情報には
+  「BYOL and PAYG licenses can be used for the VM-Series firewalls. If you
+  choose BYOL your deployment can deactivate license instances in response
+  to a scale-down event.」と説明されています。スケールダウンイベントに
+  応じたライセンスインスタンスの自動非アクティブ化はBYOLを選択した場合
+  にのみ可能です
+- **Auto Scaleモデル(Managed Instance Group)**: 需要に応じてVM-Series
+  ファイアウォールの台数を自動的に増減させるデプロイモデル。GCPの
+  Managed Instance Group(MIG)とそのautoscalerによって実現されます
+- **Panorama plugin for Google Cloud Platformの`AutoScaling`**: 一次情報
+  には「In the Panorama context, expand Google Cloud Platform, select
+  AutoScaling, and click Add. Supply the firewall Deployment Name and an
+  optional description for the deployment... supply the GCP service
+  account name, and choose the Device Group and the Template Stack you
+  created earlier.」と説明されています。Panoramaの当該プラグイン画面から
+  Deployment Name・Device Group・Template Stack・GCP Service Account
+  Credentialを指定してデプロイメント定義を作成します
+- **License Management Only**: `AutoScaling`のデプロイメント作成時にある
+  チェックボックス。一次情報には「Disable License Management Only to
+  ensure traffic is secured」と説明されており、有効のままだとライセンス
+  管理のみが行われ、Device Group/Template Stackによるセキュリティ構成の
+  配信は行われません
+- **Panorama Software Firewall Licenseプラグイン(plugin id: sw_fw_license)**:
+  一次情報には「The Software Firewall License plugin simplifies the
+  license activation and deactivation of VM-Series firewalls in
+  environments that use auto-scaling and automation」「Pay-as-you-go
+  (PAYG) licenses are not supported for use with this plugin」と説明され
+  ています。BYOL専用のライセンス自動化プラグインで、Panorama > Plugins
+  から`sw_fw_license`を検索してインストールします
+- **License Manager(Panorama > SW Firewall License > License Managers)**:
+  一次情報のとおり、ファイアウォールがPanoramaから切断されてからライセ
+  ンスを自動的に非アクティブ化するまでの待機時間(Deactivation Timeout、
+  1〜24時間、または無効化しない設定)を指定する画面
+- **Bootstrap Definitions(Panorama > SW Firewall License > Bootstrap
+  Definitions)**: 新規に起動するVM-Seriesファイアウォールへ配布する
+  Auth Code等のブートストラップ情報と、紐づけるLicense Managerを定義
+  する画面
+- **Device Group / Template Stack**: Panoramaが管理対象ファイアウォール
+  群へ配信するセキュリティポリシー・ネットワーク設定のグループ化単位
+- **request license api-key set key**: 一次情報にある、ライセンスAPI
+  キーをVM-SeriesファイアウォールのCLIから設定するオペレーショナル
+  コマンド
+
+## シナリオ設定
+
+今回、GCP上のVM-Seriesファイアウォール Auto Scaleデプロイとして構成する
+値は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| GCPプロジェクトID(gcp_project_id) | `{{ gcp_project_id }}` |
+| GCPリージョン(gcp_region) | `{{ gcp_region }}` |
+| VM-Seriesモデル(vm_series_model) | `{{ vm_series_model }}` |
+| Device Group名(device_group_name) | `{{ device_group_name }}` |
+| Template Stack名(template_stack_name) | `{{ template_stack_name }}` |
+| GCP Service Account Credential(gcp_service_account) | `{{ gcp_service_account }}` |
+| AutoScalingデプロイメント名(deployment_name) | `{{ deployment_name }}` |
+| デプロイメント説明(deployment_description) | `{{ deployment_description }}` |
+| License Manager名(license_manager_name) | `{{ license_manager_name }}` |
+| Deactivation Timeout, 時間単位(deactivation_timeout_hours) | {{ deactivation_timeout_hours }} |
+| Bootstrap Definitions名(bootstrap_definition_name) | `{{ bootstrap_definition_name }}` |
+| MIGの最小インスタンス数(min_group_size) | {{ min_group_size }} |
+| MIGの最大インスタンス数(max_group_size) | {{ max_group_size }} |
+| Panorama管理IPアドレス(panorama_mgmt_ip) | `{{ panorama_mgmt_ip }}` |
+| Auth Code / ライセンスAPIキー | `****`(マスク。秘密管理ツールで別途保管) |
+
+ライセンス形態はBYOLを選択し、`{{ vm_series_model }}`のcapacityライセンスを
+Auth Codeで登録する前提とします。
+
+## 手順
+
+### 1. 現状を確認する(変更前の基準を取る)
+
+`https://{{ panorama_mgmt_ip }}`のPanorama管理画面にログインし、新しい
+プラグイン・デプロイメント・オブジェクトを1件も登録する前に、現状を
+確認します。
+
+- `Panorama > Plugins`を開き、Google Cloud Platformプラグインと
+  `sw_fw_license`(Panorama Software Firewall License)プラグインの
+  インストール状況・バージョンを確認します。
+- `Panorama > Device Groups`・`Panorama > Templates`を開き、
+  `{{ device_group_name }}`・`{{ template_stack_name }}`と同名の
+  Device Group・Template Stackが存在しないことを確認します。
+- `Panorama > Managed Devices > Summary`を開き、現在接続済みの
+  ファイアウォール一覧を確認します(スケール後の新規登録台数と比較する
+  ための基準にします)。
+
+### 2. Panorama Software Firewall Licenseプラグインをインストールする
+
+`Panorama > Plugins`で`Check Now`をクリックして利用可能なプラグイン一覧を
+更新し、`sw_fw_license`を検索して`Download and Install`を実行します。
+
+### 3. License Managerを作成する(Panorama > SW Firewall License > License Managers)
+
+`Panorama > SW Firewall License > License Managers`で`Add`をクリックし、
+`Name`に`{{ license_manager_name }}`を入力します。`Deactivation Timeout
+(Hours)`に`{{ deactivation_timeout_hours }}`を入力します。これは、BYOL
+ライセンスの`{{ vm_series_model }}`インスタンスがPanoramaから切断されて
+から`{{ deactivation_timeout_hours }}`時間後に自動的に非アクティブ化される
+設定です。
+
+### 4. Bootstrap Definitionsを作成する(Panorama > SW Firewall License > Bootstrap Definitions)
+
+`Panorama > SW Firewall License > Bootstrap Definitions`で`Add`をクリック
+し、`Name`に`{{ bootstrap_definition_name }}`を入力します。`Auth Code`欄
+には実際の認証コードを直接入力せず、社内の秘密管理ツールで安全に管理
+している値を用います(本手順書では`****`と表記します)。`License Manager`
+には手順3で作成した`{{ license_manager_name }}`を選択します。
+
+### 5. AutoScalingデプロイメントを作成する(Panorama > Google Cloud Platform > AutoScaling)
+
+`Panorama`コンテキストで`Google Cloud Platform`を展開し`AutoScaling`を
+選択して`Add`をクリックします。
+
+- `Deployment Name`に`{{ deployment_name }}`、説明に
+  `{{ deployment_description }}`を入力します。
+- `GCP Service Account Credential`に`{{ gcp_service_account }}`を指定
+  します。
+- `Device Group`に`{{ device_group_name }}`、`Template Stack`に
+  `{{ template_stack_name }}`を選択します。
+- `License Management Only`のチェックを外します(チェックを外さないと
+  ライセンス管理のみが行われ、Device Group/Template Stackによる
+  セキュリティ構成が配信されません)。
+
+### 6. 変更を確定する(Commit and Push)
+
+Panoramaの`Commit`メニューから`Commit and Push`を実行し、候補設定を
+Panoramaの実行中設定へ反映した上で、`{{ device_group_name }}`・
+`{{ template_stack_name }}`の設定を配下のファイアウォールへ配信します。
+commit/pushが完了するまで、手順3〜5で入力した内容は実際のスケール動作
+には反映されません。
+
+### 7. GCP側のManaged Instance Groupのスケール設定を確認する
+
+Auto Scalingテンプレートで作成されたGCPのManaged Instance Groupを開き、
+autoscalerの最小インスタンス数が`{{ min_group_size }}`、最大インスタンス
+数が`{{ max_group_size }}`に設定されていることを確認します。
+
+### 8. スケールアウト時の自動ライセンス発行を確認する
+
+需要増によりMIGが新規インスタンスを起動した後、`Panorama > Managed
+Devices > Summary`を開き、新規ファイアウォールが`{{ device_group_name }}`
+配下に自動登録されていることを確認します。続けて`Panorama > SW Firewall
+License > License Managers`の`{{ license_manager_name }}`行を開き、
+増えたインスタンス分のライセンスが自動的に発行(Licensed状態)されて
+いることを確認します。
+
+### 9. スケールイン時の自動ライセンス失効を確認する
+
+需要減によりMIGがインスタンスを削除した後、対象ファイアウォールが
+Panoramaから切断されたことを`Panorama > Managed Devices > Summary`で
+確認します。切断から`{{ deactivation_timeout_hours }}`時間経過した時点で
+`Panorama > SW Firewall License > License Managers`を再度開き、該当
+ライセンスが手動操作なしに自動的に非アクティブ化され、ライセンスプールに
+戻っていることを確認します。
+
+## 動作確認
+
+- `Panorama > Managed Devices > Summary`に、スケールアウトで起動した
+  新規VM-Seriesファイアウォールが`{{ device_group_name }}`配下へ自動
+  登録されていること
+- `Panorama > SW Firewall License > License Managers`の
+  `{{ license_manager_name }}`行で、増えた`{{ vm_series_model }}`
+  インスタンス分のライセンスが自動発行されていること
+- スケールイン後、切断から`{{ deactivation_timeout_hours }}`時間経過
+  時点で、該当ライセンスが手動の`Deactivate VMs`操作なしに自動的に
+  非アクティブ化されていること
+- `Panorama > Google Cloud Platform > AutoScaling`の
+  `{{ deployment_name }}`の状態が正常であること
+- MIGのautoscaler設定が最小`{{ min_group_size }}`台・最大
+  `{{ max_group_size }}`台のままシナリオ設定と一致していること
+- commit/push後、新規ファイアウォールに`{{ device_group_name }}`・
+  `{{ template_stack_name }}`のセキュリティ構成が反映されていること
+
+## 注意事項
+
+- **Panorama Software Firewall LicenseプラグインはBYOL専用です。**
+  一次情報にあるとおり「Pay-as-you-go (PAYG) licenses are not supported
+  for use with this plugin」であるため、PAYGインスタンスにはこの自動
+  発行・自動失効機構を利用できません。PAYGを選ぶ場合は別途ライセンス
+  管理方式を検討してください。
+- **`License Management Only`のチェックを外し忘れないこと。** 外さない
+  ままだと`AutoScaling`デプロイメントはライセンス管理のみを行い、
+  `{{ device_group_name }}`・`{{ template_stack_name }}`のセキュリティ
+  構成が新規ファイアウォールへ配信されません。
+- **Auth Code・ライセンスAPIキー・GCP Service Accountの認証情報は平文で
+  残さないこと。** 本手順書やチケット、ログには`****`のようにマスクして
+  記載し、実際の値は秘密管理ツールで別途安全に保管してください。
+- **Deactivation Timeoutは短くしすぎないこと。** 一時的なネットワーク
+  断でもライセンスが早期に非アクティブ化され、再接続後に再度ライセンス
+  発行を待つことになります。需要変動の幅に応じて
+  `{{ deactivation_timeout_hours }}`時間を調整してください。
+- 外部の監視スクリプトやcronジョブ等を自作してライセンスの発行・失効を
+  制御しないでください。License Managerの`Deactivation Timeout`という
+  既存の設定項目のみで、スケールイン/アウトに追随した自動化が完結
+  します。
+- 本手順はGCP上のAuto Scaleモデルを前提とします。AWS/AzureのAuto
+  Scalingテンプレートを使う場合は、Panoramaプラグインのメニュー名や
+  パラメータを各クラウド向けプラグイン(Panorama Plugin for AWS/Azure)の
+  実際の画面表記に読み替えてください。
+- Commit and Pushを実行するまでcandidate configは配下のファイアウォール
+  へ反映されません。手順3〜5で入力した内容は、手順6のcommit/pushまで
+  実機の動作に影響しません。

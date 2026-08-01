@@ -1,0 +1,10 @@
+active_fw_hostname = "fw-hq-a"
+passive_fw_hostname = "fw-hq-b"
+ha_group_name = "HA-HQ-01"
+ha1_interface = "ha1-a"
+audit_interval_minutes = 15
+max_drift_minutes = 30
+escalation_team = "netops-oncall"
+change_ticket_prefix = "NETOPS"
+maintenance_window = "毎週火曜 02:00-03:00 JST"
+config_sync_checkbox_state = "enabled"

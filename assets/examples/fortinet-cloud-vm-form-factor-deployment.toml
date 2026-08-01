@@ -1,0 +1,16 @@
+deployment_name = "fgt-asg-jpe01"
+resource_group = "rg-fgt-asg-jpe01"
+location = "Japan East"
+vnet_name = "vnet-fgt-asg-jpe01"
+license_mode = "payg"
+byol_instance_count = 2
+payg_min_instance_count = 2
+payg_max_instance_count = 4
+scale_out_threshold = 80
+scale_in_threshold = 15
+sync_interface = "port2"
+admin_port = 8443
+heart_beat_interval = 30
+psk_secret_mask = "********"
+function_app_name = "func-fgt-asg-jpe01"
+storage_account_name = "stfgtasgjpe01"

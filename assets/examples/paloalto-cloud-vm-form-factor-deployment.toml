@@ -1,0 +1,14 @@
+gcp_project_id = "prj-network-hub-01"
+gcp_region = "asia-northeast1"
+vm_series_model = "VM-300"
+device_group_name = "DG-VMSeries-AutoScale"
+template_stack_name = "TS-VMSeries-AutoScale"
+gcp_service_account = "svc-panorama-autoscale@prj-network-hub-01.iam.gserviceaccount.com"
+deployment_name = "AutoScale-Web-Prod"
+deployment_description = "Web層Auto Scale VM-Seriesデプロイ"
+license_manager_name = "LM-VMSeries-BYOL"
+deactivation_timeout_hours = 4
+bootstrap_definition_name = "BSD-VMSeries-AutoScale"
+min_group_size = 2
+max_group_size = 6
+panorama_mgmt_ip = "10.10.0.5"

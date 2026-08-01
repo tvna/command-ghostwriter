@@ -1,0 +1,228 @@
+# OPNsense 設定ドリフトの定期検知(承認済みベースライン比較)
+
+稼働中の設定(`config.xml`)と承認済みベースライン({{ baseline_label }})を
+{{ review_interval }}に比較し、意図しない変更(コンフィグドリフト)を検知
+します。差分は`System > Configuration > History`のunified diffで確認し、
+恒久的な変更履歴は公式プラグインgit-backupで確保します。
+
+## 目的
+
+OPNsenseのHistory画面によるunified diff表示と、公式プラグイン
+git-backupによる変更履歴の永続化を用いて、稼働中の設定と承認済み
+ベースライン({{ baseline_label }})との差分を{{ review_interval }}の
+頻度で検知し、既知のノイズ・承認済み変更と未承認のドリフト(意図しない
+変更)を区別できるようになることを目指します。
+
+## 用語解説
+
+- **History画面(`System > Configuration > History`)**: 設定が変更される
+  たびに保存される`config.xml`の各版を一覧表示し、ドロップダウンから
+  選んだ版同士を比較できる画面。版を選択すると直前の版が比較対象として
+  自動選択されるが、任意の2版を選んで比較することもできる
+- **unified diff**: History画面が2つの版の差分を表示する形式
+- **Revert to this backup**: History画面のボタンの1つ。選択した版に設定を
+  戻すが、サービスは自動再起動されないため、クリーンな状態にするには
+  再起動が必要な場合がある、との注記が公式マニュアルにある
+- **Remove this backup / Download the selected backup**: History画面の
+  残り2つのボタン。それぞれ選択した版の削除、選択した版(左のドロップ
+  ダウン)のダウンロードを行う
+- **Backupsの保持数設定(`System > Configuration > Backups`)**:
+  ローカルに保持する版数を指定できる設定。監査性を高めたい場合に有効
+- **git-backupプラグイン(os-git-backup)**: OPNsense公式(Deciso)が配布
+  するプラグイン。`config.xml`の変更イベントを検知し、変更のたびにGit
+  リポジトリへコミットする。既定では夜間(nightly)にリモートへpushする
+- **`System > Configuration > Backups > Git`**: git-backupプラグインの
+  設定画面。`Enable`・`URL`・`Branch`・`SSH private key`・`User Name`・
+  `password`・`Force Push`の各項目を持つ
+- **core/backup API(`/api/core/backup/...`)**: `backups`(版の一覧取得)・
+  `diff`(2版の差分取得)・`download`(版のダウンロード)・
+  `revert_backup`(版への復元)・`delete_backup`(版の削除)の各コマンドを
+  持つAPI群
+
+## シナリオ設定
+
+今回、比較対象のベースラインと運用体制は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| 対象ホスト(fw_host) | {{ fw_host }} |
+| 承認済みベースライン(baseline_label) | {{ baseline_label }} |
+| ベースライン保存日時(baseline_saved_at) | {{ baseline_saved_at }} |
+| 比較対象(current_label) | {{ current_label }} |
+| 定期比較の頻度(review_interval) | {{ review_interval }} |
+| ローカル保持版数(retention_count) | {{ retention_count }} |
+
+差分レビューア一覧(reviewers, {{ reviewers | length }} 名):
+
+| # | 担当 |
+|---|------|
+{% for r in reviewers %}| {{ loop.index }} | {{ r }} |
+{% endfor %}
+
+ドリフト検知時の通知先(drift_alert_recipients, {{ drift_alert_recipients | length }} 件):
+
+| # | 通知先 |
+|---|--------|
+{% for a in drift_alert_recipients %}| {{ loop.index }} | {{ a }} |
+{% endfor %}
+
+既知の除外項目(known_noise_items, {{ known_noise_items | length }} 件、
+常に差分として現れるが意図した変更ではないもの):
+
+| # | 項目 | 除外理由 |
+|---|------|----------|
+{% for n in known_noise_items %}| {{ loop.index }} | {{ n.item }} | {{ n.reason }} |
+{% endfor %}
+
+承認済み変更点(approved_changes, {{ approved_changes | length }} 件、
+ベースライン保存以降に正式承認済みの変更):
+
+| # | 項目 | 内容 | 変更チケット |
+|---|------|------|--------------|
+{% for c in approved_changes %}| {{ loop.index }} | {{ c.item }} | {{ c.description }} | {% if c.change_ticket != "-" %}{{ c.change_ticket }}{% else %}(なし){% endif %} |
+{% endfor %}
+
+git-backupプラグイン設定:
+
+| 項目 | 値 |
+|------|-----|
+| 有効化(git_backup_enabled) | {{ git_backup_enabled }} |
+| リポジトリURL(git_backup_url) | {{ git_backup_url }} |
+| ブランチ(git_backup_branch) | {{ git_backup_branch }} |
+| 認証ユーザー名(git_backup_user_name) | {{ git_backup_user_name }} |
+| SSH private key | {{ git_backup_ssh_key_mask }} |
+| password | {{ git_backup_password_mask }} |
+| Force Push(git_backup_force_push) | {{ git_backup_force_push }} |
+
+## 手順
+
+### 1. 承認済みベースラインの版を確認する
+
+`$OPNSENSE_API_KEY` / `$OPNSENSE_API_SECRET` には、`System > Access > Users`
+で発行したAPIキー/シークレットをそれぞれ環境変数として設定してください。
+値は絶対にコマンド中や本手順書に直接書き込まないこと。
+
+```bash
+export FW_HOST="{{ fw_host }}"
+curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" \
+  "https://${FW_HOST}/api/core/backup/backups"
+```
+
+レスポンスの中から、ベースライン({{ baseline_label }}、保存日時
+{{ baseline_saved_at }})に該当する版を確認し、その識別子を
+`BASELINE_BACKUP` としてメモしておきます。
+
+```bash
+export BASELINE_BACKUP="<上記レスポンスで確認した識別子>"
+```
+
+GUIで確認する場合は`System > Configuration > History`を開き、左右の
+ドロップダウンから同じ版を探しても構いません。
+
+### 2. 現在の稼働設定とベースラインをunified diffで比較する
+
+`System > Configuration > History`で、片方のドロップダウンに手順1の
+ベースライン版、もう片方に{{ current_label }}を選びます。版を選択すると
+直前の版が比較対象として自動選択されますが、ここではベースライン版を
+明示的に選び直してください。画面には両版の差分がunified diff形式で
+表示されます。
+
+CLIから同じ比較を行う場合は次のとおりです。
+
+```bash
+export CURRENT_BACKUP="this"
+curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" \
+  "https://${FW_HOST}/api/core/backup/diff/${BASELINE_BACKUP}/${CURRENT_BACKUP}" \
+  -o "opnsense-drift-diff-$(date +%Y%m%d%H%M).txt"
+```
+
+### 3. 差分を既知の除外項目・承認済み変更点と照合する
+
+取得したunified diffの各差分行を、以下と突き合わせます。
+
+- 既知の除外項目({{ known_noise_items | length }} 件): シナリオ設定の
+  表にある項目(DHCPリースやRRD統計など)に該当する差分は無視します
+- 承認済み変更点({{ approved_changes | length }} 件): シナリオ設定の
+  表にある変更チケットに紐づく差分は「承認済み」として扱います
+
+いずれにも該当しない差分が残った場合、それは未承認のドリフトです。
+
+### 4. 未承認のドリフトを検知した場合に一次対応する
+
+未承認の差分を見つけた場合は、まず{{ reviewers | length }}名のレビューア
+に共有し、意図した変更(申請漏れ)か、想定外の変更(コンフィグドリフト)
+かを判断してもらいます。
+
+想定外の変更と判断された場合、ベースライン版へ復元します。**この操作は
+サービスを自動再起動しないため、クリーンな状態にするには再起動が
+必要な場合がある点に注意してください。** 復元前に、必ずレビューアの
+承認を得てから実行すること。
+
+```bash
+curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST \
+  "https://${FW_HOST}/api/core/backup/revert_backup/${BASELINE_BACKUP}"
+```
+
+復元後、{{ drift_alert_recipients | length }}件の通知先へ、検知した
+ドリフトの内容と対応結果を連絡してください。
+
+### 5. git-backupプラグインで恒久的な変更履歴を確保する
+
+`System > Configuration > Backups > Git`を開き、次のとおり設定します。
+
+- `Enable`: {{ git_backup_enabled }}
+- `URL`: `{{ git_backup_url }}`
+- `Branch`: `{{ git_backup_branch }}`
+- `User Name`: `{{ git_backup_user_name }}`
+- `SSH private key`: {{ git_backup_ssh_key_mask }}(値は本手順書やログに
+  書き込まず、鍵管理ツール経由で貼り付けること)
+- `password`: {{ git_backup_password_mask }}(SSH鍵を使わずHTTPS認証する
+  場合のみ設定。値は同様にマスクして扱うこと)
+- `Force Push`: {{ git_backup_force_push }}
+
+設定を保存すると、以降は`config.xml`が変更されるたびにコミットが作成され、
+既定では夜間にリモートリポジトリへpushされます。これにより、History画面の
+保持数({{ retention_count }}件)を超えて古い版が失われた場合でも、Gitの
+履歴から変更内容を追跡できます。
+
+### 6. 定期比較の運用体制を確立する
+
+手順1〜5を{{ review_interval }}の頻度で実施する運用に乗せます。
+`System > Configuration > Backups`で保持数を{{ retention_count }}件に
+設定し、ベースラインが世代交代で誤って失われないようにしてください。
+実施担当は{{ reviewers | length }}名のレビューアが持ち回りで行い、結果
+(差分なし/承認済み変更のみ/未承認のドリフトを検知し対応済み)を記録に
+残します。
+
+## 動作確認
+
+- 手順1で取得した`BASELINE_BACKUP`が、{{ baseline_label }}
+  ({{ baseline_saved_at }})と一致していること
+- 手順2のunified diffが正常に表示され(GUIまたはCLIいずれか)、比較対象の
+  版が正しく選ばれていること
+- 手順3で、既知の除外項目({{ known_noise_items | length }}件)と承認済み
+  変更点({{ approved_changes | length }}件)以外の差分がすべて洗い出されて
+  いること
+- 未承認のドリフトを検知した場合、{{ reviewers | length }}名のレビューア
+  への共有と、復元後の{{ drift_alert_recipients | length }}件への通知が
+  完了していること
+- `System > Configuration > Backups > Git`の設定が保存され、`config.xml`
+  変更後に新しいコミットがリポジトリ({{ git_backup_url }}、ブランチ
+  {{ git_backup_branch }})に反映されていること
+
+## 注意事項
+
+- **APIキー/シークレット、SSH private key、passwordは平文でリポジトリや
+  ログ、本手順書に残さないこと。** 環境変数や秘密管理ツール経由で扱い、
+  手順書には{{ git_backup_ssh_key_mask }}のようなマスク表記のみを残す
+- **`Revert to this backup`はサービスを自動再起動しない。** クリーンな
+  状態が必要な場合は復元後に手動で再起動すること。また復元は必ず
+  レビューアの承認を得てから実行すること
+- **`Force Push`({{ git_backup_force_push }})を有効にする場合は、リモート
+  リポジトリの履歴を上書きする操作である点に注意すること。** 誤って過去
+  のコミットを消さないよう、原則として無効のままにする
+- 既知の除外項目({{ known_noise_items | length }}件)は環境依存であり、
+  新たに恒常的なノイズが見つかった場合はシナリオ設定の一覧を更新すること
+- ベースラインの版は`System > Configuration > Backups`の保持数
+  ({{ retention_count }}件)を超えて古くなると削除される場合がある。
+  git-backupプラグインを有効化し、Gitリポジトリ側でも履歴を保持すること

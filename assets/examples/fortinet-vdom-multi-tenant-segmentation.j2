@@ -1,0 +1,204 @@
+# FortiGate VDOMによるマルチテナント/部門segmentation
+
+1台のFortiGate上に、テナント/部門ごと({{ tenants | length }}件)のVDOM
+(Virtual Domain)を作成し、ファイアウォールポリシー・ルーティングと管理者
+アカウントをテナントごとに分離します。あわせて `config log syslogd
+override-setting` でVDOMごとに異なるSyslogサーバへログを振り分け、
+`config log syslogd filter` で送信する重大度(severity)もVDOM単位で
+個別設定します。VDOM作成前に、グローバルコンフィグで multi-vdom mode を
+有効化する必要があります。
+
+## 目的
+
+物理アプライアンスを1台に集約しながら、テナント/部門ごとに設定・ポリシー・
+ログを論理的に分離運用できるようになることを目指します。具体的には、
+FortiGateのVDOM機構を使って{{ tenants | length }}件のテナント/部門ごとに
+独立したVDOMを作成し、各VDOMに専用のインターフェースと権限が制限された
+管理者アカウントを割り当て、さらにログの送信先(Syslogサーバ)とフィルタ
+条件(severity)もVDOMごとに個別設定できるようになることを目指します。
+
+## 用語解説
+
+- **VDOM(Virtual Domain)**: 1台のFortiGateを論理的に複数の仮想的な
+  FortiGateとして分割する機構。VDOMごとにファイアウォールポリシー・
+  ルーティング・VPNなどの設定を完全に分離できる
+- **multi-vdom mode**: `config system global` の `vdom-mode` を
+  `multi-vdom` に設定することで有効化する、複数のVDOMを作成・運用できる
+  動作モード。既定では無効(VDOMは `root` の1つのみ)であり、有効化すると
+  デバイスの再起動を伴う
+- **グローバルコンフィグ(global)/VDOMコンフィグ**: multi-vdom mode
+  有効化後、CLIには全VDOM共通の設定を行う「グローバル」コンテキストと、
+  個々のVDOM名で `edit` した「VDOMコンテキスト」が存在する。ログ設定など
+  VDOMごとに個別化する項目は、対象のVDOMコンテキストに入ってから設定する
+- **VDOM管理者アカウント**: `config system admin` で作成する管理者
+  アカウントに、テーブル形式の `vdom` フィールド(`config vdom` / `edit`
+  でVDOM名を登録)で担当VDOMを限定したもの。VDOM単位の管理者アカウントには
+  `super_admin` の `accprofile` は使用できない
+- **accprofile**: `config system admin` の管理者アカウントに割り当てる
+  アクセスプロファイル。そのアカウントがFortiGateのどの機能を操作できるか
+  を制御する
+- **`config log syslogd override-setting`**: VDOMコンテキスト内で設定する、
+  そのVDOM専用のSyslogサーバ送信先。グローバルの `config log syslogd
+  setting` を上書き(override)し、VDOMごとに異なるSyslogサーバへログを
+  振り分けられる
+- **`config log syslogd filter`**: 同じくVDOMコンテキスト内で設定する、
+  Syslogへ送信するログの重大度(severity)などの絞り込み条件
+- **FortiAnalyzerへの振り分け**: 本手順書はSyslogサーバへの振り分けを
+  対象としますが、`config log fortianalyzer override-setting` でも同様に
+  VDOMごとに異なるFortiAnalyzerサーバへ振り分け可能です。運用でFortiAnalyzer
+  を使う場合は、該当の一次情報を別途確認のうえ同様の要領で設定してください
+
+## シナリオ設定
+
+作成するテナント/部門VDOM({{ tenants | length }}件):
+
+| # | テナント/部門 | VDOM名(vdom_name) | 割り当てインターフェース | VDOM管理者アカウント | accprofile |
+|---|----------------|--------------------|--------------------------|------------------------|------------|
+{% for t in tenants %}| {{ loop.index }} | {{ t.name }} | `{{ t.vdom_name }}` | `{{ t.interface }}` | `{{ t.admin_account }}` | `{{ t.accprofile }}` |
+{% endfor %}
+各VDOMのログ振り分け先(Syslogサーバ):
+
+| # | テナント/部門 | VDOM名 | Syslogサーバ(log_server_ip) | ポート(log_server_port) | severity(log_severity) |
+|---|----------------|--------|-------------------------------|----------------------------|--------------------------|
+{% for t in tenants %}| {{ loop.index }} | {{ t.name }} | `{{ t.vdom_name }}` | {{ t.log_server_ip }} | {{ t.log_server_port }} | {{ t.log_severity }} |
+{% endfor %}
+| 項目 | 値 |
+|------|-----|
+| グローバル管理者アカウント(global_admin_account) | `{{ global_admin_account }}` |
+| ルートVDOM名(root_vdom_name) | `{{ root_vdom_name }}` |
+
+## 手順
+
+### 1. グローバルコンフィグで multi-vdom mode を有効化する
+
+現在このFortiGateには `{{ root_vdom_name }}` のみが存在する前提です。
+`{{ global_admin_account }}` でログインし、グローバルコンフィグから
+multi-vdom mode を有効化します。**有効化するとデバイスが再起動します。**
+事前に他の変更作業と重ならない時間帯であることを確認してください。
+
+```bash
+config system global
+    set vdom-mode multi-vdom
+end
+```
+
+再起動後、`{{ global_admin_account }}` で再ログインし、CLIプロンプトが
+`{{ root_vdom_name }} #` のようにVDOM名を含む表示に変わっていることを
+確認します。
+
+### 2. テナント/部門ごとのVDOMを作成する
+
+グローバルコンフィグから、シナリオ設定の{{ tenants | length }}件のVDOMを
+作成します。
+
+```bash
+config vdom
+{% for t in tenants %}    edit "{{ t.vdom_name }}"
+    next
+{% endfor %}end
+```
+
+### 3. 各VDOMに専用インターフェースを割り当てる
+
+引き続きグローバルコンフィグから、`config system interface` で各
+インターフェースの `vdom` を、シナリオ設定のとおりテナント/部門ごとの
+VDOMへ変更します。
+
+```bash
+config global
+config system interface
+{% for t in tenants %}    edit "{{ t.interface }}"
+        set vdom "{{ t.vdom_name }}"
+    next
+{% endfor %}end
+```
+
+### 4. VDOM単位の管理者アカウントを作成する
+
+グローバルコンフィグの `config system admin` で、テナント/部門ごとの
+管理者アカウントを作成します。`vdom` はテーブル形式のため、アカウント
+エントリ内で `config vdom` / `edit` により担当VDOMを登録します。
+`accprofile` には `super_admin` は使用できないため、シナリオ設定の
+専用プロファイル({{ tenants | map(attribute='accprofile') | join('、') }})
+を割り当てます(各プロファイルの権限範囲は別途 `config system accprofile`
+で事前に定義しておいてください)。パスワードは本手順書には記載せず、
+アカウント作成後に管理者自身が安全な方法で設定してください。
+
+```bash
+config system admin
+{% for t in tenants %}    edit "{{ t.admin_account }}"
+        set accprofile "{{ t.accprofile }}"
+        config vdom
+            edit "{{ t.vdom_name }}"
+            next
+        end
+    next
+{% endfor %}end
+```
+
+### 5. VDOMごとにログの振り分け先とseverityを設定する
+
+各VDOMのコンテキストに入り、`config log syslogd override-setting` で
+そのVDOM専用のSyslogサーバをグローバル設定に対して上書き(override)し、
+`config log syslogd filter` で送信するログの重大度(severity)を設定
+します。
+
+```bash
+{% for t in tenants %}config vdom
+edit "{{ t.vdom_name }}"
+    config log syslogd override-setting
+        set override enable
+        set status enable
+        set server "{{ t.log_server_ip }}"
+        set port {{ t.log_server_port }}
+    end
+    config log syslogd filter
+        set severity {{ t.log_severity }}
+    end
+end
+{% endfor %}```
+
+## 動作確認
+
+- multi-vdom mode 有効化後の再起動が完了し、`{{ global_admin_account }}`
+  で再ログインしてCLIプロンプトにVDOM名が表示されること
+- `get system vdom-property` または各VDOMの `config vdom` / `edit` から
+  {% for t in tenants %}`{{ t.vdom_name }}`{% if not loop.last %}・{% endif %}{% endfor %}
+  の{{ tenants | length }}件のVDOMが作成されていること
+- {% for t in tenants %}`{{ t.interface }}` が `{{ t.vdom_name }}` に{% if not loop.last %}、{% endif %}{% endfor %}
+  それぞれ割り当てられていること(`get system interface physical` の
+  `vdom` 欄で確認)
+- {% for t in tenants %}`{{ t.admin_account }}` で `{{ t.vdom_name }}`{% if not loop.last %}、{% endif %}{% endfor %}
+  へログインでき、他のテナント/部門のVDOMへは切り替えできない(権限が
+  分離されている)こと
+- 各VDOMで発生させたテスト通信のログが、対応するSyslogサーバ
+  ({% for t in tenants %}{{ t.log_server_ip }}:{{ t.log_server_port }}{% if not loop.last %}・{% endif %}{% endfor %})
+  にのみ到達し、他テナント/部門のSyslogサーバには混在しないこと
+- 各VDOMの `config log syslogd filter` の `severity` が、シナリオ設定の
+  値({% for t in tenants %}{{ t.log_severity }}{% if not loop.last %}・{% endif %}{% endfor %})
+  どおりに設定されていること
+
+## 注意事項
+
+- **multi-vdom mode の有効化はデバイスを再起動させます。** 既存の運用
+  トラフィックに影響するため、必ず計画済みのメンテナンス時間帯に実施して
+  ください。
+- **VDOM単位の管理者アカウントには `accprofile` として `super_admin` を
+  割り当てられません。** 割り当てようとすると設定が拒否されるため、
+  シナリオ設定のテナント/部門専用プロファイルを事前に用意してください。
+- **`config system interface` でのVDOM変更は、そのインターフェースに
+  依存するファイアウォールポリシーやルーティング設定を無効化する可能性が
+  あります。** 手順3の実行前に、対象インターフェースを参照している既存の
+  ポリシー・ルートを確認し、必要であれば退避してください。
+- **`config log syslogd override-setting` の `override` を `enable` に
+  し忘れると、グローバルのSyslog設定が優先され、VDOMごとの振り分けが
+  反映されません。** 手順5では必ず `set override enable` を先に実行して
+  ください。
+- グローバル管理者アカウント(`{{ global_admin_account }}`)のパスワードや
+  各VDOM管理者アカウントのパスワードは、本手順書やログに平文で記載しない
+  でください。値を記録する場合は `********` のようにマスクし、秘密管理
+  ツール等で別途安全に保管してください。
+- FortiAnalyzerへのログ振り分けを併用する場合は、`config log
+  fortianalyzer override-setting` の具体的なパラメータ(`use-management-vdom`
+  等)を含め、該当バージョンの一次情報を別途確認してから設定してください。
+  本手順書はSyslogサーバへの振り分けのみを検証済みの範囲として扱います。

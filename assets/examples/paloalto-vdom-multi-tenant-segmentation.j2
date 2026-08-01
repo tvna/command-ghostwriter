@@ -1,0 +1,234 @@
+# PAN-OS Virtual Systems(vsys)によるマルチテナント論理分離
+
+物理ファイアウォール `{{ physical_firewall_name }}` 1台の上に、PAN-OSの
+Virtual Systems(vsys)機能でテナントごとの論理仮想ファイアウォールを
+{{ tenants | length }} 個作成し、セキュリティポリシー・インターフェース・
+仮想ルーター・管理者権限・ログをテナント単位で分離します。テナント間の
+通信を許可する場合でも、Visible Virtual Systemsの設定に加えてExternal
+Zoneとセキュリティポリシーが別途必要になる点に注意して作業します。
+
+## 目的
+
+1台の物理PAN-OSアプライアンス上で複数のテナント/部門ごとに独立した
+設定・ポリシー・ログを論理的に分離運用できるようにするため、Virtual
+Systems(vsys)を用いてテナントごとの仮想ファイアウォールインスタンスを
+作成し、既定で他テナントから不可視な状態を保ちつつ、必要な場合のみ
+共有インフラ(`{{ shared_services_vsys_name }}`)との通信を明示的に
+許可する手順を実践できるようになることを目指します。
+
+## 用語解説
+
+- **Virtual Systems(vsys)**: 一次情報には "separate, logical firewall
+  instances within a single physical Palo Alto Networks firewall"
+  (1台の物理ファイアウォール内に存在する、独立した論理ファイアウォール
+  インスタンス)と定義されている。vsysごとにセキュリティポリシー、
+  管理者権限、ログ/レポートを独立して管理でき、既定のvsys(vsys1)は
+  削除できない
+- **Virtual Systems license**: 一次情報には "a Virtual Systems license"
+  が "for any virtual systems beyond the base number supported by each
+  NGFW series"(各NGFWシリーズがサポートする基本数を超えてvsysを追加
+  する場合に必要)と明記されている。テナント数が機種の基本数を超える
+  場合は事前にライセンスを確認すること
+- **Multi Virtual System Capability**: `Device > Setup > Management` の
+  General Settingsにあるチェックボックス。これを有効化してCommitしない
+  限り、`Device > Virtual Systems` からvsysを追加できない
+- **vsys ID / Name**: `Device > Virtual Systems > Add` でvsys ID
+  (1〜255の範囲で "vsys" に付与される番号)を指定し、General タブの
+  Name欄に英数字・スペース・アンダースコアのみで最大31文字の名前を
+  設定する(ハイフンなど他の記号は一次情報の範囲では確認できないため
+  本手順では使用しない)
+- **Visible Virtual Systems**: vsysのGeneralタブにある項目。一次情報
+  には "During virtual system configuration, the UI requires checking
+  boxes ... for all systems that must communicate with each other,
+  making them visible to each other"(通信が必要なvsys同士をチェック
+  することで、互いに可視になる)とある。チェックしなかったvsysは
+  互いに不可視のままとなる
+- **External Zone**: `Network > Zones` で作成するゾーン種別。一次情報
+  には、Locationに対象vsysを指定し、Typeを "External" にした上で
+  Virtual Systemsフィールドに到達先vsysを追加する、と記載されている。
+  Visible Virtual Systemsのチェックのみでは通信できず、External Zone
+  と、内部ゾーンとExternal Zone間のセキュリティポリシーの両方が別途
+  必要になる
+- **vsysadmin / vsysreader**: vsys単位で割り当てる管理者ロール。一次
+  情報には、この2ロールは "network interfaces, VLANs, virtual wires,
+  virtual routers, IPSec tunnels, GRE tunnels, DHCP, DNS Proxy, QoS,
+  LLDP, or network profiles" にアクセスできないと明記されている。
+  vsysreaderはさらに読み取り専用となる
+- **target-vsys(CLIコンテキスト切り替え)**: 一次情報のCLIチートシート
+  には `set system setting target-vsys <vsys-name>` でカレントvsysの
+  コンテキストを切り替え、`set system setting target-vsys none` で
+  グローバルに戻す、と記載されている。`<vsys-name>` にはvsys IDを
+  付与した `vsys2` のような形式を用いる
+
+## シナリオ設定
+
+物理ファイアウォール(physical_firewall_name): `{{ physical_firewall_name }}`
+
+共有サービスvsys(既定のvsys1をリネームして使用):
+
+| 項目 | 値 |
+|------|-----|
+| vsys ID | {{ shared_services_vsys_id }} |
+| Name(shared_services_vsys_name) | {{ shared_services_vsys_name }} |
+
+テナント一覧(tenants, {{ tenants | length }} 件):
+
+| # | vsys ID | Name | テナント | 仮想ルーター | ゾーン | 管理者ロール | 共有vsysとの通信 |
+|---|---------|------|----------|--------------|--------|--------------|-------------------|
+{% for tenant in tenants %}| {{ loop.index }} | {{ tenant["vsys_id"] }} | {{ tenant["vsys_name"] }} | {{ tenant["tenant_label"] }} | {{ tenant["virtual_router_name"] }} | {{ tenant["zone_name"] }} | {{ tenant["admin_role"] }} | {% if tenant["visible_vsys"] != "-" %}許可(→ {{ tenant["visible_vsys"] }}){% else %}不許可(完全分離){% endif %} |
+{% endfor %}
+
+テナントごとに割り当てるインターフェースと、Resourceタブで設定する
+セキュリティルール上限(max_security_rules)は次のとおりです。
+
+{% for tenant in tenants %}### テナント: {{ tenant["tenant_label"] }}(vsys{{ tenant["vsys_id"] }} / {{ tenant["vsys_name"] }})
+
+| # | インターフェース種別 | インターフェース名 |
+|---|----------------------|--------------------|
+{% for iface in tenant["interfaces"] %}| {{ loop.index }} | {{ iface["type"] }} | {{ iface["name"] }} |
+{% endfor %}
+- セキュリティルール上限(Resourceタブ): {{ tenant["max_security_rules"] }}
+- 管理者アカウント名(admin_account_name): `{{ tenant["admin_account_name"] }}`(パスワードは別途安全な方法で払い出し、本手順書には記載しない。値は `****` として扱う)
+
+{% endfor %}
+
+## 手順
+
+### 1. Multi Virtual System Capabilityを有効化する
+
+`Device > Setup > Management` の General Settingsを開き、`Multi Virtual
+System Capability` にチェックを入れて `OK` をクリックします。この時点
+ではまだ `Commit` せず、後続の手順とまとめて反映します。
+
+### 2. テナントごとにVirtual Systemを作成する
+
+`Device > Virtual Systems > Add` から、テナントごとに次のvsysを作成
+します。
+
+{% for tenant in tenants %}- vsys ID `{{ tenant["vsys_id"] }}` を指定し、Generalタブの Name欄に
+  `{{ tenant["vsys_name"] }}` を設定する({{ tenant["tenant_label"] }}用)
+{% endfor %}
+
+### 3. テナントごとにVirtual Routerを作成する
+
+`Network > Virtual Routers > Add` から、テナントごとに専用の仮想
+ルーターを作成し、対応するvsysに割り当てます。
+
+{% for tenant in tenants %}- `{{ tenant["virtual_router_name"] }}`(vsys `{{ tenant["vsys_name"] }}` 用)
+{% endfor %}
+
+### 4. テナントごとにインターフェースとゾーンを割り当てる
+
+各テナントのインターフェースを対応するvsysに割り当てたうえで、
+`Network > Zones` からLocationに当該vsysを指定したゾーンを作成し、
+インターフェースを所属させます。
+
+{% for tenant in tenants %}#### {{ tenant["tenant_label"] }}(vsys{{ tenant["vsys_id"] }})
+
+- 所属vsys: `{{ tenant["vsys_name"] }}` / 仮想ルーター:
+  `{{ tenant["virtual_router_name"] }}` / ゾーン: `{{ tenant["zone_name"] }}`
+{% for iface in tenant["interfaces"] %}- インターフェース `{{ iface["name"] }}`({{ iface["type"] }})を
+  vsys `{{ tenant["vsys_name"] }}` に割り当て、ゾーン
+  `{{ tenant["zone_name"] }}` に所属させる
+{% endfor %}
+{% endfor %}
+
+### 5. テナント間通信の可否を設定する
+
+各テナントのvsys Generalタブにある `Visible Virtual Systems` で、
+共有サービスvsys(`{{ shared_services_vsys_name }}`)との通信を許可
+するかどうかをシナリオ設定のとおりに設定します。
+
+{% for tenant in tenants %}{% if tenant["visible_vsys"] != "-" %}- {{ tenant["tenant_label"] }}(`{{ tenant["vsys_name"] }}`): Visible
+  Virtual Systemsで `{{ tenant["visible_vsys"] }}` にチェックを入れる。
+  続けて `Network > Zones > Add` でLocationを `{{ tenant["vsys_name"] }}`、
+  Typeを `External` としたゾーン `{{ tenant["external_zone_name"] }}` を
+  作成し、Virtual Systemsフィールドに `{{ tenant["visible_vsys"] }}` を
+  追加する。最後に `Policies > Security` で、内部ゾーン
+  `{{ tenant["zone_name"] }}` と外部ゾーン
+  `{{ tenant["external_zone_name"] }}` の間の通信を許可するルールを
+  必要な範囲のみで作成する(Visible Virtual Systemsのチェックだけでは
+  通信できない)
+{% else %}- {{ tenant["tenant_label"] }}(`{{ tenant["vsys_name"] }}`): Visible
+  Virtual Systemsには何もチェックを入れず、他のvsysから不可視のまま
+  にする(完全分離)。External Zoneも作成しない
+{% endif %}
+{% endfor %}
+
+### 6. テナントごとにResourceタブの上限を設定する
+
+各vsysの `Resource` タブで、セキュリティルール数の上限を次のとおり
+設定します(モデルごとの上限を超える値は設定できないため、機種のドキュ
+メントで上限を確認してから入力すること)。
+
+{% for tenant in tenants %}- `{{ tenant["vsys_name"] }}`: セキュリティルール上限
+  {{ tenant["max_security_rules"] }}
+{% endfor %}
+
+### 7. テナントごとに管理者アカウントとロールを割り当てる
+
+`Device > Administrators > Add` から、テナントごとに次のロールで
+管理者アカウントを作成します。パスワードはこの場では設定せず、安全な
+方法で別途払い出します(値は `****` として扱う)。
+
+{% for tenant in tenants %}- アカウント `{{ tenant["admin_account_name"] }}` / ロール
+  `{{ tenant["admin_role"] }}` / 割り当てvsys `{{ tenant["vsys_name"] }}`
+  / パスワード `****`
+{% endfor %}
+
+### 8. 設定をCommitする
+
+ここまでの変更をまとめて `Commit` します。Commit前に、シナリオ設定の
+テナント一覧とここまでの入力内容(vsys ID、Name、ゾーン、Visible
+Virtual Systemsの設定)に相違がないか再確認してください。
+
+## 動作確認
+
+- `show system info | match vsys` を実行し、マルチvsysモードが有効に
+  なっていることを確認する
+{% for tenant in tenants %}- CLIで `set system setting target-vsys vsys{{ tenant["vsys_id"] }}` を
+  実行し、`{{ tenant["tenant_label"] }}`(`{{ tenant["vsys_name"] }}`)の
+  コンテキストに切り替えられることを確認したうえで、`set system
+  setting target-vsys none` でグローバルコンテキストに戻す
+{% endfor %}
+- GUIで各テナントの管理者アカウント(admin_account_name)にログインし、
+  自テナントのvsysに割り当てたセキュリティポリシー・インターフェース・
+  ログのみが見え、他テナントの設定・ログは見えないことを確認する
+{% for tenant in tenants %}{% if tenant["visible_vsys"] != "-" %}- {{ tenant["tenant_label"] }}から共有サービスvsys
+  (`{{ tenant["visible_vsys"] }}`)宛ての通信が、手順5で作成した
+  External Zone経由のセキュリティポリシーに従って許可されることを
+  確認する
+{% else %}- {{ tenant["tenant_label"] }}から他のvsys宛ての通信が、Visible
+  Virtual Systemsが未設定のため到達しない(分離されている)ことを
+  確認する
+{% endif %}
+{% endfor %}
+
+## 注意事項
+
+- **vsys1は削除できない。** 一次情報には既定のvsysである vsys1は
+  削除できないと明記されている。本シナリオでは vsys1 を削除せず、
+  Nameを `{{ shared_services_vsys_name }}` にリネームして共有サービス
+  用途に転用している
+- **Visible Virtual Systemsのチェックだけでは通信できない。**
+  一次情報には、通信にはExternal Zoneの作成と、内部ゾーン/External
+  Zone間のセキュリティポリシーの両方が必要と明記されている。手順5で
+  Visible Virtual Systemsのみ設定してポリシーを作らないまま作業を
+  終えないこと
+- **vsysadmin / vsysreaderにはネットワーク設定の権限がない。**
+  一次情報には、この2ロールはインターフェース・VLAN・仮想ワイヤー・
+  仮想ルーター・IPSec/GREトンネル・DHCP・DNS Proxy・QoS・LLDP・
+  ネットワークプロファイルにアクセスできないと明記されている。手順3・
+  4のネットワーク設定は、vsysadmin/vsysreaderではなくsuperuser権限を
+  持つ管理者が実施すること
+- **テナント数が機種の基本サポート数を超える場合はVirtual Systems
+  licenseが必要。** 一次情報には、各NGFWシリーズがサポートする基本数
+  を超えるvsysを追加する場合にライセンスが必要と明記されている。
+  手順2でテナント用vsysを追加する前に、機種のライセンス状況を確認
+  すること
+- vsys Name欄(vsys_name)は一次情報で英数字・スペース・アンダースコア
+  のみ最大31文字までと明記されている。他の記号を含む名前を設定しない
+  こと
+- 管理者アカウントのパスワードは、本手順書には一切記載していない
+  (`****` は値がここに存在しないことを示すマスク表記)。安全な方法
+  (パスワードマネージャー等)で別途払い出し、共有すること

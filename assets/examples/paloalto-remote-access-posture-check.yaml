@@ -1,0 +1,32 @@
+gp_gateway_name: gw-remote-access
+hip_profile_name: compliant-endpoint
+hip_objects:
+  - name: av-realtime-protection
+    category: Anti-Malware
+    purpose: エンドポイント保護製品のリアルタイム保護が有効であることを確認する
+  - name: endpoint-patch-compliance
+    category: Patch Management
+    purpose: OSの必須パッチ適用状況を確認する
+  - name: disk-encryption-enabled
+    category: Disk Encryption
+    purpose: ディスク全体暗号化が有効であることを確認する
+log_forwarding_profile_name: hip-match-quarantine-forwarding
+security_policy_compliant_name: vpn-compliant-access
+security_policy_quarantine_name: vpn-quarantine-block
+vpn_zone: vpn-users
+trust_zone: trust
+allowed_services:
+  - ssl
+  - web-browsing
+  - ms-ds-smb
+test_devices:
+  - host_id: AB12-CD34-EF56
+    serial_number: PC0012345
+    user: sato.taro
+    hip_match: compliant
+    note: "-"
+  - host_id: GH78-IJ90-KL12
+    serial_number: PC0067890
+    user: suzuki.jiro
+    hip_match: non-compliant
+    note: AV定義ファイルが7日以上未更新のため非準拠と判定

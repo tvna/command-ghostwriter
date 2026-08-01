@@ -1,0 +1,191 @@
+# SonicWall (SonicOS) Multi-Instanceによるテナント/部門ごとの設定分離
+
+`{{ appliance_model }}` 上で `DEVICE | Multi-Instance` 機能を有効化し、
+Logical Blade を {{ logical_blades_reserved }} 枚予約したうえで、
+{{ tenants | length }} 件のテナント/部門ごとに独立した SonicOSX コンテナ
+インスタンス(Tenant Instance)を作成します。各インスタンスは
+Organization Name / Tenant Name / ACI Version / コア割当 / インタフェース
+(VLAN)割当を個別に持ち、Firmware・Instance License・ログもテナント単位
+で分離されます。
+
+## 目的
+
+1台の物理アプライアンス上で複数のテナント/部門ごとに独立した設定・
+ポリシー・ログを論理的に分離運用できるようになることを目指します。
+他ベンダーのネイティブ機能とは異なり、SonicWall (SonicOS)ではNSsp 15700
+等のハイエンドアプライアンス向け「Multi-Instance (MI)」機能が、
+ハイパーバイザーレベルで分離された複数の独立SonicOSXコンテナインスタンス
+を1台の物理アプライアンス上に展開し、テナント/部門ごとに個別の設定・
+ファームウェア版数・ライフサイクル・CPU/メモリ/インタフェース割当・ログ
+を分離するという別機構で同じ運用課題を解決します。あわせて、Logical
+Blade・Front Panel Portの予約からテナントインスタンスの作成・起動までの
+一連の投入手順を身につけます。
+
+## 用語解説
+
+- **DEVICE | Multi-Instance**: Multi-Instance機能の設定・監視を行う管理
+  画面ナビゲーションパス。`Settings` / `Instances` / `Firmware` /
+  `Instance Licenses` の各タブで構成される
+- **Root Instance (RI)**: Multi-Instance機能を管理するコンソールとなる
+  基盤側のインスタンス。RIを通じてテナントインスタンスの追加・起動・
+  停止・削除を行う
+- **Tenant Instance**: RI上に作成される、独自のルーティングテーブル・
+  ポリシー設定・ライセンス・セキュリティサービスを持つ独立した仮想
+  ファイアウォールインスタンス。テナント/部門単位で1インスタンスを割り
+  当てることで設定・ログを分離する
+- **Settings タブ(Logical Blade / Front Panel Portの予約)**: Multi-
+  Instance機能そのものを有効化するタブ。テナントインスタンスに割り当てる
+  Logical Blade数を設定し、対応するFront Panel Portを予約したうえで、
+  設定を反映するために `{{ appliance_model }}` を再起動する
+- **Instances タブ(Add Instance)**: テナントインスタンスを作成する
+  タブ。`Add` から `Organization Name` / `Tenant Name` / `ACI Version`
+  / `Management Cores`(Control Plane用コア数、インスタンスあたり最大
+  2コア)/ `Data Processing Cores`(データプレーン用コア数、インスタンス
+  あたり最大8コア)/ HA有無を設定して1件のTenant Instanceを作成する
+- **Instances タブ(Actions: Start / Stop / Reboot / Edit / Delete)**:
+  作成済みのTenant Instanceに対する操作。`Actions` ドロップダウンから
+  インスタンスの起動・停止・再起動・編集・削除を行う
+- **Firmware タブ**: Tenant Instance用のファームウェア(SWIファイル)を
+  アップロードするタブ。Root Instance自身のファームウェアとは別に、
+  テナント専用のファームウェアとして管理される
+- **Instance Licenses タブ**: Tenant Instanceの起動に必要なライセンスを
+  Root Tenant側で管理するタブ。ライセンスはインスタンスごとに個別の
+  シリアル番号・認証コードを持ち、SonicOS/Xでライセンス済みのセキュリティ
+  サービスは各インスタンスに継承される
+
+## シナリオ設定
+
+`{{ appliance_model }}` で Multi-Instance機能を有効化するために、次の
+{{ reserved_front_panel_ports | length }} 個の Front Panel Port を
+予約します(Logical Blade予約数: {{ logical_blades_reserved }})。
+
+{% for p in reserved_front_panel_ports %}- {{ p }}
+{% endfor %}
+
+作成する Tenant Instance は次の {{ tenants | length }} 件です。
+
+| # | Organization Name | Tenant Name | ACI Version | Mgmt Cores | DP Cores | HA | Front Panel Port | VLAN ID |
+|---|--------------------|-------------|--------------|------------|----------|----|--------------------|---------|
+{% for t in tenants %}| {{ loop.index }} | {{ t["organization_name"] }} | {{ t["tenant_name"] }} | {{ t["aci_version"] }} | {{ t["mgmt_cores"] }} | {{ t["dp_cores"] }} | {% if t["ha_enabled"] %}有効{% else %}無効{% endif %} | {{ t["front_panel_port"] }} | {{ t["vlan_id"] }} |
+{% endfor %}
+
+各Tenant Instanceの管理用インタフェース(X0/X1)と用途は次のとおりです。
+
+| # | Tenant Name | X0 | X1 | Firmware File | 用途 |
+|---|-------------|----|----|----------------|------|
+{% for t in tenants %}| {{ loop.index }} | {{ t["tenant_name"] }} | {{ t["x0_mode"] }}: {{ t["x0_ip"] }}/{{ t["x0_netmask"] }} | {% if t["x1_mode"] != "DHCP" %}{{ t["x1_mode"] }}: {{ t["x1_ip"] }}{% else %}{{ t["x1_mode"] }}{% endif %} | {{ t["firmware_file"] }} | {{ t["description"] }} |
+{% endfor %}
+
+動作確認では、テナント名 `{{ verification_tenant_name }}` のインスタンス
+を代表として管理アクセスの分離を確認します。
+
+## 手順
+
+### 1. Multi-Instance機能を有効化する準備をする(Logical Blade・Front Panel Portの予約)
+
+`DEVICE | Multi-Instance` を開き、`Settings` タブで Multi-Instance機能を
+有効化します。テナントインスタンスに割り当てる Logical Blade数を
+`{{ logical_blades_reserved }}` に設定し、シナリオ設定の
+{{ reserved_front_panel_ports | length }} 個の Front Panel Port
+({% for p in reserved_front_panel_ports %}{{ p }}{% if not loop.last %} / {% endif %}{% endfor %})
+を予約します。設定後、`{{ appliance_model }}` を再起動して Multi-Instance
+機能を有効な状態で起動させます。
+
+### 2. 各Tenant Instanceを作成する
+
+再起動後、`DEVICE | Multi-Instance` の `Instances` タブを開き、`Add`
+から各テナントにつき次のフィールドをシナリオ設定の表のとおりに設定し、
+Tenant Instanceを作成します。
+
+- `Organization Name`: `organization_name`
+- `Tenant Name`: `tenant_name`
+- `ACI Version`: `aci_version`
+- `Management Cores`: `mgmt_cores`
+- `Data Processing Cores`: `dp_cores`
+- HA: `ha_enabled` が有効なテナントのみチェックを入れる
+
+{% for t in tenants %}- {{ loop.index }}件目: Organization Name={{ t["organization_name"] }} / Tenant Name={{ t["tenant_name"] }} / ACI Version={{ t["aci_version"] }} / Management Cores={{ t["mgmt_cores"] }} / Data Processing Cores={{ t["dp_cores"] }} / HA={% if t["ha_enabled"] %}有効{% else %}無効{% endif %}
+{% endfor %}
+
+### 3. 各Tenant InstanceのFront Panel Port/VLANマッピングを設定する
+
+作成した各Tenant Instanceについて、シナリオ設定のとおりに使用する
+Front Panel PortとVLAN IDを割り当てます。
+
+{% for t in tenants %}- {{ t["tenant_name"] }}: Front Panel Port={{ t["front_panel_port"] }} / VLAN ID={{ t["vlan_id"] }}
+{% endfor %}
+
+### 4. 各Tenant InstanceのX0/X1インタフェースを設定する
+
+各Tenant InstanceのX0(必要に応じてX1)を、シナリオ設定の管理用インタ
+フェース表のとおりに設定します。
+
+{% for t in tenants %}- {{ t["tenant_name"] }}: X0={{ t["x0_mode"] }}({{ t["x0_ip"] }}/{{ t["x0_netmask"] }}) / X1={% if t["x1_mode"] != "DHCP" %}{{ t["x1_mode"] }}({{ t["x1_ip"] }}){% else %}{{ t["x1_mode"] }}{% endif %}
+{% endfor %}
+
+### 5. 各Tenant Instance用のファームウェアをアップロードする
+
+`DEVICE | Multi-Instance` の `Firmware` タブを開き、各テナントの
+`firmware_file` をアップロードします。Root Instance自身のファームウェア
+とは別に管理される、テナント専用のファームウェアであることを確認します。
+
+{% for t in tenants %}- {{ t["tenant_name"] }}: {{ t["firmware_file"] }}
+{% endfor %}
+
+### 6. 各Tenant Instanceのライセンスを確認する
+
+`Instance Licenses` タブを開き、手順2で作成した
+{{ tenants | length }} 件のTenant Instanceそれぞれに、個別のシリアル
+番号・認証コードを持つライセンスが割り当てられていることを確認します。
+
+### 7. 各Tenant Instanceを起動する
+
+`Instances` タブに戻り、各Tenant Instanceの `Actions` ドロップダウンから
+`Start` を選択して起動します。
+
+{% for t in tenants %}- {{ t["tenant_name"] }}: Start
+{% endfor %}
+
+### 8. テナントごとの管理アクセス分離を確認する
+
+代表として `{{ verification_tenant_name }}` のTenant Instanceに対し、
+そのX0(またはX1)宛にHTTPSでアクセスし、そのテナント専用のSonicOS/X
+管理画面にログインできること、かつ他テナントの設定・ログが見えないこと
+を確認します。
+
+## 動作確認
+
+- `DEVICE | Multi-Instance` の `Instances` タブに、{{ tenants | length }}
+  件すべてのTenant Instanceが `Start` 済みの状態で表示されていること
+- 各Tenant Instanceの `Organization Name` / `Tenant Name` / `ACI Version`
+  / `Management Cores` / `Data Processing Cores` がシナリオ設定のとおり
+  であること
+- `Firmware` タブで、各テナントの `firmware_file` がRoot Instanceの
+  ファームウェアとは別に登録されていること
+- `Instance Licenses` タブで、{{ tenants | length }} 件すべてのTenant
+  Instanceに個別のライセンスが割り当てられていること
+- `{{ verification_tenant_name }}` のTenant InstanceのX0/X1宛に
+  HTTPSでアクセスし、そのテナント専用の管理画面にのみログインできる
+  こと(他テナントの設定・ログが見えないこと)
+
+## 注意事項
+
+- Multi-Instance機能はNSsp 15700等の対応アプライアンスでのみ利用でき、
+  一次情報で確認できた範囲(SonicOSX 7系, `DEVICE | Multi-Instance`)を
+  超える機種・CLI構文は本手順書に記載していません。CLIで同等の投入を
+  行う場合は、別途SonicOSXのCLIリファレンスで構文を確認してから実施
+  してください。
+- `Data Processing Cores` は1インスタンスあたり最大8コアまで設定できま
+  すが、一次情報では実用上の目安として4コア程度が推奨されています。
+  全テナントの合計コア数がアプライアンスの物理コア数を超えないことを
+  事前に確認してください。
+- HA(`ha_enabled`)を有効にするテナントインスタンスの冗長構成手順(
+  セカンダリ側の具体的な設定項目)は一次情報で確認できた範囲を超えるため
+  本手順書には含めていません。別途SonicOSXのHA関連ドキュメントを参照
+  してください。
+- Instance Licenseは、Tenant Instanceを `Stop` しても解放されません。
+  ライセンスを解放するには `Delete` が必要になるため、テナントの統廃合
+  を計画する際はライセンス管理者と事前に調整してください。
+- 各Tenant Instanceの管理者パスワードやAPIキーなどの認証情報は、本手順書
+  やログに平文で残さないでください。記録が必要な場合は `********` の
+  ようにマスクし、秘密管理ツール等で別途安全に保管してください。

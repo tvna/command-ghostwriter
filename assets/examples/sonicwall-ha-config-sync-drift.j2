@@ -1,0 +1,179 @@
+# SonicWall (SonicOS) HA設定同期ドリフト監査
+
+既に構成済みのActive/Standby HAペア、Primary `{{ primary_host }}` /
+Secondary `{{ secondary_host }}`(HAペア名: `{{ ha_pair_name }}`)を対象に、
+`DEVICE | High Availability > Status` の「Settings Synchronized」
+「Stateful HA Synchronized」インジケータを`{{ audit_schedule }}`の頻度で
+定期的に監査します。インジケータが`Yes`以外の場合や、Primary/Secondary間で
+ファームウェア版数に差異がある場合は、それぞれ`Synchronize Settings`ボタン
+/`Synchronize Firmware`ボタンでPrimary側の状態をSecondary側へ強制的に
+再同期(是正)し、監査結果を`{{ change_ticket }}`へ記録します。
+
+## 目的
+
+HAペアを構成するPrimary/Secondary間で、SonicOSの設定内容とステートフル
+HA(セッション同期)設定がドリフト(非同期)を起こしていないかを
+`{{ audit_schedule }}`の頻度で継続的に監査し、`Settings Synchronized`/
+`Stateful HA Synchronized`インジケータが`Yes`以外を示した場合に、
+`Synchronize Settings`/`Synchronize Firmware`という既存のネイティブ機構
+だけを用いて是正できるようになることを目指します。あわせて、
+`Synchronize Settings`がPrimary→Secondaryへの一方向の強制反映であり、
+逆方向(Secondary→Primary)には作用しない点を理解し、是正前に必ず現在の
+Active/Standbyロールを確認する習慣を身につけます。
+
+## 用語解説
+
+- **DEVICE | High Availability > Status**: HAペアの現在の同期状態を表示する
+  SonicOSの管理画面。`Settings Synchronized`・`Stateful HA Synchronized`の
+  各インジケータに加え、`Synchronize Settings`・`Synchronize Firmware`の
+  操作ボタンもこの画面に置かれている
+- **Settings Synchronized**: `DEVICE | High Availability > Status`の項目。
+  PrimaryとSecondary間でSonicOSの設定内容(NAT Policy・Access Rule等の
+  管理設定全般)が同期済みかどうかを`Yes`/`No`で示す。監査対象の主指標
+- **Stateful HA Synchronized**: 同画面の項目。Stateful HA(既存セッション
+  情報の同期)設定が両機で同期済みかどうかを`Yes`/`No`で示す
+- **Synchronize Settings**: `DEVICE | High Availability > Status`にある
+  ボタン。クリックすると、PrimaryのSonicOS設定をSecondaryへ強制的に
+  再同期する。Primary→Secondaryの一方向のみで、Secondary側だけに存在する
+  ローカルな変更は上書きされて失われる
+- **Synchronize Firmware**: 同画面にあるボタン。Primaryにアップロード済み
+  のファームウェアをSecondaryへ同期する。Secondaryがオフラインだった間に
+  Primary側だけファームウェアを更新した場合など、両機のファームウェア
+  版数に差異が生じたときに使う
+- **Primary / Secondary**: HAペアにおける2台の役割。通常運用時はPrimaryが
+  Active(通信を処理する側)、Secondaryがそのバックアップとして待機する
+
+## シナリオ設定
+
+今回の監査対象・監査結果の設定値は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| HAペア名(ha_pair_name) | `{{ ha_pair_name }}` |
+| Primary機(primary_host) | `{{ primary_host }}` |
+| Secondary機(secondary_host) | `{{ secondary_host }}` |
+| 管理アクセス先IP(mgmt_ip) | `{{ mgmt_ip }}` |
+| 監査頻度(audit_schedule) | {{ audit_schedule }} |
+| 監査実施者(audit_owner) | {{ audit_owner }} |
+| 監査実施日(audit_date) | {{ audit_date }} |
+| 変更管理チケット(change_ticket) | `{{ change_ticket }}` |
+| 監査時点のSettings Synchronized(observed_settings_synchronized) | `{{ observed_settings_synchronized }}` |
+| 監査時点のStateful HA Synchronized(observed_stateful_synchronized) | `{{ observed_stateful_synchronized }}` |
+| Primary側ファームウェア版数(primary_firmware_version) | `{{ primary_firmware_version }}` |
+| Secondary側ファームウェア版数(secondary_firmware_version) | `{{ secondary_firmware_version }}` |
+| エスカレーション先(escalation_contact) | {{ escalation_contact }} |
+
+今回の監査では、`Settings Synchronized`が`{{ observed_settings_synchronized }}`、
+`Stateful HA Synchronized`が`{{ observed_stateful_synchronized }}`、
+Primary/Secondaryのファームウェア版数がそれぞれ`{{ primary_firmware_version }}`/
+`{{ secondary_firmware_version }}`という観測結果を起点に、手順2〜4で是正の
+要否を判定します。
+
+## 手順
+
+### 1. 現状のHAステータスを確認する(監査の起点)
+
+`{{ mgmt_ip }}`へログインし、`DEVICE | High Availability > Status`を開き
+ます。是正操作を行う前に、次の値を監査開始時点のベースラインとして
+`{{ change_ticket }}`に記録してください。
+
+- `Settings Synchronized`: 現在の表示値
+- `Stateful HA Synchronized`: 現在の表示値
+- Primary側/Secondary側のファームウェア版数: 現在の表示値
+
+シナリオ設定の観測結果(`Settings Synchronized` = `{{ observed_settings_synchronized }}`、
+`Stateful HA Synchronized` = `{{ observed_stateful_synchronized }}`)と、
+実際の画面表示が一致していることを確認してから手順2へ進みます。
+
+### 2. Settings Synchronizedを判定し、Noの場合はSynchronize Settingsで是正する
+
+{% if observed_settings_synchronized != "Yes" %}
+`Settings Synchronized`が`{{ observed_settings_synchronized }}`のため、
+設定同期のドリフトが発生しています。是正前に、`DEVICE | High Availability
+> Status`でPrimary(`{{ primary_host }}`)が現在もActive側であることを
+確認してください(`Synchronize Settings`はActive側の設定をStandby側へ
+一方向で強制反映するため、ロールを取り違えると意図しない側の設定が
+上書きされます)。ロールを確認できたら`Synchronize Settings`をクリック
+します。
+{% else %}
+`Settings Synchronized`は`{{ observed_settings_synchronized }}`のため、
+この項目については是正操作は不要です。監査結果として「ドリフトなし」を
+`{{ change_ticket }}`に記録し、手順3へ進みます。
+{% endif %}
+
+### 3. ファームウェア版数の差異を確認し、必要ならSynchronize Firmwareで是正する
+
+{% if primary_firmware_version != secondary_firmware_version %}
+Primary側のファームウェア版数`{{ primary_firmware_version }}`に対し、
+Secondary側は`{{ secondary_firmware_version }}`であり、版数に差異があり
+ます。`DEVICE | High Availability > Status`で`Synchronize Firmware`を
+クリックし、Secondary側のファームウェアをPrimary側の版数
+(`{{ primary_firmware_version }}`)へ同期します。同期完了後、再度同画面
+でPrimary側/Secondary側双方の版数が一致していることを確認してください。
+{% else %}
+Primary側/Secondary側とも`{{ primary_firmware_version }}`で一致しており、
+ファームウェア版数についての是正操作は不要です。
+{% endif %}
+
+### 4. Stateful HA Synchronizedを確認する
+
+{% if observed_stateful_synchronized != "Yes" %}
+`Stateful HA Synchronized`が`{{ observed_stateful_synchronized }}`です。
+この項目を直接強制再同期する操作ボタンは`DEVICE | High Availability >
+Status`では確認できなかったため、自作の監視スクリプトやジョブで代替
+せず、`{{ escalation_contact }}`へエスカレーションし、Stateful HA設定
+(`Enable Stateful Synchronization`等)の見直しをネットワーク運用チームと
+判断してください。
+{% else %}
+`Stateful HA Synchronized`は`{{ observed_stateful_synchronized }}`であり、
+この項目については是正操作は不要です。
+{% endif %}
+
+### 5. 監査結果を記録する
+
+`DEVICE | High Availability > Status`を再度開き、手順2〜4で是正した項目
+(該当する場合)がすべて解消していることを確認します。監査実施日
+(`{{ audit_date }}`)・監査実施者(`{{ audit_owner }}`)・是正前後の
+`Settings Synchronized`/`Stateful HA Synchronized`/ファームウェア版数の
+値を`{{ change_ticket }}`に記録し、次回監査(`{{ audit_schedule }}`)まで
+の監査サイクルを終了します。
+
+## 動作確認
+
+- `DEVICE | High Availability > Status`で`Settings Synchronized`が`Yes`
+  になっていること(手順2で是正した場合は是正後に再確認する)
+- 同画面でPrimary側/Secondary側のファームウェア版数が一致していること
+  (手順3で是正した場合は是正後に再確認する)
+- `Stateful HA Synchronized`が`Yes`であること、または`Yes`以外のまま
+  残っている場合は`{{ escalation_contact }}`へのエスカレーションが完了
+  していること
+- 監査実施日(`{{ audit_date }}`)・監査実施者(`{{ audit_owner }}`)・
+  是正前後の各インジケータの値が`{{ change_ticket }}`に記録されている
+  こと
+- 手順1で確認したPrimary(`{{ primary_host }}`)のActiveロールが、監査
+  終了時点でも意図せず変わっていないこと
+
+## 注意事項
+
+- **`Synchronize Settings`はPrimary→Secondaryへの一方向の強制反映です。**
+  逆方向には作用しないため、実行前に必ず`DEVICE | High Availability >
+  Status`で現在Active側になっている機体を確認してください。ロールを
+  取り違えたまま実行すると、Secondary側だけに存在するはずの正当な変更
+  ではなく、意図した側と逆の設定が上書きされるおそれがあります。
+- **`Stateful HA Synchronized`を直接強制再同期する専用ボタンは、本手順書
+  が参照した一次情報の範囲では確認できませんでした。** この項目が`Yes`
+  に戻らない場合でも、外部シェルスクリプトや自作の監視デーモンなど
+  一次情報に裏付けのない代替手段は用いず、`{{ escalation_contact }}`へ
+  エスカレーションしてください。
+- `Synchronize Firmware`の実行中はSecondary側の再起動を伴う場合があり
+  ます。HAペアの冗長性が一時的に失われるため、`{{ audit_schedule }}`の
+  定例監査枠以外の任意のタイミングでの実行は避け、影響を関係者へ事前に
+  周知してください。
+- 本手順書は、SonicOS技術ドキュメントの`DEVICE | High Availability >
+  Status`(HA Status)セクションで確認できたGUI操作のみを扱います。CLIや
+  スクリプトによる同等の同期状態取得・是正方法は本ページでは確認できな
+  かったため記載していません。CLIで実施する場合は、別途SonicOSのCLI
+  リファレンスで構文を確認してから行ってください。
+- 管理者パスワードやAPIキーなど認証情報は、本手順書やチケット、ログに
+  平文で残さないでください。記録が必要な場合は`********`のようにマスク
+  し、秘密管理ツール等で別途安全に保管してください。

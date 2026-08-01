@@ -1,0 +1,202 @@
+# SonicWall (SonicOS) クラウド仮想アプライアンス(NSv)のデプロイとライセンス形態選択、スケールアップ
+
+`{{ cloud_provider }}`上に SonicWall NSv 仮想ファイアウォールをアプライアンス
+として展開し、ライセンス形態(`{{ license_model }}`)を選択したうえで、
+NSM(Network Security Manager)配下の一元的なポリシー管理に組み込みます。
+その後、需要増に備えて計画メンテナンス窓の中で、NSvモデルのライセンスを
+`{{ nsv_model_current }}`から`{{ nsv_model_target }}`へアップグレードし、
+あわせてVMインスタンスタイプを`{{ current_instance_type }}`から
+`{{ target_instance_type }}`へリサイズしてスケールアップします。最後に
+ライセンス・リソース・管理プレーン上の表示が意図した値に揃っていることを
+検証します。
+
+## 目的
+
+クラウド環境に仮想アプライアンスとしてファイアウォールを展開する際、
+BYOL/PAYGのどちらのライセンス形態を選んだかに関わらず、NSMという単一の
+管理プレーンから複数クラウド上のNSvインスタンスへ一貫したポリシーを適用
+できる状態を作ることを目指します。あわせて、需要に応じたスケールアップが
+「VMインスタンスのリサイズ」と「NSvモデルライセンスのアップグレード」の
+組み合わせで実現されるというSonicOSの仕組みを理解し、計画メンテナンス窓を
+使って安全に実施し、変更後の状態を検証できるようになることを目指します。
+
+## 用語解説
+
+- **NSv シリーズ**: SonicWallの仮想NGFW製品ライン。AWS/Azure等のパブリック
+  クラウド、およびVMware ESXi/Microsoft Hyper-V/KVM/Proxmox上に仮想アプラ
+  イアンスとしてデプロイできる
+- **BYOL(Bring Your Own License)/PAYG(Pay As You Go)**: NSvのライセンス
+  形態。BYOLはSonicWallまたは販売代理店から購入したライセンスをMySonicWall
+  アカウントへ紐付けて使用する形態、PAYGはAWS Marketplace等のクラウド事業
+  者の従量課金に組み込まれた形態で、事前のライセンス登録なしに利用を開始
+  できる
+- **AWS Marketplaceのlisting名**: NSvはAWS Marketplace上で
+  `SonicWall NSv (Firewall/Security/VPN/Router) - BYOL`と
+  `SonicWall NSv (Firewall/Security/VPN/Router) - PAYG`という別々のlisting
+  として提供されており、デプロイ時に`{{ license_model }}`に応じたlistingを
+  選択する
+- **Supported Public Cloud Servers/Instance Sizes**: SonicWallが公開する、
+  NSvモデルごとに対応するクラウドのインスタンスサイズを示すナレッジベース
+  記事。NSvモデルをアップグレードする際は、目的のモデルが対応インスタンス
+  サイズの一覧に含まれるインスタンスタイプへVMをリサイズできているかを、
+  このドキュメントで確認する
+- **DEVICE | Settings > Licenses**: SonicOSの管理画面で現在のライセンス
+  状態を確認し、Security Servicesライセンスの有効化(activate)・アップ
+  グレード(upgrade)・更新(renew)を行うためのページ
+- **Dashboard | System > Summary の Register Device**: BYOLで購入した
+  ライセンスをNSv仮想マシンへ紐付けて登録するための操作。MySonicWallアカ
+  ウントへのサインインが必要
+- **NSM(Network Security Manager)**: 複数のSonicWallファイアウォールを
+  横断的に管理するマルチテナント型の管理プラットフォーム。テナント
+  (`{{ nsm_tenant_name }}`)配下にグループ(`{{ nsm_group_name }}`)を作成
+  し、同一グループに属する複数クラウド上のNSvインスタンスへ共通のポリシー
+  テンプレートを適用することで、単一の管理プレーンからの一貫したポリシー
+  適用を実現する
+
+## シナリオ設定
+
+今回、クラウド上へNSvをデプロイし、スケールアップする際の設定値は次のと
+おりです。
+
+| 項目 | 値 |
+|------|-----|
+| クラウド事業者(cloud_provider) | `{{ cloud_provider }}` |
+| リージョン(aws_region) | `{{ aws_region }}` |
+| デプロイ名(deployment_name) | `{{ deployment_name }}` |
+| ライセンス形態(license_model) | `{{ license_model }}` |
+| 変更前のNSvモデル(nsv_model_current) | `{{ nsv_model_current }}` |
+| 変更後のNSvモデル(nsv_model_target) | `{{ nsv_model_target }}` |
+| 変更前のインスタンスタイプ(current_instance_type) | `{{ current_instance_type }}` |
+| 変更後のインスタンスタイプ(target_instance_type) | `{{ target_instance_type }}` |
+| 変更前のvCPU数(current_vcpu) | {{ current_vcpu }} |
+| 変更前のメモリ(current_memory_gib) | {{ current_memory_gib }} GiB |
+| 変更後のvCPU数(target_vcpu) | {{ target_vcpu }} |
+| 変更後のメモリ(target_memory_gib) | {{ target_memory_gib }} GiB |
+| 管理アクセス先IPアドレス(management_ip) | `{{ management_ip }}` |
+| 管理アクセス用ポート(management_port) | {{ management_port }} |
+| 計画メンテナンス窓(maintenance_window) | {{ maintenance_window }} |
+| ライセンスシリアル番号(serial_number_masked) | `{{ serial_number_masked }}` |
+| NSMテナント名(nsm_tenant_name) | `{{ nsm_tenant_name }}` |
+| NSMグループ名(nsm_group_name) | `{{ nsm_group_name }}` |
+
+`serial_number_masked`はライセンス識別情報のため、実際の値をチケットや
+ログへ平文で残さず、マスク表記のまま扱ってください。
+
+## 手順
+
+### 1. 現状のライセンス状態とインスタンス構成を確認する(変更前の基準を取る)
+
+VMのリサイズやライセンスのアップグレードを1つも行う前に、現状を確認しま
+す。
+
+- SonicOSの`DEVICE | Settings > Licenses`を開き、現在のライセンス形態が
+  `{{ license_model }}`、モデルが`{{ nsv_model_current }}`になっている
+  こと、有効期限が切れていないことを確認します。
+- `{{ cloud_provider }}`のコンソールで`{{ deployment_name }}`インスタンス
+  のインスタンスタイプが`{{ current_instance_type }}`
+  (vCPU: {{ current_vcpu }} / メモリ: {{ current_memory_gib }} GiB)である
+  ことを確認します。
+- NSMにサインインし、テナント`{{ nsm_tenant_name }}`配下のグループ
+  `{{ nsm_group_name }}`に`{{ deployment_name }}`が登録済みで、想定外の
+  ポリシー変更が既に加わっていないことを確認します。
+
+### 2. `{{ cloud_provider }}` Marketplaceからライセンス形態を選択してNSvをデプロイする
+
+`{{ cloud_provider }}` Marketplaceで、`{{ license_model }}`に対応する
+listing(`SonicWall NSv (Firewall/Security/VPN/Router) - {{ license_model }}`)
+を選択します。
+
+- リージョン: `{{ aws_region }}`
+- インスタンス名: `{{ deployment_name }}`
+- インスタンスタイプ: `{{ current_instance_type }}`(SonicWallの
+  `Supported Public Cloud Servers/Instance Sizes`で`{{ nsv_model_current }}`
+  向けとして案内されているサイズであることを事前に確認してから選択します)
+- 管理アクセス用のSecurity Group/ファイアウォール規則で、信頼できる管理
+  端末の送信元からのみ`{{ management_port }}`番ポート宛のHTTPSアクセスを
+  許可します
+
+### 3. ライセンスを登録する(BYOLの場合)
+
+`{{ license_model }}`が`BYOL`の場合、SonicOSの
+`Dashboard | System > Summary`を開いて`Register Device`をクリックし、
+MySonicWallアカウントへサインインしてシリアル番号を紐付けます。登録の
+記録を残す場合はシリアル番号を`{{ serial_number_masked }}`のようにマスク
+した状態で残してください。
+
+`{{ license_model }}`が`PAYG`の場合、基本ファイアウォールライセンスは
+`{{ cloud_provider }}` Marketplaceの従量課金に含まれるため本手順は不要
+です。追加のセキュリティサービスを個別に有効化する場合は、
+`DEVICE | Settings > Licenses`で状態を確認してください。
+
+### 4. NSMへ登録し、一元的なポリシー管理下に置く
+
+NSMにサインインし、`{{ deployment_name }}`をテナント
+`{{ nsm_tenant_name }}`へオンボードします。グループ`{{ nsm_group_name }}`
+へ所属させ、同一グループの他クラウド上NSvインスタンスと共通のポリシー
+テンプレートを適用することで、単一の管理プレーンからの一貫したポリシー
+適用を実現します。
+
+### 5. 計画メンテナンス窓の中でライセンスをアップグレードし、VMをリサイズしてスケールアップする
+
+`{{ maintenance_window }}`の時間帯に実施します。この間、
+`{{ deployment_name }}`はファイアウォール機能を提供できません。
+
+- SonicOSの`DEVICE | Settings > Licenses`を開き、`Upgrade`から
+  `{{ nsv_model_target }}`のライセンスを適用します。
+- `{{ cloud_provider }}`のコンソールで`{{ deployment_name }}`インスタンス
+  を停止し、インスタンスタイプを`{{ current_instance_type }}`から
+  `{{ target_instance_type }}`(vCPU: {{ target_vcpu }} / メモリ:
+  {{ target_memory_gib }} GiB)へ変更してから起動します。変更後の
+  インスタンスタイプが、`Supported Public Cloud Servers/Instance Sizes`で
+  `{{ nsv_model_target }}`向けとして案内されているサイズであることを事前
+  に確認してください。
+- 起動後、SonicOSが追加されたvCPU/メモリを追加設定なしに認識していること
+  を、手順6の動作確認で確認します。
+
+## 動作確認
+
+```bash
+curl -k -m 5 -o /dev/null -w "HTTP %{http_code}\n" https://{{ management_ip }}:{{ management_port }}/
+```
+
+- `{{ management_ip }}:{{ management_port }}`へのHTTPS管理アクセスが継続
+  してでき、SonicOSのログイン画面が応答すること
+- `DEVICE | Settings > Licenses`のモデル表示が`{{ nsv_model_target }}`に
+  更新されており、有効期限が切れていないこと
+- `{{ cloud_provider }}`のコンソールで`{{ deployment_name }}`インスタンス
+  のインスタンスタイプが`{{ target_instance_type }}`
+  (vCPU: {{ target_vcpu }} / メモリ: {{ target_memory_gib }} GiB)に
+  なっていること
+- NSM上でテナント`{{ nsm_tenant_name }}`・グループ`{{ nsm_group_name }}`
+  配下の`{{ deployment_name }}`の表示モデルが`{{ nsv_model_target }}`へ
+  更新され、かつグループの共通ポリシーテンプレートが変更前と変わらず適用
+  されていること
+- 手順1で確認したグループ`{{ nsm_group_name }}`配下の他インスタンスの設定
+  やポリシーが、意図せず変更されていないこと
+
+## 注意事項
+
+- **スケールアップはライセンスのアップグレードとVMのリサイズの両方が必要
+  です。** どちらか一方だけでは`{{ nsv_model_target }}`相当の能力にはなり
+  ません。VMだけをリサイズしてライセンスを`{{ nsv_model_current }}`のまま
+  にする、あるいはライセンスだけをアップグレードしてVMリソースを増やさな
+  い、という状態を作らないでください。
+- **インスタンスタイプは必ずSonicWall公式の`Supported Public Cloud
+  Servers/Instance Sizes`で対象モデル向けと案内されているサイズを選択して
+  ください。** 未対応のインスタンスサイズでは、ライセンスをアップグレード
+  してもモデルどおりの動作が保証されません。
+- **手順5の作業中はファイアウォール機能が停止します。** 必ず
+  `{{ maintenance_window }}`のような計画メンテナンス窓の中で実施し、事前
+  に関係者へ周知してください。
+- `{{ license_model }}`が`PAYG`の場合、インスタンスタイプの変更は
+  `{{ cloud_provider }}` Marketplace側の従量課金額にも影響します。変更前
+  に課金体系を確認してください。
+- ライセンスシリアル番号やMySonicWallの認証情報など、認証情報に相当する
+  値は本手順書やチケット、ログに平文で残さないでください。記録が必要な
+  場合は`{{ serial_number_masked }}`のようにマスクし、秘密管理ツール等で
+  別途安全に保管してください。
+- 本手順書は一次情報(SonicWall NSvシリーズの製品ページおよびSonicOS技術
+  ドキュメント)で確認できた範囲のGUI操作・用語のみを扱います。CLIによる
+  同等の投入方法は本ページでは確認できなかったため記載していません。CLI
+  で投入する場合は、別途SonicOSのCLIリファレンスで構文を確認してから実施
+  してください。

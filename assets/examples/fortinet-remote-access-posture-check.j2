@@ -1,0 +1,260 @@
+# リモートアクセスVPNにおけるエンドポイントポスチャチェックと非準拠端末の隔離
+
+FortiClient EMSのZero Trust Tagging機能で、リモートアクセスVPNを利用する
+エンドポイントの状態(AV稼働・脅威検知有無等)を評価し、{{ zero_trust_rule_sets | length }}件の
+タグ付けルールセットに基づいて `{{ zero_trust_rule_sets[0].tag }}`(準拠)・
+`{{ zero_trust_rule_sets[1].tag }}`(非準拠)のタグを付与します。このタグは
+EMS Fabric Connector(`{{ ems_connector_name }}`)経由でFortiGateへ動的
+ファイアウォールアドレスとして同期され、`{{ ssl_vpn_interface }}` を送信元
+インターフェースとするファイアウォールポリシーで、非準拠タグの端末を拒否
+しつつEMSサーバ(`{{ ems_server_ip }}`)への到達のみは常時許可することで、
+タグ更新のための経路を残したまま非準拠端末を隔離します。
+
+## 目的
+
+FortiClient EMSのZero Trust Tagging(Zero Trust Tagging Rules)で、リモート
+アクセスVPNを利用するエンドポイントに準拠/非準拠のタグを継続的に付与できる
+ようになることを目指します。あわせて、そのタグがFortiGate側に動的ファイア
+ウォールアドレスとして同期される仕組みを理解し、EMSへの到達を確保した
+うえで非準拠タグの端末を拒否し、準拠タグの端末のみを許可するファイアウォール
+ポリシーを、正しい並び順で構成できるようになることを目指します。
+
+## 用語解説
+
+- **Zero Trust Tagging Rule Set**: FortiClient EMSの `Zero Trust Tags > Zero
+  Trust Tagging Rules` 画面で `Add` から作成する設定。`Name`・`Tag Endpoint
+  As`(付与するタグ)・`OS`・`Rule Type`・`Enabled`・`Comments` を設定する。
+  既定ではルールセット内の条件をすべて満たした場合(AND)にタグを付与するが、
+  `Edit Logic` で `and`/`or` を用いた論理式に変更できる
+- **AntiVirus Software(Rule Type)**: エンドポイントでAVソフトウェアが
+  インストールされ稼働しているか、シグネチャが最新かを評価するルール
+  タイプ。Windows/macOS/Linuxに対応する
+- **EMS Management(Rule Type)**: エンドポイントにFortiClientがインストール
+  され、TelemetryがEMSに接続していることを評価するルールタイプ
+- **Vulnerable Devices(Rule Type)**: 検出された脆弱性の深刻度(Critical/
+  High/Medium/Low以上)でエンドポイントを判定するルールタイプ
+- **EMSタグの動的ファイアウォールアドレス**: EMSで付与されたタグは、
+  Fabric Connector(CLIでは `config user fsso` の `set type fortiems`)経由
+  でFortiGateに同期され、`FCTEMS<EMS ID>_ems<番号>_<タグ名>_tag` という
+  命名規則の読み取り専用ダイナミックアドレスとして生成される。この同期には
+  Fabric Connector設定の `Synchronize firewall addresses` を有効化しておく
+  必要があり、同期後のダイナミックアドレス名は `diagnose firewall dynamic
+  list` で確認できる
+- **ssl.root**: FortiGateのSSL-VPNトンネルインターフェース。SSL VPN経由の
+  通信をファイアウォールポリシーで扱う際、Source Interface(`srcintf`)に
+  指定する仮想インターフェース
+- **SSL-VPN monitor**: `Dashboard > Network` のSSL-VPNウィジェットを
+  `Expand to Full Screen` で開くと表示される、接続中のSSL VPNセッション
+  一覧画面。セッションを右クリックし `End Session` を選択すると、その
+  セッションを即座に切断できる
+
+## シナリオ設定
+
+エンドポイントに準拠/非準拠タグを付与するZero Trust Tagging Rule Set
+({{ zero_trust_rule_sets | length }}件):
+
+| # | ルールセット名 | 付与するタグ | ルール間の論理 |
+|---|----------------|--------------|----------------|
+{% for rs in zero_trust_rule_sets %}| {{ loop.index }} | {{ rs.name }} | `{{ rs.tag }}` | {{ rs.logic }} |
+{% endfor %}
+各ルールセットの条件:
+
+| ルールセット | Rule Type | 対象OS | 条件 |
+|--------------|-----------|--------|------|
+{% for rs in zero_trust_rule_sets %}{% for cond in rs.conditions %}| {{ rs.name }} | {{ cond.rule_type }} | {{ cond.platform }} | {{ cond.detail }} |
+{% endfor %}{% endfor %}
+| 項目 | 値 |
+|------|-----|
+| EMS Fabric Connector名(ems_connector_name) | {{ ems_connector_name }} |
+| EMSサーバIP(ems_server_ip) | {{ ems_server_ip }} |
+| EMSサーバのアドレスオブジェクト名(ems_server_address_name) | {{ ems_server_address_name }} |
+| EMS管理ポート(ems_admin_port) | {{ ems_admin_port }} |
+| EMS向けカスタムサービス名(ems_service_name) | {{ ems_service_name }} |
+| SSL-VPNインターフェース(ssl_vpn_interface) | {{ ssl_vpn_interface }} |
+| 内部ネットワーク側インターフェース(internal_interface) | {{ internal_interface }} |
+| Fabric Connectorでのファイアウォールアドレス自動同期(sync_firewall_addresses) | {{ sync_firewall_addresses }} |
+| 準拠タグの同期後ダイナミックアドレス名(ems_tag_address_compliant、環境ごとに要確認) | {{ ems_tag_address_compliant }} |
+| 非準拠タグの同期後ダイナミックアドレス名(ems_tag_address_noncompliant、環境ごとに要確認) | {{ ems_tag_address_noncompliant }} |
+
+適用するファイアウォールポリシー(上から順に評価される並び順どおりに記載):
+
+| # | ポリシーID | ポリシー名 | Source | Action |
+|---|------------|------------|--------|--------|
+| 1 | {{ policy_id_ems_access }} | {{ policy_name_ems_access }} | all(宛先をEMSサーバに限定) | accept |
+| 2 | {{ policy_id_deny_noncompliant }} | {{ policy_name_deny_noncompliant }} | {{ ems_tag_address_noncompliant }} | deny |
+| 3 | {{ policy_id_allow_compliant }} | {{ policy_name_allow_compliant }} | {{ ems_tag_address_compliant }} | accept |
+
+## 手順
+
+### 1. EMSで非準拠タグのZero Trust Tagging Rule Setを作成する
+
+FortiClient EMSの `Zero Trust Tags > Zero Trust Tagging Rules` を開き、
+`Add` をクリックして次のルールセットを作成します。
+
+{% for rs in zero_trust_rule_sets %}{% if rs.tag == "VPN_NonCompliant" %}- `Name` に `{{ rs.name }}` を入力する
+- `Tag Endpoint As` に `{{ rs.tag }}` を入力する(新規タグとして作成)
+- 次の条件を追加する:
+{% for cond in rs.conditions %}  - Rule Type: `{{ cond.rule_type }}`(対象OS: {{ cond.platform }}) - {{ cond.detail }}
+{% endfor %}  - ルールが複数ある場合は `Edit Logic` で条件間を `{{ rs.logic }}` に設定する
+- `Enabled` を有効化して保存する
+{% endif %}{% endfor %}
+### 2. EMSで準拠タグのZero Trust Tagging Rule Setを作成する
+
+同じ `Zero Trust Tags > Zero Trust Tagging Rules` で、`Add` から次の
+ルールセットも作成します。
+
+{% for rs in zero_trust_rule_sets %}{% if rs.tag == "VPN_Compliant" %}- `Name` に `{{ rs.name }}` を入力する
+- `Tag Endpoint As` に `{{ rs.tag }}` を入力する(新規タグとして作成)
+- 次の条件を追加する:
+{% for cond in rs.conditions %}  - Rule Type: `{{ cond.rule_type }}`(対象OS: {{ cond.platform }}) - {{ cond.detail }}
+{% endfor %}  - ルールが複数ある場合は `Edit Logic` で条件間を `{{ rs.logic }}` に設定する
+- `Enabled` を有効化して保存する
+{% endif %}{% endfor %}
+### 3. FortiGate側のEMS Fabric Connectorとタグ同期を確認する
+
+FortiGateの `Security Fabric > Fabric Connectors` で `{{ ems_connector_name }}`
+を開き、`Synchronize firewall addresses` が{% if sync_firewall_addresses %}有効になっていることを確認します{% else %}無効になっている場合は有効化します{% endif %}。
+
+```bash
+config user fsso
+    edit "{{ ems_connector_name }}"
+        set type fortiems
+        set server "{{ ems_server_ip }}"
+        set ssl enable
+    next
+end
+```
+
+手順1・2で作成した2つのタグが同期されると、それぞれ
+`FCTEMS<EMS ID>_ems<番号>_<タグ名>_tag` という命名規則のダイナミック
+アドレスとしてFortiGate上に生成されます。実際に生成された名前を次のCLIで
+確認し、シナリオ設定の `ems_tag_address_compliant`(現在の想定値:
+`{{ ems_tag_address_compliant }}`)・`ems_tag_address_noncompliant`(現在の
+想定値: `{{ ems_tag_address_noncompliant }}`)が実環境の値と一致している
+ことを確かめてください。一致しない場合は、以降の手順で使用する値を実際の
+名前に読み替えてください。
+
+```bash
+diagnose firewall dynamic list
+```
+
+### 4. EMSサーバへの到達を常時許可するポリシーを作成する
+
+タグの状態にかかわらずEMSサーバ(`{{ ems_server_ip }}`)へは常に到達できる
+必要があるため、最初に評価される位置にこのポリシーを作成します。
+
+```bash
+config firewall address
+    edit "{{ ems_server_address_name }}"
+        set subnet {{ ems_server_ip }} 255.255.255.255
+    next
+end
+config firewall service custom
+    edit "{{ ems_service_name }}"
+        set tcp-portrange {{ ems_admin_port }}
+    next
+end
+config firewall policy
+    edit {{ policy_id_ems_access }}
+        set name "{{ policy_name_ems_access }}"
+        set srcintf "{{ ssl_vpn_interface }}"
+        set dstintf "{{ internal_interface }}"
+        set srcaddr "all"
+        set dstaddr "{{ ems_server_address_name }}"
+        set action accept
+        set schedule "always"
+        set service "{{ ems_service_name }}"
+    next
+end
+```
+
+### 5. 非準拠タグの端末を拒否するポリシーを作成する
+
+```bash
+config firewall policy
+    edit {{ policy_id_deny_noncompliant }}
+        set name "{{ policy_name_deny_noncompliant }}"
+        set srcintf "{{ ssl_vpn_interface }}"
+        set dstintf "{{ internal_interface }}"
+        set srcaddr "{{ ems_tag_address_noncompliant }}"
+        set dstaddr "all"
+        set action deny
+        set schedule "always"
+        set service "ALL"
+    next
+end
+```
+
+### 6. 準拠タグの端末を許可するポリシーを作成する
+
+```bash
+config firewall policy
+    edit {{ policy_id_allow_compliant }}
+        set name "{{ policy_name_allow_compliant }}"
+        set srcintf "{{ ssl_vpn_interface }}"
+        set dstintf "{{ internal_interface }}"
+        set srcaddr "{{ ems_tag_address_compliant }}"
+        set dstaddr "all"
+        set action accept
+        set schedule "always"
+        set service "ALL"
+    next
+end
+```
+
+### 7. ポリシーの並び順を確認・修正する
+
+`{{ policy_name_ems_access }}`(ID: {{ policy_id_ems_access }}) →
+`{{ policy_name_deny_noncompliant }}`(ID: {{ policy_id_deny_noncompliant }}) →
+`{{ policy_name_allow_compliant }}`(ID: {{ policy_id_allow_compliant }})の
+順に並んでいることを `Policy & Objects > Firewall Policy` の一覧で確認して
+ください。並び順が異なる場合は、GUIでドラッグ&ドロップして並び替えるか、
+CLIで次のように移動します。
+
+```bash
+config firewall policy
+    move {{ policy_id_deny_noncompliant }} after {{ policy_id_ems_access }}
+    move {{ policy_id_allow_compliant }} after {{ policy_id_deny_noncompliant }}
+end
+```
+
+## 動作確認
+
+- FortiClient EMSの `Zero Trust Tags > Zero Trust Tagging Rules` に、
+  `{{ zero_trust_rule_sets[0].name }}` と `{{ zero_trust_rule_sets[1].name }}`
+  の両方が `Enabled` の状態で存在すること
+- `diagnose firewall dynamic list` の出力に、`{{ ems_tag_address_compliant }}`
+  および `{{ ems_tag_address_noncompliant }}` に対応するダイナミック
+  アドレスが表示され、対象エンドポイントのタグ付け状態に応じてメンバーが
+  増減すること
+- `Policy & Objects > Firewall Policy` で、`{{ policy_name_ems_access }}` →
+  `{{ policy_name_deny_noncompliant }}` → `{{ policy_name_allow_compliant }}`
+  の順に並んでいること
+- 非準拠タグ(`{{ zero_trust_rule_sets[1].tag }}`)が付与された端末で
+  `{{ ssl_vpn_interface }}` 経由の接続を試み、EMS(`{{ ems_server_ip }}`)
+  以外の宛先への通信が拒否されること
+- 準拠タグ(`{{ zero_trust_rule_sets[0].tag }}`)が付与された端末では、同じ
+  経路での通信が許可されること
+- 緊急に特定セッションを切断したい場合、`Dashboard > Network` のSSL-VPN
+  ウィジェットの `SSL-VPN monitor` から対象セッションを `End Session` で
+  即時切断できること
+
+## 注意事項
+
+- 手順4のEMS到達許可ポリシーを最初に評価される位置に置かないと、非準拠と
+  判定された端末がEMSへ到達できず、コンプライアンス状態が改善してもタグの
+  再評価・再同期が行われないおそれがあります。
+- `ems_tag_address_compliant`・`ems_tag_address_noncompliant` の値は
+  `FCTEMS<EMS ID>_ems<番号>_<タグ名>_tag` という命名規則に基づく一例です。
+  EMSのIDや番号は環境ごとに異なるため、手順3で `diagnose firewall dynamic
+  list` を実行し、実際に生成された名前を必ず確認してから手順5・6のポリシー
+  に反映してください。
+- Zero Trust Tagging Rule Setの条件(AntiVirus Software、EMS Management、
+  Vulnerable Devices等)は例です。自組織のセキュリティ要件に応じて
+  Rule Typeや深刻度のしきい値を見直してください。
+- EMS Fabric ConnectorのCLI設定に認証情報(証明書のパスフレーズ等)が
+  必要な場合は、本手順書や実行ログに平文で記載せず `********` のように
+  マスクし、秘密管理ツール等で別途安全に保管してください。
+- 既にVPN接続済みのセッションは、タグが非準拠に変わっても自動切断されない
+  場合があります。即時の隔離が必要な場合は、動作確認に記載のSSL-VPN
+  monitorから該当セッションを個別に `End Session` してください。

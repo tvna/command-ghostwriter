@@ -1,0 +1,149 @@
+# PAN-OS設定ドリフト検知(Config Auditによるベースライン比較)
+
+Panoramaの `Config Audit` 画面で、稼働中の設定(running configuration)と
+承認済みベースライン({{ baseline_commit_description }})を並べて差分
+比較し、承認されていない設定変更(コンフィグドリフト)を{{ comparison_cadence }}の
+頻度で検知します。比較対象のデバイスグループは `{{ managed_device_group }}` です。
+差分は自動判定せず、{{ review_owner }} が目視でChange Summaryを確認し、
+想定外の変更を見つけた場合のみ {{ drift_escalation_contact }} へエスカレーション
+します。
+
+## 目的
+
+Panoramaの Config Audit 機能を用いて、稼働中の設定と過去に承認された
+コミットバージョン(ベースライン)を定期的に比較し、変更管理を経ていない
+設定変更(コンフィグドリフト)を早期に検知できるようになることを目指します。
+
+## 用語解説
+
+- **Config Audit**: `Panorama > Config Audit` 画面で行う機能。一次情報には
+  "A summary audit of the local and running config version, previous
+  config versions, and saved config versions is displayed."(ローカル設定・
+  実行中設定・過去のコミット済みバージョン・保存済みバージョンのサマリー
+  監査が表示される)と記載されており、Versions・Committed By・Commit
+  Date・Objects・Descriptionの各列を持つ一覧が表示される
+- **Compare Versions**: 一覧から比較したい2つのバージョンを選択して実行する
+  操作。一次情報には "Select up two config versions and Compare Versions."
+  と記載されている
+- **XML Diff**: Compare Versions実行後に表示されるタブの1つで、選択した
+  2バージョンをside-by-side(左に旧バージョン、右に新バージョン)で
+  比較表示する
+- **Change Summary**: Compare Versions実行後に表示されるもう1つのタブで、
+  変更内容を操作種別ごとに一覧表示する。一次情報が定義する操作種別
+  ({{ change_operation_types | length }} 種類)は次のとおりです。
+
+{% for op in change_operation_types %}  - **{{ op["operation"] }}**: {{ op["meaning"] }}
+{% endfor %}
+- **承認済みベースライン**: 本手順書における用語で、変更管理プロセスで
+  承認され、Config Audit一覧上でCommitted By・Commit Date・Descriptionに
+  よって一意に特定できるコミットバージョンを指す
+- **Config Auditの制限事項**: 一次情報には次の制約が明記されている。
+  "You can perform a config audit on commit versions created in PAN-OS
+  11.1 only."(PAN-OS 11.1で作成されたコミットバージョンのみが対象)、
+  "The Config Audit Change Summary supports config changes up to 25 MB
+  in size."(Change Summaryはサイズが{{ config_change_size_limit_mb }} MB
+  以下の設定変更のみサポート)、"Config Audit cannot capture Load and Revert
+  operations."(LoadおよびRevert操作は監査結果に含まれない)
+
+## シナリオ設定
+
+比較対象のデバイスグループと承認済みベースラインの情報は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| 対象デバイスグループ(managed_device_group) | {{ managed_device_group }} |
+| ベースラインの説明(baseline_commit_description) | {{ baseline_commit_description }} |
+| ベースラインのCommitted By(baseline_committed_by) | {{ baseline_committed_by }} |
+| ベースラインのCommit Date(baseline_commit_date) | {{ baseline_commit_date }} |
+| 比較の実施頻度(comparison_cadence) | {{ comparison_cadence }} |
+| 実施責任者(review_owner) | {{ review_owner }} |
+| Change Summaryのサイズ上限(config_change_size_limit_mb) | {{ config_change_size_limit_mb }} MB |
+| ドリフト検知時のエスカレーション先(drift_escalation_contact) | {{ drift_escalation_contact }} |
+
+Change Summaryで重点的に確認する設定オブジェクト
+(focus_config_objects, {{ focus_config_objects | length }} 件):
+
+| # | 分類 | オブジェクト名 |
+|---|------|----------------|
+{% for obj in focus_config_objects %}| {{ loop.index }} | {{ obj["category"] }} | {{ obj["object_name"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. Config Audit画面でベースラインの行を特定する
+
+`Panorama > Config Audit` を開きます。一覧のCommitted By列が
+`{{ baseline_committed_by }}`、Commit Date列が `{{ baseline_commit_date }}`、
+Description列が `{{ baseline_commit_description }}` となっている行が
+承認済みベースラインです。この行を見失わないよう、必要であれば
+Description列の内容を控えておいてください。
+
+### 2. 稼働中の設定とベースラインの2バージョンを選択する
+
+同じ一覧から、running configuration(実行中設定)の行と、手順1で特定した
+ベースラインの行の、合わせて2つを選択し `Compare Versions` を実行します。
+
+### 3. XML Diffで差分を確認する
+
+表示されたXML Diffタブで、左側(旧バージョン、ベースライン側)と右側
+(新バージョン、稼働中設定側)を見比べ、差分箇所を確認します。
+
+### 4. Change Summaryで変更種別ごとに確認する
+
+Change Summaryタブに切り替え、次の設定オブジェクトについて変更が
+記録されていないかを確認します。記録されている場合は、その操作種別
+({{ change_operation_types | length }} 種類のいずれか)を控えます。
+
+{% for obj in focus_config_objects %}- {{ obj["category"] }}: `{{ obj["object_name"] }}`
+{% endfor %}
+
+Change Summaryが対象とする設定変更のサイズには上限
+({{ config_change_size_limit_mb }} MB)があるため、対象を上記の
+オブジェクトに絞って確認します。
+
+### 5. 想定外の変更を{{ review_owner }}がエスカレーションする
+
+手順4で確認した変更のうち、変更管理の記録(承認済みの変更申請)と
+突き合わせて説明がつかないものを想定外の変更(コンフィグドリフト)と
+判断します。該当があれば、{{ review_owner }} から
+{{ drift_escalation_contact }} へ、対象オブジェクトと操作種別を添えて
+報告します。
+
+この比較作業は {{ comparison_cadence }} の頻度で繰り返し実施します。
+
+## 動作確認
+
+- `Panorama > Config Audit` の一覧に、running configurationの行と、
+  Committed Byが `{{ baseline_committed_by }}`、Commit Dateが
+  `{{ baseline_commit_date }}` であるベースラインの行の両方が表示される
+  こと
+- 上記2行を選択して `Compare Versions` を実行すると、XML Diffタブと
+  Change Summaryタブがいずれも表示されること
+- Change Summaryタブで、{{ focus_config_objects | length }} 件の
+  重点確認オブジェクトそれぞれについて、変更の有無と操作種別
+  ({{ change_operation_types | length }} 種類のいずれか)を判別できること
+- 想定外の変更が見つかった場合に、{{ review_owner }} から
+  {{ drift_escalation_contact }} への報告が行われる運用になっていること
+
+## 注意事項
+
+- **Config Auditの対象はPAN-OS 11.1で作成されたコミットバージョンに
+  限られる。** 一次情報には "You can perform a config audit on commit
+  versions created in PAN-OS 11.1 only." と明記されており、それより前の
+  バージョンで作成されたコミットは比較対象にできない。
+- **Change Summaryが扱える設定変更のサイズには上限
+  ({{ config_change_size_limit_mb }} MB)がある。** 上限を超える規模の
+  変更が発生した場合、Change Summary上で全量を確認できない可能性が
+  あるため、XML Diff側でも併せて確認すること。
+- **Load操作・Revert操作はConfig Auditの監査結果に含まれない。** 一次
+  情報には "Config Audit cannot capture Load and Revert operations." と
+  明記されている。これらの操作が行われた可能性がある場合は、Config
+  Audit以外の記録(変更管理の申請記録など)と突き合わせて確認すること。
+- Panoramaがactive/passiveのHA構成である場合、一次情報には "For
+  Panorama in an active/passive high availability (HA) configuration,
+  you can only perform a config audit on the active HA peer." と
+  明記されている。Config Auditはactive側のHAピアでのみ実行できる。
+- 本手順は{{ comparison_cadence }}に実施する定期比較であり、比較の
+  実行自体はPanoramaが自動的に行うものではない。{{ review_owner }}が
+  都度GUI上で `Compare Versions` を実行し、目視でChange Summaryを
+  確認する運用である。

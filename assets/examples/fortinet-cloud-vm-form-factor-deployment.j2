@@ -1,0 +1,239 @@
+# FortiGate-VMのクラウド形態デプロイとオートスケール構成
+
+クラウド環境にファイアウォールを仮想アプライアンス(FortiGate-VM)として展開し、
+ライセンス形態(BYOL/PAYG)を選択したうえで、需要に応じてインスタンス数を
+自動的に増減させたい、という運用課題に対応します。本手順書は一次情報が
+確認できた Azure 向けの FortiGate Autoscale for Azure を対象とし、
+リソースグループ`{{ resource_group }}`のVNet`{{ vnet_name }}`上に
+デプロイ名`{{ deployment_name }}`のソリューションを構築します。BYOLは
+固定サイズのVM Scale Set(VMSS)、PAYGはメトリクスに応じて動的に
+スケールアウト/インするVMSSという、FortiGate Autoscale自体が備える
+ネイティブな仕組みを利用し、自作のスクリプトやデーモンによる代替は
+行いません。
+
+## 目的
+
+FortiGate Autoscale for Azureのアーキテクチャ(外部/内部ロードバランサー、
+Function App、Blob Storage、VM Scale Set)を理解し、ライセンス形態
+(BYOL/PAYG)ごとのスケーリングの違い(固定サイズ vs 動的スケールアウト/イン)
+を踏まえてARMテンプレートのパラメーターを設定し、Configsetのプレース
+ホルダーが実際の値に置換されていることを確認できるようになることを
+目指します。
+
+## 用語解説
+
+- **BYOL(Bring Your Own License)**: 保有しているFortiGate-VMライセンス
+  数に合わせた固定サイズのVM Scale Setとしてデプロイするライセンス形態。
+  「BYOL scale set contains 0 to many FortiGate-VMs of the BYOL licensing
+  model and is a VMSS with a fixed size」と説明されており、インスタンス数は
+  スケーリングメトリクスによって自動的には変化しない
+- **PAYG(Pay-As-You-Go)**: 使用量に応じた従量課金のライセンス形態。PAYGの
+  VM Scale Setは「will dynamically scale-out or scale-in based on the
+  scaling metrics」と説明されており、Scale Out Threshold / Scale In
+  Thresholdの2つのしきい値パラメーターに基づいて、FortiGate Autoscale
+  自体がインスタンス数を自動的に増減させる。この自動スケーリングは
+  ネイティブ機構であり、外部の監視スクリプトやcronジョブによる代替を
+  必要としない
+- **VM Scale Set(VMSS)**: Azureの仮想マシンスケールセット機能。BYOL用・
+  PAYG用でそれぞれ独立したVMSSが構成され、BYOLのみ・PAYGのみのいずれの
+  構成でも最低2インスタンスが必要とされる
+- **Scale Out Threshold / Scale In Threshold**: PAYGのVM Scale Setが
+  スケールアウト/スケールインするかどうかを判定する、ARMテンプレートの
+  デプロイパラメーター。スケーリングメトリクスがScale Out Thresholdを
+  超えるとインスタンスが追加され、Scale In Thresholdを下回ると
+  インスタンスが削除される
+- **Configset**: FortiGate-VMの初期設定を投入するための設定ファイル群。
+  Blob Storageの`configset`コンテナーに格納され、`baseconfig`
+  (全インスタンス共通の基本設定)、`httproutingpolicy` /
+  `httpsroutingpolicy`(ロードバランサーのルーティングに関する設定)、
+  `extrastaticroute`(追加の静的ルート)といったファイルで構成される
+- **Configsetのプレースホルダー**: `baseconfig`等の中に記述する置換用
+  トークン。`{SYNC_INTERFACE}`(HA同期用インターフェース)、
+  `{CALLBACK_URL}`(Function Appのコールバック先URL)、`{PSK_SECRET}`
+  (HA用の事前共有鍵)、`{ADMIN_PORT}`(管理アクセス用ポート)、
+  `{HEART_BEAT_INTERVAL}`(ハートビート間隔)が確認されており、デプロイ時に
+  実際の値へ置換される
+- **Function App**: オートスケーリングのロジック(スケールアウト/インの
+  判定や新規インスタンスへの設定投入)を実行するAzureのコンポーネント
+- **外部/内部ロードバランサー**: FortiGate Autoscale for Azureが作成する
+  2つのAzureロードバランサー。デプロイ名に`-external-load-balancer` /
+  `-internal-load-balancer`という接尾辞を付けた名前で作成される
+- **Cosmos DB**: FortiGate Autoscaleがインスタンスの状態(state)を
+  管理するために使用するAzureのデータベースサービス
+
+## シナリオ設定
+
+今回、FortiGate Autoscale for Azureをデプロイする設定値は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| デプロイ名(deployment_name) | `{{ deployment_name }}` |
+| リソースグループ(resource_group) | `{{ resource_group }}` |
+| リージョン(location) | `{{ location }}` |
+| VNet名(vnet_name) | `{{ vnet_name }}` |
+| ライセンス形態(license_mode) | `{{ license_mode }}` |
+| BYOL VMSSの固定インスタンス数(byol_instance_count) | {{ byol_instance_count }} |
+| PAYG VMSSの最小インスタンス数(payg_min_instance_count) | {{ payg_min_instance_count }} |
+| PAYG VMSSの最大インスタンス数(payg_max_instance_count) | {{ payg_max_instance_count }} |
+| Scale Out Threshold(scale_out_threshold) | {{ scale_out_threshold }} |
+| Scale In Threshold(scale_in_threshold) | {{ scale_in_threshold }} |
+| HA同期用インターフェース(sync_interface) | `{{ sync_interface }}` |
+| 管理アクセス用ポート(admin_port) | {{ admin_port }} |
+| ハートビート間隔・秒(heart_beat_interval) | {{ heart_beat_interval }} |
+| HA事前共有鍵(psk_secret) | `{{ psk_secret_mask }}`(実際の値はマスクして記載) |
+| Function App名(function_app_name) | `{{ function_app_name }}` |
+| ストレージアカウント名(storage_account_name) | `{{ storage_account_name }}` |
+
+`license_mode`が`byol`の場合は固定サイズのBYOL VMSS(`byol_instance_count`
+台)、`payg`の場合は`payg_min_instance_count`〜`payg_max_instance_count`
+の範囲で動的にスケールする PAYG VMSS を構成します。
+
+## 手順
+
+### 1. 現状のリソースグループとネットワーク構成を確認する(デプロイ前の基準を取る)
+
+新しいリソースを1件も追加する前に、現状を確認します。
+
+- Azure Portalでリソースグループ`{{ resource_group }}`を開き、
+  デプロイ名`{{ deployment_name }}`と同名のリソース(VMSS、ロード
+  バランサー、Function App、ストレージアカウント等)が存在しないことを
+  確認します。
+- VNet`{{ vnet_name }}`のアドレス空間とサブネット構成を確認し、
+  FortiGate Autoscale用のサブネットと重複しないことを確認します。
+
+### 2. ライセンス形態を決定し、FortiGate Autoscale for AzureのARMテンプレートをデプロイする
+
+Azure Marketplaceで提供されるFortiGate Autoscale for Azureのソリューション
+テンプレート(ARMテンプレート)から、リソースグループ`{{ resource_group }}`
+(リージョン`{{ location }}`)、VNet`{{ vnet_name }}`を指定してデプロイ
+します。
+
+{% if license_mode == "byol" %}
+本デプロイのライセンス形態は`byol`のため、BYOL VMSSを固定サイズ
+`{{ byol_instance_count }}`台で構成します。保有しているFortiGate-VMの
+ライセンス数が`{{ byol_instance_count }}`台分以上あることを事前に確認して
+ください。BYOLのVMSSはFortiGate Autoscale自体のスケーリングメトリクス
+によって台数が自動的に変化することはありません。
+{% elif license_mode == "payg" %}
+本デプロイのライセンス形態は`payg`のため、PAYG VMSSを
+`{{ payg_min_instance_count }}`〜`{{ payg_max_instance_count }}`台の範囲
+で動的にスケールする構成にします。ARMテンプレートのパラメーターで
+Scale Out Thresholdを`{{ scale_out_threshold }}`、Scale In Thresholdを
+`{{ scale_in_threshold }}`に設定してください。スケーリングメトリクスが
+Scale Out Thresholdを超えるとインスタンスが追加され、Scale In Threshold
+を下回るとインスタンスが削除されます。この自動スケールアウト/インは
+FortiGate Autoscale自体のネイティブ機構であり、外部の監視スクリプトや
+自作のwatchdogを追加で用意する必要はありません。
+{% endif %}
+
+いずれのライセンス形態でも、Function App名は`{{ function_app_name }}`、
+ストレージアカウント名は`{{ storage_account_name }}`を指定します。
+
+### 3. Configsetのプレースホルダーが実際の値に置換されていることを確認する
+
+デプロイ完了後、ストレージアカウント`{{ storage_account_name }}`の
+`configset`コンテナーにある`baseconfig`を開き、次のプレースホルダーが
+実際の値に置換されていることを確認します。
+
+```bash
+# Azure CLIでbaseconfigの内容を確認する例
+az storage blob download \
+    --account-name {{ storage_account_name }} \
+    --container-name configset \
+    --name baseconfig \
+    --file ./baseconfig.downloaded
+```
+
+| プレースホルダー | 置換後に期待する値 |
+|------|-----|
+| `{SYNC_INTERFACE}` | `{{ sync_interface }}` |
+| `{ADMIN_PORT}` | `{{ admin_port }}` |
+| `{HEART_BEAT_INTERVAL}` | `{{ heart_beat_interval }}` |
+| `{PSK_SECRET}` | `{{ psk_secret_mask }}`(実際の値はマスクされているため、値そのものの一致確認ではなく置換済みであることのみ確認する) |
+
+`{CALLBACK_URL}`はFunction App`{{ function_app_name }}`のコールバック
+エンドポイントへのURLに置換されます。ダウンロードした`baseconfig`の
+中に`{CALLBACK_URL}`という文字列がそのまま残っていないことを確認して
+ください。
+
+### 4. ロードバランサーとFunction Appの構成を確認する
+
+FortiGate Autoscale for Azureは、デプロイ名に接尾辞を付けた2つの
+ロードバランサーを作成します。
+
+- 外部ロードバランサー: `{{ deployment_name }}-external-load-balancer`
+- 内部ロードバランサー: `{{ deployment_name }}-internal-load-balancer`
+
+Azure Portalでリソースグループ`{{ resource_group }}`を開き、上記2つの
+ロードバランサーと、Function App`{{ function_app_name }}`が作成されて
+いることを確認します。Function Appは、VM Scale Setのスケールアウト/イン
+の判定と、新規インスタンスへの`baseconfig`投入を担うコンポーネントです。
+
+{% if license_mode == "byol" %}
+### 5. BYOLライセンスファイルをBlob Storageへアップロードする
+
+BYOL VMSSの各インスタンスにライセンスを適用するため、ライセンスファイル
+(`.lic`)をストレージアカウント`{{ storage_account_name }}`の
+`fgt-asg-license`コンテナーへアップロードします。
+
+```bash
+az storage blob upload \
+    --account-name {{ storage_account_name }} \
+    --container-name fgt-asg-license \
+    --name fgt-vm-01.lic \
+    --file ./fgt-vm-01.lic
+```
+
+アップロードするライセンスファイルの実体(バイナリ)や、Azure Storage
+アカウントの接続文字列・アクセスキーは、本手順書やチケット、ログに
+記載しないでください。
+{% endif %}
+
+## 動作確認
+
+- リソースグループ`{{ resource_group }}`に、`{{ deployment_name }}-external-load-balancer`
+  と`{{ deployment_name }}-internal-load-balancer`、Function App
+  `{{ function_app_name }}`、ストレージアカウント`{{ storage_account_name }}`
+  が作成されていること
+{% if license_mode == "byol" %}
+- BYOL VMSSのインスタンス数が`{{ byol_instance_count }}`台で、スケーリング
+  メトリクスの変動によって台数が変化しないこと
+{% elif license_mode == "payg" %}
+- PAYG VMSSのインスタンス数が`{{ payg_min_instance_count }}`〜
+  `{{ payg_max_instance_count }}`台の範囲に収まっており、負荷をかけた際に
+  Scale Out Threshold(`{{ scale_out_threshold }}`)を超えるとインスタンス
+  が追加され、負荷を下げた際にScale In Threshold(`{{ scale_in_threshold }}`)
+  を下回るとインスタンスが削除されること
+{% endif %}
+- `configset`コンテナーの`baseconfig`内で、`{SYNC_INTERFACE}` /
+  `{ADMIN_PORT}` / `{HEART_BEAT_INTERVAL}` / `{PSK_SECRET}` /
+  `{CALLBACK_URL}`のいずれのプレースホルダーも文字列のまま残っておらず、
+  シナリオ設定の値に置換されていること
+- 新規に追加されたVMSSインスタンスに対しても、`{{ admin_port }}`番ポート
+  での管理アクセスと、`{{ sync_interface }}`インターフェース経由のHA同期が
+  行えること
+- 手順1で確認した既存リソースが、意図せず変更・削除されていないこと
+
+## 注意事項
+
+- **BYOLとPAYGでスケーリングの挙動が異なります。** BYOLのVM Scale Setは
+  `{{ byol_instance_count }}`台の固定サイズであり、負荷が増減しても
+  台数は自動的に変化しません。台数を増やすにはBYOLライセンスを追加購入
+  したうえで再デプロイまたは構成変更が必要です。
+- **PAYGのスケールアウト/インはFortiGate Autoscale自体のネイティブ機構
+  です。** Scale Out Threshold(`{{ scale_out_threshold }}`)と
+  Scale In Threshold(`{{ scale_in_threshold }}`)というARMテンプレートの
+  既存パラメーターで制御してください。外部の監視スクリプトやcronジョブ、
+  自作のwatchdogプロセスでインスタンス数を増減させる実装を追加しないで
+  ください。
+- BYOLのみ・PAYGのみのいずれの構成でも、VM Scale Setには最低2インスタンス
+  が必要です。`{{ payg_min_instance_count }}`を2未満に設定しないでくだ
+  さい。
+- `{PSK_SECRET}`に対応するHA事前共有鍵や、Azureストレージアカウントの
+  接続文字列・アクセスキー、Function Appの認証情報は、本手順書やチケット、
+  ログに平文で残さないでください。記録が必要な場合は`{{ psk_secret_mask }}`
+  のようにマスクし、秘密管理ツール等で別途安全に保管してください。
+- 本手順書はAzure向けの一次情報(FortiGate Autoscale for Azure)に基づいて
+  記述しています。AWS等の他クラウドでは、ロードバランサーやFunction App
+  に相当するコンポーネントの名称・構成が異なるため、対象クラウドのガイド
+  を別途確認してください。

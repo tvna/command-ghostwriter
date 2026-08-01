@@ -1,0 +1,32 @@
+physical_firewall_name: fw-edge-01
+shared_services_vsys_id: "1"
+shared_services_vsys_name: shared_services
+tenants:
+  - vsys_id: "2"
+    vsys_name: tenant_a
+    tenant_label: テナントA(営業部門)
+    virtual_router_name: vr-tenant-a
+    zone_name: tenant-a-trust
+    external_zone_name: tenant-a-to-shared
+    visible_vsys: shared_services
+    interfaces:
+      - name: ethernet1/3
+        type: Ethernet
+      - name: ethernet1/4.200
+        type: VLAN
+    max_security_rules: 200
+    admin_role: vsysadmin
+    admin_account_name: tenant_a_admin
+  - vsys_id: "3"
+    vsys_name: tenant_b
+    tenant_label: テナントB(開発部門)
+    virtual_router_name: vr-tenant-b
+    zone_name: tenant-b-trust
+    external_zone_name: "-"
+    visible_vsys: "-"
+    interfaces:
+      - name: ethernet1/5
+        type: Ethernet
+    max_security_rules: 100
+    admin_role: vsysreader
+    admin_account_name: tenant_b_viewer

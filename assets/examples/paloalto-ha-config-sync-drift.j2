@@ -1,0 +1,177 @@
+# Palo Alto Networks(PAN-OS)HAペア設定同期(config sync)ドリフト定期監査
+
+HAグループ`{{ ha_group_name }}`を構成する`{{ active_fw_hostname }}`(Active)と
+`{{ passive_fw_hostname }}`(Passive)の間で、PAN-OSネイティブのHA
+Synchronization機構を用いてrunning configの同期状態を`{{ audit_interval_minutes }}`
+分間隔で定期監査し、非同期(ドリフト)を検知した場合は
+`request high-availability sync-to-remote`コマンドで是正、
+`{{ max_drift_minutes }}`分以内に解消しない場合は`{{ escalation_team }}`へ
+エスカレーションします。
+
+## 目的
+
+PAN-OSのHA Synchronizationでは、commit時にrunning configが、save時に
+candidate configがHA1/HA2リンク経由でHAピア間に同期されますが、commit
+キューに滞留した設定はHA同期のタイミングでは同期されない、という制約
+(コミット未完了分は対象外)があります。この手順では、Dashboardの
+High Availabilityウィジェットおよび`show high-availability state`コマンド
+を用いて、この同期の結果として現れる`Running Configuration`欄
+(synchronized / not synchronized)を定期的に監査し、非同期状態を早期に
+検知・是正できるようになることを目指します。あわせて、`Enable Config
+Sync`が有効になっていることを前提条件として確認し、是正コマンドの
+`request high-availability sync-to-remote running-config`
+(必要に応じて`candidate-config`)をネイティブの機構としてどう使い分ける
+かを理解した上で、しきい値`{{ max_drift_minutes }}`分を超えて解消しない
+場合の一次切り分けとエスカレーション先を明確にすることを目指します。
+
+## 用語解説
+
+- **HA Synchronization**: PAN-OSのHA(高可用性)ペア間で、HA1リンク
+  (制御トラフィック)経由に設定を同期するネイティブ機構。commit時に
+  running configが、save時にcandidate configが同期される
+- **HA1リンク**: HAペア間の制御・同期用リンク。本手順の対象インター
+  フェースは`{{ ha1_interface }}`です
+- **commitキューの制約**: 一次情報には「Only committed configurations
+  synchronize between HA peers. Any configuration in the commit queue
+  at the time of an HA sync won't be synchronized.」と説明されています。
+  commit実行中や未完了の変更はHA同期の対象外となるため、監査前に
+  commitが完了しているかどうかも切り分け対象になります
+- **Enable Config Sync**: `Device > High Availability > General`に
+  ある設定項目。これが有効(`{{ config_sync_checkbox_state }}`)でない
+  と、Dashboard側の`Sync to peer`リンクが表示されず、設定同期そのもの
+  も行われません
+- **Dashboard > High Availabilityウィジェット / Running Config欄**:
+  DashboardのHigh Availabilityウィジェットに表示される項目の1つ。
+  Active機・Passive機双方で`Running Config`が`synchronized`と表示
+  されているかを目視確認できます。`synchronized`でない場合、同じ
+  ウィジェットの`Sync to peer`リンクから手動同期を実行できます
+- **show high-availability state**: HAの状態を表示するCLIコマンド。
+  出力中の`Running Configuration`欄が`synchronized`かどうかで、
+  running configの同期状態を確認できます
+- **request high-availability sync-to-remote running-config**:
+  ローカルのrunning configをHAピアへ同期するCLIの是正コマンド
+- **request high-availability sync-to-remote candidate-config**:
+  ローカルのcandidate configをHAピアへ同期するCLIの是正コマンド。
+  commit前の未反映設定側にドリフトがある場合に使用します
+
+## シナリオ設定
+
+今回、定期監査の対象とするHAペアおよびしきい値は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| HAグループ名(ha_group_name) | `{{ ha_group_name }}` |
+| Active機ホスト名(active_fw_hostname) | `{{ active_fw_hostname }}` |
+| Passive機ホスト名(passive_fw_hostname) | `{{ passive_fw_hostname }}` |
+| 監査対象のHA1インターフェース(ha1_interface) | `{{ ha1_interface }}` |
+| 監査間隔(audit_interval_minutes) | {{ audit_interval_minutes }}分 |
+| ドリフト許容時間(max_drift_minutes) | {{ max_drift_minutes }}分 |
+| エスカレーション先(escalation_team) | `{{ escalation_team }}` |
+| 変更チケットの接頭辞(change_ticket_prefix) | `{{ change_ticket_prefix }}` |
+| 定例メンテナンス枠(maintenance_window) | {{ maintenance_window }} |
+| Enable Config Syncの期待状態(config_sync_checkbox_state) | `{{ config_sync_checkbox_state }}` |
+
+`{{ max_drift_minutes }}`分は、監査で非同期を検知してから
+`{{ escalation_team }}`へのエスカレーションを判断するまでの許容時間
+であり、この手順書内の仮称値です。実際の運用要件に応じて調整して
+ください。
+
+## 手順
+
+### 1. 前提条件(Enable Config Sync)を確認する
+
+`{{ active_fw_hostname }}`・`{{ passive_fw_hostname }}`の両機で
+`Device > High Availability > General`を開き、`Enable Config Sync`が
+`{{ config_sync_checkbox_state }}`になっていることを確認します。この
+設定が無効な場合、以降の監査・是正手順の前提が成立しないため、まず
+有効化してからcommitしてください。
+
+### 2. Dashboardで同期状態を定期監視する
+
+`{{ active_fw_hostname }}`・`{{ passive_fw_hostname }}`の両機で
+Dashboardを開き、High Availabilityウィジェットの`Running Config`欄を
+`{{ audit_interval_minutes }}`分間隔で確認します。両機とも
+`synchronized`と表示されていれば、その回の監査は正常終了です。
+
+### 3. CLIでも同期状態を確認する(show high-availability state)
+
+Dashboardでの確認に加えて、CLIから次のコマンドを実行し、
+`Running Configuration`欄が`synchronized`であることを確認します。
+
+```bash
+show high-availability state
+```
+
+Dashboardの表示とCLIの出力が食い違う場合は、画面のキャッシュを疑い、
+CLI側の結果を優先して判断します。
+
+### 4. 非同期(ドリフト)を検知したら是正コマンドを実行する
+
+`Running Config`または`Running Configuration`欄が`synchronized`で
+ない場合、以下のCLIコマンドでローカルのrunning configをHAピアへ同期
+します。
+
+```bash
+request high-availability sync-to-remote running-config
+```
+
+commit前のcandidate config側にもドリフトが疑われる場合は、あわせて
+次のコマンドを実行します。
+
+```bash
+request high-availability sync-to-remote candidate-config
+```
+
+いずれもコマンド実行前に、直前のcommitが完了済みであることを確認し
+てください(commitキューに滞留中の変更はHA同期の対象外です)。
+
+### 5. 是正結果を再確認する
+
+手順4の実行後、手順2(Dashboard)・手順3(CLI)を再実施し、両機の
+`Running Config`が`synchronized`になったことを確認します。
+
+### 6. しきい値を超えて解消しない場合はエスカレーションする
+
+非同期を検知した時刻から`{{ max_drift_minutes }}`分が経過しても
+`synchronized`にならない場合、是正コマンドの再実行は行わず、
+`{{ change_ticket_prefix }}`を接頭辞とするチケットを起票した上で
+`{{ escalation_team }}`へエスカレーションします。チケットには検知
+時刻・対象HAグループ(`{{ ha_group_name }}`)・実行した是正コマンド・
+CLI出力を記録してください。
+
+## 動作確認
+
+- `{{ active_fw_hostname }}`・`{{ passive_fw_hostname }}`双方の
+  Dashboard High Availabilityウィジェットで`Running Config`が
+  `synchronized`と表示されていること
+- CLIの`show high-availability state`の`Running Configuration`欄が
+  `synchronized`であること
+- `Device > High Availability > General`の`Enable Config Sync`が
+  `{{ config_sync_checkbox_state }}`のままであること
+- ドリフトを検知して是正コマンドを実行した場合、実行後の再監査
+  (手順5)で`synchronized`に戻っていること
+- `{{ max_drift_minutes }}`分を超えても解消しなかった場合、
+  `{{ change_ticket_prefix }}`のチケットが起票され`{{ escalation_team }}`
+  へ連絡が届いていること
+
+## 注意事項
+
+- **commitキューに滞留中の変更はHA同期の対象外です。** 是正コマンド
+  実行前に、直前のcommitが完了していることを確認してください。
+  commit未完了のままでは`request high-availability sync-to-remote`
+  を実行しても意図した内容が同期されません。
+- **`Enable Config Sync`が無効なままでは是正コマンドの前提が崩れます。**
+  手順1で無効を検知した場合は、まずこの設定を有効化してcommitし、
+  その後にあらためて同期状態を監査してください。
+- **`request high-availability sync-to-remote`はローカル側の設定を
+  ピアへ上書きするコマンドです。** 実行前に、どちら側(Active/Passive)
+  の設定を正としてよいかをチケット上で確認してから実行してください。
+  誤った方向で実行すると、正としたい側の設定が失われるおそれが
+  あります。
+- `{{ maintenance_window }}`以外の時間帯に緊急でrunning configを
+  同期する場合は、通常の変更管理プロセスに準じて事前承認を得て
+  ください。
+- CLI/GUIへのログインに使う管理者パスワードやAPIキーは、本手順書や
+  チケット、ログに平文で残さないでください。記録が必要な場合は
+  `********`のようにマスクし、秘密管理ツール等で別途安全に保管して
+  ください。

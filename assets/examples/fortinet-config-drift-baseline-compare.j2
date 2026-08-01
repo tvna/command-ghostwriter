@@ -1,0 +1,179 @@
+# FortiGate設定ドリフト検知(FortiManagerベースライン比較)
+
+FortiManager ADOM `{{ adom }}` 配下のFortiGate {{ devices | length }}台について、
+`Device Manager > Device & Groups` のテーブルビューでデバイス設定ステータス
+(稼働機のランニングコンフィグとFortiManagerデバイスDBの同期状態)を確認し、
+`Synchronized` 以外のデバイスは `Configuration Revision History` ダイアログで
+承認済みベースラインリビジョン(`{{ devices[0].baseline_tag }}`)と現在の
+リビジョンをDiff Output(`{{ diff_output_mode }}`)で比較します。
+{{ review_cycle_label }}として{{ reviewer }}が実施し、差分が承認済みの変更
+(チケット接頭辞 `{{ change_ticket_prefix }}`)であれば新しいベースライン
+(`{{ next_baseline_tag }}`)としてタグ付けし直し、そうでなければ
+`{{ escalation_contact }}` へエスカレーションします。
+
+## 目的
+
+FortiManager管理下のFortiGateに対して、(1) Device Managerのデバイス設定
+ステータスで稼働機のランニングコンフィグとFortiManagerデバイスDB(=事実上の
+ベースライン)との同期状態を継続的に把握する、(2) Configuration Revision
+Historyで承認済みベースラインリビジョンと現在のリビジョンの差分(Diff)を
+確認する、という2つのネイティブ機構を組み合わせて、定期的なコンフィグ
+ドリフト検知の運用を構築できるようになることを目指します。他ベンダーの
+ネイティブ機能とは異なり、Fortinet (FortiOS)ではFortiOS単体には「承認済み
+ベースラインとの定期差分検知」という単一機能は無く、FortiManagerが同等の
+運用を提供するという別機構で同じ運用課題を解決します。あわせて、検出した
+差分が承認済みの変更なのか未承認のドリフトなのかを切り分け、前者は新しい
+ベースラインへの更新、後者はエスカレーションという判断のプロセスも
+実践します。
+
+## 用語解説
+
+- **デバイス設定ステータス**: `Device Manager > Device & Groups` の
+  テーブルビューで各デバイスに表示される、稼働機のランニングコンフィグと
+  FortiManagerデバイスDBとの同期状態。`Synchronized`(最新のリビジョン
+  履歴がFortiGate上の設定と一致)、`Modified`(デバイスDB側が変更され
+  Install/Retrieve待ち)、`Auto-Updated`(FortiGate上で直接変更が行われ、
+  自動的にデバイスDBへ反映された)、`Out of sync`(最新のリビジョンが
+  FortiGate上の設定と一致しない)、`Unknown`(到達不能等で判定不能)、
+  `Conflict`(直近のInstallでエラーが発生)の各状態がある
+- **Auto-update / Auto-retrieve**: いずれもデフォルトで有効。FortiManager
+  経由でない変更がFortiGate上で行われた場合、FortiGate自身がその変更内容を
+  自動的にFortiManagerへ送信する(Auto-update)。Auto-updateが行われな
+  かった場合に限り、FortiManagerが変更を検知してフルコンフィグを自動的に
+  再取得する(Auto-retrieve)。この2つの仕組みにより、FortiGate上で直接
+  行われた変更もデバイスDBへ反映され、デバイス設定ステータス上で可視化
+  される
+- **Total Revisions / Revision History**: デバイスDB画面の `Total
+  Revisions` 行にある `Revision History` ボタン。クリックすると
+  `Configuration Revision History` ダイアログが開き、過去のリビジョン
+  一覧を確認できる
+- **Tag (Name) / Comments**: `Configuration Revision History` ダイアログ
+  で個々のリビジョンを右クリックし `Rename` を選択すると入力できる項目。
+  `Tag (Name)` 欄にリビジョンの名前を、`Comments` 欄に補足情報を付与
+  できる。本手順書では、承認済みの版を「ベースライン」として明示的に
+  タグ付けする運用にこれを用いる
+- **Diff Output(Show Full File Diff / Show Diff Only / Capture Diff to a
+  Script)**: リビジョン比較時に選べる出力形式。`Show Full File Diff` は
+  設定ファイル全文を表示し差分箇所をハイライトする、`Show Diff Only` は
+  差分箇所のみを表示する、`Capture Diff to a Script` は差分をスクリプト
+  としてダウンロードする
+
+## シナリオ設定
+
+比較対象のFortiGate({{ devices | length }}台、ADOM `{{ adom }}`)と、
+前回レビュー時点のデバイス設定ステータス:
+
+| # | デバイス名 | 機種 | IPアドレス | デバイス設定ステータス | ベースラインTag (Name) |
+|---|-----------|------|-----------|----------------------|------------------------|
+{% for d in devices %}| {{ loop.index }} | {{ d.name }} | {{ d.platform }} | {{ d.ip }} | {{ d.current_status }} | {{ d.baseline_tag }} |
+{% endfor %}
+ベースラインリビジョンに付与したComments(承認根拠):
+`{{ devices[0].baseline_comment }}`
+
+| 項目 | 値 |
+|------|-----|
+| レビュー周期(review_cycle_label) | {{ review_cycle_label }} |
+| 実施担当(reviewer) | {{ reviewer }} |
+| Diff Output選択(diff_output_mode) | {{ diff_output_mode }} |
+| 承認済み変更チケットの接頭辞(change_ticket_prefix) | {{ change_ticket_prefix }} |
+| 次回ベースラインのTag (Name)(next_baseline_tag) | {{ next_baseline_tag }} |
+| 未承認ドリフト検出時のエスカレーション先(escalation_contact) | {{ escalation_contact }} |
+
+## 手順
+
+### 1. 前回のベースラインリビジョンが存在することを確認する
+
+対象デバイスがすべてFortiManager `{{ adom }}` ADOMの管理下にあり、
+`Unauthorized Devices` グループに入っていないことを確認します。各デバイスの
+デバイスDB画面で `Total Revisions` 行の `Revision History` を開き、
+`Configuration Revision History` ダイアログに `{{ devices[0].baseline_tag }}`
+のTag (Name)が付与されたリビジョンが存在すること、Commentsに
+`{{ devices[0].baseline_comment }}` が記録されていることを確認します。
+
+{% for d in devices %}- {{ d.name }}({{ d.ip }})
+{% endfor %}
+### 2. Device Managerでデバイス設定ステータスを確認する
+
+`Device Manager > Device & Groups` のテーブルビューを開き、対象
+{{ devices | length }}台のデバイス設定ステータス列を確認します。
+
+| # | デバイス名 | デバイス設定ステータス |
+|---|-----------|----------------------|
+{% for d in devices %}| {{ loop.index }} | {{ d.name }} | {{ d.current_status }} |
+{% endfor %}
+`Synchronized` のデバイスは、稼働中のランニングコンフィグとFortiManager
+デバイスDBが一致しているため、この周期でのリビジョン比較は不要です。
+
+### 3. `Synchronized` 以外のデバイスをConfiguration Revision Historyで比較する
+
+{% for d in devices if d.current_status != "Synchronized" %}- {{ d.name }}
+  (デバイス設定ステータス: {{ d.current_status }})
+{% endfor %}
+上記{{ devices | selectattr('current_status', 'ne', 'Synchronized') | list | length }}台について、`Total Revisions` 行の
+`Revision History` から `Configuration Revision History` ダイアログを開き、
+Tag (Name)が `{{ devices[0].baseline_tag }}` のベースラインリビジョンと
+最新のリビジョンを選択して比較します。Diff Output は
+`{{ diff_output_mode }}` を選択します。
+
+### 4. 差分の内容が承認済みの変更かドリフトかを判定する
+
+手順3で表示された差分の各項目について、{{ review_cycle_label }}までに
+起票・承認された変更管理チケット(接頭辞 `{{ change_ticket_prefix }}`)の
+内容と突き合わせます。
+
+- 差分の全項目がいずれかの `{{ change_ticket_prefix }}` チケットの内容と
+  一致する場合は、承認済みの変更として手順5に進みます。
+- 一致しない差分が1件でもある場合は、未承認のドリフトとして手順6に進みます。
+
+### 5. 承認済みの変更として新しいベースラインにタグ付けし直す
+
+手順4で承認済みと判定したデバイスについて、`Configuration Revision
+History` ダイアログで最新のリビジョンを右クリックし `Rename` を選択します。
+`Tag (Name)` 欄に `{{ next_baseline_tag }}` を入力し、`Comments` 欄に
+突き合わせた変更管理チケット番号を記録して保存します。この版が次回
+({{ review_cycle_label }})の比較対象ベースラインになります。
+
+### 6. 未承認のドリフトをエスカレーションする
+
+手順4で未承認のドリフトと判定したデバイスについて、{{ reviewer }} は
+デバイス名・Diff Output(`{{ diff_output_mode }}`)の出力内容・突き合わせ
+できなかった差分項目を添えて `{{ escalation_contact }}` へ連絡します。
+ベースラインへのタグ付け直し(手順5)は、エスカレーション先の判断で
+差分が事後承認されるまで行いません。
+
+## 動作確認
+
+- `Device Manager > Device & Groups` のテーブルビューで、対象
+  {{ devices | length }}台すべてのデバイス設定ステータスが取得できていること
+  (`Unknown` のままのデバイスが残っていないこと)
+- `Synchronized` 以外と判定した{{ devices | selectattr('current_status', 'ne', 'Synchronized') | list | length }}台について、
+  `Configuration Revision History` でベースラインリビジョン
+  (`{{ devices[0].baseline_tag }}`)との比較が完了していること
+- 承認済みと判定したデバイスで、最新リビジョンのTag (Name)が
+  `{{ next_baseline_tag }}` に更新され、Commentsに突き合わせたチケット
+  番号が記録されていること
+- 未承認のドリフトと判定したデバイスについて、`{{ escalation_contact }}`
+  への連絡が完了し、当該デバイスのベースラインが未更新のまま維持されて
+  いること
+
+## 注意事項
+
+- **FortiGate上で直接設定変更を行わないこと。** デバイス設定ステータスが
+  `Auto-Updated` になっているデバイスは、FortiManager経由ではなくFortiGate
+  上で直接変更が行われたことを示します。設定は原則FortiManager側で行い、
+  FortiGate側での直接変更を避けることがコンフィグドリフトと未承認変更の
+  防止につながります。
+- **ベースラインリビジョンのTag (Name)は上書きせず、新しい版に付け替える
+  こと。** 過去のベースラインとの比較履歴を追跡できるよう、
+  `{{ devices[0].baseline_tag }}` のリビジョンは保持したまま、承認後は
+  `{{ next_baseline_tag }}` を新規のリビジョンに付与します。
+- 手順4の突き合わせに用いる変更管理チケット(接頭辞
+  `{{ change_ticket_prefix }}`)は本手順書の対象外であり、別途チケット
+  管理システムで管理してください。
+- FortiManagerおよびFortiGateの管理者アカウントの認証情報は本手順書や
+  ログに平文で記載しないでください。記録する場合は `****` のようにマスク
+  してください。
+- 本手順書はDevice Managerのデバイス設定ステータスと
+  Configuration Revision Historyのみを対象としており、Security Ratingに
+  よるベストプラクティス逸脱の継続監査は対象外です。導入を検討する場合は
+  該当の一次情報を別途確認してください。
