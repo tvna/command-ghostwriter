@@ -1,0 +1,7 @@
+rule_no,interface,tcpip_version,action,proto,src,src_port,dst,dst_port,description
+1,wan,IPv4,pass,tcp,0.0.0.0/0,*,203.0.113.10,443,DMZ Webサーバ(IPv4)へのHTTPS着信を許可
+2,wan,IPv6,pass,tcp,::/0,*,2001:db8:0:10::10,443,DMZ Webサーバ(IPv6)へのHTTPS着信を許可
+3,wan,IPv4,pass,udp,0.0.0.0/0,*,203.0.113.1,51820,WireGuard VPN終端(IPv4)への着信を許可
+4,wan,IPv6,pass,udp,::/0,*,2001:db8:0:10::1,51820,WireGuard VPN終端(IPv6)への着信を許可
+5,wan,IPv4,block,any,0.0.0.0/0,*,0.0.0.0/0,*,IPv4 明示的デフォルト拒否(未許可の全通信をログに記録)
+6,wan,IPv6,block,any,::/0,*,::/0,*,IPv6 明示的デフォルト拒否(未許可の全通信をログに記録)

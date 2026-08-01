@@ -1,0 +1,36 @@
+policy_id: 1
+policy_name: "wan1-dmz-dos-protect"
+inbound_interface: "wan1"
+service: "ALL"
+protected_addresses:
+  - name: "web-dmz-vip"
+    description: "公開Webサーバ(DMZ)VIP"
+  - name: "dns-dmz-vip"
+    description: "公開DNSサーバ(DMZ)VIP"
+baseline_observation_days: 7
+anomalies:
+  - name: "tcp_syn_flood"
+    log: "enable"
+    action: "block"
+    threshold: 2000
+    baseline_pps: 350
+  - name: "tcp_port_scan"
+    log: "enable"
+    action: "block"
+    threshold: 1000
+    baseline_pps: 20
+  - name: "udp_flood"
+    log: "enable"
+    action: "block"
+    threshold: 5000
+    baseline_pps: 800
+  - name: "icmp_flood"
+    log: "enable"
+    action: "block"
+    threshold: 250
+    baseline_pps: 15
+current_anomaly_mode: "continuous"
+target_anomaly_mode: "periodical"
+np_hardware_model: "FortiGate-101F"
+np_offload_supported: true
+verification_window_minutes: 30

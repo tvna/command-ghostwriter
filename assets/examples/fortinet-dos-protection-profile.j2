@@ -1,0 +1,199 @@
+# FortiGate DoSポリシー(アノマリー検知)によるSYNフラッド等の防御
+
+FortiGate(FortiOS)の `{{ inbound_interface }}` に着信するトラフィックに対し、
+`Policy & Objects` の IPv4 DoS Policy(CLI: `config firewall DoS-policy`)で
+{{ anomalies | length }}種類のアノマリー({% for a in anomalies %}`{{ a.name }}`{% if not loop.last %}・{% endif %}{% endfor %})
+にしきい値を設定し、保護対象({{ protected_addresses | length }}件)宛ての
+SYNフラッド等を検知・遮断します。あわせて `config ips global` の
+`anomaly-mode`(Continuous/Periodical)を切り替え、攻撃継続中に正常な通信まで
+遮断し続けてしまう誤検知(過剰遮断)を抑えます。しきい値は{{ baseline_observation_days }}日間の
+ベースライン観測値をもとに設定し、適用後は{{ verification_window_minutes }}分間モニタリングして
+過剰遮断が起きていないことを確認します。
+
+## 目的
+
+FortiGateのDoSポリシー(アノマリーベースのフラッド対策)を使って、SYNフラッド
+等のDoS/DDoS攻撃を検知・緩和できるようになることを目指します。あわせて、
+`anomaly-mode` のContinuous modeとPeriodical modeの違いを理解し、攻撃検知後の
+挙動(継続的にブロックし続けるか、しきい値相当のパケット数/秒のみ許可するか)
+を状況に応じて選べるようになること、しきい値をベースライン観測値から設定し、
+正常な通信への誤検知(過剰遮断)を避けられるようになることを目指します。
+
+## 用語解説
+
+- **DoS Policy(IPv4 DoS Policy)**: `Policy & Objects` で作成する、インター
+  フェース単位のアノマリーベースDoS対策ポリシー。CLIでは
+  `config firewall DoS-policy` 配下の `edit <policy-id>` で、`name`・
+  `interface`・`srcaddr`・`dstaddr`・`service` を指定して作成する
+- **anomaly(アノマリー)**: DoSポリシー配下の `config anomaly` で個別に
+  設定する、事前定義済みの異常検知項目。`tcp_syn_flood`(SYNフラッド)の
+  ほか、`tcp_port_scan`・`udp_flood`・`icmp_flood` など複数のアノマリー
+  種別があり、それぞれ `edit "<anomaly-name>"` で選択して個別に
+  `status`(有効/無効)・`log`(ログ)・`action`(pass/block)・
+  `threshold`(しきい値、パケット数/秒)を設定する
+- **threshold(しきい値)**: 該当アノマリーの新規接続やパケットのレート
+  (パケット数/秒)がこの値を超えると `action` が実行される。しきい値は
+  対象トラフィックの通常時のレート(ベースライン)を踏まえて設定する
+  必要があり、低すぎると正常な通信まで遮断する誤検知(過剰遮断)につながる
+- **Continuous mode / Periodical mode(anomaly-mode)**: `config ips global`
+  の `set anomaly-mode {continuous | periodical}` で設定する、しきい値
+  超過を検知した後の全DoSポリシー共通の挙動。Continuous modeは既定値で、
+  一度しきい値を超えて検知すると、レートがしきい値を下回るまでブロックを
+  継続する。Periodical modeは、検知後もそのアノマリーで設定した
+  `threshold` 相当のパケット数/秒は毎秒許可し続ける
+- **SYN cookiesハードウェアオフロード(NP7/NP6XLite)**: NP7または
+  NP6XLiteハードウェアを搭載したモデルでは、`tcp_syn_flood` のしきい値を
+  超過した場合に限り、SYN cookiesメカニズムによる応答をハードウェア側で
+  処理できる。ソフトウェア処理の負荷を抑えつつSYNフラッドに対応するための
+  仕組みで、有効化のための追加コマンドではなく、対応ハードウェアであれば
+  しきい値超過時に自動的に働く
+
+## シナリオ設定
+
+保護対象アドレス({{ protected_addresses | length }}件、DoSポリシーの
+`dstaddr` に指定):
+
+| # | アドレスオブジェクト名 | 説明 |
+|---|------------------------|------|
+{% for addr in protected_addresses %}| {{ loop.index }} | {{ addr.name }} | {{ addr.description }} |
+{% endfor %}
+設定するアノマリー({{ anomalies | length }}件、`{{ baseline_observation_days }}`日間の
+ベースライン観測値をもとにしきい値を設定):
+
+| # | アノマリー名 | ベースライン(pps) | しきい値(pps) | ログ | アクション |
+|---|--------------|--------------------|-----------------|------|------------|
+{% for a in anomalies %}| {{ loop.index }} | {{ a.name }} | {{ a.baseline_pps }} | {{ a.threshold }} | {{ a.log }} | {{ a.action }} |
+{% endfor %}
+| 項目 | 値 |
+|------|-----|
+| DoSポリシーID(policy_id) | {{ policy_id }} |
+| DoSポリシー名(policy_name) | {{ policy_name }} |
+| 対象インターフェース(inbound_interface) | {{ inbound_interface }} |
+| 対象サービス(service) | {{ service }} |
+| 現在のanomaly-mode(current_anomaly_mode) | {{ current_anomaly_mode }} |
+| 変更後のanomaly-mode(target_anomaly_mode) | {{ target_anomaly_mode }} |
+| 機種(np_hardware_model) | {{ np_hardware_model }} |
+| SYN cookiesハードウェアオフロード対応(np_offload_supported) | {{ np_offload_supported }} |
+| 適用後のモニタリング時間(verification_window_minutes) | {{ verification_window_minutes }}分 |
+
+## 手順
+
+### 1. ベースライントラフィックを記録する(しきい値判定の基準を用意する)
+
+しきい値を投入する前に、既存のトラフィック監視手段(トラフィックログ・
+ダッシュボード等)を使い、保護対象アドレス({{ protected_addresses | length }}件)
+宛ての通常時のトラフィックレートを{{ baseline_observation_days }}日間観測し、
+シナリオ設定の各アノマリーの「ベースライン(pps)」列の値に相当する通常時
+レートであることを確認します。しきい値はこのベースラインより十分高い値に
+設定し(本シナリオでは各アノマリーで数倍のマージンを確保)、正常な通信の
+ピーク時レートを誤って超過しないようにします。
+
+### 2. GUIでDoSポリシーを作成する
+
+`Policy & Objects` の IPv4 DoS Policy を開き、新規ポリシーを作成します。
+
+- Name: `{{ policy_name }}`
+- Incoming Interface: `{{ inbound_interface }}`
+- Source Address: `all`
+- Destination Address: {% for addr in protected_addresses %}`{{ addr.name }}`{% if not loop.last %}・{% endif %}{% endfor %}
+
+- Service: `{{ service }}`
+- Status: 有効
+
+続けて、ポリシー内の各アノマリーを次のとおり設定します。
+
+{% for a in anomalies %}- `{{ a.name }}`: Status 有効、Logging 有効、Action
+  `{{ a.action }}`、Threshold `{{ a.threshold }}`(pps)
+{% endfor %}
+入力後は `OK` で保存します。
+
+### 3. 同じ内容をCLIでも設定する
+
+```bash
+config firewall DoS-policy
+    edit {{ policy_id }}
+        set name "{{ policy_name }}"
+        set interface "{{ inbound_interface }}"
+        set srcaddr "all"
+        set dstaddr {% for addr in protected_addresses %}"{{ addr.name }}"{% if not loop.last %} {% endif %}{% endfor %}
+
+        set service "{{ service }}"
+        set status enable
+        config anomaly
+{% for a in anomalies %}            edit "{{ a.name }}"
+                set status enable
+                set log {{ a.log }}
+                set action {{ a.action }}
+                set threshold {{ a.threshold }}
+            next
+{% endfor %}        end
+    next
+end
+```
+
+{% if np_offload_supported %}`{{ np_hardware_model }}` はNP7/NP6XLiteハードウェアを搭載しており、
+`tcp_syn_flood` のしきい値(`{{ anomalies[0].threshold }}`pps)を超過した際、
+SYN cookiesメカニズムによる応答をハードウェア側で自動的に処理します。この
+オフロードを有効化するための追加のコマンドはありません。
+{% endif %}
+### 4. グローバルのanomaly-mode(Continuous/Periodical)を選択し設定する
+
+`anomaly-mode` はDoSポリシー個別ではなく `config ips global` のグローバル
+設定であり、この設定を変更するとFortiGate上の他のDoSポリシーの挙動にも
+影響します。変更前に、既存の他のDoSポリシーが `{{ current_anomaly_mode }}`
+モードでの挙動を前提にしていないか確認してください。
+
+現在の設定は `{{ current_anomaly_mode }}`(既定値、しきい値超過中は継続的に
+ブロック)です。攻撃が長時間継続した場合に正常な通信まで遮断し続けることを
+避けたいため、`{{ target_anomaly_mode }}` モード(検知後もアノマリーごとの
+`threshold` 相当のパケット数/秒は許可し続ける)に変更します。
+
+```bash
+config ips global
+    set anomaly-mode {{ target_anomaly_mode }}
+end
+```
+
+### 5. 適用後、一定時間モニタリングして過剰遮断の有無を確認する
+
+設定を保存した後、{{ verification_window_minutes }}分間、ログを有効にした
+各アノマリー({% for a in anomalies %}`{{ a.name }}`{% if not loop.last %}・{% endif %}{% endfor %})
+のログを確認し、保護対象アドレス宛ての正常な通信までブロックされていないか
+点検します。過剰遮断が見られる場合は、手順1で記録したベースラインと比較し、
+該当アノマリーのしきい値を引き上げてから再度確認してください。
+
+## 動作確認
+
+- `{{ policy_name }}`(policy_id `{{ policy_id }}`)が `{{ inbound_interface }}`
+  向けのDoSポリシーとして作成され、Status が有効になっていること
+- シナリオ設定の各アノマリー({{ anomalies | length }}件)で Status/Logging
+  が有効、Action としきい値がシナリオ設定表のとおり設定されていること
+- `config ips global` の `anomaly-mode` が `{{ target_anomaly_mode }}` に
+  変更されていること
+- 手順5のモニタリング時間({{ verification_window_minutes }}分)中に、保護
+  対象アドレス({{ protected_addresses | length }}件)宛ての正常な通信が
+  誤って遮断されていないこと
+{% if np_offload_supported %}- `{{ np_hardware_model }}` でSYNフラッド発生時にSYN cookiesによる
+  ハードウェアオフロードが働いていること(ハードウェア処理の有無は機種の
+  仕様に依存するため、疑わしい場合はベンダーの最新ドキュメントで当該機種の
+  対応状況を確認してください)
+{% endif %}
+## 注意事項
+
+- **`anomaly-mode` はグローバル設定であること。** `{{ target_anomaly_mode }}`
+  への変更はこのDoSポリシーだけでなく、FortiGate上の他のすべてのDoSポリシー
+  の挙動に影響します。変更前に他のポリシーへの影響を確認してください。
+- **しきい値はベースライン観測(手順1、{{ baseline_observation_days }}日間)を
+  もとに設定すること。** 根拠のない低いしきい値は、正常な通信への誤検知
+  (過剰遮断)を引き起こすおそれがあります。
+- 手順5で過剰遮断が確認された場合は、しきい値を引き下げる方向ではなく、
+  ベースラインとの比較にもとづき引き上げる方向で調整し、再度モニタリング
+  してください。
+- SYN cookiesハードウェアオフロードは対応ハードウェア(NP7/NP6XLite)搭載
+  モデルでしきい値超過時に自動的に働く仕組みであり、これを有効化するための
+  独立したCLIコマンドはありません。ソフトウェアのみのモデルではこの
+  オフロードは適用されません。
+- 本手順書は一次情報(Fortinet DoS policyドキュメント)で確認できた
+  `config firewall DoS-policy`・`config anomaly`・`config ips global` の
+  範囲の構文のみを扱っています。Local-in Policyなど他の防御層を追加する
+  場合は、該当の一次情報を別途確認してください。

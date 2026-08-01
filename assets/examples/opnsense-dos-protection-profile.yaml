@@ -1,0 +1,18 @@
+fw_host: "10.0.0.1"
+
+protected_rules:
+  - interface: "wan"
+    description: "WAN-HTTPS-webserver"
+    dest_port: 443
+  - interface: "wan"
+    description: "WAN-HTTP-webserver"
+    dest_port: 80
+
+max_established_per_host: 100
+max_new_conn_count: 30
+max_new_conn_interval: 5
+max_state_entries_per_host: 200
+
+syncookies_mode: "adaptive"
+syncookies_low_watermark: 20
+syncookies_high_watermark: 80

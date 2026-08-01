@@ -1,0 +1,6 @@
+filter_mode = "All Connections"
+botnet_exclusion_object = "AG_TRUSTED_PARTNER_APIS"
+custom_botnet_address_object = "H_SUSPECTED_C2_203_0_113_77"
+custom_botnet_ip = "203.0.113.77"
+affected_host_ip = "172.16.10.55"
+lan_zone = "LAN"

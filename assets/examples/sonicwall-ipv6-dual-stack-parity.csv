@@ -1,0 +1,7 @@
+rule_no,ip_version,from_zone,to_zone,rule_name,action,parity_of,source_addr,dest_addr,service,priority,description
+1,IPv4,WAN,DMZ,allow-dmz-https-v4,Allow,-,Any,dmz-web-server-v4,HTTPS,Auto Prioritize,既存IPv4のDMZ WebサーバへのHTTPS許可(基準ルール)
+2,IPv6,WAN,DMZ,allow-dmz-https-v6,Allow,allow-dmz-https-v4,Any,dmz-web-server-v6,HTTPS,Auto Prioritize,IPv6版DMZ WebサーバへのHTTPS許可(IPv4ルールとのパリティ確保)
+3,IPv4,WAN,DMZ,allow-vpn-gw-v4,Allow,-,Any,vpn-gateway-v4,svc-ipsec-udp500-4500,Auto Prioritize,既存IPv4の拠点間IPsec VPNゲートウェイ着信許可(基準ルール)
+4,IPv6,WAN,DMZ,allow-vpn-gw-v6,Allow,allow-vpn-gw-v4,Any,vpn-gateway-v6,svc-ipsec-udp500-4500,Auto Prioritize,IPv6版拠点間IPsec VPNゲートウェイ着信許可(IPv4ルールとのパリティ確保)
+5,IPv6,WAN,LAN,explicit-deny-wan-lan-v6,Deny,-,Any,Any,Any,Insert at the End,IPv6側WAN to LANの明示的拒否ルール(IPv4側default-denyとの可視化パリティ)
+6,IPv6,WAN,WLAN,explicit-deny-wan-wlan-v6,Deny,-,Any,Any,Any,Insert at the End,IPv6側WAN to WLANの明示的拒否ルール(IPv4側default-denyとの可視化パリティ)

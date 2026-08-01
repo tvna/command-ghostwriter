@@ -1,0 +1,198 @@
+# Palo Alto Networks(PAN-OS)によるIPv4/IPv6デフォルト拒否ポリシーのパリティ確保
+
+WAN側ゾーン(untrust)からdmzゾーンへの許可ルールについて、CSVで定義した
+{{ csv_rows | length }}件のうちIPv4向けにすでに許可されている通信と同じ
+条件のIPv6向け許可ルールを追加登録します。PAN-OSのSecurity Policyルール
+ベースはIPv4/IPv6共通の単一の機構であり、`interzone-default`もIPv4/IPv6の
+区別なく既定拒否を行うため、新たな拒否ルールを作成するのではなく、IPv6
+Firewallingの有効化・IPv6 address objectの追加・IPv4行と対になる許可ルール
+の登録のみを行います。
+
+## 目的
+
+PAN-OSのSecurity PolicyルールベースがIPv4/IPv6で共通の機構であることを
+理解した上で、IPv6環境においてもIPv4と同じ粒度の許可ルールのみを明示登録
+し、それ以外の通信は`interzone-default`により既定で拒否される状態
+(default-denyパリティ)を構築できるようになることを目指します。あわせて、
+IPv6 Firewallingの有効化、IPv6 address objectの作成、App-ID/セキュリティ
+プロファイルがIPv6フローにも適用されることを確認し、
+`test security-policy-match`とTraffic logでIPv4/IPv6双方の許可・拒否を
+検証できるようになることを目指します。
+
+## 用語解説
+
+- **IPv6 Firewalling**: `Device > Setup > Session`にあるチェックボックス。
+  これを有効化しない限り、インターフェースやaddressオブジェクトにIPv6を
+  設定してもPAN-OSはそのIPv6設定を無視する
+- **address object(IP Netmask・IPv6プレフィックス表記)**: `Objects >
+  Addresses`で作成するオブジェクト。Typeを`IP Netmask`のまま、値の欄に
+  `2001:db8:1:10::10/128`のようなIPv6プレフィックス表記を入力すると、
+  IPv4アドレスと同じ扱いでSecurity Policyルールの送信元/宛先に指定できる
+- **any / any6の不在**: PAN-OSにはIPv6専用の`any6`というオブジェクトは
+  存在しない。既存ルールの送信元/宛先が`any`のままだと、IPv6 Firewalling
+  有効化後はIPv4だけでなくIPv6の通信もあわせて一致するようになる
+- **App-ID(IPv6フロー)**: アプリケーション識別(App-ID)はIPv4と同様に
+  IPv6フローに対しても動作する。ルールのApplicationにはポート番号ではなく
+  `ssl`や`dns-base`のようなアプリケーション名を指定する
+- **セキュリティプロファイル(Threat Prevention/URL Filtering等)**: ルール
+  のActionsタブで割り当てるプロファイルで、IPv4ルールと同じものをIPv6
+  ルールにも割り当てることで、同じ検査能力をIPv6フローにも適用できる
+- **interzone-default rule**: PAN-OSが既定で持つSecurity Policyルール。
+  ゾーンをまたぐ通信(interzone traffic)のうち他のどのルールにも一致しな
+  かったものを、IPv4/IPv6の区別なくすべて拒否する。ルールベース最下部に
+  あり既定では読み取り専用
+- **Service = application-default**: ルールが許可するアプリケーションを、
+  そのアプリケーション本来の標準ポートのみに限定する既定の推奨設定
+- **commit**: candidate configとrunning configを分離する二段階構成モデル。
+  GUIで`Save`した内容もcommitするまで実機の動作には反映されない
+- **test security-policy-match**: 指定した送信元/宛先/アプリケーションなど
+  の組み合わせが、実際にどのSecurity Policyルールに一致するかをCLIから
+  確認できるテストコマンド。送信元/宛先にIPv4アドレスとIPv6アドレスの
+  どちらを指定しても同じ構文で利用できる
+
+## シナリオ設定
+
+`untrust`ゾーンから`dmz`ゾーンへの通信のうち、IPv4向けにすでに許可されて
+いる通信と、それに対になるIPv6向けの許可、および既定で拒否される
+`interzone-default`をあわせて次の{{ csv_rows | length }}件で管理します。
+`pair_id`が同じ行同士がIPv4/IPv6の対になる許可ルール、`family`は
+`ipv4`/`ipv6`/両方に共通(`dual`)のいずれかを表します。
+
+| rule_no | pair_id | name | family | from_zone | to_zone | source | destination | application | std_port | action | description |
+|---------|---------|------|--------|-----------|---------|--------|-------------|-------------|----------|--------|--------------|
+{% for r in csv_rows %}| {{ r["rule_no"] }} | {{ r["pair_id"] }} | {{ r["name"] }} | {{ r["family"] }} | {{ r["from_zone"] }} | {{ r["to_zone"] }} | {{ r["source"] }} | {{ r["destination"] }} | {{ r["application"] }} | {{ r["std_port"] }} | {{ r["action"] }} | {{ r["description"] }} |
+{% endfor %}
+
+`untrust`は自組織のWAN(インターネット)側インターフェースが所属する前提の
+ゾーン名、`dmz`は公開サーバー群が所属する前提のゾーン名です。実際の環境に
+存在するゾーン名に読み替えてください。`interzone-default`の行(action が
+deny)は新規作成する対象ではなく、PAN-OSに既定で存在する読み取り専用ルール
+です。
+
+## 手順
+
+### 1. 現状のIPv6 FirewallingとSecurity Policyルールベースを確認する
+
+`Device > Setup > Session`を開き、`IPv6 Firewalling`チェックボックスの現在
+の状態を確認します。続けて`Policies > Security`を開き、既存のIPv4許可
+ルールと、ルールベース最下部の`interzone-default`の現在のAction・Log設定を
+確認します。既定ルールはNameの列に継承アイコンが表示され、Name・Rule
+Type・Descriptionが編集できない読み取り専用であることをあわせて確認し
+ます。
+
+### 2. IPv6 Firewallingを有効化する
+
+`Device > Setup > Session`で`Session Settings`の`Edit`(鉛筆アイコン)を
+開き、`IPv6 Firewalling`チェックボックスを選択して`OK`をクリックします。
+この設定を有効化しない限り、以降の手順で作成するIPv6 address objectや
+IPv6ルールはPAN-OSに無視されるため、必ずこの手順を先に行います。
+
+### 3. IPv6 address objectを登録する
+
+`Objects > Addresses`で`Add`を選び、シナリオ設定のうち`family`が`ipv6`の
+行について、`destination`の値をTypeが`IP Netmask`のaddress objectとして
+登録します。Nameにはルール名に紐づく識別しやすい名前を使います。
+
+{% for r in csv_rows %}{% if r["family"] == "ipv6" %}- {{ r["name"] }}-DST: {{ r["destination"] }}(rule_no {{ r["rule_no"] }}、pair_id {{ r["pair_id"] }})
+{% endif %}{% endfor %}
+IPv4向けの`destination`についても同様に、`family`が`ipv4`の行の値を
+address objectとして登録済みであることを前提とします(未登録の場合は同じ
+手順で追加します)。
+
+{% for r in csv_rows %}{% if r["family"] == "ipv4" %}- {{ r["name"] }}-DST: {{ r["destination"] }}(rule_no {{ r["rule_no"] }}、pair_id {{ r["pair_id"] }})
+{% endif %}{% endfor %}
+
+### 4. IPv4行と対になるIPv6許可ルールを登録する
+
+`Policies > Security`で`Add`を選び、シナリオ設定の`action`が`allow`かつ
+`family`が`ipv6`の行を`rule_no`の昇順で登録します。各行につき、対になる
+IPv4行(同じ`pair_id`)と同じApplication・Service・Actionを設定します。
+
+- General タブ: `Name`にルール名を入力する
+- Source タブ: `Source Zone`に`from_zone`を設定し、`Source Address`は
+  `source`の値(`any`の場合は既定の`any`のまま)にする
+- Destination タブ: `Destination Zone`に`to_zone`を設定し、
+  `Destination Address`に手順3で登録したaddress objectを指定する
+- Applications タブ: `Application`に`application`の値を追加する
+- Service/URL Category タブ: `Service`は`application-default`のままにする
+- Actions タブ: `Action`を`Allow`にし、対になるIPv4行と同じセキュリティ
+  プロファイルを割り当てる
+
+{% for r in csv_rows %}{% if r["family"] == "ipv6" %}- rule_no {{ r["rule_no"] }}({{ r["name"] }}、pair_id {{ r["pair_id"] }}): {{ r["from_zone"] }} -> {{ r["to_zone"] }} / {{ r["source"] }} -> {{ r["destination"] }} / application={{ r["application"] }} ({{ r["description"] }})
+{% endif %}{% endfor %}
+入力後は`OK`のみを行い、この時点ではまだ`Commit`は実行しません。IPv4行
+(`family`が`ipv4`)がすでに登録済みであることも、ルールベース上で確認して
+おきます。
+
+### 5. 変更を確定する(commit)
+
+`Commit`を実行し、候補設定(candidate config)を実行中の設定(running
+config)へ反映します。commitが完了するまで、手順2〜4で入力した内容は実機の
+動作に反映されません。
+
+### 6. test security-policy-matchとTraffic logでIPv4/IPv6双方を検証する
+
+CLIから`test security-policy-match`を実行し、シナリオ設定の`allow`行が
+IPv4・IPv6のどちらもそれぞれ意図したルールに一致することを確認します。
+
+```bash
+{% for r in csv_rows %}{% if r["action"] == "allow" %}test security-policy-match application {{ r["application"] }} source {{ r["test_src"] }} destination {{ r["destination"] }} destination-port {{ r["std_port"] }} protocol {{ r["proto_num"] }}
+{% endif %}{% endfor %}```
+
+出力に一致したルール名(`ALLOW-HTTPS-DMZ-V4`/`ALLOW-HTTPS-DMZ-V6`など)と
+そのAction・from/toゾーンが表示されるので、シナリオ設定の対応する行と一致
+するか、また同じ`pair_id`のIPv4/IPv6両方で同じActionになっているかを確認
+します。
+
+続けて、シナリオ設定に存在しない宛先宛のIPv4・IPv6通信が、いずれも
+`interzone-default`に一致しdenyとなることも確認します。
+
+```bash
+test security-policy-match application web-browsing source 198.51.100.99 destination 203.0.113.99 destination-port 80 protocol 6
+test security-policy-match application web-browsing source 2001:db8:2::99 destination 2001:db8:1:10::99 destination-port 80 protocol 6
+```
+
+出力に一致したルール名として、IPv4・IPv6どちらの場合も`interzone-default`
+が表示され、Actionが`deny`になっていることを確認します。
+
+最後に、`Monitor > Logs`を開いて`Traffic`ログ種別を選び、フィルタ欄に
+`( rule eq interzone-default )`と入力して`Apply Filter`を実行し、IPv4・
+IPv6双方の拒否ログが記録されているかを確認します。
+
+## 動作確認
+
+- `Device > Setup > Session`で`IPv6 Firewalling`が有効化されていること
+- `test security-policy-match`で、シナリオ設定の`allow`行(IPv4・IPv6の
+  両方)がそれぞれ対応するルール名に一致し、Actionが`allow`であること
+- 同じ`pair_id`のIPv4行とIPv6行が、いずれも同じApplication・Actionで一致
+  していること(IPv4/IPv6でルールの粒度がずれていないこと)
+- `test security-policy-match`で、シナリオ設定に存在しない宛先宛の通信が
+  IPv4・IPv6のどちらも`interzone-default`に一致し、Actionが`deny`である
+  こと
+- `Monitor > Logs`の`Traffic`ログで、フィルタ`( rule eq interzone-default
+  )`によりIPv4・IPv6双方の拒否通信が記録されていること
+- `Policies > Security`のName列で、シナリオ設定の`allow`行が
+  `interzone-default`より上位(評価順で先)に並んでいること
+
+## 注意事項
+
+- **IPv6 Firewallingを有効化しない限り、IPv6のaddress objectやルールを
+  登録してもPAN-OSはそれを無視します。** 手順2を先に行わないと、手順3・4
+  の設定が実機の動作に反映されているように見えて、実際には何も検証できて
+  いない状態になります。
+- **`any6`というIPv6専用オブジェクトは存在しません。** 既存のIPv4ルールで
+  `Source Address`/`Destination Address`が`any`のままの場合、IPv6
+  Firewalling有効化後はそのルールがIPv6通信にも一致するようになります。
+  IPv4専用に維持したいルールがある場合は、`any`のままにせず明示的な
+  IPv4 address objectへ変更する必要があります。
+- **interzone-defaultのActionを変更しないこと。** Overrideできるのは
+  タグ・アクション・ログ設定・セキュリティプロファイルのみですが、この
+  手順ではinterzone-defaultへの変更自体を行いません。IPv4/IPv6どちらの
+  意図しない通信も、既定のまま`interzone-default`によって拒否されることが
+  このパリティ確保の前提です。
+- `Commit`を実行するまでcandidate configはrunning configに反映されません。
+  手順2〜4で入力した内容は、手順5のcommitまで実機の動作に影響しません。
+- ルール評価は上から順・最初に一致した1件のみが適用されるため、IPv6の
+  許可ルールも`interzone-default`より上位に登録してください。
+- `untrust`/`dmz`はこの手順書内の仮称であり、実際の環境に存在するゾーン名
+  に読み替えてください。

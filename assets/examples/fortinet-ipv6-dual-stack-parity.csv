@@ -1,0 +1,7 @@
+rule_no,name,ip_version,srcintf,dstintf,action,srcaddr,dstaddr,service,pair_key,description
+1,allow-dmz-https-v4,v4,wan1,dmz,accept,all,dmz-web-server,svc-dmz-https,-,DMZ Webサーバへの HTTPS 着信を許可(IPv4)
+2,allow-dmz-https-v6,v6,wan1,dmz,accept,all,dmz-web-server-v6,svc-dmz-https,allow-dmz-https-v4,DMZ Webサーバへの HTTPS 着信を許可(IPv6、IPv4版とのペア)
+3,allow-vpn-udp-v4,v4,wan1,dmz,accept,all,vpn-gateway,svc-vpn-wireguard,-,拠点間VPNトンネル終端への着信を許可(IPv4)
+4,allow-vpn-udp-v6,v6,wan1,dmz,accept,all,vpn-gateway-v6,svc-vpn-wireguard,allow-vpn-udp-v4,拠点間VPNトンネル終端への着信を許可(IPv6、IPv4版とのペア)
+5,explicit-default-deny-v4,v4,wan1,dmz,deny,all,all,ALL,-,明示的デフォルト拒否(IPv4、暗黙拒否と同じ効果をログに残す)
+6,explicit-default-deny-v6,v6,wan1,dmz,deny,all,all,ALL,-,明示的デフォルト拒否(IPv6、暗黙拒否と同じ効果をログに残す)

@@ -1,0 +1,25 @@
+wan_interface = "wan"
+alias_name = "THREAT_INTEL_BLOCKLIST"
+alias_descr = "External threat intel IP blocklist (URL Table)"
+refresh_frequency_days = 1
+block_rule_descr = "BLOCK-THREAT-INTEL-INBOUND"
+legacy_rule_descr = "TEMP-ALLOW-ALL-WAN-INBOUND"
+config_backup_note = "config.xml"
+
+[[feeds]]
+source = "FireHOL"
+name = "firehol_level1"
+url = "https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level1.netset"
+note = "-"
+
+[[feeds]]
+source = "Spamhaus"
+name = "spamhaus_drop"
+url = "https://www.spamhaus.org/drop/drop.txt"
+note = "利用前にSpamhausの利用規約(商用利用条件)を確認"
+
+[[feeds]]
+source = "Spamhaus"
+name = "spamhaus_edrop"
+url = "https://www.spamhaus.org/drop/edrop.txt"
+note = "-"

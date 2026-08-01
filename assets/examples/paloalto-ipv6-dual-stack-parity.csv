@@ -1,0 +1,6 @@
+rule_no,pair_id,name,family,from_zone,to_zone,source,destination,application,proto_num,std_port,test_src,action,description
+1,1,ALLOW-HTTPS-DMZ-V4,ipv4,untrust,dmz,any,203.0.113.10/32,ssl,6,443,198.51.100.50,allow,公開WebサーバーへのHTTPS着信を許可(IPv4)
+2,1,ALLOW-HTTPS-DMZ-V6,ipv6,untrust,dmz,any,2001:db8:1:10::10/128,ssl,6,443,2001:db8:2::50,allow,公開WebサーバーへのHTTPS着信を許可(IPv6・IPv4行と同一の許可条件)
+3,2,ALLOW-DNS-DMZ-V4,ipv4,untrust,dmz,any,203.0.113.11/32,dns-base,17,53,198.51.100.51,allow,公開DNSサーバーへの名前解決要求を許可(IPv4)
+4,2,ALLOW-DNS-DMZ-V6,ipv6,untrust,dmz,any,2001:db8:1:10::11/128,dns-base,17,53,2001:db8:2::51,allow,公開DNSサーバーへの名前解決要求を許可(IPv6・IPv4行と同一の許可条件)
+5,-,interzone-default,dual,any,any,any,any,any,-,-,-,deny,既定のinterzone-default(IPv4/IPv6共通で全interzone通信を拒否・読み取り専用のため新規作成しない)

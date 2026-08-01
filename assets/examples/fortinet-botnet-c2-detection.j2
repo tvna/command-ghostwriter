@@ -1,0 +1,185 @@
+# FortiGateのBotnet C&C(コマンド&コントロール)通信検知・遮断構成
+
+マルウェアに感染した端末が外部のC2サーバーと通信するのを検知・遮断するため、
+FortiGate (FortiOS) のIPS Sensorに用意されているBotnet C&C IP blocking
+(`scan-botnet-connections`)を有効化します。IPS Sensor単体を作成しただけでは
+効果がなく、既存のLAN側インターフェース`{{ lan_interface }}`からWAN側
+インターフェース`{{ wan_interface }}`への通信を許可しているFirewall Policy
+(`{{ policy_name }}`)にこのIPS Sensorを適用して初めて、outbound通信が
+Fortinetのボットネットcommand-and-controlのIPデータベースと照合されるように
+なります。GUIとCLIの両方の手順を併記し、最後にログでの検知状況を確認します。
+
+## 目的
+
+既存のLANからWANへのインターネットアクセスを許可しているFirewall Policyに
+Botnet C&C IP blockingを組み込んだIPS Sensorを適用し、感染端末が外部のC2
+サーバーへ発信するoutbound通信を検知・遮断できるようになることを目指します。
+あわせて、IPS Sensorの作成だけでは検知が働かないというFortiOSの仕組みを理解
+し、GUI・CLIのどちらからでも同じ構成を再現し、Log & Reportでの検知状況を
+確認できるようになることを目指します。
+
+## 用語解説
+
+- **C2(コマンド&コントロール)サーバー**: マルウェアに感染した端末が外部から
+  指令を受け取ったり窃取した情報を送信したりするために接続する、攻撃者側の
+  サーバー。感染端末からこのサーバーへのoutbound通信を検知・遮断すること
+  で、被害の拡大を防ぐ
+- **IPS Sensor(config ips sensor)**: FortiOSのIntrusion Prevention機能の
+  設定をまとめるオブジェクト。GUIでは`Security Profiles > Intrusion
+  Prevention`、CLIでは`config ips sensor`で作成する。Firewall Policyに
+  適用して初めて、そのポリシーを通過する通信がスキャン対象になる
+- **Botnet C&C(IPS Sensor内のセクション)/ Scan Outgoing Connections to
+  Botnet Sites**: IPS Sensorの編集画面にある設定項目。FortiOS 6.2.0以降、
+  従来はインターフェースやFirewall Policy単位で個別に持っていたBotnet C&C
+  関連の設定が、IPS Profile(IPS Sensor)内のこの1項目に統合された。GUIでは
+  `Block`または`Monitor`を選択する
+- **scan-botnet-connections(CLIパラメータ)**: 上記のGUI設定に対応する
+  `config ips sensor`配下のCLIパラメータ。`disable` / `block` / `monitor`
+  のいずれかを設定する。`block`は検知した通信を遮断してログに記録し、
+  `monitor`は遮断せずログにのみ記録する
+- **ips-sensor / utm-status(Firewall PolicyのCLIフィールド)**:
+  `config firewall policy`配下のフィールド。`set utm-status enable`で
+  そのポリシーのセキュリティプロファイル検査を有効化し、`set ips-sensor`
+  で適用するIPS Sensor名を指定する。GUIではFirewall Policy編集画面の
+  `Security Profiles`欄で`IPS`を有効にしてIPS Sensorを選択する操作に対応
+  する
+- **Log & Report > Intrusion Prevention**: Botnet C&C検知を含むIPSログを
+  確認するGUIメニュー。通信をブロックまたは検知した場合にログが記録される
+
+## シナリオ設定
+
+今回、Botnet C&C IP blockingを組み込むIPS Sensorと、それを適用する既存の
+Firewall Policyの設定値は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| LAN側インターフェース(lan_interface) | `{{ lan_interface }}` |
+| WAN側インターフェース(wan_interface) | `{{ wan_interface }}` |
+| 適用先のFirewall Policy名(policy_name) | `{{ policy_name }}` |
+| 適用先のFirewall Policy ID(policy_id) | {{ policy_id }} |
+| IPS Sensor名(ips_sensor_name) | `{{ ips_sensor_name }}` |
+| Botnet C&C検知時の動作(botnet_action) | `{{ botnet_action }}` |
+| 保護対象のLANサブネットのアドレスオブジェクト名(lan_subnet_name) | `{{ lan_subnet_name }}` |
+
+`{{ policy_name }}`(ID `{{ policy_id }}`)は、`{{ lan_subnet_name }}`配下の
+端末が`{{ lan_interface }}`から`{{ wan_interface }}`経由でインターネットへ
+アクセスするための既存のFirewall Policyであることを前提とします(このポリ
+シー自体の新規作成は本手順書の対象外です)。
+
+## 手順
+
+### 1. 現状のIPS SensorとFirewall Policyの設定を確認する(変更前の基準を取る)
+
+新しいIPS Sensorを作成する前に、現状を確認します。
+
+- `Security Profiles > Intrusion Prevention`を開き、`{{ ips_sensor_name }}`
+  と同名のIPS Sensorが存在しないことを確認します。
+- CLIで対象ポリシーの現在の設定を確認し、`utm-status`と`ips-sensor`の値を
+  記録しておきます(この値が変更前の基準になります)。
+
+```bash
+show firewall policy {{ policy_id }}
+```
+
+### 2. IPS SensorをGUIで作成し、Botnet C&Cを設定する
+
+1. `Security Profiles > Intrusion Prevention`を開き、`Create New`をクリック
+   します。
+2. `Name`に`{{ ips_sensor_name }}`を入力します。
+3. `Botnet C&C`セクションの`Scan Outgoing Connections to Botnet Sites`を
+   `{{ botnet_action | capitalize }}`に設定します。
+4. `OK`をクリックして保存します。
+
+### 3. 同じIPS SensorをCLIでも作成する
+
+GUIと同じ内容を、`config ips sensor`でも登録します。
+
+```bash
+config ips sensor
+    edit "{{ ips_sensor_name }}"
+        set scan-botnet-connections {{ botnet_action }}
+    next
+end
+```
+
+この時点ではIPS Sensorを作成しただけで、どのFirewall Policyにも適用されて
+いません。手順4でFirewall Policyに適用するまで、`{{ policy_name }}`を通過
+する通信はBotnet C&Cのスキャン対象になりません。
+
+### 4. 対象のFirewall PolicyにIPS Sensorを適用する
+
+GUI:
+
+1. `Policy & Objects > Firewall Policy`を開き、`{{ policy_name }}`
+   (ID `{{ policy_id }}`)を編集します。
+2. `Security Profiles`欄の`IPS`を有効にし、`{{ ips_sensor_name }}`を選択
+   します。
+3. `OK`をクリックして保存します。
+
+CLI:
+
+```bash
+config firewall policy
+    edit {{ policy_id }}
+        set utm-status enable
+        set ips-sensor "{{ ips_sensor_name }}"
+    next
+end
+```
+
+{%- if botnet_action == "block" %}
+`{{ botnet_action }}`を選択しているため、`{{ lan_subnet_name }}`配下の端末
+が既知のBotnet C&C宛先へ通信しようとすると、その通信自体が遮断されたうえで
+ログに記録されます。
+{%- elif botnet_action == "monitor" %}
+`{{ botnet_action }}`を選択しているため、`{{ lan_subnet_name }}`配下の端末
+が既知のBotnet C&C宛先へ通信しても通信そのものは遮断されず、ログにのみ記録
+されます。
+{%- endif %}
+
+### 5. IPSログでBotnet C&C検知の記録状況を確認する
+
+設定変更後、通常のインターネットアクセスをそのまま継続させ、一定期間
+(例: 24時間)経過後に`Log & Report > Intrusion Prevention`を開きます。
+
+- Sourceが`{{ lan_subnet_name }}`配下のホストであるログの有無を確認しま
+  す。感染端末が存在しない場合、この時点でログが0件でも問題ありません。
+- 意図的に既知のC2アドレスへ接続して検知動作を試すことは行わないでくだ
+  さい。実在するC2サーバーへの接続は、たとえ検証目的でも新たなセキュリ
+  ティリスクになります。
+
+## 動作確認
+
+- `Security Profiles > Intrusion Prevention`の一覧に`{{ ips_sensor_name }}`
+  が表示され、`Botnet C&C`の`Scan Outgoing Connections to Botnet Sites`が
+  `{{ botnet_action | capitalize }}`になっていること
+- `Policy & Objects > Firewall Policy`の`{{ policy_name }}`
+  (ID `{{ policy_id }}`)の`Security Profiles`欄に`{{ ips_sensor_name }}`が
+  表示され、`IPS`が有効になっていること
+- CLIで`show firewall policy {{ policy_id }}`を実行した出力に
+  `set utm-status enable`と`set ips-sensor "{{ ips_sensor_name }}"`が含ま
+  れていること
+- `Log & Report > Intrusion Prevention`が参照可能で、`{{ lan_subnet_name }}`
+  配下のホストの通信がスキャン対象になっていること(実際の検知有無は感染
+  状況に依存するため、ログの有無自体は合否判定に用いない)
+- 手順1で確認した既存のIPS Sensor一覧・Firewall Policyの設定が、意図せず
+  変更されていないこと
+
+## 注意事項
+
+- **IPS Sensorの作成だけでは検知は働きません。** IPS SensorはBotnet C&C
+  IP blockingの設定をまとめたオブジェクトであり、実際にスキャンが行われる
+  のは手順4でFirewall Policyに適用した後です。手順3までしか実施していない
+  状態を「設定した」と判断しないでください。
+- **`Block`は通信そのものを遮断します。** 誤検知が発生した場合、
+  `{{ lan_subnet_name }}`配下の正常な業務通信まで遮断される可能性がありま
+  す。本番環境で`block`を選択する前に、まず`Monitor`で一定期間ログのみを
+  確認し、業務通信への影響がないことを確かめてから`Block`へ切り替える運用
+  を推奨します。
+- 意図的に既知のC2サーバーへ接続して検知動作を確認することは行わないでく
+  ださい。検証目的であっても実在する攻撃者インフラへの通信は新たなリスク
+  になります。
+- CLI/GUIへのログインに使う管理者パスワードやAPIトークンは、本手順書や
+  チケット、ログに平文で残さないでください。記録が必要な場合は
+  `********`のようにマスクし、秘密管理ツール等で別途安全に保管してくだ
+  さい。

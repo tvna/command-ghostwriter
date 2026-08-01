@@ -1,0 +1,20 @@
+ips_interface = "wan"
+lan_network = "10.0.20.0/24"
+observation_days = 3
+policy_descr = "BOTNET-C2-DROP"
+policy_priority = 1
+
+[[rulesets]]
+name = "abuse.ch Feodo Tracker"
+file = "abuse.ch.feodotracker.rules"
+target = "Feodo(Cridex/Bugat)系バンキング型マルウェアのC2サーバー"
+
+[[rulesets]]
+name = "abuse.ch SSL Blacklist"
+file = "abuse.ch.sslblacklist.rules"
+target = "マルウェア/ボットネット通信に使われる不正なSSL証明書"
+
+[[rulesets]]
+name = "abuse.ch ThreatFox"
+file = "abuse.ch.threatfox.rules"
+target = "各種マルウェアのC2 IOC(IPアドレス・ドメイン等)"

@@ -1,0 +1,261 @@
+# SonicWall (SonicOS) 外部脅威インテリジェンスフィード連携によるBotnet自動遮断
+
+SonicOSの`POLICY | Rules and Policies > Settings > Botnet`にある`Dynamic Botnet
+List`タブへ、外部の脅威インテリジェンスフィード配信サーバー
+`{{ server_ip }}`のディレクトリパス`{{ directory_path }}`・ファイル名
+`{{ file_name }}`を登録し、`{{ download_interval }}`間隔での定期ダウンロード
+を有効にします。あわせて`Settings`タブでBotnet Filteringのブロックモードを
+`{{ block_mode }}`に設定し、`Custom Botnet List`で誤検知時の例外を、
+`Settings > GEO-IP`で地域単位のブロックをそれぞれ構成することで、外部フィー
+ドの内容を継続的にファイアウォールポリシーへ反映し、既知の悪性IPを自動遮断
+します。
+
+## 目的
+
+外部脅威インテリジェンスフィードの内容(既知の悪性IP一覧)を、手作業でのAddress
+Objectメンテナンスに頼らず、SonicOSのDynamic Botnet List機構を用いて定期的
+に自動取得し、ファイアウォールポリシーへ反映して自動遮断できるようになるこ
+とを目指します。あわせて、ブロックモード(`All Connections`/
+`Firewall Rule-Based Connections`)の違い、Custom Botnet Listが動的リストより
+優先されるという評価順序、GeoIP Filterによる地域単位ブロックとの組み合わせ
+方を理解し、GUIから同じ構成を再現し、設定が意図どおり反映されていることを確
+認できるようになることを目指します。
+
+## 用語解説
+
+- **Botnet Filter**: SonicOSがBotnet Command and Controlサーバーとの通信を
+  検知・遮断するセキュリティサービス。既知の悪性IPアドレスの一覧(Botnetリス
+  ト)と実際の通信を突き合わせて判定する
+- **Dynamic Botnet List**: `POLICY | Rules and Policies > Settings > Botnet`
+  の`Dynamic Botnet List`タブで設定する、外部サーバーからBotnetリストファイ
+  ル(IPアドレスを改行区切りで列挙した`.txt`ファイル)を定期的にダウンロード
+  する機構。`Enable botnet list download periodically`を有効にした上で、
+  `Server IP Address`(配信元サーバーのIPアドレス)・`Directory Path`(ルー
+  トディレクトリからの相対パス)・`File Name`(ダウンロード対象のファイル
+  名)・プロトコル(HTTPS/FTP)・`Download Interval`(ダウンロード間隔。
+  `5 minutes`が既定値で、ほかに`15 minutes`/`1 hour`/`24 hours`を選択でき
+  る)を指定する
+- **Settings タブ(Botnet Settings)**: `POLICY | Rules and Policies >
+  Settings > Botnet`の`Settings`タブ。`Block connections to/from Botnet
+  Command and Control Servers`を有効にした上で、ブロックモードとして
+  `All Connections`(ファイアウォールを通過する全接続を対象とする既定モー
+  ド)または`Firewall Rule-Based Connections`(Access Ruleでマッチした接続
+  のみを対象とするモード)のいずれかを選択する。`Block all connections to
+  public IPs if BOTNET DB is not downloaded`(Botnet DB未取得時に全公開IP宛
+  通信を遮断する)・`Enable Custom Botnet List`・`Enable Logging`も同タブで
+  設定する
+- **BotNet/CC(Access Ruleの Security Profiles)**: `Firewall Rule-Based
+  Connections`モードを選択した場合、Botnet Filterの適用対象は自動的にはなら
+  ず、対象としたいAccess Ruleの`Security Profiles`タブで`BotNet/CC`オプショ
+  ンを有効にしたルールを通過する接続だけが判定対象になる
+- **Custom Botnet List**: `POLICY | Rules and Policies > Settings > Botnet`
+  の`Custom Botnet List`タブで管理する例外リスト。`Enable Custom Botnet
+  List`を有効にすると、このリストがDynamic Botnet Listより優先され、
+  Dynamic Botnet List上は悪性と判定されるIPアドレスでも、Custom Botnet
+  Listで「Botnetではない」と登録されていれば通信が許可される。誤検知(フォ
+  ールスポジティブ)の一時的なオーバーライドに用いる
+- **GEO-IP Filter**: `POLICY | Rules and Policies > Settings > GEO-IP`の
+  `Settings`タブで`Block connections to/from countries`を有効にし、
+  `Countries`タブで遮断対象の国をチェックボックスで選択することで、国・地
+  域単位の通信ブロックを構成する機構。`Geo-IP Exclusion Object`に業務上除
+  外したい接続先を指すAddress Object(グループ)を指定すると、そのオブジェ
+  クトに含まれるIPアドレスは遮断対象国からの通信であってもGeo-IP Filterの
+  ブロック対象から除外される
+
+## シナリオ設定
+
+今回、外部脅威インテリジェンスフィードと連携するBotnet自動遮断の設定値は次
+のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| フィード識別名(feed_name) | `{{ feed_name }}` |
+| フィード配信サーバーIPアドレス(server_ip) | `{{ server_ip }}` |
+| プロトコル(protocol) | `{{ protocol }}` |
+| ディレクトリパス(directory_path) | `{{ directory_path }}` |
+| ファイル名(file_name) | `{{ file_name }}` |
+| ダウンロード間隔(download_interval) | `{{ download_interval }}` |
+| 認証要否(auth_required) | {{ auth_required }} |
+| ブロックモード(block_mode) | `{{ block_mode }}` |
+| BotNet/CCを有効化するAccess Rule名(bot_access_rule_name) | `{{ bot_access_rule_name }}` |
+| DB未取得時に公開IP宛を遮断(block_public_if_db_missing) | {{ block_public_if_db_missing }} |
+| ロギング有効化(enable_logging) | {{ enable_logging }} |
+| Custom Botnet List有効化(enable_custom_list) | {{ enable_custom_list }} |
+| 誤検知オーバーライド対象IP(custom_list_ip) | `{{ custom_list_ip }}` |
+| オーバーライド理由(custom_list_reason) | {{ custom_list_reason }} |
+| GeoIP Filter有効化(geoip_enabled) | {{ geoip_enabled }} |
+| GeoIPブロック対象国(geoip_block_countries) | {{ geoip_block_countries | join(', ') }} |
+| GeoIP除外用Address Object(geoip_exclusion_object) | `{{ geoip_exclusion_object }}` |
+
+{% if auth_required %}
+`{{ server_ip }}`への接続に認証が必要な場合、`Dynamic Botnet List`タブの
+Username/Password欄を使用しますが、実際の認証情報は本手順書には記載しませ
+ん。設定時は`********`のようなマスク値で記録し、実値は秘密管理ツール等から
+直接入力してください。
+{% endif %}
+
+## 手順
+
+### 1. 現状のBotnet Filter設定を確認する(変更前の基準を取る)
+
+新しい設定を投入する前に、現状を確認します。
+
+- `POLICY | Rules and Policies > Settings > Botnet`の`Dynamic Botnet List`
+  タブを開き、`Enable botnet list download periodically`が無効(既定)であ
+  ること、`Server IP Address`/`Directory Path`/`File Name`が未設定である
+  ことを確認します。
+- 同メニューの`Settings`タブを開き、`Block connections to/from Botnet
+  Command and Control Servers`の現在の有効/無効状態と、有効な場合の現在の
+  ブロックモードを記録します。
+- `Custom Botnet List`タブを開き、`{{ custom_list_ip }}`と同じIPアドレスの
+  エントリが既に存在しないことを確認します。
+{% if geoip_enabled %}
+- `POLICY | Rules and Policies > Settings > GEO-IP`の`Settings`タブを開き、
+  `Block connections to/from countries`の現在の有効/無効状態を記録します。
+{% endif %}
+
+### 2. Dynamic Botnet Listのサーバー設定を行う
+
+`POLICY | Rules and Policies > Settings > Botnet`の`Dynamic Botnet List`タブ
+で次の値を入力します。
+
+- Server IP Address: `{{ server_ip }}`
+- Directory Path: `{{ directory_path }}`
+- File Name: `{{ file_name }}`
+- Protocol: `{{ protocol }}`
+- Download Interval: `{{ download_interval }}`
+
+すべて入力したら`Enable botnet list download periodically`にチェックを入
+れ、`Accept`(または`Save`)をクリックして保存します。この時点でBotnetリス
+トの定期ダウンロードは開始されますが、手順3でブロック機能自体を有効にする
+までは、取得したリストに基づく遮断は行われません。
+
+### 3. Botnet Filteringのブロックモードを設定する
+
+`Settings`タブを開き、次の値を設定して保存します。
+
+- Block connections to/from Botnet Command and Control Servers: 有効
+- ブロックモード: `{{ block_mode }}`
+{% if block_public_if_db_missing %}
+- Block all connections to public IPs if BOTNET DB is not downloaded: 有効
+{% endif %}
+{% if enable_logging %}
+- Enable Logging: 有効
+{% endif %}
+
+{% if block_mode == "Firewall Rule-Based Connections" %}
+### 4. Firewall Rule-Based Connections用にAccess RuleでBotNet/CCを有効にする
+
+`{{ block_mode }}`モードでは、Access Ruleでマッチした接続のみがBotnet Filter
+の判定対象になります。`POLICY | Rules and Policies > Access Rules`を開き、
+`{{ bot_access_rule_name }}`を編集して`Security Profiles`タブの`BotNet/CC`
+オプションを有効にし、`Save`をクリックします。このAccess Ruleを通過しない
+接続は、Dynamic Botnet Listに登録された悪性IPであっても本設定では遮断され
+ません。
+{% else %}
+### 4. ブロックモードが`All Connections`であることを確認する
+
+`{{ block_mode }}`モードでは、ファイアウォールを通過する全接続が判定対象に
+なるため、個別のAccess Ruleへ`BotNet/CC`オプションを追加する必要はありませ
+ん。手順3で設定したモードが`All Connections`になっていることを再確認してく
+ださい。
+{% endif %}
+
+{% if enable_custom_list %}
+### 5. Custom Botnet Listで誤検知時の例外を登録する
+
+`Custom Botnet List`タブを開き、`+Add`をクリックして次の値を入力し、
+`Save`をクリックします。
+
+- IP Address: `{{ custom_list_ip }}`
+- 判定: 「Botnetではない」
+- Comment: {{ custom_list_reason }}
+
+登録後、`Settings`タブで`Enable Custom Botnet List`にチェックを入れて保存し
+ます。有効化すると、このCustom Botnet ListがDynamic Botnet Listより優先さ
+れるため、`{{ custom_list_ip }}`がDynamic Botnet List側で悪性と判定されて
+いても通信が許可されます。
+{% endif %}
+
+{% if geoip_enabled %}
+### 6. GEO-IP Filterで地域単位のブロックを設定する
+
+`POLICY | Rules and Policies > Settings > GEO-IP`の`Settings`タブを開き、
+`Block connections to/from countries`を有効にします。`Geo-IP Exclusion
+Object`には、地域ブロックの対象から除外したい接続先を指す既存のAddress
+Objectグループ`{{ geoip_exclusion_object }}`を指定します(このAddress
+Objectグループ自体の作成は本手順書の対象外です)。続いて`Countries`タブを
+開き、次の国のチェックボックスを選択して`Accept`をクリックします。
+
+{% for country in geoip_block_countries %}
+- {{ country }}
+{% endfor %}
+{% endif %}
+
+### 7. 設定を保存し、Botnetリストの取得状況を確認する
+
+`Dynamic Botnet List`タブを再度開き、設定した`Server IP Address`/
+`Directory Path`/`File Name`/`Download Interval`の値が保存されていること、
+およびダウンロードがエラーなく完了していることを画面上で確認します。エラー
+が表示されている場合は、`{{ server_ip }}`への到達性(ネットワーク経路・
+{{ protocol }}でのアクセス可否)を確認してから再度保存し直してください。
+
+## 動作確認
+
+- `Dynamic Botnet List`タブに設定値(`{{ server_ip }}`/`{{ directory_path }}`/
+  `{{ file_name }}`/`{{ download_interval }}`)が表示され、直近のダウンロー
+  ドがエラーなく完了していること
+- `Settings`タブで`Block connections to/from Botnet Command and Control
+  Servers`が有効、ブロックモードが`{{ block_mode }}`になっていること
+{% if block_mode == "Firewall Rule-Based Connections" %}
+- `POLICY | Rules and Policies > Access Rules`の`{{ bot_access_rule_name }}`
+  を開き、`Security Profiles`タブの`BotNet/CC`が有効になっていること
+{% endif %}
+{% if enable_custom_list %}
+- `Custom Botnet List`タブに`{{ custom_list_ip }}`のエントリが存在し、
+  `Enable Custom Botnet List`が有効になっていること。あわせて
+  `{{ custom_list_ip }}`宛/発の通信がこの設定変更後も遮断されていないこと
+  を、実際の通信(該当サービスへの疎通確認)で確認すること
+{% endif %}
+{% if geoip_enabled %}
+- `POLICY | Rules and Policies > Settings > GEO-IP`の`Countries`タブで、
+  {{ geoip_block_countries | join(', ') }}が選択された状態になっていること
+- `Geo-IP Exclusion Object`(`{{ geoip_exclusion_object }}`)に含まれる接続
+  先が、地域ブロックの対象国からの通信であっても遮断されていないこと
+{% endif %}
+- 手順1で記録した変更前の設定(既存のブロックモード、GEO-IP設定の有効/無効
+  状態)と比較し、意図しない項目まで変更されていないこと
+
+## 注意事項
+
+- **Dynamic Botnet Listの定期ダウンロードを有効にしただけでは遮断されませ
+  ん。** 手順3で`Block connections to/from Botnet Command and Control
+  Servers`を有効にするまで、取得したリストに基づく遮断は行われません。
+- **`Firewall Rule-Based Connections`モードでは、Access Ruleの`BotNet/CC`
+  を有効にしたルールを通過する接続だけが判定対象です。** 意図した通信が
+  `{{ bot_access_rule_name }}`以外のAccess Ruleを通過している場合、Botnet
+  Filterは適用されません。全接続を対象にしたい場合は`All Connections`モー
+  ドを選択してください。
+- **Custom Botnet ListはDynamic Botnet Listより優先されます。** 誤検知の解
+  除以外の目的でCustom Botnet Listへ安易にIPアドレスを追加すると、本来遮断
+  すべき悪性IPからの通信を誤って許可し続けるおそれがあります。`Comment`に
+  はオーバーライドの理由を必ず記録し、定期的に棚卸ししてください。
+- **ダウンロード間隔(`{{ download_interval }}`)は取得済みリストの鮮度と、
+  外部サーバーへの負荷・回線トラフィックのトレードオフです。** 頻度を上げ
+  るほどフィードの反映は早くなりますが、対象サーバー側の配布ポリシーやアプ
+  ライアンスの負荷も考慮して選択してください。
+{% if geoip_enabled %}
+- **GEO-IP Filterの`Geo-IP Exclusion Object`に指定漏れがあると、業務上必要
+  な接続まで地域ブロックの対象になります。** {{ geoip_block_countries | join(', ') }}
+  を遮断対象国に含める前に、当該国を経由する正規の通信経路がないか確認して
+  ください。
+{% endif %}
+- 認証情報(Dynamic Botnet Listの認証に用いるユーザー名・パスワード等)は、
+  本手順書やチケット、ログに平文で残さないでください。記録が必要な場合は
+  `********`のようにマスクし、秘密管理ツール等で別途安全に保管してくださ
+  い。
+- 本手順書は一次情報(SonicOS技術ドキュメントのBotnet Filter設定関連ページ)
+  で確認できたGUI操作のみを扱います。SonicOS CLIやAPIによる同等の投入方法
+  は本ページでは確認できなかったため記載していません。CLIやAPIで投入する
+  場合は、別途SonicOSのCLI/APIリファレンスで構文を確認してから実施してく
+  ださい。

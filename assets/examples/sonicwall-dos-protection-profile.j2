@@ -1,0 +1,167 @@
+# SonicWall (SonicOS) DoS/DDoS Flood Protection の閾値・モード調整
+
+`NETWORK | Firewall | Flood Protection` の `{{ flood_protections | length }}` 種類
+(TCP/UDP/ICMP)のFlood Protectionについて、WANインターフェース
+`{{ wan_interface_name }}`(Zone: `{{ wan_zone }}`)向けの Attack Threshold と
+(SYNのみ)Protection Modeを、通常運用トラフィックの観測ピークを踏まえて
+調整し、SYNフラッド等のDoS/DDoS攻撃の検知・緩和と、正常な通信への誤検知
+(過剰遮断)回避の両立を図ります。
+
+## 目的
+
+SonicOSのFlood Protection(TCP Layer 3 SYN Flood Protection - SYN Proxy /
+UDP Flood Protection / ICMP Flood Protection)が持つ Attack Threshold と
+Protection Modeという既存の設定項目のみを使って、DoS/DDoS攻撃を検知・
+緩和しつつ正常な通信を過剰に遮断しないようにする調整の進め方を身につける
+ことを目指します。外部の監視スクリプトや自作の遮断ツールを新たに用意する
+のではなく、SonicOS自身が持つ閾値・モードの調整だけで運用課題に対応する
+点を確認します。
+
+## 用語解説
+
+- **NETWORK | Firewall | Flood Protection**: Flood Protectionの各種設定を
+  行う管理画面ナビゲーションパス。`TCP` / `UDP` の各タブから、プロトコル
+  ごとのFlood Protection設定を開く
+- **TCP タブ(Layer 3 SYN Flood Protection - SYN Proxy)**: `NETWORK |
+  Firewall | Flood Protection` の `TCP` タブにある設定項目。半開き
+  (half-opened)のTCPセッションや高頻度のSYNパケット送信からネットワーク
+  を保護する
+- **SYN Flood Protection Mode**: TCPタブで選択するSYNフラッド対策の
+  動作モード。一次情報で確認できる3種類は次のとおり
+  - `Watch and Report Possible SYN Floods`: SYN Proxyを有効化せず、全
+    インターフェースのSYNトラフィックを監視して閾値超過時にログへ記録
+    するのみの、最も影響の少ないモード
+  - `Proxy WAN Client Connections When Attack is Suspected`: 攻撃が疑わ
+    れる(閾値超過を検知した)場合にのみSYN Proxyを有効化するモード
+  - `Always Proxy WAN Client Connections`: 常時SYN Proxyを有効化し、
+    スプーフィングされたSYNパケットをすべて遮断する、最も厳格なモード
+- **SYN Flood Attack Threshold**: TCPタブでSYNフラッドとみなす、秒あたりの
+  不完全な接続試行数のしきい値。一次情報が示す設定可能範囲は 5〜200,000
+  であり、機器はWAN TCP接続の最大値・平均値の統計をもとに推奨値を提示する
+- **UDP タブ(UDP Flood Protection)**: `NETWORK | Firewall | Flood
+  Protection` の `UDP` タブにある設定項目。ホスト/レンジ/サブネット宛の
+  UDPパケットが閾値(UDP Flood Attack Threshold)を超えると、それ以降の
+  UDPパケットを破棄する
+- **UDP > ICMP > IPv4 タブ(ICMP Flood Protection)**: `UDP` タブの中にある
+  `ICMP` > `IPv4` サブタブ。UDP Flood Protectionと同様の仕組みで、ICMPv4
+  パケットの流量を監視する。ICMP Flood Attack Thresholdの一次情報上の範囲
+  は 10〜100,000(既定値200)
+- **Attack Threshold(共通)**: TCP/UDP/ICMPいずれのタブにも存在する、秒
+  あたりのパケット数/接続数のしきい値設定欄。本手順書ではこの値と(SYNの
+  み)Protection Modeのみを変更し、それ以外の設定は変更しません
+
+## シナリオ設定
+
+WANインターフェース `{{ wan_interface_name }}`(Zone: `{{ wan_zone }}`)の
+Flood Protectionについて、現在の閾値・変更後の閾値・直近で観測した通常
+トラフィックのピーク値は次のとおりです。
+
+| # | 対象 | 画面タブ | 現在の閾値 | 変更後の閾値 | 観測した通常ピーク | SYN Flood Protection Mode | 理由 |
+|---|------|---------|-----------|-------------|-------------------|---------------------------|------|
+{% for p in flood_protections %}| {{ loop.index }} | {{ p["protocol_label"] }} | {{ p["menu_tab"] | safe }} | {{ p["current_threshold"] }} | {{ p["new_threshold"] }} | {{ p["observed_normal_peak"] }} | {% if p["mode"] != "-" %}{{ p["mode"] }}{% else %}(TCP以外は対象外){% endif %} | {{ p["reason"] }} |
+{% endfor %}
+
+いずれの行も「変更後の閾値」が「観測した通常ピーク」を上回るように設定
+することで、正常な通信を過剰に遮断しないようにします。
+
+{{ verification_attacker_note }}
+
+## 手順
+
+### 1. 現状のAttack ThresholdとProtection Modeを確認する(変更前の基準を取る)
+
+`NETWORK | Firewall | Flood Protection` を開き、`TCP` タブで現在のSYN
+Flood Attack ThresholdとSYN Flood Protection Modeを、`UDP` タブで現在の
+UDP Flood Attack Thresholdを、`UDP` タブ内の `ICMP` > `IPv4` サブタブで
+現在のICMP Flood Attack Thresholdを、それぞれ記録します。画面に表示され
+る統計(WAN接続数の最大値・平均値)もあわせて確認し、シナリオ設定の
+「観測した通常ピーク」との整合を確かめます。
+
+### 2. 通常トラフィックのピーク値がシナリオ設定と乖離していないか確認する
+
+**この確認を飛ばして手順3に進まないでください。** 手順1で確認した統計や、
+別途取得している監視ツールの実測値が、シナリオ設定の「観測した通常
+ピーク」と大きく乖離している場合は、乖離した値をもとに「変更後の閾値」を
+見直してから手順3以降に進んでください。乖離したまま閾値を引き上げると、
+攻撃検知が遅れるおそれがあり、逆に見直さずに引き上げ幅が不足すると、
+引き続き正常な通信への誤検知(過剰遮断)が発生するおそれがあります。
+
+### 3. TCP(SYN)のAttack ThresholdとProtection Modeを設定する
+
+`NETWORK | Firewall | Flood Protection` の `TCP` タブを開き、次のとおり
+設定して保存します。
+
+{% for p in flood_protections %}{% if p["mode"] != "-" %}- 対象: {{ p["protocol_label"] }}
+  - SYN Flood Attack Threshold: `{{ p["current_threshold"] }}` から
+    `{{ p["new_threshold"] }}` に変更
+  - SYN Flood Protection Mode: `{{ p["mode"] }}` を選択
+{% endif %}{% endfor %}
+
+### 4. UDP Flood ProtectionのAttack Thresholdを設定する
+
+`NETWORK | Firewall | Flood Protection` の `UDP` タブを開き、次のとおり
+設定して保存します。
+
+{% for p in flood_protections %}{% if p["menu_tab"] == "UDP" %}- 対象: {{ p["protocol_label"] }}
+  - UDP Flood Attack Threshold: `{{ p["current_threshold"] }}` から
+    `{{ p["new_threshold"] }}` に変更
+{% endif %}{% endfor %}
+
+### 5. ICMP Flood Protection(IPv4)のAttack Thresholdを設定する
+
+`NETWORK | Firewall | Flood Protection` の `UDP` タブ内、`ICMP` >
+`IPv4` サブタブを開き、次のとおり設定して保存します。
+
+{% for p in flood_protections %}{% if p["menu_tab"] == "UDP > ICMP > IPv4" %}- 対象: {{ p["protocol_label"] }}
+  - ICMP Flood Attack Threshold: `{{ p["current_threshold"] }}` から
+    `{{ p["new_threshold"] }}` に変更
+{% endif %}{% endfor %}
+
+### 6. 画面表示で設定値を確認する
+
+`TCP` / `UDP` / `UDP > ICMP > IPv4` の各タブに戻り、手順3〜5で設定した
+Attack Threshold(および `TCP` タブのSYN Flood Protection Mode)が、
+シナリオ設定の「変更後の閾値」どおりに表示されていることを確認します。
+
+### 7. {{ observation_period_days }}日間、誤検知・過検知の有無を監視する
+
+シナリオ設定の「変更後の閾値」を適用した状態で {{ observation_period_days }}
+営業日、通常運用を継続しながら監視します。この期間中に業務影響(正常な
+通信が遮断される事象)が発生した場合は、手順1の統計と実測値を再取得し、
+手順2からやり直して閾値を見直します。
+
+## 動作確認
+
+- `NETWORK | Firewall | Flood Protection` の `TCP` タブで、SYN Flood
+  Attack ThresholdとSYN Flood Protection Modeがシナリオ設定の「変更後の
+  閾値」どおりになっていること
+- 同 `UDP` タブで、UDP Flood Attack Thresholdがシナリオ設定の「変更後の
+  閾値」どおりになっていること
+- 同 `UDP` タブ内 `ICMP` > `IPv4` サブタブで、ICMP Flood Attack
+  Thresholdがシナリオ設定の「変更後の閾値」どおりになっていること
+- {{ observation_period_days }}営業日の監視期間中、正常な通信が誤って
+  遮断される事象(過剰遮断)が発生していないこと
+- 同期間中、シナリオ設定の「観測した通常ピーク」を明確に上回るトラ
+  フィックが観測された場合に、Flood Protectionの動作(ログ記録、または
+  `TCP` タブのモードに応じたSYN Proxy動作)が確認できること
+
+## 注意事項
+
+- **手順2の確認を必ず行うこと。** 通常トラフィックのピーク値とシナリオ
+  設定の値が乖離したまま閾値を引き上げると、攻撃の検知漏れにつながる
+  おそれがあり、逆に見直しを怠ると誤検知(過剰遮断)が解消しない
+  おそれがあります。
+- `Always Proxy WAN Client Connections` は常時SYN Proxyを有効化する
+  最も厳格なモードです。本シナリオでは
+  `Proxy WAN Client Connections When Attack is Suspected` を採用して
+  いますが、より高いセキュリティ要件がある場合は一次情報を確認した
+  うえで `Always Proxy WAN Client Connections` への変更を検討してください。
+- 本手順書はSonicOS技術ドキュメントの一次情報で確認できたGUI操作
+  (Attack ThresholdとSYN Flood Protection Modeの変更)のみを扱います。
+  外部の監視スクリプトや自作の遮断ツールによる代替は、一次情報による
+  裏付けがないため本手順書には含めていません。
+- 実際の攻撃トラフィックを模擬するツールの使用は本手順書の対象外です。
+  {{ verification_attacker_note }}
+- 管理者パスワードやAPIキーなどの認証情報は、本手順書やログに平文で
+  残さないでください。記録が必要な場合は `********` のようにマスクし、
+  秘密管理ツール等で別途安全に保管してください。

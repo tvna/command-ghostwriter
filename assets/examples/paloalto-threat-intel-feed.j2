@@ -1,0 +1,232 @@
+# Palo Alto Networks(PAN-OS)の外部脅威インテリジェンスフィード自動遮断構成(External Dynamic List)
+
+`Objects > External Dynamic Lists`で外部Webサーバーがホストする既知の悪性
+IPアドレスリスト`{{ source_url }}`を参照するExternal Dynamic List(EDL)
+`{{ edl_name }}`を登録し、`{{ repeat_frequency }}`間隔で自動的にリストを
+再取得させます。このEDLを`Policies > Security`のアウトバウンド遮断ルール
+`{{ outbound_rule_name }}`とインバウンド遮断ルール`{{ inbound_rule_name }}`
+の双方から参照することで、外部の脅威インテリジェンスフィードの更新内容を
+ファイアウォールポリシーへ継続的に反映し、既知の悪性IPアドレスとの通信を
+自動的に遮断します。commit後、CLIの`request system external-list show`と
+`test security-policy-match`でリストの取り込み内容と遮断ルールへの一致状況
+を検証します。
+
+## 目的
+
+PAN-OSのExternal Dynamic List(EDL)機構を用いて、外部で継続的に更新される
+脅威インテリジェンスフィード(既知の悪性IPアドレスリスト)を、ファイア
+ウォール側の設定変更やcommitを都度行うことなく自動的に取り込み、
+Security Policyへ反映して遮断できるようになることを目指します。あわせて、
+「EDLの外部リスト内容そのものの更新は設定変更・commit不要で反映される」
+「EDLオブジェクトの新規登録やSecurity Policyへの参照追加はcommitが必要」
+という2つの異なる反映経路を区別できるようになること、CLIの
+`request system external-list show`でEDLの実際の取り込み内容を確認し、
+`test security-policy-match`で遮断ルールへの一致を検証できるようになる
+ことを目指します。
+
+## 用語解説
+
+- **External Dynamic List (EDL)**: 外部Webサーバーでホストされたテキスト
+  リスト(IPアドレス/ドメイン/URL等)を、PAN-OSが定期的に取り込んで
+  ポリシーの送信元・宛先アドレスとして利用できるようにする仕組み。
+  `Objects > External Dynamic Lists`で構成する
+- **Type**: EDLが扱うリストの種類。`IP Address`(IPv4/IPv6アドレス・範囲・
+  サブネット)、`Domain`、`URL`、`Predefined IP Address`(Palo Alto
+  Networks提供のビルトインリスト)などがある。本手順で作成するEDLは
+  `Type={{ edl_type }}`とし、Security Policyの送信元・宛先アドレスとして
+  参照する
+- **Source**: EDLが参照する外部リストの完全なURL(ホスト名またはIP
+  アドレス・パス・ファイル名を含む)。本手順では`{{ source_url }}`を指定
+  する
+- **Repeat(更新間隔)**: EDLが外部リストを再取得する頻度。`Five Minute`・
+  `Hourly`・`Daily`・`Weekly`・`Monthly`から選択するドロップダウン設定。
+  本手順では`{{ repeat_frequency }}`を選択する
+- **EDLの動的反映とcommitの使い分け**: 一次情報には「As you modify the
+  list, the firewall dynamically imports the list at the configured
+  interval and enforces policy without the need to make a configuration
+  change or a commit on the firewall」と説明されています。つまり外部
+  サーバー側でリストの中身(悪性IPアドレスの追加・削除)を更新した場合は
+  `{{ repeat_frequency }}`間隔での自動取り込みのみで遮断対象に反映され
+  commitは不要です。一方、EDLオブジェクト`{{ edl_name }}`自体の新規登録や、
+  それをSecurity Policyルールへ参照として追加する変更は、他のPAN-OS設定
+  と同様にcommitして初めて実機の動作に反映されます
+- **Predefined/Built-in EDL**: 一次情報には「These Built-In External
+  Dynamic Lists—for bulletproof hosting providers, known malicious, and
+  high-risk IP addresses—are automatically added to your firewall if you
+  have an active Threat Prevention license」と説明されています。Threat
+  Preventionライセンスが有効な環境では、Palo Alto Networks提供のビルト
+  インEDL(既知の悪性IPアドレス等、日次更新の脅威インテリジェンス)も
+  併用でき、本手順のカスタムEDLと同様にSecurity Policyから参照できます
+- **List capacity(登録上限)**: 一次情報には、重複しないSourceを持つ
+  カスタムEDLは1台のファイアウォールにつき最大30個まで登録できると
+  説明されています。IPアドレス・URL・ドメインそれぞれの最大エントリ数も
+  モデルにより上限があります
+- **request system external-list show**: 指定したEDLが実際に取り込んで
+  いるエントリの一覧をCLIから確認するコマンド。`type`(`ip`/`domain`/
+  `url`)と`name`(EDLオブジェクト名)を指定して実行する
+- **test security-policy-match**: 指定した送信元/宛先などの組み合わせが、
+  実際にどのSecurity Policyルールに一致するかをCLIから確認できるテスト
+  コマンド
+- **commit**: PAN-OSはcandidate configとrunning configを分離する二段階
+  構成モデルを採る。GUIで`OK`を押しただけの設定もcommitするまで実機の
+  動作には反映されない
+
+## シナリオ設定
+
+今回、外部脅威インテリジェンスフィードの自動遮断として構成する値は次の
+とおりです。
+
+| 項目 | 値 |
+|------|-----|
+| EDLオブジェクト名(edl_name) | `{{ edl_name }}` |
+| EDLのType(edl_type) | `{{ edl_type }}` |
+| フィードのSource URL(source_url) | `{{ source_url }}` |
+| 更新間隔(repeat_frequency) | `{{ repeat_frequency }}` |
+| 内部側ゾーン(trust_zone) | `{{ trust_zone }}` |
+| 外部側ゾーン(untrust_zone) | `{{ untrust_zone }}` |
+| アウトバウンド遮断ルール名(outbound_rule_name) | `{{ outbound_rule_name }}` |
+| インバウンド遮断ルール名(inbound_rule_name) | `{{ inbound_rule_name }}` |
+| 検証用の内部ホストIPアドレス(test_internal_host) | `{{ test_internal_host }}` |
+| 検証用の悪性IPアドレス(フィード掲載想定)(test_malicious_ip) | `{{ test_malicious_ip }}` |
+
+`{{ trust_zone }}`/`{{ untrust_zone }}`はこの手順書内の仮称であり、実際の
+環境に存在するゾーン名に読み替えてください。`{{ test_malicious_ip }}`は
+`{{ source_url }}`のフィードに実際に掲載されているIPアドレスである前提と
+します。
+
+## 手順
+
+### 1. 現状を確認する(変更前の基準を取る)
+
+新しいEDLオブジェクト・ルールを1件も登録する前に、現状を確認します。
+
+- `Objects > External Dynamic Lists`を開き、`{{ edl_name }}`と同名のEDL
+  オブジェクトが存在しないことを確認します。
+- `Policies > Security`を開き、`{{ outbound_rule_name }}`・
+  `{{ inbound_rule_name }}`と同名のルールがなく、既存ルールの並び順
+  (評価順)がどうなっているかを確認します。
+
+### 2. External Dynamic Listオブジェクトを作成する(Objects > External Dynamic Lists)
+
+`Objects > External Dynamic Lists > Add`から、次の内容でEDLオブジェクトを
+作成します。
+
+- Name={{ edl_name }}
+- Type={{ edl_type }}
+- Source={{ source_url }}
+- Repeat={{ repeat_frequency }}
+
+入力後`OK`を押して保存します。この時点ではまだ`Commit`は実行しません。
+
+### 3. アウトバウンド遮断ルールを作成する(Policies > Security)
+
+`Policies > Security`で`Add`をクリックし、内部から外部の悪性IPアドレスへ
+向かう通信を遮断するルールを作成します。
+
+- General タブ: `Name`に`{{ outbound_rule_name }}`を入力します。
+- Source タブ: `Source Zone`に`{{ trust_zone }}`を設定し、`Source Address`
+  は既定の`any`のままにします。
+- Destination タブ: `Destination Zone`に`{{ untrust_zone }}`を設定し、
+  `Destination Address`に`{{ edl_name }}`を追加します(EDLをアドレス
+  オブジェクトとして選択します)。
+- Actions タブ: `Action`を`Deny`にします。
+
+入力後は`OK`のみを行います。このルールは、既存の許可ルールより上位
+(先に評価される位置)に配置します。PAN-OSはルールを上から順に評価する
+ため、許可ルールより下に配置すると先に許可ルールが一致してしまい遮断が
+機能しません。
+
+### 4. インバウンド遮断ルールを作成する(Policies > Security)
+
+続けて`Add`をクリックし、外部の悪性IPアドレスから内部へ向かう通信を遮断
+するルールを作成します。
+
+- General タブ: `Name`に`{{ inbound_rule_name }}`を入力します。
+- Source タブ: `Source Zone`に`{{ untrust_zone }}`を設定し、
+  `Source Address`に`{{ edl_name }}`を追加します。
+- Destination タブ: `Destination Zone`に`{{ trust_zone }}`を設定し、
+  `Destination Address`は既定の`any`のままにします。
+- Actions タブ: `Action`を`Deny`にします。
+
+入力後は`OK`のみを行い、こちらのルールも既存の許可ルールより上位に配置
+します。
+
+### 5. 変更を確定する(commit)
+
+`Commit`を実行し、候補設定(candidate config)を実行中の設定(running
+config)へ反映します。手順2〜4で入力した内容(EDLオブジェクトの登録と
+Security Policyへの参照)は、commitが完了するまで実機の動作に反映され
+ません。
+
+### 6. CLIでEDLの取り込み内容を確認する
+
+commit完了後、CLIから次のコマンドを実行し、`{{ edl_name }}`が実際に
+取り込んでいるエントリの一覧を確認します。
+
+```bash
+request system external-list show type ip name {{ edl_name }}
+```
+
+出力に`{{ source_url }}`から取得したIPアドレス(`{{ test_malicious_ip }}`
+を含む)が列挙されていることを確認します。
+
+### 7. test security-policy-matchで遮断ルールへの一致を確認する
+
+CLIから`test security-policy-match`を2回実行し、アウトバウンド・
+インバウンドそれぞれの通信が意図した遮断ルールに一致することを確認
+します。
+
+```bash
+test security-policy-match source {{ test_internal_host }} destination {{ test_malicious_ip }} destination-port 443 protocol 6
+```
+
+出力に一致したルール名として`{{ outbound_rule_name }}`が表示され、Action
+が`deny`になっていることを確認します。
+
+```bash
+test security-policy-match source {{ test_malicious_ip }} destination {{ test_internal_host }} destination-port 443 protocol 6
+```
+
+出力に一致したルール名として`{{ inbound_rule_name }}`が表示され、Action
+が`deny`になっていることを確認します。
+
+## 動作確認
+
+- `request system external-list show type ip name {{ edl_name }}`の出力に
+  `{{ test_malicious_ip }}`が含まれること
+- `test security-policy-match`で、送信元`{{ test_internal_host }}`・
+  宛先`{{ test_malicious_ip }}`の通信が`{{ outbound_rule_name }}`に一致
+  し、Actionが`deny`であること
+- `test security-policy-match`で、送信元`{{ test_malicious_ip }}`・
+  宛先`{{ test_internal_host }}`の通信が`{{ inbound_rule_name }}`に一致
+  し、Actionが`deny`であること
+- `Policies > Security`の一覧で`{{ outbound_rule_name }}`・
+  `{{ inbound_rule_name }}`が既存の許可ルールより上位(先に評価される
+  位置)に配置されていること
+- 手順1で確認した既存のSecurity Policyルールの並び順・内容が意図せず
+  変更されていないこと
+
+## 注意事項
+
+- **遮断ルールは許可ルールより上位に配置すること。** PAN-OSはSecurity
+  Policyルールを上から順に評価するため、`{{ outbound_rule_name }}`・
+  `{{ inbound_rule_name }}`が既存の許可ルールより下にあると、先に許可
+  ルールが一致してしまい遮断が機能しません。
+- **EDLの外部リスト内容の更新とEDLオブジェクト自体の変更は反映経路が
+  異なります。** 外部サーバー側でリストの中身を更新した場合は
+  `{{ repeat_frequency }}`間隔での自動取り込みのみで反映されcommitは
+  不要です。一方、EDLオブジェクト`{{ edl_name }}`の新規登録やSecurity
+  Policyへの参照追加(手順2〜4)は、commitするまで実機の動作に反映され
+  ません。
+- **重複しないSourceを持つカスタムEDLの登録数には上限があります。**
+  1台のファイアウォールにつき最大30個までのため、`{{ source_url }}`と
+  同一のフィードを重複登録しないよう、手順1で既存EDLを確認してください。
+- フィード提供元のWebサーバーへの到達性が失われると、ファイアウォールは
+  最後に取得できた内容(old copy)を使い続けます。フィード提供元との
+  疎通状況を別途監視してください。
+- CLI/GUIへのログインに使う管理者パスワードやAPIキーは、本手順書やチケ
+  ット、ログに平文で残さないでください。記録が必要な場合は`********`の
+  ようにマスクし、秘密管理ツール等で別途安全に保管してください。
+- 本手順は`{{ source_url }}`がHTTPS等で到達可能であり、フィード提供元が
+  信頼できる運用であることを前提とします。フィードの信頼性が確保できない
+  場合、誤ったIPアドレスの遮断(過検知)につながるおそれがあります。

@@ -1,0 +1,22 @@
+zone_protection_profile_name: zone-flood-protect
+protected_zones:
+  - untrust
+  - dmz
+dos_profile_name: dos-syn-protect
+dos_profile_type: Aggregate
+syn_alarm_rate: 10000
+syn_activate_rate: 10000
+syn_max_rate: 40000
+syn_action: SYN Cookies
+block_duration: 300
+dos_policy_rules:
+  - name: dos-protect-web-servers
+    source_zone: untrust
+    destination_zone: dmz
+    destination_address: 10.10.10.0/24
+    action: Protect
+  - name: dos-protect-vip
+    source_zone: untrust
+    destination_zone: dmz
+    destination_address: 10.10.10.100/32
+    action: Protect

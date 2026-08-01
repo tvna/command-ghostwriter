@@ -1,0 +1,202 @@
+# FortiGate IPv6デュアルスタックにおけるDefault-Denyパリティ確保
+
+FortiGate (FortiOS) の Consolidated(単一) Firewall Policy を用いて、IPv4環境
+で運用中の許可ポリシーそれぞれに対応するIPv6版の許可ポリシーを同一の
+`config firewall policy` テーブルへ登録し、CSV で定義した
+{{ csv_rows | length }}件のうち action が accept の行を最小許可ポリシーとし
+て、action が deny の行を明示的デフォルト拒否ポリシーとして投入します。IPv4
+とIPv6でポリシー評価の枠組み・実装(暗黙拒否を含む)が共通であることを踏ま
+え、`pair_key` 列でIPv4/IPv6の対応関係を管理し、登録漏れ(片方のアドレスファ
+ミリだけ許可ポリシーが存在する状態)を防ぎます。
+
+## 目的
+
+IPv4向けに登録済みの許可ポリシーと同じ通信要件を、IPv6でも同じFirewall
+Policy評価フレームワークの上でCSVの`pair_key`列を用いて漏れなく対応づけて
+登録し、IPv6のみ許可されていない通信がIPv4と同じ暗黙拒否ロジックで拒否され
+ることをPolicy matchツールで検証できるようになることを目指します。あわせて、
+Firewall Policy一覧のアドレスファミリ絞り込み表示で、IPv4のみ・IPv6のみに
+偏ったポリシーが残っていないかを点検できるようになることを目指します。
+
+## 用語解説
+
+- **Consolidated(Combined) IPv4-IPv6 Policy**: FortiOS 6.4.0以降、IPv4と
+  IPv6を別テーブル(`config firewall policy` と `config firewall policy6`)
+  で管理せず、単一の `config firewall policy` テーブルにまとめて設定できる
+  方式。1つのポリシー内で送信元・宛先のIPアドレスファミリは統一する必要が
+  あり(IPv4の送信元とIPv6の宛先を混在させることはできない)、
+  `srcintf`/`dstintf`/`service`/`action`/`schedule`/`nat` はIPv4・IPv6の
+  ポリシーで共通のパラメータとして扱われる
+- **srcaddr6 / dstaddr6**: `config firewall policy` 内でIPv6の送信元/宛先
+  アドレスオブジェクトを指定するパラメータ。IPv4用の `srcaddr`/`dstaddr` と
+  対になっており、同じポリシーブロックの中でIPv6側のアドレスだけを別パラ
+  メータ名で指定する
+- **config firewall policy6(旧方式)**: Consolidated方式が導入される前の
+  FortiOSでIPv6専用のFirewall Policyを設定するためのブロック構文。本手順書
+  はConsolidated方式(`config firewall policy` に `srcaddr6`/`dstaddr6` を
+  設定する方式)を対象とする
+- **暗黙拒否 (implicit deny)**: IPv4・IPv6のいずれについても、登録済みの
+  Firewall Policyのいずれの条件にも一致しなかった通信を最終的に拒否(ドロッ
+  プ)する既定動作。IPv4とIPv6は同じポリシー評価ロジックでこの判定を行う
+- **Firewall Policy一覧のアドレスファミリ絞り込み**: `Policy & Objects >
+  Firewall Policy` の一覧表示には、ポリシーが含むアドレスがIPv4のみか、
+  IPv6のみか、IPv4・IPv6双方(dual)かで絞り込んで表示する機能があり、
+  IPv4/IPv6の登録漏れの点検に利用できる
+- **Policy match(Policy Lookup)ツール**: ポリシー一覧画面から実行できる検証
+  ツール。送信元インターフェース・プロトコル・送信元アドレス・宛先アドレス・
+  送信元ポート・宛先ポートを入力すると、その通信がどのFirewall Policyに一致
+  するかを判定し、一致したポリシーを一覧画面上でハイライト表示する。IPv4/
+  IPv6いずれのアドレスを入力した場合も同じ操作で照合できる
+
+## シナリオ設定
+
+今回、WAN(`wan1`)からDMZ(`dmz`)方向にConsolidated方式で登録するIPv4/IPv6
+の許可ポリシーと明示的デフォルト拒否ポリシーは、次の{{ csv_rows | length }}
+件です。`pair_key` 列は、そのIPv6ポリシーが対応するIPv4ポリシーの `name` を
+示します(IPv4行および明示的デフォルト拒否ポリシーは対応先を持たないため
+`-` とします)。`rule_no` の昇順がそのままポリシーの並び順(評価順)になり
+ます。
+
+| rule_no | name | ip_version | srcintf | dstintf | action | srcaddr | dstaddr | service | pair_key | description |
+|---------|------|------------|---------|---------|--------|---------|---------|---------|----------|--------------|
+{% for r in csv_rows %}| {{ r["rule_no"] }} | {{ r["name"] }} | {{ r["ip_version"] }} | {{ r["srcintf"] }} | {{ r["dstintf"] }} | {{ r["action"] }} | {{ r["srcaddr"] }} | {{ r["dstaddr"] }} | {{ r["service"] }} | {{ r["pair_key"] }} | {{ r["description"] }} |
+{% endfor %}
+`srcaddr`/`dstaddr` 列のアドレスオブジェクトは、IPv4行は通常のアドレス
+オブジェクトとして、IPv6行(`ip_version` が `v6`)は同名のIPv6アドレス
+オブジェクトとして、いずれも `Policy & Objects > Addresses` に事前登録済み
+であることを前提とします。`service` 列のサービスオブジェクトは、IPv4/IPv6
+で共通のパラメータとして扱われるため、同じ名前を両方の行で再利用します
+(deny行の `ALL` を除く)。
+
+## 手順
+
+### 1. 現状のFirewall Policy一覧とIPv6アドレスオブジェクトの前提を確認する
+
+新しいポリシーを1件も追加する前に、現状を確認します。
+
+- `Policy & Objects > Firewall Policy` を開き、既存ポリシーの並び順(評価順)
+  と、現在IPv4で許可されている通信の内容を確認し、記録します。
+- シナリオ設定の `srcaddr`/`dstaddr` 列にあるアドレスオブジェクト(IPv4用・
+  IPv6用とも)が `Policy & Objects > Addresses` に存在することを確認します
+  (アドレスオブジェクト自体の作成は本手順書の対象外です)。
+- シナリオ設定の `service` 列にあるサービスオブジェクトが事前に作成済みで
+  あることを確認します(サービスオブジェクト自体の作成は本手順書の対象外
+  です)。
+
+### 2. IPv4/IPv6の許可ポリシーをCLIで登録する(action が accept の行)
+
+`config firewall policy` に、`ip_version` の値に応じて `srcaddr`/`dstaddr`
+(IPv4)または `srcaddr6`/`dstaddr6`(IPv6)を使い分けて登録します。`edit` に
+続くポリシーIDは `rule_no` の値をそのまま使用します。
+
+```bash
+{% for r in csv_rows %}{% if r["action"] == "accept" %}config firewall policy
+    edit {{ r["rule_no"] }}
+        set name "{{ r["name"] }}"
+        set srcintf "{{ r["srcintf"] }}"
+        set dstintf "{{ r["dstintf"] }}"
+{% if r["ip_version"] == "v6" %}        set srcaddr6 "{{ r["srcaddr"] }}"
+        set dstaddr6 "{{ r["dstaddr"] }}"
+{% else %}        set srcaddr "{{ r["srcaddr"] }}"
+        set dstaddr "{{ r["dstaddr"] }}"
+{% endif %}        set action accept
+        set schedule "always"
+        set service "{{ r["service"] }}"
+        set logtraffic all
+    next
+end
+{% endif %}{% endfor %}```
+
+### 3. Firewall Policy一覧のアドレスファミリ絞り込みでIPv4/IPv6の登録状況を確認する
+
+`Policy & Objects > Firewall Policy` の一覧表示で、含まれるアドレスが
+IPv4のみのポリシー・IPv6のみのポリシー・IPv4とIPv6双方(dual)を含むポリシー
+を絞り込んで表示できます。手順2で登録したポリシーが、意図した `ip_version`
+の側(IPv4のみ、またはIPv6のみ)に正しく分類されていることを確認します。
+
+### 4. IPv4/IPv6それぞれの明示的デフォルト拒否ポリシーを最後尾に登録する
+
+action が `deny` の行は、暗黙拒否と同じ効果をログに残すためのポリシーです。
+手順2で登録した `accept` ポリシーより**必ず後ろ**(評価順で最後)に置いて
+ください。IPv4用・IPv6用のどちらも忘れずに登録します。
+
+```bash
+{% for r in csv_rows %}{% if r["action"] == "deny" %}config firewall policy
+    edit {{ r["rule_no"] }}
+        set name "{{ r["name"] }}"
+        set srcintf "{{ r["srcintf"] }}"
+        set dstintf "{{ r["dstintf"] }}"
+{% if r["ip_version"] == "v6" %}        set srcaddr6 "{{ r["srcaddr"] }}"
+        set dstaddr6 "{{ r["dstaddr"] }}"
+{% else %}        set srcaddr "{{ r["srcaddr"] }}"
+        set dstaddr "{{ r["dstaddr"] }}"
+{% endif %}        set action deny
+        set schedule "always"
+        set service "{{ r["service"] }}"
+        set logtraffic all
+    next
+end
+{% endif %}{% endfor %}```
+
+### 5. Policy matchツールでIPv4・IPv6それぞれの一致ポリシーを検証する
+
+`Policy & Objects` のポリシー一覧画面で `Policy match` を開き、通信条件
+(送信元インターフェース・プロトコル・送信元アドレス・宛先アドレス・送信元
+ポート・宛先ポート)を入力して `Find matching policy` をクリックします。
+
+1. シナリオ設定の `accept` 行それぞれについて、IPv4行はIPv4アドレスを、
+   IPv6行はIPv6アドレスを入力し、一致したポリシーが同じ `name`(手順2で
+   登録した名前)であることを確認します。
+2. シナリオ設定に無い通信(未許可の宛先ポート等)を、IPv4アドレスとIPv6
+   アドレスの両方で入力し、一致したポリシーがそれぞれのアドレスファミリの
+   明示的デフォルト拒否ポリシー
+   ({% for r in csv_rows %}{% if r["action"] == "deny" %}`{{ r["name"] }}`{% if not loop.last %}、{% endif %}{% endif %}{% endfor %})
+   であることを確認します。
+
+### 6. pair_key列を用いてIPv4/IPv6ポリシーの対応関係(parity)を確認する
+
+{% for r in csv_rows %}{% if r["ip_version"] == "v6" and r["action"] == "accept" and r["pair_key"] != "-" %}{% for r2 in csv_rows %}{% if r2["name"] == r["pair_key"] %}- IPv6ポリシー `{{ r["name"] }}`(dstaddr6=`{{ r["dstaddr"] }}`)は、IPv4ポリシー `{{ r2["name"] }}`(dstaddr=`{{ r2["dstaddr"] }}`)とペアです。Firewall Policy一覧の`By Sequence`表示で両方が存在し、ともに action が accept であることを確認してください。
+{% endif %}{% endfor %}{% endif %}{% endfor %}
+上記のペアのうちいずれか一方(IPv4またはIPv6)しか存在しない場合は、
+default-denyパリティが崩れている(片方のアドレスファミリだけ通信が許可
+されていない、または暗黙拒否されるべき通信がもう一方では許可されている)
+状態です。手順2に戻って不足しているポリシーを登録してください。
+
+## 動作確認
+
+- Policy matchで、シナリオ設定の `accept` 行に対応する通信が、IPv4・IPv6
+  それぞれ意図した `name` のポリシーに一致すること
+- Policy matchで、シナリオ設定に無い通信(未許可のポート等)が、IPv4・IPv6
+  それぞれの明示的デフォルト拒否ポリシーに一致すること
+- Firewall Policy一覧のアドレスファミリ絞り込みで、`pair_key` 列に記載した
+  IPv4/IPv6の各ペアが、いずれもaction accept のポリシーとして両方存在して
+  いること
+- `Policy & Objects > Firewall Policy` の一覧(`By Sequence`)で、IPv4・IPv6
+  ともに `accept` ポリシーが `deny` ポリシーより上位(評価順で先)に並んで
+  いること
+- 手順1で記録した既存ポリシーの並び順・内容が、意図せず変更されていないこと
+
+## 注意事項
+
+- **1つのポリシー内で送信元・宛先のIPアドレスファミリを混在させないこと。**
+  IPv4の送信元アドレスとIPv6の宛先アドレスを同じポリシーに設定することは
+  できません。`ip_version` が `v6` の行は必ず `srcaddr6`/`dstaddr6` を、
+  `v4` の行は必ず `srcaddr`/`dstaddr` を使用してください。
+- **並び順を厳守すること。** ポリシーは一覧に表示される順序で評価されるた
+  め、IPv4・IPv6それぞれの `accept` ポリシーと `deny` ポリシーの並び順を
+  誤ると、意図しない拒否・許可が発生します。
+- **一致する条件が1つもない通信は、この手順で作成した明示的デフォルト拒否
+  ポリシーの有無にかかわらず、IPv4・IPv6ともに既定で拒否されます(暗黙拒
+  否)。** 今回の `deny` ポリシーは、この既定動作をログに残すために明示化
+  するものです。
+- **`pair_key` によるparity点検を省略しないこと。** IPv4側だけ許可ポリシー
+  を追加してIPv6側を登録し忘れると、IPv6の当該通信は意図せず暗黙拒否される
+  (またはその逆で意図せず許可される)ため、手順6の対応関係確認を必ず実施
+  してください。
+- Firewall Policyの変更がFortiGate自身の管理アクセス(GUI/SSHログイン)を
+  経由するインターフェースに影響する場合、手順2の `accept` ポリシーの登録
+  と手順5の検証が完了するまで、既存の広めの許可ポリシーを無効化・削除しな
+  いでください。
+- CLI/GUIへのログインに使う管理者パスワードやAPIトークンは、本手順書や
+  ログに平文で残さないでください。値を記録する場合は `********` のように
+  マスクし、秘密管理ツール等で別途安全に保管してください。
