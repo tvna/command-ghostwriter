@@ -298,7 +298,7 @@ EOF
 - Modify: `web/src/components/Library.tsx` (add constant; replace the `middleware` entry; add `MIDDLEWARE_RAIL` const in test)
 - Test: `web/src/components/Library.test.tsx`
 
-- [ ] **Step 1: Update the failing test**
+- [x] **Step 1: Update the failing test**
 
 In `Library.test.tsx`, inside `describe("RAIL predicate exclusivity and exhaustiveness", ...)`, add a new const alongside `NETWORK_RAIL`/`SERVER_RAIL`:
 
@@ -340,12 +340,12 @@ with:
     "middleware-services": 37,
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cd web && bun run test -- Library.test.tsx`
 Expected: FAIL — `MIDDLEWARE_RAIL` has length 0 (not 3, since `RAIL` still has one entry with id exactly `middleware`, which does not start with `"middleware-"`); the new exhaustiveness test fails with every middleware template matching 0 entries.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `Library.tsx`, after the `SERVER_AUDIT` constant added in Task 2, add:
 
@@ -404,17 +404,17 @@ with:
   },
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd web && bun run test -- Library.test.tsx`
 Expected: PASS.
 
-- [ ] **Step 5: Type-check**
+- [x] **Step 5: Type-check**
 
 Run: `cd web && bunx tsc -b`
 Expected: exit 0.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add web/src/components/Library.tsx web/src/components/Library.test.tsx
