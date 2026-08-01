@@ -1,0 +1,6 @@
+rule_no,name,from_zone,to_zone,source,destination,application,app_category,proto_num,std_port,test_src,action,description
+1,ALLOW-SANCTIONED-SAAS,trust,untrust,10.0.10.0/24,any,ms-office365-base,collaboration-and-messaging,6,443,10.0.11.20,allow,承認済みSaaS(Office365)へのアクセスをアプリケーション単位で許可
+2,MONITOR-UNSANCTIONED-STORAGE,trust,untrust,10.0.10.0/24,any,dropbox,file-sharing,6,443,10.0.11.21,allow,未承認クラウドストレージ利用を遮断せず許可しACCで可視化して要否を判断
+3,DENY-P2P-FILESHARE,trust,untrust,10.0.10.0/24,any,bittorrent,peer2peer,-,-,-,deny,P2Pファイル共有アプリケーションを遮断
+4,DENY-PROXY-EVASION,trust,untrust,10.0.10.0/24,any,tor,proxy-evasion,-,-,-,deny,プロキシ迂回・匿名化通信を遮断
+5,DENY-UNKNOWN-TRAFFIC,trust,untrust,10.0.10.0/24,any,unknown-tcp,unknown,-,-,-,deny,既知のシグネチャに一致しない不明なアプリケーション通信を遮断

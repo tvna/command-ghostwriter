@@ -1,0 +1,37 @@
+ldap_server_profile_name: ldap-ad-corp
+ldap_servers:
+  - name: dc01
+    host: dc01.corp.example.com
+    port: 389
+  - name: dc02
+    host: dc02.corp.example.com
+    port: 389
+ldap_server_type: active-directory
+ldap_base_dn: DC=corp,DC=example,DC=com
+ldap_bind_dn: CN=svc-paloalto-userid,OU=ServiceAccounts,DC=corp,DC=example,DC=com
+ldap_bind_password_masked: "****"
+group_mapping_name: gm-corp-ad
+update_interval_seconds: 3600
+primary_username_attribute: sAMAccountName
+group_name_attribute: cn
+group_member_attribute: member
+group_include_list:
+  - CN=fw-admins,OU=Groups,DC=corp,DC=example,DC=com
+  - CN=finance-staff,OU=Groups,DC=corp,DC=example,DC=com
+  - CN=contractors,OU=Groups,DC=corp,DC=example,DC=com
+security_policy_rules:
+  - name: allow-finance-to-erp
+    source_zone: internal
+    dest_zone: dmz-erp
+    source_user: corp\finance-staff
+    action: allow
+  - name: allow-fw-admins-to-mgmt
+    source_zone: internal
+    dest_zone: mgmt
+    source_user: corp\fw-admins
+    action: allow
+  - name: deny-contractors-to-dmz-erp
+    source_zone: internal
+    dest_zone: dmz-erp
+    source_user: corp\contractors
+    action: deny

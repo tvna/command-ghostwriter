@@ -1,0 +1,220 @@
+# SonicWall (SonicOS) SSO連携によるユーザー/グループ単位ポリシー適用
+
+IPアドレスの静的な登録・棚卸しに頼らず、AD ドメイン `{{ ad_domain }}` の
+ユーザー/セキュリティグループ単位でファイアウォールポリシーを適用できる
+ようにするため、`Device > Users > Settings > Authentication` の
+`Configure SSO` から SSO を構成し、SSO Agent がADから取得したログオン
+情報とLDAPグループメンバーシップに基づいて `POLICY | Rules and Policies
+> Access Rules` のポリシーが適用される状態を作ります。あわせて、
+ID-to-IPマッピングが動的に維持されていることを `SSO Configuration` 画面
+上で確認します。
+
+## 目的
+
+ユーザーの端末IPアドレスが変わっても(DHCPによる再割当、席替え、
+ノートPCの持ち歩き等)、AD/LDAPのセキュリティグループ単位でファイア
+ウォールポリシーが追従して適用される状態を構築できるようになることを
+目指します。あわせて、その時点でどのユーザーがどのIPアドレスにマッピング
+されているかをGUI上で確認し、ID-IPマッピングの整合性を継続的に検証する
+進め方を身につけます。
+
+## 用語解説
+
+- **Device > Users > Settings > Authentication**: ユーザー認証全般の
+  設定画面ナビゲーションパス。認証方式の選択や、LDAP/RADIUS連携、SSO
+  連携の各設定はこの画面から行う
+- **Configure SSO / SSO Configuration**: `Device > Users > Settings >
+  Authentication` 画面上の `Configure SSO` の隣にある `Configure` を
+  クリックすると開く設定画面。`SSO Agents` / `Users` / `Enforcement` /
+  `Terminal Services` / `NTLM` / `RADIUS Accounting` / `3rd Party API`
+  / `Capture Client` / `Test` の各タブで構成される
+- **SSO Agents タブ**: `SSO Configuration` 画面のタブの一つ。AD環境に
+  別途導入済みのSSO Agent(またはTerminal Services Agent)を登録し、
+  そこから送られてくるログオン情報の問い合わせ先とする。個々の入力
+  フィールド名はSonicOSのビルドにより差異があり得るため、実機のGUIで
+  確認してから設定する
+- **Enforcement タブ**: `SSO Configuration` 画面のタブの一つ。SSOに
+  よるユーザー識別(ログオン情報とIPの対応付け)を適用する送信元ゾーン
+  やネットワークの範囲を指定する
+- **Users タブ**: `SSO Configuration` 画面のタブの一つ。その時点でSSO
+  により識別されているユーザー名と、対応する送信元IPアドレスの一覧
+  (ID-IPマッピングの現況)を表示する
+- **LDAPグループメンバーシップに基づくポリシー適用**: SSO Agentが取得
+  したログオン情報をもとに、LDAPクエリで返されたグループメンバーシップ
+  に応じて `POLICY | Rules and Policies > Access Rules` のルールが適用
+  される仕組み。IPアドレスではなくAD/LDAPのセキュリティグループを
+  Access RuleのSourceの単位として扱えるようにする
+- **POLICY | Rules and Policies > Access Rules**: Access Ruleを設定
+  する管理画面。ルールの `Configure` から `Source` フィールドを編集
+  できる(SonicOS 7.X系で確認済みのナビゲーションパス)
+
+## シナリオ設定
+
+ADドメイン `{{ ad_domain }}` に対して、次の {{ sso_agent_hosts | length }}
+台のSSO Agentを `SSO Agents` タブに登録します。
+
+| # | Name | IP Address | 役割 |
+|---|------|------------|------|
+{% for a in sso_agent_hosts %}| {{ loop.index }} | {{ a["name"] }} | {{ a["ip_address"] }} | {{ a["role"] }} |
+{% endfor %}
+
+`Enforcement` タブでSSOによるユーザー識別を適用するゾーンは次のとおり
+です。
+
+| # | Zone | 理由 |
+|---|------|------|
+{% for z in enforcement_zones %}| {{ loop.index }} | {{ z["zone_name"] }} | {{ z["reason"] }} |
+{% endfor %}
+
+`SSO Configuration` 画面の各タブと、本手順で使用するかどうかは次の
+とおりです。
+
+| # | タブ | 本手順で使用 | 用途 |
+|---|------|--------------|------|
+{% for t in sso_configuration_tabs %}| {{ loop.index }} | {{ t["name"] }} | {% if t["used_in_this_procedure"] %}使用する{% else %}使用しない{% endif %} | {% if t["purpose"] != "-" %}{{ t["purpose"] }}{% else %}(本手順の対象外){% endif %} |
+{% endfor %}
+
+IPアドレスではなくグループ単位でAccess Ruleを適用する対象のADセキュリ
+ティグループは次の {{ ldap_groups | length }} 件です。
+
+| # | Group Name | 説明 | Access Ruleでの扱い |
+|---|------------|------|----------------------|
+{% for g in ldap_groups %}| {{ loop.index }} | {{ g["name"] }} | {{ g["description"] }} | {{ g["access_rule_note"] }} |
+{% endfor %}
+
+動作確認には次の2名の検証用ユーザーを使用します。
+
+- 許可される想定: `{{ verification_case["user_name"] }}`(所属グループ
+  `{{ verification_case["group_name"] }}` / 端末IP
+  `{{ verification_case["workstation_ip"] }}`)が
+  `{{ verification_case["target_resource"] }}` にアクセスできること
+- 拒否される想定: `{{ verification_denied_case["user_name"] }}`(所属
+  グループ `{{ verification_denied_case["group_name"] }}` / 端末IP
+  `{{ verification_denied_case["workstation_ip"] }}`)が
+  `{{ verification_denied_case["target_resource"] }}` にアクセスできない
+  こと
+
+## 手順
+
+### 1. 前提となるLDAP/RADIUS連携の状態を確認する
+
+本手順はADドメイン `{{ ad_domain }}` に対するLDAP/RADIUS認証連携が
+既に構成済みであることを前提とします。`Device > Users > Settings >
+Authentication` を開き、`Authentication Method` がLDAPまたは
+RADIUSを含む方式に設定されていることを確認します。未構成の場合は、
+先にLDAP/RADIUS連携の初期設定を完了させてから本手順に進んでください
+(初期設定手順は本書の対象外です)。
+
+### 2. SSO Configuration画面を開く
+
+`Device > Users > Settings > Authentication` 画面で `Configure SSO`
+の隣にある `Configure` をクリックし、`SSO Configuration` 画面を開き
+ます。
+
+### 3. SSO Agentsタブでエージェントを登録する
+
+`SSO Agents` タブを開き、シナリオ設定の {{ sso_agent_hosts | length }}
+台について、AD環境側に導入済みのSSO Agent(またはTerminal Services
+Agent)をそれぞれ登録します。
+
+{% for a in sso_agent_hosts %}- {{ loop.index }}台目: `{{ a["name"] }}` / IP Address={{ a["ip_address"] }}({{ a["role"] }})
+{% endfor %}
+
+登録後、各エージェントとの接続状態が正常であることを確認してから
+次の手順に進みます。個々の入力フィールドのラベルはビルドにより異なる
+場合があるため、表示されているフィールド名に沿って値を入力してくだ
+さい。
+
+### 4. Enforcementタブで適用範囲を指定する
+
+`Enforcement` タブを開き、シナリオ設定のとおりSSOによるユーザー識別
+を適用するゾーンを設定します。
+
+{% for z in enforcement_zones %}- `{{ z["zone_name"] }}`: 適用対象に含める — {{ z["reason"] }}
+{% endfor %}
+
+設定後、保存します。
+
+### 5. Usersタブで現在のID-IPマッピングを確認する
+
+`Users` タブを開き、現時点でSSOにより識別されているユーザーと送信元
+IPアドレスの一覧が表示されることを確認します。この時点では、まだ
+Access RuleのSourceをグループ単位に変更していないため、一覧の内容は
+参考情報として確認するにとどめます。
+
+### 6. Access RuleのSourceをADセキュリティグループ単位に変更する
+
+`POLICY | Rules and Policies > Access Rules` を開き、シナリオ設定の
+各ADセキュリティグループに対応する既存のAccess Ruleについて、
+`Configure` から `Source` フィールドを編集します。
+
+{% for g in ldap_groups %}- `{{ g["name"] }}`: {{ g["access_rule_note"] }}
+{% endfor %}
+
+設定後、`Save` で保存します。
+
+### 7. 検証用ユーザーでログオンし、ポリシーの適用状況を確認する
+
+- `{{ verification_case["user_name"] }}` が端末
+  `{{ verification_case["workstation_ip"] }}` からADにログオンした
+  状態で、`{{ verification_case["target_resource"] }}` へのアクセスを
+  試み、許可されることを確認します。
+- `{{ verification_denied_case["user_name"] }}` が端末
+  `{{ verification_denied_case["workstation_ip"] }}` からADにログオン
+  した状態で、`{{ verification_denied_case["target_resource"] }}` への
+  アクセスを試み、拒否されることを確認します。
+
+### 8. Usersタブで検証後のID-IPマッピングを再確認する
+
+`SSO Configuration` 画面の `Users` タブに戻り、手順7でログオンした
+2名のユーザー名と、それぞれの送信元IPアドレス
+(`{{ verification_case["workstation_ip"] }}` /
+`{{ verification_denied_case["workstation_ip"] }}`)が対応付けられて
+表示されていることを確認します。
+
+## 動作確認
+
+- `SSO Agents` タブに登録した {{ sso_agent_hosts | length }} 台の
+  エージェントがいずれも正常に接続されていること
+- `Enforcement` タブの適用対象ゾーンが
+{% for z in enforcement_zones %} `{{ z["zone_name"] }}`{% if not loop.last %}、{% endif %}{% endfor %}
+  になっていること
+- `Users` タブで、検証用ユーザーのログオン後にユーザー名と送信元IP
+  アドレスの対応(ID-IPマッピング)が表示され、端末IPの変化に追従して
+  更新されること
+- `POLICY | Rules and Policies > Access Rules` で、シナリオ設定の
+  各グループに対応するAccess RuleのSourceが `Any` ではなくグループ
+  指定になっていること
+- `{{ verification_case["user_name"] }}` から
+  `{{ verification_case["target_resource"] }}` へのアクセスが許可
+  されること
+- `{{ verification_denied_case["user_name"] }}` から
+  `{{ verification_denied_case["target_resource"] }}` へのアクセスが
+  拒否されること
+
+## 注意事項
+
+- 本手順書は、SonicOSの技術ドキュメント(SonicOS 7.1 Users)のうち
+  参照可能であった範囲(`Device > Users > Settings > Authentication`
+  の `Configure SSO` から開く `SSO Configuration` 画面の構成、および
+  同ドキュメントの目次に記載された `Configuring Access Rules` /
+  `Automatically Generated Rules for SonicWall SSO` / `Viewing and
+  Managing SSO User Sessions` の各見出し)のみを根拠にしています。
+  `SSO Agents` タブ・`Enforcement` タブ内の個々の入力フィールド名は、
+  該当ページがアクセス制限(bot対策)により直接確認できなかったため、
+  本手順書には具体的なラベル名を記載していません。実機のGUI表示に
+  従って設定してください。
+- LDAP/RADIUS連携自体の初期設定(認証方式の選択、LDAPサーバーの登録
+  等)は本手順の前提とし、本書では扱っていません。未構成の環境では
+  先にその設定を完了させてください。
+- SonicOS CLIによる同等の投入方法は本ページの参照範囲では確認できな
+  かったため記載していません。CLIで投入する場合は、別途SonicOSのCLI
+  リファレンスで構文を確認してから実施してください。
+- SSO AgentやLDAPバインドに使う共有鍵・サービスアカウントのパスワード
+  などの認証情報は、本手順書やログに平文で残さないでください。記録が
+  必要な場合は `********` のようにマスクし、秘密管理ツール等で別途
+  安全に保管してください。
+- 手順6でAccess RuleのSourceを変更した直後は、対象ユーザーの既存
+  セッションに変更が反映されるまで時間差が生じる場合があります。
+  手順7の検証は、必要に応じて対象端末での再ログオン後に行ってくだ
+  さい。

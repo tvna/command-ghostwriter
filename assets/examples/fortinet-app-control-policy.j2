@@ -1,0 +1,203 @@
+# FortiGateのApplication Controlによるアプリケーション単位の可視化と制御
+
+ポート番号だけでは判別できないアプリケーション(SaaS、P2P、迂回通信等)を、
+FortiGuard Application Controlシグネチャベースのレイヤ7識別で可視化し、
+CSVで定義した{{ csv_rows | length }}件のエントリをApplication Controlセンサー
+(プロファイル)`{{ csv_rows[0]["sensor_name"] }}` に登録します。センサーを
+Firewall Policy `{{ csv_rows[0]["policy_name"] }}` に適用し、カテゴリ単位・
+個別アプリケーション単位でallow(pass)/monitor(pass+log)/blockのアクションを
+設定した上で、Forward Trafficログでアプリケーション識別結果を検証します。
+
+## 目的
+
+ポート番号のみでは判別できないSaaS/P2P/迂回通信を、FortiGuard Application
+Controlのシグネチャベースの識別によってレイヤ7で可視化し、カテゴリ単位・
+個別アプリケーション単位でallow/monitor/blockのポリシーを適用できるように
+することを目指します。あわせて、Forward Trafficログでアプリケーション識別
+結果を検証し、意図した制御(許可した通信の可視化、遮断対象の遮断)が行われて
+いることを確認できるようになることを目指します。
+
+## 用語解説
+
+- **Application Control**: FortiGuard Application Controlシグネチャベース
+  でアプリケーションを識別するセキュリティプロファイル(センサー)。IPSの
+  プロトコルデコーダにより、非標準ポート/プロトコル上のアプリケーション
+  通信も識別する。GUIでは `Security Profiles > Application Control` から
+  作成する。利用にはFortiGuard Application Controlサブスクリプションが必要
+- **Categories**: Application Controlプロファイル内でアプリケーションを
+  カテゴリ(P2P、Proxy等)単位でまとめて扱う設定項目。カテゴリ名の横のアイ
+  コンから、そのカテゴリ全体のアクション(Allow/Monitor/Block/Quarantine)
+  を設定する
+- **Application and Filter Overrides**: カテゴリ単位の設定を上書きし、
+  個別アプリケーション(または条件を指定したフィルタ)単位でアクションを
+  設定する項目。`Create New` から個別エントリを追加する
+- **Monitor(アクション)**: GUI上のアクションの一つ。通信を許可しつつログを
+  記録する動作で、CLIでは `set action pass` と `set log enable` の組み合わ
+  せに相当する
+- **config application list**: FortiOS CLIでApplication Controlプロファイル
+  (センサー)を作成するブロック構文。`edit <name>` でプロファイルを作成し、
+  配下の `config entries` の `edit <エントリ番号>` で個々のカテゴリ/アプリ
+  ケーションのエントリを、`set category` / `set application` / `set action`
+  / `set log` で設定する
+- **utm-status / application-list(Firewall Policy)**: Firewall Policyで
+  `set utm-status enable` を設定するとセキュリティプロファイルの適用が有効
+  になり、`set application-list "<name>"` で適用するApplication Control
+  プロファイルを指定できる
+- **Forward Trafficログ**: `Log & Report > Forward Traffic` から確認できる、
+  Firewall Policyを通過した通信のログ画面。ログ詳細にApplication Controlで
+  識別されたアプリケーション名が表示される
+
+## シナリオ設定
+
+Application Controlセンサー `{{ csv_rows[0]["sensor_name"] }}` に登録する
+カテゴリ/アプリケーションエントリと、それを適用するFirewall Policy
+`{{ csv_rows[0]["policy_name"] }}`(`{{ csv_rows[0]["srcintf"] }}` から
+`{{ csv_rows[0]["dstintf"] }}` 方向)は、次の{{ csv_rows | length }}件です。
+
+| entry_no | target_type | target_id | target_name | action | log | description |
+|----------|-------------|-----------|-------------|--------|-----|--------------|
+{% for r in csv_rows %}| {{ r["entry_no"] }} | {{ r["target_type"] }} | {{ r["target_id"] }} | {{ r["target_name"] }} | {{ r["action"] }} | {{ r["log"] }} | {{ r["description"] }} |
+{% endfor %}
+`target_id` はFortiGuardのシグネチャデータベース更新により変動する値である
+ため、本手順書の値をそのまま使わず、必ず対象環境のGUI(`Categories` および
+`Application and Filter Overrides` の一覧)で実際のIDまたは名称を確認して
+CSVを書き換えてください。Firewall Policyの `srcaddr`/`dstaddr`
+(`{{ csv_rows[0]["srcaddr"] }}`/`{{ csv_rows[0]["dstaddr"] }}`)は、既存の
+アドレスオブジェクトが `Policy & Objects > Addresses` に登録済みであること
+を前提とします。
+
+## 手順
+
+### 1. 現状のFirewall PolicyとUTMプロファイル適用状況を確認する(変更前の基準を取る)
+
+新しいセンサーを適用する前に、現状を確認します。
+
+- `Policy & Objects > Firewall Policy` を開き、
+  `{{ csv_rows[0]["policy_name"] }}` に相当するポリシー(または新規作成予定
+  の位置)の現在の設定(`utm-status`、既存のセキュリティプロファイル適用有無)
+  を確認し、記録します。
+- `Security Profiles > Application Control` を開き、同名のセンサーが既に
+  存在しないことを確認します。
+
+### 2. カテゴリ単位のアクションをGUIで設定する(target_type が category の行)
+
+`Security Profiles > Application Control > Create New` からセンサー
+`{{ csv_rows[0]["sensor_name"] }}` を作成し、`Categories` セクションで対象
+カテゴリのアイコンから、次のアクションを設定します。
+
+{% for r in csv_rows %}{% if r["target_type"] == "category" %}- カテゴリ `{{ r["target_name"] }}`(ID {{ r["target_id"] }}): {% if r["action"] == "pass" and r["log"] == "enable" %}Monitor{% elif r["action"] == "pass" %}Allow{% else %}Block{% endif %} — {{ r["description"] }}
+{% endif %}{% endfor %}
+### 3. 個別アプリケーションのApplication Overrideを追加する(target_type が application の行)
+
+同じセンサーの `Application and Filter Overrides` セクションで `Create New`
+をクリックし、次の個別アプリケーションエントリを追加します。
+
+{% for r in csv_rows %}{% if r["target_type"] == "application" %}- アプリケーション `{{ r["target_name"] }}`(ID {{ r["target_id"] }}): {% if r["action"] == "pass" and r["log"] == "enable" %}Monitor{% elif r["action"] == "pass" %}Allow{% else %}Block{% endif %} — {{ r["description"] }}
+{% endif %}{% endfor %}
+入力後は `OK` で保存します。
+
+### 4. 同じ内容をCLIでも登録する
+
+GUIと同じ内容を、`config application list` でも登録します。`config entries`
+配下の `edit` にはCSVの `entry_no` の値をそのまま使用します。
+
+```bash
+config application list
+    edit "{{ csv_rows[0]["sensor_name"] }}"
+        set other-application-action pass
+        set unknown-application-action pass
+        config entries
+{% for r in csv_rows %}            edit {{ r["entry_no"] }}
+{% if r["target_type"] == "category" %}                set category {{ r["target_id"] }}
+{% elif r["target_type"] == "application" %}                set application {{ r["target_id"] }}
+{% endif %}                set action {{ r["action"] }}
+                set log {{ r["log"] }}
+            next
+{% endfor %}        end
+    next
+end
+```
+
+`other-application-action`/`unknown-application-action` は、上記エントリに
+一致しないその他/未分類のアプリケーション通信を業務影響なく可視化するため
+`pass`(許可)としています。遮断に倒す場合は事前に影響範囲を確認してください。
+
+### 5. Firewall PolicyにセンサーをGUI/CLIで適用する
+
+`Policy & Objects > Firewall Policy` でポリシー
+`{{ csv_rows[0]["policy_name"] }}` を開き(存在しない場合は `Create New`)、
+`Security Profiles` の `Application Control` を有効化して
+`{{ csv_rows[0]["sensor_name"] }}` を選択します。
+
+同じ内容をCLIでも設定します。
+
+```bash
+config firewall policy
+    edit 0
+        set name "{{ csv_rows[0]["policy_name"] }}"
+        set srcintf "{{ csv_rows[0]["srcintf"] }}"
+        set dstintf "{{ csv_rows[0]["dstintf"] }}"
+        set srcaddr "{{ csv_rows[0]["srcaddr"] }}"
+        set dstaddr "{{ csv_rows[0]["dstaddr"] }}"
+        set action accept
+        set schedule "always"
+        set service "{{ csv_rows[0]["service"] }}"
+        set utm-status enable
+        set application-list "{{ csv_rows[0]["sensor_name"] }}"
+        set logtraffic all
+        set nat enable
+    next
+end
+```
+
+Firewall Policyの `action` は `accept` のままで構いません。個別アプリケー
+ションの遮断は、ポリシー全体の許可/拒否ではなく、Application Controlセン
+サー内のエントリごとの `action`(手順2・3)で行われます。
+
+### 6. Forward Trafficログでアプリケーション識別結果を検証する
+
+`Log & Report > Forward Traffic` を開き、`{{ csv_rows[0]["policy_name"] }}`
+に一致する通信のログ詳細を確認します。
+
+1. 手順3で `pass`(Monitor)としたアプリケーション
+   ({% for r in csv_rows %}{% if r["action"] == "pass" %}`{{ r["target_name"] }}`{% if not loop.last %}、{% endif %}{% endif %}{% endfor %})
+   の通信が許可され、ログのアプリケーション欄に識別された名称が記録されて
+   いることを確認します。
+2. 手順2・3で `block` としたカテゴリ/アプリケーション
+   ({% for r in csv_rows %}{% if r["action"] == "block" %}`{{ r["target_name"] }}`{% if not loop.last %}、{% endif %}{% endif %}{% endfor %})
+   宛の通信が遮断され、Forward Trafficログ(または該当するセキュリティログ)
+   に遮断の記録が残ることを確認します。
+
+## 動作確認
+
+- Forward Trafficログで、`action` が `pass` のカテゴリ/アプリケーション
+  ({% for r in csv_rows %}{% if r["action"] == "pass" %}`{{ r["target_name"] }}`{% if not loop.last %}、{% endif %}{% endif %}{% endfor %})
+  の通信が許可され、アプリケーション名が識別・記録されていること
+- `action` が `block` のカテゴリ/アプリケーション
+  ({% for r in csv_rows %}{% if r["action"] == "block" %}`{{ r["target_name"] }}`{% if not loop.last %}、{% endif %}{% endif %}{% endfor %})
+  宛の通信が遮断されていること
+- `Security Profiles > Application Control` の
+  `{{ csv_rows[0]["sensor_name"] }}` で、`Categories` および
+  `Application and Filter Overrides` の設定が手順2・3の内容と一致している
+  こと
+- 手順1で記録した既存のFirewall Policy設定が、意図せず変更されていないこと
+
+## 注意事項
+
+- **Application Controlの利用にはFortiGuard Application Controlサブスクリ
+  プションの契約と、シグネチャデータベースの最新化が必要です。** 契約が
+  無効、またはシグネチャが古い場合、新しいSaaS/P2Pアプリケーションを正しく
+  識別できないことがあります。
+- **`target_id`(カテゴリID/アプリケーションID)はシグネチャデータベースの
+  更新により変動します。** 本手順書のCSV値をそのまま別環境に流用せず、必ず
+  対象環境の `Security Profiles > Application Control` 画面で実際のID・
+  名称を確認してから登録してください。
+- 新しいアプリケーションを `block` に設定する前に、まず `Monitor`(手順の
+  `pass`+`log enable`)で一定期間可視化し、業務影響が無いことを確認してから
+  `Block` へ切り替えることを推奨します。
+- Firewall Policyの `utm-status` を有効化する変更が、FortiGate自身の管理
+  アクセス(GUI/SSHログイン)を経由するインターフェースに影響する場合、
+  手順5・6が完了するまで既存の許可設定を無効化・削除しないでください。
+- CLI/GUIへのログインに使う管理者パスワードやAPIトークンは、本手順書や
+  ログに平文で残さないでください。値を記録する場合は `****` のようにマスク
+  し、秘密管理ツール等で別途安全に保管してください。

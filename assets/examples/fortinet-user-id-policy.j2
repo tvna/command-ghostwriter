@@ -1,0 +1,270 @@
+# FortiGate ユーザー/グループ単位ファイアウォールポリシー(FSSO)導入
+
+FortiGate(FortiOS)で、既存のIPサブネットベースのファイアウォールポリシーを、
+FSSO(Fortinet Single Sign-On)+LDAP連携によるユーザー/グループベースの
+ポリシーへ置き換えます。Collector Agent(`{{ collector_agent.name }}`、AD access
+mode: `{{ collector_agent.ad_access_mode }}`)がLDAPサーバー(`{{ ldap_server.name }}`)
+経由でAD上のグループ情報を参照しつつ、ドメインコントローラのログオンイベントを
+監視してID-IPマッピングを維持し、FortiGateへ通知します。これにより
+{{ fsso_user_groups | length }}件のFSSOユーザーグループを送信元とする
+ファイアウォールポリシー({{ firewall_policies | length }}件)を追加し、新しい
+ポリシーでの通信を検証したうえで、同じサブネットを参照していた既存のIPベース
+ポリシー({{ legacy_ip_policies | length }}件)を無効化します。
+
+## 目的
+
+FSSO(Fortinet Single Sign-On)とLDAP連携により、AD上のユーザー/グループ情報と
+ログオン情報由来のID-IPマッピングをFortiGateへ連携し、IPアドレスではなくAD
+グループ単位でファイアウォールポリシーを適用できるようになることを目指します。
+あわせて、新しいユーザー/グループベースのポリシーを検証してから、同じ通信を
+許可していた既存のIPサブネットベースのポリシーを無効化するという安全な適用
+順序を実践し、切り替え時に対象ユーザーの通信が意図せず遮断される、または
+IPベースの旧ポリシーが残存してユーザー識別のない広い許可が併存し続ける、と
+いった事態を防げるようになることを目指します。
+
+## 用語解説
+
+- **FSSO (Fortinet Single Sign-On)**: Windows AD等のディレクトリサービスへの
+  ログオン情報を監視し、ユーザーがどのIPアドレスからログオンしているかを
+  FortiGateに通知する仕組み。ファイアウォールポリシーの送信元をIPアドレス
+  ではなくユーザー/グループで指定できるようにする
+- **Collector Agent**: ADドメインコントローラのログオンイベントを監視し、
+  ログオンユーザーとIPアドレスの対応(ID-to-IPマッピング)を収集して
+  FortiGateへ送信するコンポーネント。GUIでは `Security Fabric > External
+  Connectors` で `Create New` から `Endpoint/Identity` 配下の
+  `FSSO Agent on Windows AD` として登録する
+- **Collector Agent AD access mode**: 上記の外部コネクタ設定内の項目。本
+  手順書では、LDAPサーバーを指定してユーザーグループ情報にアクセスする
+  `Advanced` モードを使用する
+- **LDAP Server(FSSO用)**: `User & Authentication > LDAP Servers` で作成する、
+  AD(Windows AD グローバルカタログ)へアクセスするための設定。Collector
+  Agentの `Advanced` モードから参照され、`Distinguished Name` や
+  `Username`(バインドDN)などを設定する
+- **FSSOユーザーグループ**: `User & Authentication > User Groups` で `Type` を
+  `Fortinet Single Sign-On (FSSO)` として作成するグループ。`Members` 欄には
+  Collector Agent経由で監視しているADグループを追加し、ファイアウォール
+  ポリシーの `Source User(s)` として選択できるようになる。CLIでは
+  `config user group` 配下で `set group-type fsso-service` を設定する
+- **Source User(s)**: `Policy & Objects > Firewall Policy` のポリシー編集
+  画面にある項目。ここにFSSOユーザーグループを指定すると、そのポリシーは
+  指定したグループに所属するユーザーのログオンセッションにのみ適用される。
+  CLIでは `config firewall policy` 配下の `set groups` に対応する
+
+## シナリオ設定
+
+LDAPサーバー(LDAP Servers、Collector AgentのAdvancedモードから参照):
+
+| 項目 | 値 |
+|------|-----|
+| 名前(ldap_server.name) | {{ ldap_server.name }} |
+| Server Name / IP(ldap_server.server_ip) | {{ ldap_server.server_ip }} |
+| Distinguished Name(ldap_server.base_dn) | {{ ldap_server.base_dn }} |
+| Username(バインドDN、ldap_server.bind_dn) | {{ ldap_server.bind_dn }} |
+| Password | **** |
+
+Collector Agent(External Connectors、FSSO Agent on Windows AD):
+
+| 項目 | 値 |
+|------|-----|
+| Name(collector_agent.name) | {{ collector_agent.name }} |
+| Server IP/Name(collector_agent.server_ip) | {{ collector_agent.server_ip }} |
+| Password | **** |
+| Collector Agent AD access mode(collector_agent.ad_access_mode) | {{ collector_agent.ad_access_mode }} |
+| LDAP Server | {{ ldap_server.name }} |
+
+監視対象のADグループ(monitored_ad_groups、{{ monitored_ad_groups | length }}件):
+
+| # | グループ名 | Distinguished Name |
+|---|------------|---------------------|
+{% for grp in monitored_ad_groups %}| {{ loop.index }} | {{ grp.name }} | {{ grp.dn }} |
+{% endfor %}
+作成するFSSOユーザーグループ(fsso_user_groups、{{ fsso_user_groups | length }}件):
+
+| # | グループ名 | Type | Members(監視対象ADグループ) |
+|---|------------|------|-------------------------------|
+{% for group in fsso_user_groups %}| {{ loop.index }} | {{ group.name }} | Fortinet Single Sign-On (FSSO) | {% for m in group.members %}{{ m.name }}{% if not loop.last %}, {% endif %}{% endfor %} |
+{% endfor %}
+新しいポリシーの送信元アドレスオブジェクト(policy_addresses、{{ policy_addresses | length }}件):
+
+| # | 名前 | Type | IP/Netmask | Interface |
+|---|------|------|------------|-----------|
+{% for addr in policy_addresses %}| {{ loop.index }} | {{ addr.name }} | Subnet | {{ addr.subnet }} | {{ addr.interface }} |
+{% endfor %}
+無効化する既存のIPベースポリシー(legacy_ip_policies、{{ legacy_ip_policies | length }}件、
+同じ送信元サブネットをIP単位のみで許可している):
+
+| # | Policy ID | Source Address |
+|---|-----------|-----------------|
+{% for legacy in legacy_ip_policies %}| {{ loop.index }} | {{ legacy.policy_id }} | {{ legacy.source_address }} |
+{% endfor %}
+追加するFSSOベースのファイアウォールポリシー(firewall_policies、
+{{ firewall_policies | length }}件):
+
+| # | Policy ID | Incoming Interface | Source Address | Source User(s) | Outgoing Interface | Destination Address | Service | Schedule | NAT |
+|---|-----------|---------------------|-----------------|-----------------|----------------------|------------------------|---------|----------|-----|
+{% for p in firewall_policies %}| {{ loop.index }} | {{ p.policy_id }} | {{ p.incoming_interface }} | {{ p.source_address }} | {{ p.source_user_group }} | {{ p.outgoing_interface }} | {{ p.destination_address }} | {{ p.service }} | {{ p.schedule }} | {% if p.nat %}Enabled{% else %}Disabled{% endif %} |
+{% endfor %}
+## 手順
+
+### 1. LDAPサーバーを設定する(AD上のグループ情報への参照経路)
+
+`User & Authentication > LDAP Servers` を開き、`Create New` から次の設定を
+登録します。
+
+| 項目 | 値 |
+|------|-----|
+| Name | {{ ldap_server.name }} |
+| Server Name / IP | {{ ldap_server.server_ip }} |
+| Distinguished Name | {{ ldap_server.base_dn }} |
+| Bind Type | Regular |
+| Username | {{ ldap_server.bind_dn }} |
+| Password | (バインド用アカウントのパスワードを入力し、マスクして記録する) |
+
+CLIで同じ内容を設定する場合:
+
+```bash
+config user ldap
+    edit "{{ ldap_server.name }}"
+        set server "{{ ldap_server.server_ip }}"
+        set dn "{{ ldap_server.base_dn }}"
+        set type regular
+        set username "{{ ldap_server.bind_dn }}"
+        set password ****
+    next
+end
+```
+
+### 2. Collector Agent(外部コネクタ)を登録する
+
+`Security Fabric > External Connectors` を開き、`Create New` から
+`Endpoint/Identity` 配下の `FSSO Agent on Windows AD` を選択し、次の設定を
+行います。
+
+| 項目 | 値 |
+|------|-----|
+| Name | {{ collector_agent.name }} |
+| Server IP/Name | {{ collector_agent.server_ip }} |
+| Password | (Collector Agent側で認証を必須にしている場合のみ入力し、マスクして記録する) |
+| Collector Agent AD access mode | {{ collector_agent.ad_access_mode }} |
+| LDAP Server | {{ ldap_server.name }} |
+| User/Groups/Organization Units | 手順3で監視対象とするADグループを選択する |
+
+CLIで同じ内容を設定する場合:
+
+```bash
+config user fsso
+    edit "{{ collector_agent.name }}"
+        set ldap-server "{{ ldap_server.name }}"
+        set password ****
+        set server "{{ collector_agent.server_ip }}"
+    next
+end
+```
+
+### 3. 監視対象のADグループを確認する
+
+Collector Agentの `User/Groups/Organization Units` で、次のADグループが
+選択されていることを確認します(未選択の場合は追加する)。
+
+{% for grp in monitored_ad_groups %}- {{ grp.name }}(`{{ grp.dn }}`)
+{% endfor %}
+### 4. FSSOユーザーグループを作成する
+
+`User & Authentication > User Groups` を開き、`Create New` から
+`Type` を `Fortinet Single Sign-On (FSSO)` としてグループを作成します。
+
+{% for group in fsso_user_groups %}- `{{ group.name }}` を作成し、Membersに次のADグループを追加する:
+{% for m in group.members %}  - {{ m.name }}
+{% endfor %}{% endfor %}
+CLIで同じ内容を設定する場合:
+
+```bash
+config user group
+{% for group in fsso_user_groups %}    edit {{ group.name }}
+        set group-type fsso-service
+        set member {% for m in group.members %}{{ m.dn }}{% if not loop.last %} {% endif %}{% endfor %}
+
+    next
+{% endfor %}end
+```
+
+### 5. 新しい送信元アドレスオブジェクトを作成する
+
+`Policy & Objects > Addresses` を開き、`Create New` から `Address` を選択し、
+次のアドレスオブジェクトを作成します(GUIのみで作成する。CLI構文は一次情報に
+記載がないため本手順書では扱わない)。
+
+{% for addr in policy_addresses %}- Name: `{{ addr.name }}` / Type: `Subnet` / IP/Netmask: `{{ addr.subnet }}` / Interface: `{{ addr.interface }}`
+{% endfor %}
+### 6. FSSOユーザーグループを送信元とするファイアウォールポリシーを作成する(既存ポリシーはまだ無効化しない)
+
+`Policy & Objects > Firewall Policy` を開き、`Create New` から次のポリシーを
+{{ firewall_policies | length }}件作成します。この時点では、手順7で無効化
+する既存のIPベースポリシーはそのまま残しておきます。
+
+{% for p in firewall_policies %}- Policy ID {{ p.policy_id }}: Incoming Interface `{{ p.incoming_interface }}` / Source Address `{{ p.source_address }}` / Source User(s) `{{ p.source_user_group }}` / Outgoing Interface `{{ p.outgoing_interface }}` / Destination Address `{{ p.destination_address }}` / Service `{{ p.service }}` / Schedule `{{ p.schedule }}` / NAT `{% if p.nat %}Enabled{% else %}Disabled{% endif %}`
+{% endfor %}
+CLIで同じ内容を設定する場合:
+
+```bash
+config firewall policy
+{% for p in firewall_policies %}    edit {{ p.policy_id }}
+        set srcintf {{ p.incoming_interface }}
+        set dstintf {{ p.outgoing_interface }}
+        set srcaddr {{ p.source_address }}
+        set dstaddr {{ p.destination_address }}
+        set action accept
+        set groups {{ p.source_user_group }}
+        set schedule {{ p.schedule }}
+        set service {{ p.service }}
+{% if p.nat %}        set nat enable
+{% endif %}    next
+{% endfor %}end
+```
+
+### 7. 検証後、既存のIPベースポリシーを無効化する
+
+手順6のFSSOベースポリシーで対象ユーザーの通信が想定どおり許可されることを
+「動作確認」の内容で確認できてから、同じ送信元サブネットをIPアドレスのみで
+許可していた次の既存ポリシーを無効化(Disable)、または削除します。
+
+{% for legacy in legacy_ip_policies %}- Policy ID {{ legacy.policy_id }}(Source Address: `{{ legacy.source_address }}`)を `Policy & Objects > Firewall Policy` で編集し、Status を無効化する
+{% endfor %}
+**手順6の検証が完了するまで、既存のIPベースポリシーを無効化しないでください。**
+検証前に無効化すると、FSSOによるID-IPマッピングがまだ確立していないユーザーの
+通信が遮断されるおそれがあります。
+
+## 動作確認
+
+- `User & Authentication > User Groups` で、{{ fsso_user_groups | length }}件のFSSOユーザー
+  グループ({% for group in fsso_user_groups %}`{{ group.name }}`{% if not loop.last %}・{% endif %}{% endfor %})が
+  それぞれ `Type: Fortinet Single Sign-On (FSSO)` として作成され、監視対象の
+  ADグループがMembersに含まれていること
+- 監視対象のADグループ({% for grp in monitored_ad_groups %}`{{ grp.name }}`{% if not loop.last %}・{% endif %}{% endfor %})
+  に所属するユーザーがドメインにログオンした際、Collector Agent
+  (`{{ collector_agent.name }}`)経由でそのユーザーのID-IPマッピングが
+  FortiGateに通知され、`Policy & Objects > Firewall Policy` の該当ポリシー
+  ヒットカウントが増加すること
+- 追加した{{ firewall_policies | length }}件のポリシー(Policy ID: {% for p in firewall_policies %}{{ p.policy_id }}{% if not loop.last %}・{% endif %}{% endfor %})で、
+  対象ADグループに所属するユーザーの通信のみが許可され、対象グループに属さ
+  ないユーザーからの同一サブネット内の通信は許可されないこと
+- 手順7を実施した後、無効化した既存ポリシー(Policy ID: {% for legacy in legacy_ip_policies %}{{ legacy.policy_id }}{% if not loop.last %}・{% endif %}{% endfor %})
+  経由では該当サブネットからの通信が許可されなくなっていること
+
+## 注意事項
+
+- **適用順序を厳守すること。** 先に手順6でFSSOベースのポリシーを追加して
+  検証し、対象ユーザーの通信が正しく許可されることを確認したうえで、手順7で
+  既存のIPベースポリシーを無効化する。順序を逆にすると、FSSOのID-IPマッピング
+  が確立する前に既存の許可経路が失われ、対象ユーザーの通信が一時的に遮断
+  されるおそれがある
+- LDAPサーバーおよびCollector Agentのバインドパスワードは、本手順書やログに
+  平文で記載しないこと。値を記録する場合は `****` のようにマスクし、秘密管理
+  ツール等で別途安全に保管すること
+- Collector Agentがドメインコントローラのログオンイベントを正しく監視できて
+  いない場合、ログオン直後のID-IPマッピング反映に遅延が生じ、手順6のポリシー
+  で一時的に通信が許可されないことがある。動作確認で通信が許可されない場合は、
+  まずCollector Agentとドメインコントローラ間の接続状況を確認すること
+- `Policy & Objects > Addresses` でのアドレスオブジェクト作成に対応する
+  CLI構文は一次情報に記載がなく未確認のため、本手順書ではGUIでの作成のみを
+  対象とする

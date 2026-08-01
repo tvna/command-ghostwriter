@@ -1,0 +1,282 @@
+# FortiGateのSSL/TLS Deep Inspectionとプライバシー除外構成
+
+FortiGate (FortiOS) の SSL/SSH Inspection プロファイル(`{{ ssl_ssh_profile_name }}`)
+を用いて、LAN(`{{ lan_interface }}`)からWAN(`{{ wan_interface }}`)向けの一般的な
+outbound HTTPS通信を Full SSL Inspection(Deep Inspection)で復号・検査し、
+マルウェアや情報漏えいの兆候を可視化します。FortiGateはクライアントとサーバーの
+中間者となり、いったん復号した通信をCA証明書(`{{ ca_certificate_name }}`)で
+再署名・再暗号化して転送するため、このCA証明書のチェーンを信頼された
+ルートCAとしてエンドポイントへ事前配布しておく必要があります。あわせて、
+金融・医療等プライバシー配慮が必要な通信は既定のWeb Categories除外
+(Finance and Banking / Health and Wellness / Personal Privacy)に加え、
+個別のアドレス・wildcard-FQDNによる SSL Exemption で明示的に検査対象から
+除外し、プロファイル作成だけでは検査は行われない(Firewall Policyへの適用が
+必須)というFortiOSの仕組みを踏まえてGUI・CLI両方の手順を示します。
+
+## 目的
+
+outbound HTTPS通信に対して SSL/SSH Inspection プロファイルで Full SSL
+Inspection を有効化し、Firewall Policy に適用することで、暗号化通信の中身を
+可視化してマルウェアや情報漏えいを検知できるようになることを目指します。
+同時に、SSL Exemption の既定除外カテゴリ(Finance and Banking / Health and
+Wellness / Personal Privacy)を維持しつつ、業務上必要な個別の金融・医療系
+通信先をアドレス/wildcard-FQDN単位で明示的に除外し、検査対象と除外対象の
+両方をGUI・CLIで確認・検証できるようになることを目指します。
+
+## 用語解説
+
+- **SSL/TLS Deep Inspection(Full SSL Inspection)**: 一次情報に「SSL/TLS
+  deep inspection allows firewalls to inspect traffic even when they are
+  encrypted」と説明される機構。FortiGateがクライアント-サーバー間の中間者
+  として通信を復号して検査し、CA証明書で再署名・再暗号化して転送する。
+  管理者向けガイドでは「Full SSL Inspection: Inspects the SSL/TLS encrypted
+  traffic payload.」と説明されており、ヘッダのみを見る「SSL Certificate
+  Inspection」とは検査範囲が異なる
+- **CA certificate(`caname`)/ 信頼chain**: Full SSL Inspection時にFortiGate
+  がサーバー証明書を再署名するために使うCA証明書(既定値は
+  `Fortinet_CA_SSL`)。一次情報には「usually uses a subordinate CA
+  certificate that is signed by the company's private CA, such as a
+  FortiAuthenticator or a Windows server with certificate services」とあり、
+  「there must be certificate chain back to the trusted root CA that is
+  installed on the user's endpoint」と説明されている。この配布を怠ると、
+  検査対象の通信ごとにエンドポイントで証明書警告が発生する
+- **SSL/SSH Inspection プロファイル(`config firewall ssl-ssh-profile`)**:
+  GUIでは `Security Profiles > SSL/SSH Inspection` を開き `Create New` から
+  作成する。`Enable SSL Inspection of` フィールドで用途を選び、`Multiple
+  Clients Connecting to Multiple Servers`(CLI: `set server-cert-mode
+  re-sign`)は宛先不明のoutbound通信全般を対象にする本シナリオの用途、
+  `Protecting SSL Server`(CLI: `set server-cert-mode replace`、`Server
+  certificate` フィールドで実サーバーの証明書を指定)はSSL Inbound
+  Inspection(内部サーバーを保護する用途)で使う。CLIでは `config https` /
+  `config ftps` 等のプロトコル別ブロックで `set status
+  [disable|certificate-inspection|deep-inspection]` と `set ports` を設定し、
+  `config ssl` ブロックで `set inspect-all
+  [disable|certificate-inspection|deep-inspection]` を設定する
+- **SSL Exemption(除外設定)**: GUIのプロファイル編集画面内 `Exempt from
+  SSL Inspection` セクションで構成する。`Web Categories` には
+  `Finance and Banking` / `Health and Wellness` / `Personal Privacy` が
+  既定で追加されており、管理者向けガイドには「These categories are the
+  most likely to have applications that will require a specific
+  certificate」と説明されている。`Addresses` には `interface` が `any` の
+  アドレスオブジェクトを指定でき、`Reputable Websites` を有効にすると
+  FortiGuardが評価した信頼サイトも除外される。CLIでは `config ssl-exempt`
+  ブロックの `edit <id>` 配下で `set type
+  [fortiguard-category|address|address6|wildcard-fqdn|regex]` を指定し、
+  `type` に応じて `set address` / `set address6` / `set wildcard-fqdn` /
+  `set regex` / `set fortiguard-category` を設定する
+- **Firewall Policyへの適用**: SSL/SSH Inspection プロファイルは作成した
+  だけでは通信に適用されない。`config firewall policy` の対象ポリシーで
+  `set utm-status enable` と `set ssl-ssh-profile "<プロファイル名>"` を
+  設定して初めて、そのポリシーを通過する通信がプロファイルの検査対象になる
+
+## シナリオ設定
+
+今回のSSL/TLS Deep Inspection構成の設定値は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| SSL/SSH Inspectionプロファイル名(ssl_ssh_profile_name) | `{{ ssl_ssh_profile_name }}` |
+| プロファイルのコメント(profile_comment) | {{ profile_comment }} |
+| CA証明書名(ca_certificate_name / caname) | `{{ ca_certificate_name }}` |
+| HTTPSの検査対象ポート(https_port) | {{ https_port }} |
+| LAN側インターフェース(lan_interface) | `{{ lan_interface }}` |
+| WAN側インターフェース(wan_interface) | `{{ wan_interface }}` |
+| 適用先Firewall PolicyのID(firewall_policy_id) | {{ firewall_policy_id }} |
+| 適用先Firewall Policy名(firewall_policy_name) | `{{ firewall_policy_name }}` |
+| Reputable Websites除外の有効化(reputable_websites_enabled) | {{ reputable_websites_enabled }} |
+| 検査対象での確認用URL(verify_general_url) | {{ verify_general_url }} |
+| 除外対象での確認用URL(verify_exempt_url) | {{ verify_exempt_url }} |
+
+`{{ firewall_policy_id }}`(`{{ firewall_policy_name }}`)は、
+`{{ lan_interface }}` から `{{ wan_interface }}` へのoutbound HTTPS通信を
+既に許可している既存のFirewall Policyであることを前提とします(新規作成は
+本手順書の対象外です)。
+
+個別に除外するアドレス/wildcard-FQDN(`ssl_exempt_entries`、
+{{ ssl_exempt_entries | length }}件)は次のとおりです。既定で除外される
+Web Categoriesの `Finance and Banking` / `Health and Wellness` /
+`Personal Privacy` とは別に、業務上明示しておきたい個別の通信先です。
+
+| id | type | 値 | 理由 |
+|----|------|-----|------|
+{% for e in ssl_exempt_entries %}| {{ e["id"] }} | `{{ e["type"] }}` | `{{ e["match_value"] }}` | {{ e["note"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 現状のSSL/SSH Inspectionプロファイル一覧とFirewall Policyの内容を確認する(変更前の基準を取る)
+
+新しいプロファイルを1件も追加する前に、現状を確認します。
+
+- `Security Profiles > SSL/SSH Inspection` を開き、`{{ ssl_ssh_profile_name }}`
+  と同名のプロファイルが存在しないことを確認します。
+- `Policy & Objects > Firewall Policy` を開き、`{{ firewall_policy_id }}`
+  番(`{{ firewall_policy_name }}`)のポリシーの現在の `Security Profiles`
+  欄(SSL Inspectionが未適用であること)を確認し、記録します。
+
+### 2. SSL/SSH InspectionプロファイルをGUIで作成する
+
+1. `Security Profiles > SSL/SSH Inspection` を開き、`Create New` を
+   クリックします。
+2. `Name` に `{{ ssl_ssh_profile_name }}` を入力します。
+3. `Comments` に `{{ profile_comment }}` を入力します。
+4. `SSL Inspection Options` の `Enable SSL Inspection of` を
+   `Multiple Clients Connecting to Multiple Servers` に設定します(宛先
+   不明のoutbound通信全般を対象にするため)。
+5. `Inspection method` を `Full SSL Inspection` に設定します。
+6. `CA certificate` のドロップダウンで `{{ ca_certificate_name }}` を
+   選択します。
+7. `Exempt from SSL Inspection` セクションを確認します。
+   - `Web Categories` に `Finance and Banking` / `Health and Wellness` /
+     `Personal Privacy` が既定で追加されていることを確認します(削除しない
+     でください)。
+{% if reputable_websites_enabled %}   - `Reputable Websites` を有効にします。
+{% else %}   - `Reputable Websites` は無効のままにします。
+{% endif %}   - `Log SSL exemptions` を有効にします。
+8. `OK` をクリックして保存します。
+
+### 3. 同じプロファイルをCLIでも作成する
+
+GUIと同じ内容を、`config firewall ssl-ssh-profile` でも登録します。
+
+```bash
+config firewall ssl-ssh-profile
+    edit "{{ ssl_ssh_profile_name }}"
+        set comment "{{ profile_comment }}"
+        set caname "{{ ca_certificate_name }}"
+        set server-cert-mode re-sign
+        config https
+            set ports {{ https_port }}
+            set status deep-inspection
+        end
+        config ssl
+            set inspect-all disable
+        end
+{% if reputable_websites_enabled %}        set allowlist enable
+{% else %}        set allowlist disable
+{% endif %}        set ssl-exemption-log enable
+    next
+end
+```
+
+`config ssl` の `inspect-all` は `disable` のまま、プロトコル別ブロック
+(`config https` 等)ごとに検査モードを設定する構成とします。
+
+### 4. 個別のSSL Exemptionエントリを追加する
+
+シナリオ設定の `ssl_exempt_entries` に基づき、既定の `Web Categories` 除外
+に加えて、個別のアドレス/wildcard-FQDNをGUI・CLIの両方で追加します。
+
+GUIでは、手順2で開いたプロファイル編集画面の `Exempt from SSL Inspection`
+セクション、`Addresses` の項目で対象のアドレスオブジェクトを追加指定します
+(`type` が `wildcard-fqdn` のエントリは、事前に `Policy & Objects >
+Addresses` でwildcard-FQDN型のアドレスオブジェクトとして登録したうえで
+同様に指定します。アドレスオブジェクト自体の作成は本手順書の対象外です)。
+
+CLIでは `config ssl-ssh-profile` の `config ssl-exempt` ブロックに、
+`ssl_exempt_entries` の件数分のエントリを追加します。
+
+```bash
+config firewall ssl-ssh-profile
+    edit "{{ ssl_ssh_profile_name }}"
+        config ssl-exempt
+{% for e in ssl_exempt_entries %}            edit {{ e["id"] }}
+                set type {{ e["type"] }}
+{% if e["type"] == "address" %}                set address "{{ e["address_name"] }}"
+{% elif e["type"] == "wildcard-fqdn" %}                set wildcard-fqdn "{{ e["wildcard_fqdn"] }}"
+{% endif %}            next
+{% endfor %}        end
+    next
+end
+```
+
+### 5. Firewall PolicyにSSL/SSH InspectionプロファイルをGUI/CLIで適用する
+
+プロファイルは作成しただけでは通信に適用されません。手順1で確認した
+既存のFirewall Policy(`{{ firewall_policy_id }}` /
+`{{ firewall_policy_name }}`)に適用します。
+
+GUI:
+
+1. `Policy & Objects > Firewall Policy` を開き、
+   `{{ firewall_policy_name }}`(ID `{{ firewall_policy_id }}`)を編集
+   します。
+2. `Security Profiles` の `SSL Inspection` を有効にし、
+   `{{ ssl_ssh_profile_name }}` を選択します。
+3. `OK` をクリックして保存します。
+
+CLI:
+
+```bash
+config firewall policy
+    edit {{ firewall_policy_id }}
+        set utm-status enable
+        set ssl-ssh-profile "{{ ssl_ssh_profile_name }}"
+    next
+end
+```
+
+### 6. FortiGateのCA証明書をエンドポイントへ配布する
+
+`Security Profiles > SSL/SSH Inspection` の `{{ ssl_ssh_profile_name }}`
+編集画面で `CA certificate` の `Download` をクリックし、
+`{{ ca_certificate_name }}` の証明書ファイルを取得します。取得した証明書
+(またはそのルートCA)を、Full SSL Inspectionの対象となる全端末の
+信頼されたルート証明書ストアへ配布・インストールしてください。この手順を
+省略すると、手順5適用後にエンドポイント側でTLS証明書警告が発生し、通信が
+継続できなくなるおそれがあります。
+
+### 7. 検査対象・除外対象それぞれで動作を確認する
+
+エンドポイントのブラウザから次の2つのURLへアクセスし、証明書チェーンの
+発行者(Issuer)を確認します。
+
+- `{{ verify_general_url }}`(除外対象外の一般的なHTTPSサイト): 証明書の
+  発行者が `{{ ca_certificate_name }}` に置き換わっていること(Full SSL
+  Inspectionが適用されていること)を確認します。
+- `{{ verify_exempt_url }}`(`ssl_exempt_entries` のwildcard-FQDN除外に
+  一致するサイト): 証明書の発行者が元のサーバー証明書の発行者のままで
+  あること(検査対象から除外されていること)を確認します。
+
+## 動作確認
+
+- `Policy & Objects > Firewall Policy` の `{{ firewall_policy_name }}`
+  (ID `{{ firewall_policy_id }}`)の `Security Profiles` 欄で `SSL
+  Inspection` に `{{ ssl_ssh_profile_name }}` が表示されていること
+- `{{ verify_general_url }}` へのアクセスで、証明書の発行者が
+  `{{ ca_certificate_name }}` になっていること
+- `{{ verify_exempt_url }}` へのアクセスで、証明書の発行者が元のサーバー
+  証明書のままであり、`{{ ca_certificate_name }}` に置き換わっていないこと
+- `Security Profiles > SSL/SSH Inspection` の `{{ ssl_ssh_profile_name }}`
+  で、`Web Categories` に `Finance and Banking` / `Health and Wellness` /
+  `Personal Privacy` が引き続き含まれていること
+- `Log & Report` のSSLログ(SSL exemption)に、`ssl_exempt_entries` に
+  対応する除外イベントが記録されていること(`set ssl-exemption-log enable`
+  が有効な場合)
+- 手順1で記録した既存のFirewall Policyの並び順・他の設定値が、意図せず
+  変更されていないこと
+
+## 注意事項
+
+- **プロファイルの作成だけでは検査は行われません。** 実際に通信が検査
+  対象になるのは、手順5でFirewall Policyの `ssl-ssh-profile` に適用した
+  後です。手順4までしか実施していない段階で「設定した」と判断しないで
+  ください。
+- **CA証明書のエンドポイント配布(手順6)を省略しないこと。** 一次情報の
+  とおり、信頼されたルートCAへのchainがエンドポイントに存在しない場合、
+  Full SSL Inspection適用後の通信でTLS証明書警告や接続失敗が発生します。
+- **既定の除外Web Categories(Finance and Banking / Health and Wellness /
+  Personal Privacy)を誤って無効化・削除しないこと。** これらはプライバシー
+  配慮が必要な通信を検査対象から外すための既定除外であり、削除すると金融・
+  医療関連の暗号化通信まで復号・検査対象に含まれてしまいます。
+- `fortiguard-category` をCLIで直接指定する場合、カテゴリIDの具体的な数値
+  は一次情報のCLIリファレンスに例示がありません。数値を推測で入力せず、
+  GUIの `Web Categories` 選択画面から対象カテゴリを選ぶ方法を優先して
+  ください。
+- SSL/TLS Deep Inspectionはユーザーの暗号化通信の中身を復号して可視化する
+  機構です。適用範囲(対象ポリシー・対象ユーザー)と除外範囲について、事前に
+  法務・コンプライアンス部門の承認を得てから本番展開してください。
+- CLI/GUIへのログインに使う管理者パスワードやAPIトークンは、本手順書や
+  チケット、ログに平文で残さないでください。記録が必要な場合は
+  `********` のようにマスクし、秘密管理ツール等で別途安全に保管してくだ
+  さい。

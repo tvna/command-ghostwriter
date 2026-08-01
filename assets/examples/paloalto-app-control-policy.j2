@@ -1,0 +1,163 @@
+# Palo Alto Networks(PAN-OS)によるApp-IDを用いたアプリケーション単位ポリシー適用手順書
+
+ポート番号だけでは業務上必要なSaaSと未承認のクラウドストレージ、P2P、迂回通信
+などを区別できないという課題に対し、PAN-OSのApp-IDでトラフィックの内容から
+アプリケーションそのものを識別し、CSVで定義した{{ csv_rows | length }}件の
+アプリケーション単位ルールを`Policies > Security`に登録します。登録前に
+ACCで現状のアプリケーション利用状況を確認し、登録後は`test
+security-policy-match`とTraffic logで許可・遮断双方の挙動を検証します。
+
+## 目的
+
+PAN-OSのApp-IDが、宛先ポート番号ではなくトラフィックの内容(シグネチャ・
+プロトコルデコード・復号後の再検査・振る舞い解析)からアプリケーションを
+識別する仕組みであることを理解した上で、承認済みSaaS・未承認SaaS・P2P・
+迂回通信といった性質の異なるアプリケーションそれぞれに対して、許可/監視
+継続/遮断のSecurity Policyルールをアプリケーション単位で登録できるように
+なることを目指します。あわせて、ACCによる利用状況の可視化と、`test
+security-policy-match`・Traffic logを用いた許可・遮断双方の挙動確認が
+できるようになることを目指します。
+
+## 用語解説
+
+- **App-ID**: PAN-OSが持つアプリケーション識別エンジン。ポート番号・
+  プロトコル・暗号化(SSH/SSL)の有無や、ポート番号を偽装するなどの回避策
+  にかかわらず、シグネチャ照合・プロトコルデコード・(復号ポリシーが存在
+  する場合の)復号後の再照合・既知の識別方法で判別できないアプリケーション
+  に対する振る舞い解析を組み合わせてアプリケーションそのものを判定する
+- **Security Policyルールとアプリケーション制御**: App-IDで識別された
+  アプリケーションに対して、Security Policyルールのポリシー照合により
+  遮断(block)、許可した上で脅威スキャンを行う、不正なファイル転送や
+  データパターンを検査する、QoSで帯域制御する、といった扱いを決定できる
+- **unknown-tcp / unknown-udp**: 既知のどのApp-IDシグネチャにも一致しな
+  かったTCP/UDP通信に付与される特別なアプリケーション名。未知の通信を
+  ひとまとめに識別できるため、可視化と遮断の対象にしやすい
+- **ACC(Application Command Center)**: 識別済みのアプリケーションごとに
+  通信量やセッション数を可視化するダッシュボード画面。新規ルール登録前の
+  現状把握や、許可した未承認アプリケーションの継続監視に用いる
+- **Service = application-default**: ルールが許可する通信を、対象アプリ
+  ケーション本来の標準ポートに限定する設定。ポート番号ではなくアプリ
+  ケーション自体で通信を識別・制御するApp-IDの前提と組み合わせて使う既定
+  の推奨設定
+- **commit**: PAN-OSはcandidate configとrunning configを分離する二段階
+  構成モデルを採る。GUIで`Save`したルールもcommitするまで実機の動作には
+  反映されない
+- **test security-policy-match**: 指定した送信元/宛先/アプリケーションな
+  どの組み合わせが、実際にどのSecurity Policyルールに一致するかをCLIから
+  確認できるテストコマンド
+
+## シナリオ設定
+
+内部セグメント`trust`から外部(`untrust`)へ向かう通信のうち、性質の異なる
+{{ csv_rows | length }}件のアプリケーションを対象に、許可・監視継続・遮断
+のいずれかを適用します。`rule_no`の昇順がそのままルールベース内の並び順
+(評価順)になります。
+
+| rule_no | name | from_zone | to_zone | source | destination | application | app_category | action | description |
+|---------|------|-----------|---------|--------|-------------|-------------|--------------|--------|--------------|
+{% for r in csv_rows %}| {{ r["rule_no"] }} | {{ r["name"] }} | {{ r["from_zone"] }} | {{ r["to_zone"] }} | {{ r["source"] }} | {{ r["destination"] }} | {{ r["application"] }} | {{ r["app_category"] }} | {{ r["action"] }} | {{ r["description"] }} |
+{% endfor %}
+
+`trust`は自組織の内部セグメントが所属する前提のゾーン名、`untrust`は
+インターネット側インターフェースが所属する前提のゾーン名です。実際の環境
+に存在するゾーン名に読み替えてください。
+
+## 手順
+
+### 1. ACCで現状のアプリケーション利用状況を確認する(ルール登録前の基準を取る)
+
+新しいルールを1件も登録する前に、ACCタブを開き、現時点でApp-IDが識別して
+いるアプリケーションごとの通信量・セッション数を確認します。この時点では
+まだ明示的なアプリケーション単位ルールが存在しないため、内部から外部への
+通信は既定のルールに従って扱われています。ここで確認する現状値が、手順5
+で行う検証の比較対象になります。
+
+### 2. アプリケーション単位のSecurity Policyルールを登録する
+
+`Policies > Security`で`Add`を選び、シナリオ設定の各行を`rule_no`の昇順で
+登録します。各行につき、次のタブへ表の値をそのまま入力します。
+
+- General タブ: `Name`にルール名を入力する
+- Source タブ: `Source Zone`を設定し、`Source Address`を指定する
+- Destination タブ: `Destination Zone`を設定し、`Destination Address`を
+  指定する(値が`any`の場合は既定の`any`のままにする)
+- Applications タブ: `Application`に対象アプリケーションを追加する
+- Service/URL Category タブ: `Service`は`application-default`のままにする
+  (アプリケーション本来の標準ポートのみに限定するため)
+- Actions タブ: `Action`をシナリオ設定の`action`列の値(`allow`または
+  `deny`)に合わせて設定する
+
+{% for r in csv_rows %}- rule_no {{ r["rule_no"] }}({{ r["name"] }}): {{ r["from_zone"] }} -> {{ r["to_zone"] }} / {{ r["source"] }} -> {{ r["destination"] }} / application={{ r["application"] }} / action={{ r["action"] }}({{ r["description"] }})
+{% endfor %}
+`action`が`allow`の行のうち、未承認のクラウドストレージ(rule_no 2)は遮断
+せず許可した上でACCによる継続監視の対象とします。入力後は`OK`のみを行い、
+この時点ではまだ`Commit`は実行しません。
+
+### 3. 変更を確定する(commit)
+
+`Commit`を実行し、候補設定(candidate config)を実行中の設定(running
+config)へ反映します。commitが完了するまで、手順2で入力した内容は実機の
+動作に反映されません。
+
+### 4. test security-policy-matchで許可ルールの一致を確認する
+
+CLIから`test security-policy-match`を実行し、シナリオ設定の`allow`行が
+意図したルールに一致することを確認します。
+
+```bash
+{% for r in csv_rows %}{% if r["action"] == "allow" %}test security-policy-match application {{ r["application"] }} source {{ r["test_src"] }} destination {{ r["destination"] }} destination-port {{ r["std_port"] }} protocol {{ r["proto_num"] }}
+{% endif %}{% endfor %}```
+
+出力に一致したルール名(`ALLOW-SANCTIONED-SAAS`など)とそのAction・
+from/toゾーンが表示されるので、シナリオ設定の対応する行と一致するかを
+確認します。
+
+### 5. ACCとTraffic logで遮断・監視対象アプリケーションの挙動を確認する
+
+`Monitor > Logs`を開いて`Traffic`ログ種別を選び、遮断対象アプリケーション
+ごとにフィルタ欄へ次のフィルタを入力して`Apply Filter`を実行し、意図した
+ルール名で遮断(deny)されているかを確認します。
+
+{% for r in csv_rows %}{% if r["action"] == "deny" %}```
+( app eq {{ r["application"] }} )
+```
+{% endif %}{% endfor %}
+続けて、ACCタブに戻り、rule_no 2(未承認クラウドストレージ)のアプリ
+ケーション利用が手順1で確認した現状値と比較して可視化されており、遮断
+されずに継続して観測できることを確認します。
+
+## 動作確認
+
+- `test security-policy-match`で、シナリオ設定の`allow`行それぞれが対応
+  するルール名(`ALLOW-SANCTIONED-SAAS`など)に一致し、Actionが`allow`で
+  あること
+- `Monitor > Logs`の`Traffic`ログで、フィルタ`( app eq bittorrent )`
+  `( app eq tor )``( app eq unknown-tcp )`によりそれぞれ遮断された通信が
+  記録されていること
+- ACCタブで、rule_no 2(未承認クラウドストレージ)のアプリケーション利用
+  が遮断されずに可視化され続けていること
+- `Policies > Security`のルールベース上で、シナリオ設定の全行が既定の
+  ルールより上位(評価順で先)に並んでいること
+
+## 注意事項
+
+- **App-IDによる識別は暗号化された通信では制限されることがあります。**
+  SSL/SSHで暗号化されたセッションは、復号ポリシー(Decryption Policy)が
+  設定されていない場合、内容に基づく追加のシグネチャ照合まで行われず、
+  識別の精度が下がることがあります。SaaSアプリケーションを精密に区別
+  したい場合は、復号ポリシーの適用も検討してください。
+- **unknown-tcp/unknown-udpを一律で遮断する前に、Traffic logで内訳を
+  確認してください。** 自組織で運用する未知のカスタムアプリケーション
+  の通信もこの分類に含まれるため、rule_no 5を登録する前に業務影響がない
+  かを確認します。
+- ルール評価は上から順・最初に一致した1件のみが適用されるため、
+  シナリオ設定の各行は`rule_no`の昇順、つまりルールベース内でこの順番の
+  まま登録してください。
+- `Commit`を実行するまでcandidate configはrunning configに反映されません。
+  手順2で入力した内容は、手順3のcommitまで実機の動作に影響しません。
+- `trust`/`untrust`はこの手順書内の仮称であり、実際の環境に存在するゾーン
+  名に読み替えてください。
+- App-IDのアプリケーション定義はコンテンツアップデートにより随時更新
+  されるため、既存ルールに設定したアプリケーションの分類や標準ポートが
+  更新後に変わっていないか、定期的にPolicies > Security上で見直して
+  ください。

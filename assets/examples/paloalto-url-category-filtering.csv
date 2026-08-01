@@ -1,0 +1,7 @@
+no,category_type,category_name,url_entry,site_action,case_no,description
+1,base,phishing,-,block,-,フィッシングサイトへのアクセスを遮断する(既定のPAN-DBカテゴリ)
+2,base,malware,-,block,-,マルウェア配布サイトへのアクセスを遮断する(既定のPAN-DBカテゴリ)
+3,base,command-and-control,-,block,-,C2(コマンドアンドコントロール)通信先への通信を遮断する(既定のPAN-DBカテゴリ)
+4,base,high-risk,-,alert,-,高リスクカテゴリは業務影響を避けるためブロックせずアラートのみ記録する
+5,exception,fp-allowlist,partner.example.co.jp/*,allow,INC-2026-041,取引先ポータルがphishingカテゴリに誤分類されブロックされたための例外許可
+6,exception,fp-allowlist,intranet.example.com/*,allow,INC-2026-058,社内請求システムがmalwareカテゴリに誤分類されブロックされたための例外許可

@@ -1,0 +1,5 @@
+policy_no,app_name,traffic_type,action,description
+1,Dropbox,SaaS,Log,ポート番号では判別できないSaaSファイル同期通信を可視化するためログのみ有効化
+2,YouTube,SaaS,BWM,業務時間帯の帯域占有を抑えるため帯域制御ポリシーの対象とする
+3,BitTorrent,P2P,Block,社内ネットワークでのP2Pファイル共有トラフィックを遮断
+4,Tor,Circumvention,Block,プロキシ経由の迂回通信(Torクライアントトラフィック)を遮断

@@ -1,0 +1,167 @@
+# Palo Alto Networks(PAN-OS)によるURLカテゴリフィルタリングと誤検知例外運用
+
+URL Filteringプロファイル(`Objects > Security Profiles > URL Filtering`)で、
+フィッシングやマルウェア配布サイト等の危険なURLカテゴリを`block`し、CSV で
+定義した{{ csv_rows | length }}件のうち、業務に必要な正当なサイトが誤って
+遮断された場合は、カスタムURLカテゴリ(Type: `URL List`)へ当該URLを登録し、
+そのカテゴリのSite Accessを`allow`に設定することで例外を運用します。カスタム
+URLカテゴリの設定は、同一URLが一致した既定のPAN-DBカテゴリより優先して適用
+されるため、既存のブロック設定自体は変更しません。
+
+## 目的
+
+PAN-OSのURL Filteringプロファイルにおいて、`phishing`・`malware`・
+`command-and-control`のような脅威系カテゴリをSite Access `block`で遮断し、
+`high-risk`のようなカテゴリを`alert`で監視できるようにします。あわせて、
+誤検知(過検知)によって正当な業務サイトが遮断された際に、カスタムURL
+カテゴリ(URL List)への登録とプロファイル側のSite Access設定だけで、既定の
+カテゴリ判定・ブロック設定を変更せずに迅速な例外許可を運用できるように
+なることを目指します。
+
+## 用語解説
+
+- **URL Filtering profile**: `Objects > Security Profiles > URL Filtering`で
+  作成・編集するセキュリティプロファイル。PAN-DBのURLカテゴリごとに
+  Site Accessを設定し、Security Policyルールに適用することでカテゴリ単位の
+  制御を行う
+- **Site Access**: URL Filteringプロファイル内でカテゴリごとに設定する
+  アクション。`block`(サイトを遮断)、`alert`(サイトへのアクセスを許可し
+  ログを記録)、`allow`(サイトへのアクセスを許可)、`continue`(いったん
+  遮断し、ユーザーが続行を選択すればアクセスできる)、`override`
+  (管理者/IT担当者がパスワードを入力すれば一時的にアクセスできる)の
+  いずれかを取る
+- **Custom URL Category**: `Objects > Custom Objects > URL Category`で作成
+  するカスタムカテゴリ。`Type`は`Category Match`(既存の複数カテゴリに一致
+  するサイトをまとめて扱う)と`URL List`(既定のURLカテゴリとは異なる
+  扱いをしたい特定サイトを個別に登録する)のいずれかを選択する
+- **URL Category Exceptions**: `URL List`タイプのカスタムURLカテゴリに
+  例外対象のURLを登録し、そのカテゴリ自体をURL Filteringプロファイルへ
+  追加してSite Accessを設定する運用方法。同一URLが一致した場合、カスタム
+  URLカテゴリに設定したアクションが既定のPAN-DBカテゴリの判定より優先
+  される
+- **Profile Setting / Profile Type**: Security Policyルールの`Actions`タブに
+  ある設定項目。`Profile Type`を`Profiles`にすると、適用するURL Filtering
+  プロファイルを個別に選択できる。プロファイルは、当該ルールで通信が
+  `Allow`された場合にのみ評価される
+- **commit**: PAN-OSはcandidate configとrunning configを分離する二段階構成
+  モデルを採る。GUIで`Save`したプロファイル設定もcommitするまで実機の
+  動作には反映されない
+
+## シナリオ設定
+
+`phishing`・`malware`・`command-and-control`を遮断し、`high-risk`をアラート
+のみとする既定カテゴリと、誤検知によって遮断された業務サイトをカスタムURL
+カテゴリ`fp-allowlist`(Type: `URL List`)へ登録する例外運用をあわせて次の
+{{ csv_rows | length }}件で管理します。
+
+| no | category_type | category_name | url_entry | site_action | case_no | description |
+|----|---------------|---------------|-----------|-------------|---------|--------------|
+{% for r in csv_rows %}| {{ r["no"] }} | {{ r["category_type"] }} | {{ r["category_name"] }} | {{ r["url_entry"] }} | {{ r["site_action"] }} | {{ r["case_no"] }} | {{ r["description"] }} |
+{% endfor %}
+
+`category_type`が`base`の行は既定のPAN-DBカテゴリに対するSite Access設定、
+`exception`の行はカスタムURLカテゴリ`fp-allowlist`へ登録するURLエントリを
+表します。`url_entry`・`case_no`が`-`の行は、その項目が対象外であることを
+示すセンチネル値です。
+
+## 手順
+
+### 1. URL Filteringプロファイルの現状を確認する(変更前の基準を取る)
+
+`Objects > Security Profiles > URL Filtering`を開き、既存のプロファイルの
+各カテゴリのSite Access設定を確認します。まだプロファイルが存在しない
+場合は`Add`で新規作成し、プロファイル名を入力します。
+
+### 2. 脅威系カテゴリのSite Accessを設定する
+
+シナリオ設定の`category_type`が`base`の行について、対象カテゴリの
+Site Accessを表の`site_action`のとおりに設定します。
+
+{% for r in csv_rows %}{% if r["category_type"] == "base" %}- カテゴリ`{{ r["category_name"] }}`: Site Access = `{{ r["site_action"] }}`({{ r["description"] }})
+{% endif %}{% endfor %}
+入力後は`OK`のみを行い、この時点ではまだ`Commit`は実行しません。
+
+### 3. カスタムURLカテゴリに例外URLを登録する(誤検知対応)
+
+`Objects > Custom Objects > URL Category`を開き、`Add`をクリックして
+カスタムURLカテゴリを作成します。`Name`にカテゴリ名`fp-allowlist`を入力し、
+`Type`を`URL List`に設定します。シナリオ設定の`category_type`が`exception`
+の行について、`url_entry`の値をこのカスタムURLカテゴリのリストへ追加し、
+`OK`をクリックして保存します。
+
+{% for r in csv_rows %}{% if r["category_type"] == "exception" %}- {{ r["case_no"] }}: `{{ r["url_entry"] }}`をカテゴリ`{{ r["category_name"] }}`へ追加({{ r["description"] }})
+{% endif %}{% endfor %}
+### 4. カスタムURLカテゴリをプロファイルへ追加し、Site Accessをallowに設定する
+
+手順1で開いたURL Filteringプロファイルへ戻り、カテゴリ一覧にカスタムURL
+カテゴリ`fp-allowlist`を追加し、Site Accessを`allow`に設定します。同一URLが
+`phishing`や`malware`など既定カテゴリにも一致する場合でも、カスタムURL
+カテゴリ側のアクションが優先されるため、`fp-allowlist`に登録したURLへの
+アクセスは許可されます。入力後は`OK`のみを行います。
+
+### 5. Security PolicyルールへURL Filteringプロファイルを適用する
+
+対象のSecurity Policyルールを開き、`Actions`タブの`Profile Setting`で
+`Profile Type`を`Profiles`にし、`URL Filtering`の項目で手順1から4で設定した
+プロファイルを選択して`OK`をクリックします。このプロファイルは、当該ルール
+で通信が`Allow`された場合にのみ評価されます。
+
+### 6. 変更を確定する(commit)
+
+`Commit`を実行し、候補設定(candidate config)を実行中の設定(running
+config)へ反映します。commitが完了するまで、手順1から5で入力した内容は
+実機の動作に反映されません。
+
+### 7. Traffic/URL Filteringログで遮断・例外許可を検証する
+
+`Monitor > Logs`を開いて`URL Filtering`ログ種別を選び、脅威系カテゴリが
+遮断されていることを確認します。
+
+```
+( category eq phishing ) and ( action eq block )
+```
+
+続けて、カスタムURLカテゴリによる例外許可が機能していることを確認します。
+
+```
+( category eq fp-allowlist ) and ( action eq allow )
+```
+
+`Apply Filter`を実行し、それぞれの条件に一致するログが記録されているかを
+確認します。
+
+## 動作確認
+
+- `Objects > Security Profiles > URL Filtering`のプロファイルで、シナリオ
+  設定の`base`行それぞれのカテゴリに対応するSite Accessが設定されていること
+- `Objects > Custom Objects > URL Category`で、`fp-allowlist`(Type:
+  `URL List`)にシナリオ設定の`exception`行それぞれの`url_entry`が登録されて
+  いること
+- URL Filteringプロファイルのカテゴリ一覧に`fp-allowlist`が追加され、
+  Site Accessが`allow`に設定されていること
+- 対象のSecurity Policyルールの`Actions`タブで、`Profile Type`が`Profiles`
+  になっており、手順で設定したURL Filteringプロファイルが選択されていること
+- `Monitor > Logs`の`URL Filtering`ログで、フィルタ
+  `( category eq phishing ) and ( action eq block )`により脅威系カテゴリの
+  遮断が記録されていること
+- 同ログで、フィルタ`( category eq fp-allowlist ) and ( action eq allow )`
+  により、例外登録したURLへのアクセスが許可として記録されていること
+
+## 注意事項
+
+- **カスタムURLカテゴリのアクションは、同一URLが一致した既定のPAN-DB
+  カテゴリより優先して適用されます。** `fp-allowlist`に登録したURLは、
+  `phishing`や`malware`のブロック対象であっても許可されるため、登録前に
+  誤検知であることを必ず確認してください。
+- URL Filteringプロファイルは、Security Policyルールで通信が`Allow`された
+  場合にのみ評価されます。ルール自体が`Deny`の通信には適用されません。
+- カスタムURLカテゴリの`URL List`ではワイルドカード(`*`と`^`)が使用でき、
+  ドメインのみを入力した場合は末尾に`/`が自動的に付与されます。登録時は
+  意図しない範囲まで一致しないか確認してください。
+- `Commit`を実行するまでcandidate configはrunning configに反映されません。
+  手順1から5で入力した内容は、手順6のcommitまで実機の動作に影響しません。
+- `override`アクションを使う場合、管理者/IT担当者向けのパスワードを
+  プロファイルに設定しますが、この手順書ではパスワード値そのものは扱わず、
+  設定欄の値は`****`のようにマスクして記録してください。
+- `case_no`はシナリオ設定内の追跡用の記録であり、実際の運用ではインシデント
+  管理システムの起票番号など、組織の実際の管理番号に読み替えてください。

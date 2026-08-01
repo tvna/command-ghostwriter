@@ -1,0 +1,25 @@
+ssl_ssh_profile_name = "ssl-deep-inspect-outbound"
+profile_comment = "outbound HTTPS deep inspection with finance/health/privacy exemptions"
+ca_certificate_name = "Fortinet_CA_SSL"
+https_port = 443
+lan_interface = "lan"
+wan_interface = "wan1"
+firewall_policy_id = 42
+firewall_policy_name = "out_lan-wan1_default-internet"
+reputable_websites_enabled = true
+verify_general_url = "https://example.com/"
+verify_exempt_url = "https://www.example-bank.co.jp/"
+
+[[ssl_exempt_entries]]
+id = 1
+type = "address"
+address_name = "addr-clinic-portal-vpn"
+match_value = "198.51.100.20/32"
+note = "提携医療機関ポータル(Health and Wellness既定除外に加え、固定IPで明示除外)"
+
+[[ssl_exempt_entries]]
+id = 2
+type = "wildcard-fqdn"
+wildcard_fqdn = "*.example-bank.co.jp"
+match_value = "*.example-bank.co.jp"
+note = "取引銀行の外部サイト(Finance and Banking既定除外に加え、ワイルドカードFQDNで明示除外)"
