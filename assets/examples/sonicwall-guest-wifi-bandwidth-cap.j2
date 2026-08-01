@@ -1,0 +1,160 @@
+# SonicWall (SonicOS) ゲストWiFi帯域・同時接続数制限
+
+SonicOS の Wireless Guest Services(WGS)は、ゲストアカウント単位の
+Traffic Quota(`Receive Limit` / `Transmit Limit`)と、WLAN ゾーン単位の
+`Maximum Concurrent Guests` フィールドをそれぞれ独立に持ちます。本手順書は
+CSV で定義した {{ csv_rows | length }} 件のゲストアカウントに対し、
+`DEVICE | Users > Guest Services` でアカウントごとの帯域上限(Traffic
+Quota)と `Enforce login uniqueness` を設定し、`OBJECT | Match Objects >
+Zones` の WLAN ゾーン編集ダイアログで同時接続ゲスト数の上限
+(`Maximum Concurrent Guests`)を設定します。これにより、ゲストWiFi利用者
+の帯域や同時接続数に上限を設け、社内ネットワークのリソースを保護します。
+
+## 目的
+
+ゲストWiFiを利用する来訪者・イベント参加者などの通信が、社内の業務用
+回線やSonicOS本体のセッションテーブルを圧迫しないよう、SonicOSが標準で
+持つ Traffic Quota と Maximum Concurrent Guests の既存機構だけで帯域上限
+と同時接続数上限を設定できるようになることを目指します。あわせて、
+アカウントを使い回されたくない受付窓口向けゲストアカウントについては
+`Enforce login uniqueness` で多重ログインそのものを防ぎます。
+
+## 用語解説
+
+- **DEVICE | Users > Guest Services**: ゲストアカウントを新規作成・編集
+  するための管理画面ナビゲーションパス。この配下の「Guest Account」
+  ダイアログで、アカウント名や以下の Traffic Quota 関連フィールドを設定
+  する
+- **Receive Limit / Transmit Limit(Traffic Quota)**: 「Guest Account」
+  ダイアログ内のフィールド。`Receive Limit` はそのアカウントが受信できる
+  データ量(ダウンロード上限)、`Transmit Limit` は送信できるデータ量
+  (アップロード上限)を Megabytes 単位で指定する。値を `0` にすると
+  上限なし(Unlimited、既定値)として扱われる
+- **Enforce login uniqueness**: 「Guest Account」ダイアログ内のチェック
+  ボックス。有効にすると、同一アカウントでの同時ログインをただ1セッション
+  のみに制限する。無効のままだと同一アカウントを複数端末で同時に使い回す
+  ことができる
+- **OBJECT | Match Objects > Zones**: ゾーン設定を編集するための管理画面
+  ナビゲーションパス。WLAN ゾーンを選び `Edit` を開くと、他ゾーンには無い
+  `Guest Services` タブが表示される
+- **Maximum Concurrent Guests**: WLAN ゾーンの `Guest Services` タブに
+  ある、ゾーン全体で同時にログイン可能なゲスト数そのものの上限フィールド。
+  アカウント単位の `Enforce login uniqueness` とは独立した、ゾーン単位の
+  上限である
+- **Session Lifetime / Idle Timeout**: 「Guest Account」ダイアログ内の
+  フィールド。`Session Lifetime` はアカウント有効化後にセッションを維持
+  できる最大時間、`Idle Timeout` は通信が発生しない状態が続いた場合に
+  セッションを終了させるまでの時間を指定する
+- **Quota超過時の挙動**: 一次情報で確認されている既定動作。ゲストアカウント
+  が `Receive Limit` / `Transmit Limit` のいずれかを超過すると、当該ゲスト
+  ユーザーはログアウトさせられる
+
+## シナリオ設定
+
+今回 `DEVICE | Users > Guest Services` に登録するゲストアカウントは、次の
+{{ csv_rows | length }} 件です。いずれも同じ WLAN ゾーンに属し、ゾーン共通
+の `Maximum Concurrent Guests` は {{ csv_rows[0]["max_concurrent_guests"] }}
+に設定します。
+
+| account_no | guest_username | receive_limit_mb | transmit_limit_mb | enforce_uniqueness | session_lifetime_min | idle_timeout_min | description |
+|------------|----------------|-------------------|--------------------|---------------------|------------------------|--------------------|--------------|
+{% for r in csv_rows %}| {{ r["account_no"] }} | {{ r["guest_username"] }} | {{ r["receive_limit_mb"] }} | {{ r["transmit_limit_mb"] }} | {{ r["enforce_uniqueness"] }} | {{ r["session_lifetime_min"] }} | {{ r["idle_timeout_min"] }} | {{ r["description"] }} |
+{% endfor %}
+
+`receive_limit_mb` / `transmit_limit_mb` が `0` の行(`guest-temp-05`)は、
+「Guest Account」ダイアログ上で `Receive Limit` / `Transmit Limit` を
+Unlimited のまま(既定値)にすることを表します。
+
+## 手順
+
+### 1. 現状の WLAN ゾーン設定とゲストアカウント一覧を確認する(変更前の基準を取る)
+
+新しいゲストアカウントを1件も追加する前に、現状を確認します。
+
+- `OBJECT | Match Objects > Zones` を開き、対象の WLAN ゾーンの `Edit` を
+  クリックして `Guest Services` タブを表示し、現在の
+  `Maximum Concurrent Guests` の値を記録します。
+- `DEVICE | Users > Guest Services` を開き、既存のゲストアカウント一覧に
+  シナリオ設定の `guest_username` と重複するアカウント名が無いことを確認
+  します。
+
+### 2. WLAN ゾーンの Maximum Concurrent Guests を設定する(同時接続数の上限)
+
+`OBJECT | Match Objects > Zones` の対象 WLAN ゾーン `Edit` ダイアログの
+`Guest Services` タブで、`Maximum Concurrent Guests` フィールドに
+`{{ csv_rows[0]["max_concurrent_guests"] }}` を入力し、`OK` で保存します。
+この値は個々のゲストアカウントではなく、ゾーンに同時ログインできるゲスト
+総数そのものを制限します。
+
+### 3. 各ゲストアカウントを登録し、Receive Limit / Transmit Limit を設定する(帯域上限)
+
+シナリオ設定の `account_no` の昇順で、`DEVICE | Users > Guest Services` の
+`Add Guest Account` から1件ずつ登録します。各行につき次のフィールドを表の
+値のまま設定します。
+
+- `Account Name`: `guest_username`
+- `Enable Guest Services Privilege`: 有効
+- `Receive Limit`: `receive_limit_mb` MB(`0` の場合は Unlimited のまま)
+- `Transmit Limit`: `transmit_limit_mb` MB(`0` の場合は Unlimited のまま)
+- `Session Lifetime`: `session_lifetime_min` 分
+- `Idle Timeout`: `idle_timeout_min` 分
+- `Comment`: `description`
+
+{% for r in csv_rows %}- account_no {{ r["account_no"] }}: `{{ r["guest_username"] }}` / Receive Limit={{ r["receive_limit_mb"] }}MB / Transmit Limit={{ r["transmit_limit_mb"] }}MB / Session Lifetime={{ r["session_lifetime_min"] }}分 / Idle Timeout={{ r["idle_timeout_min"] }}分({{ r["description"] }})
+{% endfor %}
+
+`Account Password` / `Confirm Password` は本手順書には記載しません。強固な
+値を都度発行し、`****` のようにマスクした状態でのみ記録・共有してください。
+
+### 4. Enforce login uniqueness を有効にするアカウントを設定する(同時ログインの抑止)
+
+シナリオ設定の `enforce_uniqueness` が `Yes` のアカウントは、手順3で開いた
+同じ「Guest Account」ダイアログ内で `Enforce login uniqueness` チェック
+ボックスを有効にしてから `Save` します。`No` のアカウントは無効のまま
+(既定)にします。
+
+{% for r in csv_rows %}{% if r["enforce_uniqueness"] == "Yes" %}- account_no {{ r["account_no"] }}: `{{ r["guest_username"] }}` は `Enforce login uniqueness` を有効化(同時ログインは1セッションのみ)
+{% endif %}{% endfor %}
+{% for r in csv_rows %}{% if r["enforce_uniqueness"] != "Yes" %}- account_no {{ r["account_no"] }}: `{{ r["guest_username"] }}` は `Enforce login uniqueness` を無効のまま({{ r["description"] }})
+{% endif %}{% endfor %}
+
+### 5. 設定を保存し、ゲストアカウント一覧で内容を確認する
+
+`DEVICE | Users > Guest Services` のゲストアカウント一覧に戻り、
+{{ csv_rows | length }} 件すべてのアカウントが表示されていること、各行の
+`Receive Limit` / `Transmit Limit` / `Enforce login uniqueness` の表示が
+シナリオ設定と一致していることを1件ずつ確認します。
+
+## 動作確認
+
+- `OBJECT | Match Objects > Zones` の対象 WLAN ゾーン `Guest Services`
+  タブで、`Maximum Concurrent Guests` が
+  {{ csv_rows[0]["max_concurrent_guests"] }} に設定されていること
+- `DEVICE | Users > Guest Services` のアカウント一覧に、シナリオ設定の
+  {{ csv_rows | length }} 件のアカウントがすべて登録されていること
+- `receive_limit_mb` / `transmit_limit_mb` が `0` でないアカウントについて、
+  該当アカウントで実際にファイルをダウンロード・アップロードし、指定した
+  MB 数に達した時点でそのゲストがログアウトされること
+- `enforce_uniqueness` が `Yes` のアカウントについて、同一アカウントで
+  2台目の端末からログインを試み、1台目が切断されるか2台目のログインが
+  拒否されること
+- `enforce_uniqueness` が `No` のアカウントについて、同一アカウントで
+  複数端末が同時にログインできること
+
+## 注意事項
+
+- **`Maximum Concurrent Guests` はゾーン全体の上限であり、個々のアカウント
+  の帯域上限とは別軸の設定です。** 手順2で設定した値を、手順3・4で登録
+  するアカウント数と混同しないでください。
+- **Receive Limit / Transmit Limit を `0`(Unlimited)のまま運用する
+  アカウントは、社内ネットワークのリソース保護という本手順書の目的を
+  満たさないままになります。** シナリオ設定の `guest-temp-05` のように
+  暫定運用する場合は、個別要件が確定し次第、上限値を設定してください。
+- 本手順書は一次情報(SonicOS の Guest Services / Wireless Guest Services
+  技術ドキュメント)で確認できた GUI 操作のみを扱います。SonicOS CLI や
+  スクリプトによる同等の投入方法は本ページでは確認できなかったため記載
+  していません。CLI で投入する場合は、別途 SonicOS の CLI リファレンスで
+  構文を確認してから実施してください。
+- ゲストアカウントの `Account Password` など認証情報は、本手順書やログに
+  平文で残さないでください。記録が必要な場合は `****` のようにマスクし、
+  秘密管理ツール等で別途安全に保管してください。

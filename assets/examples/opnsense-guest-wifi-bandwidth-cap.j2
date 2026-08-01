@@ -1,0 +1,129 @@
+# OPNsenseによるゲストWiFi帯域上限設定
+
+ゲストWiFi利用者の帯域に上限を設け、社内ネットワーク(業務用セグメント)の
+リソースを守ります。OPNsense標準機能の Traffic Shaper(Firewall > Shaper の
+Pipes / Rules)のみを使用し、サードパーティ製プラグインは使いません。CSV
+で定義した {{ csv_rows | length }} 件の設定(Guest全体の共有上限 2件 +
+クライアント1台あたりの個別上限 2件)を、GUIから順に登録します。
+
+## 目的
+
+ゲストWiFiセグメント全体の下り/上り帯域に共有の上限を設けたうえで、
+さらにクライアント1台が上限を独占しないようクライアント単位の上限も
+併用し、業務用セグメントの帯域を圧迫させないことを目指します。あわせて、
+Pipe と Rule の対応関係、および `mask` フィールドが持つ役割(共有 vs
+個別)を正しく理解し、意図した粒度で制限が効いていることを確認できるように
+なることを目指します。
+
+## 用語解説
+
+- **Pipe**: `Firewall > Shaper > Pipes` で作成する帯域制御の基本単位。
+  帯域幅(`bandwidth` + `bandwidth Metric`)と、トラフィックの分類方法
+  (`mask`)を持つ
+- **mask**: Pipe内の設定項目。空欄のままにすると、そのPipeを通る全通信が
+  1本の帯域を共有する。`source` を指定すると送信元アドレスごと、
+  `destination` を指定すると宛先アドレスごとに、動的に個別のPipeが生成され
+  クライアント単位の上限として働く
+- **Rule (Shaper Rule)**: `Firewall > Shaper > Rules` で作成する、どの
+  トラフィックをどのPipeに振り分けるかを決める規則。`interface` /
+  `proto` / `source` / `destination` に加え、複数インターフェースを跨ぐ
+  トラフィックのみを対象にする場合は `interface2` も指定する
+- **advanced mode**: `Firewall > Shaper > Rules` 画面左上のトグルで切り替える
+  詳細設定モード。既定表示のままでは編集できない項目を扱うために切り替える
+  必要がある
+- **GuestNet**: ゲストWiFi用に分離したインターフェース/セグメント。本シナリオ
+  では `192.168.2.0/24` を割り当てているものとする
+
+## シナリオ設定
+
+今回登録する Pipe と Rule の組み合わせは、次の {{ csv_rows | length }} 件
+です。`scope` が `shared` の2件は GuestNet 全体で共有する上限、`peruser` の
+2件はクライアント1台あたりの個別上限です。
+
+| no | scope | bandwidth | interface | interface2 | proto | source | destination | direction | mask | target | description |
+|----|-------|-----------|-----------|------------|-------|--------|-------------|-----------|------|--------|--------------|
+{% for r in csv_rows %}| {{ r["no"] }} | {{ r["scope"] }} | {{ r["bandwidth"] }} {{ r["bandwidth_metric"] }} | {{ r["interface"] }} | {{ r["interface2"] }} | {{ r["proto"] }} | {{ r["source"] }} | {{ r["destination"] }} | {{ r["direction"] }} | {{ r["mask"] }} | {{ r["target"] }} | {{ r["description"] }} |
+{% endfor %}
+
+表中の `-` は「そのフィールドは今回の設定では使用しない(既定のまま)」を
+表します。
+
+## 手順
+
+### 1. Guest全体で共有する下り/上りPipeを作成する
+
+`Firewall > Shaper > Pipes` を開き、`+` ボタンから `scope` が `shared` の
+行を1件ずつPipeとして登録します。`mask` が `-` の行は、mask欄は空欄の
+ままにしてください(空欄のままだと、そのPipeを通る全クライアントの通信が
+1本の帯域を共有します)。
+
+{% for r in csv_rows %}{% if r["scope"] == "shared" %}- {{ r["target"] }}: bandwidth={{ r["bandwidth"] }} / bandwidth Metric={{ r["bandwidth_metric"] }} / mask={% if r["mask"] != "-" %}{{ r["mask"] }}{% else %}(空欄のまま){% endif %} / description={{ r["target"] }}
+{% endif %}{% endfor %}
+入力後は都度 `Save` してください。この時点ではまだ `Apply` は押しません。
+
+### 2. Guest全体向けのShaperルールを作成する
+
+`Firewall > Shaper > Rules` を開き、左上のトグルで advanced mode に切り替えて
+から `+` ボタンで登録します。`scope` が `shared` の行は、GuestNetとWAN間の
+トラフィックのみを対象にするため `interface2` にも値を入れます。
+
+{% for r in csv_rows %}{% if r["scope"] == "shared" %}- interface={{ r["interface"] }} / interface2={{ r["interface2"] }} / proto={{ r["proto"] }} / source={{ r["source"] }} / destination={{ r["destination"] }} / direction={{ r["direction"] }} / target={{ r["target"] }}
+{% endif %}{% endfor %}
+direction が `in` のルールは手順1で作成した下りPipeを、`out` のルールは
+上りPipeを、それぞれ `target` に指定してください。
+
+### 3. クライアント1台あたりの個別上限Pipeを作成する
+
+再度 `Firewall > Shaper > Pipes` の `+` ボタンから、`scope` が `peruser` の
+行をPipeとして登録します。今回は `mask` に値を指定し、クライアントごとに
+動的なPipeを生成させます。
+
+{% for r in csv_rows %}{% if r["scope"] == "peruser" %}- {{ r["target"] }}: bandwidth={{ r["bandwidth"] }} / bandwidth Metric={{ r["bandwidth_metric"] }} / mask={{ r["mask"] }} / description={{ r["target"] }}
+{% endif %}{% endfor %}
+mask に `destination` を指定したPipeは宛先アドレス(=ダウンロードする
+クライアント)ごとに、`source` を指定したPipeは送信元アドレス(=アップロード
+するクライアント)ごとに、それぞれ個別のPipeを動的生成します。
+
+### 4. クライアント1台あたりの個別上限ルールを作成する
+
+`Firewall > Shaper > Rules` で、`scope` が `peruser` の行を登録します。
+今回はGuestNetセグメント自体を `source`/`destination` に指定するため、
+`interface2` は使用しません。
+
+{% for r in csv_rows %}{% if r["scope"] == "peruser" %}- interface={{ r["interface"] }} / proto={{ r["proto"] }} / source={{ r["source"] }} / destination={{ r["destination"] }} / target={{ r["target"] }}{% if r["direction"] != "-" %} / direction={{ r["direction"] }}{% else %}(directionは既定のまま変更しません){% endif %}
+{% endif %}{% endfor %}
+
+### 5. 設定を適用する
+
+Pipe・Ruleの登録がすべて終わったら、`Firewall > Shaper > Rules`(または
+Pipes)画面の `Apply` を押して設定を反映します。反映前に、手順1〜4で
+登録した内容が一覧に想定どおり並んでいることを再度見直してください。
+
+## 動作確認
+
+- GuestNetに接続したクライアント1台で速度測定を行い、下り・上りの実測値が
+  それぞれ手順3で設定した個別上限(no=3, no=4 の `bandwidth`)を大きく
+  超えないこと
+- GuestNetに複数クライアントを同時接続して負荷をかけ、GuestNet全体の
+  下り・上りの合計スループットが手順1で設定した共有上限(no=1, no=2 の
+  `bandwidth`)を大きく超えないこと
+- 業務用セグメント(GuestNet以外)の通信が、今回のShaper設定の影響を
+  受けず通常どおりの速度を維持していること
+- `Firewall > Shaper > Pipes` / `Rules` の一覧で、登録した {{ csv_rows | length }} 件の
+  Pipe・Ruleが有効(enabled)な状態で表示されていること
+
+## 注意事項
+
+- mask を指定したPipe(no=3, no=4)は、接続してきたクライアントの数だけ
+  動的にPipeが生成されます。想定より接続数が多い環境では、個別上限が
+  期待どおりに機能しているかを事後に必ず確認してください。
+- 共有Pipe(no=1, no=2)と個別Pipe(no=3, no=4)は役割が異なります。共有
+  Pipeを削除・変更すると個別上限だけが残り、Guest全体としての上限が
+  なくなる点に注意してください。
+- Rule作成時にadvanced modeへの切り替えを忘れると、`interface2` などの
+  項目が編集画面に表示されません。手順2で必ずトグルを切り替えてください。
+- direction を指定しないPeruserルール(no=3, no=4)は、既定の挙動のまま
+  適用されます。想定外の方向にも制限をかけたい場合は、既定値を確認した
+  うえで明示的にdirectionを設定してください。
+- 本手順はOPNsense標準のTraffic Shaper機能のみを使用しており、Zenarmor等の
+  サードパーティ製プラグインやBusiness Edition限定機能は使用していません。

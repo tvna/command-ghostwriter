@@ -1,0 +1,250 @@
+Palo Alto Networks(PAN-OS)における拠点間IPSec VPNトンネルの死活監視構成
+
+`Network > Network Profiles > Monitor`にTunnel Monitoring Profileを1件作成し、
+`Network > IPSec Tunnels`のプライマリトンネル`{{ primary_ipsec_tunnel_name }}`
+にICMPプローブによる死活監視を設定した上で、`Network > Virtual Routers`に
+プライマリ経路より優先度の低い(メトリック値の大きい)バックアップ経路を
+1件登録します。これにより、`{{ remote_site_name }}`拠点向けのトンネルが
+途絶した際にAction=`{{ monitor_action }}`でプライマリトンネルインター
+フェースがルーティングから自動的に除外され、バックアップ経路へ自動的に
+切り替わる構成を実現します。
+
+## 目的
+
+拠点間VPNトンネルの死活を継続的に監視し、断絶を検知した際に人手を介さず
+自動的にバックアップ経路へフェイルオーバーできるようにすることを目指し
+ます。あわせて、Tunnel Monitoring ProfileのAction設定(Wait Recover /
+Fail Over)がルーティングに与える挙動の違いを理解し、IKEv2 Liveness Check
+やIKEv1 Dead Peer DetectionといったIKEレイヤーの死活検知機構との役割分担
+(IKEピアの死活検知か、トンネル内部の宛先までのエンドツーエンド到達性
+監視か)を区別できるようになることも目指します。最後に、CLIの`show`
+コマンドと計画停止による疑似障害試験を通じて、実際にフェイルオーバーが
+機能することを確認できるようになることを目指します。
+
+## 用語解説
+
+- **IPSec Tunnel Monitoring**: トンネルインターフェースに設定した宛先IP
+  アドレスへ、指定したポーリング間隔でICMPプローブを送信し、トンネル内の
+  疎通を継続的に監視するPAN-OSの仕組み
+- **Tunnel Monitoring Profile(`Network > Network Profiles > Monitor`)**:
+  監視動作を定義するプロファイル。`Name`・`Action`・`Interval (sec)`
+  (2〜10秒、既定3秒)・`Threshold`(2〜100回、既定5回)の各項目を設定する
+- **Action = Wait Recover**: プローブが閾値回数連続で失敗しても、ファイア
+  ウォールはトンネルの復旧を待ち続け、トンネルインターフェースを引き続き
+  ルーティング判断の対象として扱う(あたかもトンネルが有効であるかの
+  ように経路を保持し続ける)
+- **Action = Fail Over**: プローブが閾値回数連続で失敗すると、ファイア
+  ウォールはトンネルインターフェースを無効化し、そのインターフェースを
+  使う経路をルーティングテーブルから除外する。これにより、別の経路が
+  存在すればそちらへトラフィックが自動的に切り替わる
+- **Tunnel Monitor / Destination IP / Profile(`Network > IPSec Tunnels`の
+  General タブ)**: `Show Advanced Options`を開くと現れる設定項目群。
+  `Tunnel Monitor`を有効化し、`Destination IP`にトンネル内部(対向拠点側)
+  の到達先IPアドレスを指定し、`Profile`に監視に使うTunnel Monitoring
+  Profileを選択する
+- **IKEv2 Liveness Check(`Network > Network Profiles > IKE Gateways`の
+  Advanced Options)**: IKEv2ゲートウェイ同士がIKEピアの生死を確認する
+  仕組み。既定の間隔は5秒。Tunnel Monitoringとは異なりIKEピアレベルの
+  死活検知であり、トンネル内部の宛先までのエンドツーエンド到達性は
+  確認しない
+- **IKEv1 Dead Peer Detection(DPD)**: IKEv1ゲートウェイにおいてIKEv2の
+  Liveness Checkに相当する、IKEピアの死活検知機構。こちらもIKEピア
+  レベルの検知であり、Tunnel Monitoringのようなトンネル内部の宛先への
+  ICMPプローブは行わない
+- **仮想ルーター(Virtual Router)の静的ルートメトリック**: 同一宛先
+  ネットワークに対して複数の静的ルートが存在する場合、メトリック値が
+  小さい経路が優先される。プライマリ経路のメトリックをバックアップ経路
+  より小さく設定しておくことで、Fail Overによりプライマリ経路が
+  ルーティングテーブルから除外された際、バックアップ経路へ自動的に
+  切り替わる
+- **show vpn ipsec-sa / show vpn ike-sa / show vpn flow / show vpn tunnel**:
+  IPSecトンネルのフェーズ2/フェーズ1セキュリティアソシエーションや
+  トンネルの状態をCLIから確認するコマンド
+- **show routing route / show routing fib virtual-router <name> | match
+  <宛先>**: ルーティングテーブル全体、または特定の宛先ネットワークに
+  対する経路をCLIから確認するコマンド
+- **commit**: PAN-OSはcandidate configとrunning configを分離する二段階
+  構成モデルを採る。GUIで`OK`を押しただけの設定もcommitするまで実機の
+  動作には反映されない
+
+## シナリオ設定
+
+今回、拠点間VPNトンネルの死活監視とフェイルオーバーとして構成する値は
+次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| 対向拠点名(remote_site_name) | {{ remote_site_name }} |
+| 仮想ルーター名(virtual_router_name) | `{{ virtual_router_name }}` |
+| Trust側ゾーン(trust_zone) | `{{ trust_zone }}` |
+| プライマリIKE GatewayName(primary_ike_gateway_name) | `{{ primary_ike_gateway_name }}` |
+| プライマリIPSecトンネル名(primary_ipsec_tunnel_name) | `{{ primary_ipsec_tunnel_name }}` |
+| プライマリトンネルインターフェース(primary_tunnel_if) | `{{ primary_tunnel_if }}` |
+| バックアップIPSecトンネル名(backup_ipsec_tunnel_name) | `{{ backup_ipsec_tunnel_name }}` |
+| バックアップトンネルインターフェース(backup_tunnel_if) | `{{ backup_tunnel_if }}` |
+| Tunnel Monitoring Profile名(monitor_profile_name) | `{{ monitor_profile_name }}` |
+| 監視先IPアドレス(monitor_destination_ip) | `{{ monitor_destination_ip }}` |
+| Action(monitor_action) | `{{ monitor_action }}` |
+| Interval秒(monitor_interval) | {{ monitor_interval }} |
+| Threshold回数(monitor_threshold) | {{ monitor_threshold }} |
+| 対向拠点のネットワーク(remote_network) | `{{ remote_network }}` |
+| プライマリ静的ルート名(primary_route_name) | `{{ primary_route_name }}` |
+| プライマリ経路メトリック(primary_route_metric) | {{ primary_route_metric }} |
+| バックアップ静的ルート名(backup_route_name) | `{{ backup_route_name }}` |
+| バックアップ経路メトリック(backup_route_metric) | {{ backup_route_metric }} |
+| 疎通確認元クライアントIP(test_client_ip) | `{{ test_client_ip }}` |
+| 疎通確認先ホストIP(test_target_ip) | `{{ test_target_ip }}` |
+
+`{{ primary_ike_gateway_name }}`・`{{ primary_ipsec_tunnel_name }}`・
+`{{ backup_ipsec_tunnel_name }}`は既にIKE Phase1/Phase2の設定が完了して
+稼働中である前提とし、本手順では死活監視とフェイルオーバー経路の追加設定
+のみを扱います。
+
+## 手順
+
+### 1. 現状のルーティング状態を確認する(変更前の基準を取る)
+
+新しいプロファイル・ルートを1件も登録する前に、現状を確認します。
+
+- `Network > Network Profiles > Monitor`を開き、`{{ monitor_profile_name }}`
+  と同名のTunnel Monitoring Profileが存在しないことを確認します。
+- `Network > Virtual Routers > {{ virtual_router_name }} > Static Routes`
+  を開き、`{{ remote_network }}`宛の既存の静的ルートと`{{ primary_route_name }}`・
+  `{{ backup_route_name }}`が重複しないことを確認します。
+- CLIで現在の経路を確認します。
+
+```bash
+show routing route
+```
+
+### 2. Tunnel Monitoring Profileを作成する(Network > Network Profiles > Monitor)
+
+`Network > Network Profiles > Monitor > Add`から、次の内容で1件作成します。
+
+- Name = {{ monitor_profile_name }}
+- Action = {{ monitor_action }}
+- Interval (sec) = {{ monitor_interval }}
+- Threshold = {{ monitor_threshold }}
+
+入力後`OK`を押して保存します。
+
+### 3. プライマリトンネルにTunnel Monitorを設定する(Network > IPSec Tunnels)
+
+`Network > IPSec Tunnels`で`{{ primary_ipsec_tunnel_name }}`を開き、
+Generalタブの`Show Advanced Options`をクリックして次を設定します。
+
+- `Tunnel Monitor`にチェックを入れます。
+- `Destination IP`に`{{ monitor_destination_ip }}`(対向拠点側の
+  トンネル内到達先IPアドレス)を入力します。
+- `Profile`に手順2で作成した`{{ monitor_profile_name }}`を選択します。
+
+入力後`OK`を押します。この時点ではまだ`Commit`は実行しません。
+
+### 4. IKEv2 Liveness Checkを確認する(Network > Network Profiles > IKE Gateways)
+
+`Network > Network Profiles > IKE Gateways`で`{{ primary_ike_gateway_name }}`
+を開き、`Advanced Options`タブでLiveness Checkが有効になっていることを
+確認します。これはIKEピアレベルの死活検知であり、手順2〜3で設定した
+トンネル内部の宛先までのエンドツーエンド到達性監視(Tunnel Monitoring)
+とは役割が異なるため、両方を有効にしておきます。設定変更は不要です。
+
+### 5. バックアップ経路の静的ルートを設定する(Network > Virtual Routers)
+
+`Network > Virtual Routers > {{ virtual_router_name }} > Static Routes >
+IPv4`で、次の2件を登録します。
+
+- プライマリ経路: Name={{ primary_route_name }} / Destination=
+  {{ remote_network }} / Interface={{ primary_tunnel_if }} /
+  Metric={{ primary_route_metric }}
+- バックアップ経路: Name={{ backup_route_name }} / Destination=
+  {{ remote_network }} / Interface={{ backup_tunnel_if }} /
+  Metric={{ backup_route_metric }}
+
+バックアップ経路のMetricをプライマリ経路より大きい値にすることで、
+プライマリ経路が有効な間はプライマリが優先され、Fail Overにより
+プライマリ経路がルーティングテーブルから除外された際にバックアップ経路
+へ自動的に切り替わります。入力後`OK`を押します。
+
+### 6. 変更を確定する(commit)
+
+`Commit`を実行し、候補設定(candidate config)を実行中の設定(running
+config)へ反映します。commitが完了するまで、手順2〜5で入力した内容は
+実機の動作に反映されません。
+
+### 7. Tunnel MonitoringのステータスとBGP/静的経路を確認する
+
+commit完了後、CLIから次のコマンドを実行し、プライマリトンネルが稼働中
+であること、プライマリ経路がルーティングテーブルに存在することを確認
+します。
+
+```bash
+show vpn ipsec-sa
+show vpn flow
+show routing fib virtual-router {{ virtual_router_name }} | match {{ remote_network }}
+```
+
+### 8. 計画停止によるフェイルオーバー動作を検証する
+
+対向拠点(`{{ remote_site_name }}`)のネットワーク運用担当と事前に調整の
+うえ、メンテナンスウィンドウ内でプライマリトンネルの対向側を一時的に
+停止します。
+
+- ローカル側で`show vpn ipsec-sa`を再実行し、プライマリトンネルの
+  セキュリティアソシエーションが失われていることを確認します。
+- `show routing route`を再実行し、`{{ primary_route_name }}`が
+  ルーティングテーブルから除外され、`{{ backup_route_name }}`が有効に
+  なっていることを確認します。
+- Trust側ゾーン(`{{ trust_zone }}`)に置かれたクライアント
+  `{{ test_client_ip }}`から`{{ test_target_ip }}`への疎通確認を行い、
+  バックアップ経路経由で到達できることを確認します。
+
+```bash
+ping source {{ test_client_ip }} host {{ test_target_ip }}
+```
+
+確認後、対向拠点の担当にプライマリトンネルの復旧を依頼し、Tunnel
+Monitoringのプローブが再度成功するとプライマリ経路が自動的に復元される
+ことを`show routing route`で確認します。
+
+## 動作確認
+
+- `Network > IPSec Tunnels`の一覧で`{{ primary_ipsec_tunnel_name }}`の
+  Monitorステータスが有効(Up)であること
+- `show vpn ipsec-sa`・`show vpn flow`でプライマリトンネルのセキュリティ
+  アソシエーションが確立していること
+- `show routing fib virtual-router {{ virtual_router_name }} | match
+  {{ remote_network }}`で、平常時は`{{ primary_route_name }}`
+  (`{{ primary_tunnel_if }}`)が有効経路として表示されること
+- 手順8の疑似障害試験で、プライマリトンネル停止中は`{{ backup_route_name }}`
+  (`{{ backup_tunnel_if }}`)へ経路が切り替わり、`{{ test_client_ip }}`から
+  `{{ test_target_ip }}`への疎通が維持されること
+- プライマリトンネル復旧後、`{{ primary_route_name }}`が自動的に復元
+  されること
+- 手順1で確認した既存のTunnel Monitoring Profile・静的ルートの内容が
+  意図せず変更されていないこと
+
+## 注意事項
+
+- **Fail Overはバックアップ経路が存在して初めて効果を持つこと。** 手順5
+  で`{{ backup_route_name }}`を登録していない場合、Fail Overにより
+  `{{ primary_tunnel_if }}`の経路が除外されても切り替え先の経路が存在
+  せず、通信が到達不能になります。
+- **Wait Recoverではプライマリトンネルインターフェースの経路が保持され
+  続けること。** バックアップ経路が用意されている構成でWait Recoverを
+  選択すると、プローブが失敗し続けてもプライマリ経路が除外されず、
+  バックアップ経路へ切り替わらない点に注意してください。
+- **`Destination IP`にはトンネル内部(対向拠点側)の到達先IPアドレスを
+  指定すること。** 対向拠点のWAN側(トンネル外)のIPアドレスを指定すると、
+  ICMPプローブがトンネルを経由せず本来の監視目的を果たしません。
+- IKEv2 Liveness Check(またはIKEv1のDead Peer Detection)はIKEピア
+  レベルの死活検知であり、Tunnel Monitoringが行うトンネル内部の宛先への
+  エンドツーエンド到達性監視とは異なります。どちらか一方のみでは検知
+  できない障害があるため、両方を有効にしておくことを推奨します。
+- `Commit`を実行するまでcandidate configはrunning configに反映されません。
+  手順2〜5で入力した内容は、手順6のcommitまで実機の動作に影響しません。
+- 手順8の疑似障害試験は対向拠点の実トンネルを停止するため、実運用トラ
+  フィックに影響します。必ず事前に対向拠点の運用担当と合意したメンテ
+  ナンスウィンドウ内で実施してください。
+- CLI/GUIへのログインに使う管理者パスワードやAPIキーは、本手順書やチケ
+  ット、ログに平文で残さないでください。記録が必要な場合は`********`の
+  ようにマスクし、秘密管理ツール等で別途安全に保管してください。

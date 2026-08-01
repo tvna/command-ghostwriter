@@ -1,0 +1,242 @@
+# Palo Alto Networks(PAN-OS)のQoS(Quality of Service)による回線輻輳時の帯域制御構成
+
+`Network > Network Profiles > QoS Profile`で優先度・帯域(Egress Max/
+Egress Guaranteed)を定義したQoSプロファイル`{{ qos_profile_name }}`を作成し、
+`Policies > QoS`で重要業務トラフィックと非重要トラフィックをそれぞれ別の
+クラスへ振り分けるQoSポリシールールを2件登録し、`Network > QoS`で送信元
+インターフェース`{{ egress_interface }}`にQoS機能とこのプロファイルを
+適用します。回線輻輳時にクラス優先度とギャランティード帯域により重要
+業務トラフィックを保護し、非重要トラフィックの帯域を制限することで業務
+影響を最小化します。
+
+## 目的
+
+PAN-OSのQoSにおいて、インターフェースでのQoS有効化・QoSプロファイルでの
+クラスごとの優先度と帯域設定・QoSポリシールールによるトラフィックの
+クラス振り分けという3要素がどのように連携して機能するかを理解した上で、
+回線輻輳時に重要業務トラフィックを優先し非重要トラフィックの帯域を制限
+できるようになることを目指します。特に、クラスごとの`Egress Guaranteed
+(%)`がプロファイルの`Egress Guaranteed`値ではなく`Egress Max`値を基準に
+算出されるという一次情報で確認済みの仕様、およびQoSポリシールールがNATを
+含む他のセキュリティポリシールール適用後のトラフィックに対して適用される
+という仕様を理解した上で構成できるようになることを目指します。最後に
+`Network > QoS > Statistics`で輻輳時の帯域配分の実績を確認できるように
+なることを目指します。
+
+## 用語解説
+
+- **QoS (Quality of Service)**: 回線帯域が輻輳した際に、重要度に応じて
+  トラフィックへ優先的に帯域を割り当てるPAN-OSの仕組み。インターフェース
+  でのQoS有効化・QoSプロファイル・QoSポリシールールの3要素で構成する
+- **QoSプロファイル (Network > Network Profiles > QoS Profile)**: 最大8個
+  のクラス(Class 1〜8)ごとに優先度(Priority)と帯域(Egress Max/Egress
+  Guaranteed)を定義する設定オブジェクト。プロファイル全体としても
+  `Egress Max`・`Egress Guaranteed`を設定する
+- **Priority(優先度)**: クラスごとに設定する`real-time`・`high`・
+  `medium`・`low`のいずれか。輻輳時にどのクラスを優先的にスケジューリング
+  するかを決める
+- **クラスのEgress Guaranteed(%)の算出基準**: 一次情報には、クラスごとの
+  `Egress Guaranteed`はプロファイルの`Egress Max`値に対する割合(%)で指定し、
+  プロファイルの`Egress Guaranteed`値ではなく`Egress Max`値を基準に算出
+  される旨が説明されています。本手順では`{{ critical_class_priority }}`
+  クラス(Class {{ critical_class_id }})に`{{ critical_class_guaranteed_percent }}`
+  %を設定し、プロファイルの`Egress Max`である`{{ profile_egress_max_mbps }}`
+  Mbpsを基準に実効`{{ critical_class_guaranteed_effective_mbps }}`Mbpsが
+  ギャランティードされる計算になります
+- **Egress Max(クラス単位)**: そのクラスが輻輳時にも上限として使用できる
+  帯域。ギャランティードされた帯域を超える分は、一次情報に「bandwidth
+  exceeding guaranteed levels is best effort and not guaranteed」と説明
+  されているとおりベストエフォートになります
+- **未使用のギャランティード帯域の扱い**: 一次情報には「bandwidth that is
+  guaranteed but is unused continues to remain available for all
+  traffic」と説明されています。あるクラスにギャランティードした帯域を
+  そのクラスが使い切っていない場合、他のクラスのトラフィックにも一時的に
+  開放されます
+- **QoSポリシールール(Policies > QoS)**: 送信元/宛先アドレス・
+  アプリケーション・Service/URL Category・DSCP/ToS値などの一致条件を
+  設定し、一致したトラフィックをQoSクラス(1〜8)へ振り分けるルール
+- **QoSポリシールールの適用タイミング**: 一次情報には、QoSポリシールール
+  はNATを含む他のセキュリティポリシールールがすべて適用された後の
+  トラフィックに対して適用される旨が説明されています。送信元アドレスを
+  一致条件に使う場合は、変換後ではなく変換前(pre-NAT)の送信元アドレスを
+  指定する必要があります
+- **インターフェースでのQoS有効化(Network > QoS)**: 物理インターフェース
+  を選択してQoS機能を有効化し、そのインターフェースの`Egress Max
+  bandwidth`(物理回線の帯域)を設定した上で、クリアテキストトラフィック用
+  の`Default Profile`(必要に応じてトンネルトラフィック用の別プロファイル)
+  を割り当てる設定
+- **commit**: PAN-OSはcandidate configとrunning configを分離する二段階構成
+  モデルを採る。GUIで`OK`を押しただけの設定もcommitするまで実機の動作には
+  反映されない
+- **QoS Statistics(Network > QoS > Statistics)**: commit後にインター
+  フェースごとの帯域使用率・クラスごとのアクティブセッション数・
+  アプリケーション別の内訳を確認できる監視ページ
+
+## シナリオ設定
+
+今回、回線輻輳時の帯域制御として構成する値は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| QoSを有効化するインターフェース(egress_interface) | `{{ egress_interface }}` |
+| インターフェースのEgress Max bandwidth(interface_egress_max_mbps) | {{ interface_egress_max_mbps }} Mbps |
+| QoSプロファイル名(qos_profile_name) | `{{ qos_profile_name }}` |
+| プロファイル全体のEgress Max(profile_egress_max_mbps) | {{ profile_egress_max_mbps }} Mbps |
+| プロファイル全体のEgress Guaranteed(profile_egress_guaranteed_mbps) | {{ profile_egress_guaranteed_mbps }} Mbps |
+| 重要業務トラフィック用クラス(critical_class_id) | Class {{ critical_class_id }} |
+| 重要業務トラフィック用クラスのPriority(critical_class_priority) | `{{ critical_class_priority }}` |
+| 重要業務トラフィック用クラスのEgress Guaranteed(critical_class_guaranteed_percent) | {{ critical_class_guaranteed_percent }} %(実効{{ critical_class_guaranteed_effective_mbps }} Mbps) |
+| 重要業務トラフィック用クラスのEgress Max(critical_class_max_mbps) | {{ critical_class_max_mbps }} Mbps |
+| 非重要トラフィック用クラス(noncritical_class_id) | Class {{ noncritical_class_id }} |
+| 非重要トラフィック用クラスのPriority(noncritical_class_priority) | `{{ noncritical_class_priority }}` |
+| 非重要トラフィック用クラスのEgress Guaranteed(noncritical_class_guaranteed_percent) | {{ noncritical_class_guaranteed_percent }} %(実効{{ noncritical_class_guaranteed_effective_mbps }} Mbps) |
+| 非重要トラフィック用クラスのEgress Max(noncritical_class_max_mbps) | {{ noncritical_class_max_mbps }} Mbps |
+| 重要業務トラフィック用QoSポリシールール名(critical_rule_name) | `{{ critical_rule_name }}` |
+| 非重要トラフィック用QoSポリシールール名(noncritical_rule_name) | `{{ noncritical_rule_name }}` |
+| 重要業務アプリケーション(critical_application) | `{{ critical_application }}` |
+| 非重要アプリケーション(noncritical_application) | `{{ noncritical_application }}` |
+| QoSポリシールールの送信元ゾーン(qos_source_zone) | `{{ qos_source_zone }}` |
+| QoSポリシールールの宛先ゾーン(qos_destination_zone) | `{{ qos_destination_zone }}` |
+| 輻輳確認に使う送信元端末のIPアドレス(congestion_check_source) | `{{ congestion_check_source }}` |
+
+`{{ egress_interface }}`はWAN側への送信元インターフェース(既定ルートの
+egressインターフェース)である前提とします。ゾーン名・インターフェース名は
+実際の環境に存在する名称に読み替えてください。
+
+## 手順
+
+### 1. 現状を確認する(変更前の基準を取る)
+
+新しいプロファイル・ルールを1件も登録する前に、現状を確認します。
+
+- `Network > Network Profiles > QoS Profile`を開き、`{{ qos_profile_name }}`
+  と同名のプロファイルが存在しないことを確認します。
+- `Policies > QoS`を開き、`{{ critical_rule_name }}`・
+  `{{ noncritical_rule_name }}`と同名の既存ルールがないこと、および既存
+  ルールの並び順(評価順)を確認します。
+- `Network > QoS`を開き、`{{ egress_interface }}`がまだQoS対象インター
+  フェースとして登録されていないことを確認します。
+
+### 2. QoSプロファイルを作成する(Network > Network Profiles > QoS Profile)
+
+`Network > Network Profiles > QoS Profile > Add`から`{{ qos_profile_name }}`
+という名前でプロファイルを作成します。
+
+- プロファイル全体の`Egress Max`に{{ profile_egress_max_mbps }}(Mbps)、
+  `Egress Guaranteed`に{{ profile_egress_guaranteed_mbps }}(Mbps)を設定
+  します。
+- Class {{ critical_class_id }}を選択し、`Priority`を
+  `{{ critical_class_priority }}`にし、`Egress Guaranteed`(%)に
+  {{ critical_class_guaranteed_percent }}、`Egress Max`に
+  {{ critical_class_max_mbps }}(Mbps)を設定します。
+- Class {{ noncritical_class_id }}を選択し、`Priority`を
+  `{{ noncritical_class_priority }}`にし、`Egress Guaranteed`(%)に
+  {{ noncritical_class_guaranteed_percent }}、`Egress Max`に
+  {{ noncritical_class_max_mbps }}(Mbps)を設定します。
+
+入力後は`OK`のみを行い、この時点ではまだ`Commit`は実行しません。
+
+### 3. QoSポリシールールを作成する(Policies > QoS)
+
+`Policies > QoS`で`Add`をクリックし、重要業務トラフィック用と非重要
+トラフィック用の2件のルールを作成します。送信元アドレスを条件に使う場合は
+NAT適用後ではなく変換前(pre-NAT)のアドレスを指定する必要がある点に注意
+します。
+
+- 重要業務トラフィック用ルール: `Name`に`{{ critical_rule_name }}`を
+  入力します。`Source Zone`に`{{ qos_source_zone }}`、`Destination Zone`
+  に`{{ qos_destination_zone }}`を設定します。`Application`に
+  `{{ critical_application }}`を追加します。`Other Settings`タブで
+  `QoS Class`を{{ critical_class_id }}に設定します。
+- 非重要トラフィック用ルール: `Name`に`{{ noncritical_rule_name }}`を
+  入力します。`Source Zone`に`{{ qos_source_zone }}`、`Destination Zone`
+  に`{{ qos_destination_zone }}`を設定します。`Application`に
+  `{{ noncritical_application }}`を追加します。`Other Settings`タブで
+  `QoS Class`を{{ noncritical_class_id }}に設定します。
+
+入力後は`OK`のみを行います。ルールの並び順は、重要業務トラフィック用ルール
+`{{ critical_rule_name }}`を非重要トラフィック用ルール
+`{{ noncritical_rule_name }}`より上に配置します。
+
+### 4. インターフェースでQoSを有効化する(Network > QoS)
+
+`Network > QoS > Add`から、`Physical Interface`に`{{ egress_interface }}`
+を選択します。
+
+- QoS機能を有効化(Turn on QoS for this interface)します。
+- `Egress Max`にインターフェースの物理回線帯域である
+  {{ interface_egress_max_mbps }}(Mbps)を設定します。
+- Clear Text Traffic タブで`Default Profile`に`{{ qos_profile_name }}`を
+  選択します。
+
+入力後は`OK`のみを行います。
+
+### 5. 変更を確定する(commit)
+
+`Commit`を実行し、候補設定(candidate config)を実行中の設定(running
+config)へ反映します。commitが完了するまで、手順2〜4で入力した内容は実機の
+動作に反映されません。
+
+### 6. QoS統計で輻輳時の帯域配分を確認する(Network > QoS > Statistics)
+
+commit完了後、`Network > QoS > Statistics`を開き、`{{ egress_interface }}`
+を選択して帯域使用率・クラスごとのアクティブセッション数・アプリケーション
+別の内訳を確認します。
+
+送信元`{{ congestion_check_source }}`から`{{ critical_application }}`と
+`{{ noncritical_application }}`の双方のトラフィックを同時に流して回線を
+輻輳させ、Class {{ critical_class_id }}(`{{ critical_rule_name }}`)側の
+帯域が実効{{ critical_class_guaranteed_effective_mbps }}Mbps以上維持され、
+Class {{ noncritical_class_id }}(`{{ noncritical_rule_name }}`)側の帯域が
+{{ noncritical_class_max_mbps }}Mbps以下に制限されることを確認します。
+
+## 動作確認
+
+- `Network > QoS`の一覧で`{{ egress_interface }}`が有効(QoS enabled)に
+  なっており、`Egress Max`が{{ interface_egress_max_mbps }}Mbpsで、
+  `Default Profile`が`{{ qos_profile_name }}`になっていること
+- `Network > Network Profiles > QoS Profile`の`{{ qos_profile_name }}`で、
+  Class {{ critical_class_id }}のPriorityが`{{ critical_class_priority }}`、
+  Class {{ noncritical_class_id }}のPriorityが
+  `{{ noncritical_class_priority }}`になっていること
+- `Policies > QoS`の一覧で`{{ critical_rule_name }}`のQoS Classが
+  {{ critical_class_id }}、`{{ noncritical_rule_name }}`のQoS Classが
+  {{ noncritical_class_id }}になっており、
+  `{{ critical_rule_name }}`が`{{ noncritical_rule_name }}`より上位に
+  評価されること
+- `Network > QoS > Statistics`で、輻輳を発生させた状態でも
+  Class {{ critical_class_id }}側の帯域が実効
+  {{ critical_class_guaranteed_effective_mbps }}Mbps以上維持され、
+  Class {{ noncritical_class_id }}側の帯域が
+  {{ noncritical_class_max_mbps }}Mbps以下に制限されていること
+- 手順1で確認した既存のQoSプロファイル・QoSポリシールールの並び順・内容が
+  意図せず変更されていないこと
+
+## 注意事項
+
+- **クラスの`Egress Guaranteed`(%)はプロファイルの`Egress Max`値を基準に
+  計算されること。** プロファイルの`Egress Guaranteed`値を基準に計算される
+  と誤解すると、実際にギャランティードされる帯域(本手順では
+  `{{ critical_class_guaranteed_percent }}`%×{{ profile_egress_max_mbps }}
+  Mbps={{ critical_class_guaranteed_effective_mbps }}Mbps)を見誤ります。
+- **QoSポリシールールはNATを含む他のセキュリティポリシールール適用後の
+  トラフィックに対して適用されること。** 送信元アドレスを一致条件に使う
+  場合は変換前(pre-NAT)のアドレスを指定する必要があります。本手順では
+  ゾーン・アプリケーションのみで一致させているため直接の影響はありません
+  が、アドレスを追加する場合は注意してください。
+- **インターフェースの`Egress Max`(物理回線帯域)とプロファイル全体の
+  `Egress Max`は別の設定値であること。** 両者が一致していないと、
+  プロファイル側の想定帯域と実際に流せる帯域に差が生じます。
+- 各クラスにギャランティードした帯域のうち未使用分は他クラスにも一時的に
+  開放されるため、輻輳が発生していない時間帯の統計だけでは優先制御が正しく
+  機能しているか判断できません。手順6のように意図的に輻輳させた状態で確認
+  してください。
+- `Commit`を実行するまでcandidate configはrunning configに反映されません。
+  手順2〜4で入力した内容は、手順5のcommitまで実機の動作に影響しません。
+- **重要業務トラフィック用ルール`{{ critical_rule_name }}`を非重要トラ
+  フィック用ルール`{{ noncritical_rule_name }}`より上位に配置すること。**
+  QoSポリシールールも上から順に評価されるため、順序を誤ると意図しない
+  クラスへ振り分けられるおそれがあります。
+- CLI/GUIへのログインに使う管理者パスワードやAPIキーは、本手順書やチケ
+  ット、ログに平文で残さないでください。記録が必要な場合は`********`の
+  ようにマスクし、秘密管理ツール等で別途安全に保管してください。

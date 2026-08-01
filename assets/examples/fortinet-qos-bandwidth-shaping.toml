@@ -1,0 +1,27 @@
+wan_interface = "wan1"
+lan_interface = "internal1"
+wan_bandwidth_mbps = 100
+
+shaper_important_name = "shaper-important-realtime"
+shaper_important_guaranteed_bandwidth = 20000
+shaper_important_maximum_bandwidth = 0
+shaper_important_priority = "high"
+
+shaper_nonimportant_name = "shaper-nonimportant-fileshare"
+shaper_nonimportant_guaranteed_bandwidth = 2000
+shaper_nonimportant_maximum_bandwidth = 5000
+shaper_nonimportant_priority = "low"
+
+shaping_policy_important_id = 1
+shaping_policy_important_name = "shape-important-realtime"
+tos_value = "0xb8"
+tos_mask = "0xfc"
+diffservcode_important = "101110"
+
+shaping_policy_nonimportant_id = 2
+shaping_policy_nonimportant_name = "shape-nonimportant-fileshare"
+nonimportant_dstaddr = "srv-fileshare01"
+nonimportant_service_name = "svc-fileshare-smb"
+nonimportant_protocol = "tcp"
+nonimportant_port = 445
+diffservcode_nonimportant = "001000"

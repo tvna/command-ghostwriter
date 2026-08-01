@@ -1,0 +1,287 @@
+# FortiGateのWAN輻輳時における業務トラフィック優先制御(Traffic Shaping)
+
+WAN回線が輻輳した際、DSCPで既にマーキングされているリアルタイム性の高い
+重要業務トラフィックを優先して転送し、ファイル共有・バックアップ等の非重要
+トラフィックの帯域を制限することで、輻輳時の業務影響を最小化します。
+FortiOSのShared Traffic Shaper(`config firewall shaper traffic-shaper`)で
+帯域保証(guaranteed bandwidth)と上限(maximum bandwidth)を定義し、Traffic
+Shaping Policy(`config firewall shaping-policy`)でToSベースのDSCPマッチ
+(`tos`/`tos-mask`)とDSCPマーキング(`diffserv-forward`/`diffservcode-forward`)
+を組み合わせて適用します。GUIとCLIの両方の手順を併記し、最後に輻輳を再現
+しながら優先制御が機能していることを確認します。
+
+## 目的
+
+回線輻輳時に重要業務トラフィックの帯域を保証しつつ、非重要トラフィックの
+帯域を制限することで、業務影響を最小化できるようになることを目指します。
+あわせて、FortiOSの優先度キュー(queue 0〜5)がToSベースの優先度値と
+ファイアウォールポリシー優先度値の組み合わせで決まる仕組みを理解し、GUI・
+CLIのどちらからでも同じ構成を再現し、輻輳時の優先制御を検証できるように
+なることを目指します。
+
+## 用語解説
+
+- **Traffic Shaping(トラフィックシェーピング)**: 帯域制御とプライオリティ
+  キューイングを組み合わせた輻輳制御の仕組み。物理インターフェースごとに
+  6段階の優先度キュー(queue 0が最優先)を持ち、現在のパケットレートが
+  保証帯域(guaranteed bandwidth)未満であればqueue 0を使用し、保証帯域を
+  超え上限帯域(maximum bandwidth)未満の場合は、ToSベースの優先度値
+  (0、1、2)とファイアウォールポリシーの優先度値(1、2、3)を加算して
+  使用するキュー番号を決定する
+- **Shared Traffic Shaper(`config firewall shaper traffic-shaper`)**:
+  帯域保証(`guaranteed-bandwidth`)と帯域上限(`maximum-bandwidth`、
+  1〜16776000Kbpsの範囲で指定し、0を指定すると無制限)、および優先度
+  (`priority`、`high`/`medium`/`low`)を定義するオブジェクト。GUIでは
+  `Policy & Objects > Traffic Shapers` の `Create New` から作成する。
+  低優先度の接続には、高優先度の接続が帯域を必要としていないときにだけ
+  帯域が割り当てられる
+- **Traffic Shaping Policy(`config firewall shaping-policy`)**: どの
+  トラフィックにどのTraffic Shaperを適用するかを定義するポリシー。GUIでは
+  `Policy & Objects > Traffic Shaping Policy` の `Create New` から、
+  `If Traffic Matches` セクションでマッチ条件(送信元/宛先インターフェース
+  やアドレス、サービス、ToS値など)を、`Then` セクションで適用する
+  Shaperを設定する。メニューが表示されない場合は `System > Feature
+  Visibility` で `Traffic Shaping` を有効にする
+- **tos / tos-mask(ToSベースのDSCPマッチ)**: Traffic Shaping Policyで、
+  既にDSCPマーキング済みのトラフィックをマッチさせるための条件。8ビットの
+  ToSバイト値として指定し、DSCP値でマッチさせる場合は`tos-mask`を`0xfc`
+  にした上で、`tos`にDSCP値に対応するToSバイト値(例: EF=`0xb8`)を指定
+  する
+- **diffserv-forward / diffserv-reverse、diffservcode-forward /
+  diffservcode-rev(DSCPマーキング)**: Traffic Shaping Policyを通過する
+  トラフィックのDSCP値を書き換える機能。`diffserv-forward`/
+  `diffserv-reverse`を有効にした上で、6桁の2進数文字列で`diffservcode-forward`
+  /`diffservcode-rev`にDSCP値を指定する。`diffserv-forward`/
+  `diffserv-reverse`のみを有効にし対応する`diffservcode`を設定しない場合、
+  DSCP値は`000000`にリセットされる
+- **config firewall service custom**: Firewall Policy/Traffic Shaping
+  Policyの`service`に指定するサービスオブジェクトをCLIで作成するブロック。
+  `set protocol`(大文字の`TCP`/`UDP`等)と、対応する`set tcp-portrange`/
+  `set udp-portrange`でポート範囲を指定する
+- **diagnose firewall shaper traffic-shaper list /
+  diagnose firewall shaping-policy list**: 現在のShared Traffic Shaperおよび
+  Traffic Shaping Policyの適用状況(現在の帯域使用量やドロップ数を含む)を
+  確認するCLI診断コマンド
+
+## シナリオ設定
+
+今回、WAN輻輳時の優先制御として設定する値は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| LAN側インターフェース(lan_interface) | `{{ lan_interface }}` |
+| WAN側インターフェース(wan_interface) | `{{ wan_interface }}` |
+| WAN回線の契約帯域(wan_bandwidth_mbps) | {{ wan_bandwidth_mbps }} Mbps |
+| 重要トラフィック用Shaper名(shaper_important_name) | `{{ shaper_important_name }}` |
+| 重要トラフィックの保証帯域(shaper_important_guaranteed_bandwidth) | {{ shaper_important_guaranteed_bandwidth }} Kbps |
+| 重要トラフィックの上限帯域(shaper_important_maximum_bandwidth、0=無制限) | {{ shaper_important_maximum_bandwidth }} Kbps |
+| 重要トラフィックの優先度(shaper_important_priority) | {{ shaper_important_priority }} |
+| 非重要トラフィック用Shaper名(shaper_nonimportant_name) | `{{ shaper_nonimportant_name }}` |
+| 非重要トラフィックの保証帯域(shaper_nonimportant_guaranteed_bandwidth) | {{ shaper_nonimportant_guaranteed_bandwidth }} Kbps |
+| 非重要トラフィックの上限帯域(shaper_nonimportant_maximum_bandwidth) | {{ shaper_nonimportant_maximum_bandwidth }} Kbps |
+| 非重要トラフィックの優先度(shaper_nonimportant_priority) | {{ shaper_nonimportant_priority }} |
+| 重要トラフィック用Shaping PolicyのID(shaping_policy_important_id) | {{ shaping_policy_important_id }} |
+| 重要トラフィック用Shaping Policy名(shaping_policy_important_name) | `{{ shaping_policy_important_name }}` |
+| マッチさせるToSバイト値(tos_value) | `{{ tos_value }}` |
+| ToSマスク値(tos_mask) | `{{ tos_mask }}` |
+| 重要トラフィックの再マーキング用DSCP値(diffservcode_important) | `{{ diffservcode_important }}` |
+| 非重要トラフィック用Shaping PolicyのID(shaping_policy_nonimportant_id) | {{ shaping_policy_nonimportant_id }} |
+| 非重要トラフィック用Shaping Policy名(shaping_policy_nonimportant_name) | `{{ shaping_policy_nonimportant_name }}` |
+| 非重要トラフィックの宛先アドレス(nonimportant_dstaddr) | `{{ nonimportant_dstaddr }}` |
+| 非重要トラフィック用Serviceオブジェクト名(nonimportant_service_name) | `{{ nonimportant_service_name }}` |
+| 非重要トラフィックのプロトコル(nonimportant_protocol) | `{{ nonimportant_protocol }}` |
+| 非重要トラフィックの宛先ポート(nonimportant_port) | {{ nonimportant_port }} |
+| 非重要トラフィックのマーキング用DSCP値(diffservcode_nonimportant) | `{{ diffservcode_nonimportant }}` |
+
+重要トラフィックは、TV会議・VoIP等のリアルタイム系アプリケーションが
+LAN側で既にDSCP(ToSバイト値`{{ tos_value }}`)でマーキングしている前提
+とし、アドレスやポートではなくToS値でマッチさせます。非重要トラフィックは
+ファイル共有・バックアップサーバー(`{{ nonimportant_dstaddr }}`)宛の
+通信を対象とします。
+
+## 手順
+
+### 1. 現状のTraffic ShaperとTraffic Shaping Policyの一覧を確認する(変更前の基準を取る)
+
+新しいShaperやShaping Policyを1件も追加する前に、現状を確認します。
+
+- `Policy & Objects > Traffic Shaping Policy` を開きます。メニューが
+  表示されない場合は `System > Feature Visibility` で `Traffic Shaping`
+  を有効にしてください。既存ポリシーの並び順(評価順)と、
+  `{{ shaping_policy_important_id }}`番・`{{ shaping_policy_nonimportant_id }}`
+  番のIDが未使用であることを確認します。
+- `Policy & Objects > Traffic Shapers` を開き、`{{ shaper_important_name }}`
+  および `{{ shaper_nonimportant_name }}` と同名のShaperが存在しないことを
+  確認します。
+
+### 2. 重要トラフィック用のShared Traffic ShaperをGUI/CLIで作成する
+
+GUI:
+
+1. `Policy & Objects > Traffic Shapers` を開き、`Create New` をクリック
+   します。
+2. `Name` に `{{ shaper_important_name }}` を入力します。
+3. Guaranteed Bandwidthに `{{ shaper_important_guaranteed_bandwidth }}`
+   (Kbps)を設定します。
+4. Maximum Bandwidthに `{{ shaper_important_maximum_bandwidth }}` (Kbps、
+   `0`は無制限)を設定します。
+5. 優先度(Priority)を `{{ shaper_important_priority }}` に設定します。
+6. `OK` をクリックして保存します。
+
+CLI:
+
+```bash
+config firewall shaper traffic-shaper
+    edit "{{ shaper_important_name }}"
+        set guaranteed-bandwidth {{ shaper_important_guaranteed_bandwidth }}
+        set maximum-bandwidth {{ shaper_important_maximum_bandwidth }}
+        set priority {{ shaper_important_priority }}
+    next
+end
+```
+
+### 3. 非重要トラフィック用のShared Traffic Shaperを作成する
+
+手順2と同じ要領で、非重要トラフィック用のShaperを作成します。上限帯域を
+低く設定することで、輻輳時にファイル共有・バックアップ通信が重要トラ
+フィックの帯域を圧迫しないようにします。
+
+```bash
+config firewall shaper traffic-shaper
+    edit "{{ shaper_nonimportant_name }}"
+        set guaranteed-bandwidth {{ shaper_nonimportant_guaranteed_bandwidth }}
+        set maximum-bandwidth {{ shaper_nonimportant_maximum_bandwidth }}
+        set priority {{ shaper_nonimportant_priority }}
+    next
+end
+```
+
+### 4. 重要トラフィック用のTraffic Shaping PolicyをCLIで作成する(ToSマッチ+DSCPマーキング)
+
+既にDSCPマーキングされたリアルタイムトラフィックを、ToSバイト値
+(`{{ tos_value }}`/マスク`{{ tos_mask }}`)でマッチさせ、手順2で作成した
+Shaperを適用します。WANを越えた先でもマーキングが失われないよう、
+`diffserv-forward` でDSCP値`{{ diffservcode_important }}`への再マーキング
+も行います。
+
+```bash
+config firewall shaping-policy
+    edit {{ shaping_policy_important_id }}
+        set name "{{ shaping_policy_important_name }}"
+        set srcintf "{{ lan_interface }}"
+        set dstintf "{{ wan_interface }}"
+        set tos {{ tos_value }}
+        set tos-mask {{ tos_mask }}
+        set traffic-shaper "{{ shaper_important_name }}"
+        set traffic-shaper-reverse "{{ shaper_important_name }}"
+        set diffserv-forward enable
+        set diffservcode-forward {{ diffservcode_important }}
+    next
+end
+```
+
+GUIから作成する場合は `Policy & Objects > Traffic Shaping Policy` を開き
+`Create New` をクリックし、`Name` に `{{ shaping_policy_important_name }}`
+を入力の上、`If Traffic Matches` セクションで送信元インターフェースを
+`{{ lan_interface }}`、宛先インターフェースを`{{ wan_interface }}`に設定
+します。`Then` セクションで、手順2で作成した`{{ shaper_important_name }}`
+をShared Traffic Shaperとして指定します。
+
+### 5. 非重要トラフィック用のFirewall ServiceとTraffic Shaping Policyを作成する
+
+まず、ファイル共有・バックアップサーバー宛の通信に一致するカスタム
+サービスを作成します。
+
+```bash
+config firewall service custom
+    edit "{{ nonimportant_service_name }}"
+{% if nonimportant_protocol | upper == "TCP" %}        set protocol TCP
+        set tcp-portrange {{ nonimportant_port }}
+{% elif nonimportant_protocol | upper == "UDP" %}        set protocol UDP
+        set udp-portrange {{ nonimportant_port }}
+{% endif %}    next
+end
+```
+
+続けて、このサービスと宛先アドレス`{{ nonimportant_dstaddr }}`宛の通信を
+非重要トラフィック用Shaperにマッピングし、輻輳時に帯域が制限されるように
+します。
+
+```bash
+config firewall shaping-policy
+    edit {{ shaping_policy_nonimportant_id }}
+        set name "{{ shaping_policy_nonimportant_name }}"
+        set srcintf "{{ lan_interface }}"
+        set dstintf "{{ wan_interface }}"
+        set dstaddr "{{ nonimportant_dstaddr }}"
+        set service "{{ nonimportant_service_name }}"
+        set traffic-shaper "{{ shaper_nonimportant_name }}"
+        set traffic-shaper-reverse "{{ shaper_nonimportant_name }}"
+        set diffserv-forward enable
+        set diffservcode-forward {{ diffservcode_nonimportant }}
+    next
+end
+```
+
+### 6. 輻輳を再現しながら優先制御を確認する
+
+WAN回線の契約帯域(`{{ wan_bandwidth_mbps }}` Mbps)に近い負荷を発生させ、
+重要トラフィックと非重要トラフィックを同時に流し、優先制御が機能するかを
+確認します。
+
+```bash
+# 非重要トラフィック役: ファイル共有サーバー宛にバルク転送相当の負荷を発生させる
+iperf3 -c {{ nonimportant_dstaddr }} -p {{ nonimportant_port }} -t 30 -b {{ wan_bandwidth_mbps }}M
+
+# 重要トラフィック役: ToS値 {{ tos_value }} を付与したパケットで同時に負荷をかける
+iperf3 -c <重要トラフィックの宛先> -S {{ tos_value }} -t 30 -b 30M
+```
+
+輻輳が発生している間、FortiGate側で各Shaperの適用状況を確認します。
+
+```bash
+diagnose firewall shaper traffic-shaper list
+diagnose firewall shaping-policy list
+```
+
+## 動作確認
+
+- `diagnose firewall shaper traffic-shaper list` の出力で、
+  `{{ shaper_important_name }}` の現在の帯域使用量が
+  `{{ shaper_important_guaranteed_bandwidth }}` Kbps付近を維持しており、
+  ドロップが発生していないこと
+- 同出力で、`{{ shaper_nonimportant_name }}` の現在の帯域使用量が
+  `{{ shaper_nonimportant_maximum_bandwidth }}` Kbpsを超えて増加しない
+  こと(輻輳時に上限で頭打ちになっていること)
+- `diagnose firewall shaping-policy list` の出力に
+  `{{ shaping_policy_important_name }}`(ID `{{ shaping_policy_important_id }}`)
+  と `{{ shaping_policy_nonimportant_name }}`(ID
+  `{{ shaping_policy_nonimportant_id }}`)がともに表示され、それぞれ意図
+  したShaperが適用されていること
+- `Policy & Objects > Traffic Shaping Policy` の一覧で、両ポリシーの並び順
+  (評価順)が意図したとおりであること
+- 手順1で確認した既存のShaper・Shaping Policyの構成が、意図せず変更されて
+  いないこと
+
+## 注意事項
+
+- **保証帯域(guaranteed bandwidth)の合計は、WAN回線の契約帯域
+  (`{{ wan_bandwidth_mbps }}` Mbps)を超えないようにしてください。** 各
+  Shaperの保証帯域を合計した値が回線容量を上回ると、輻輳時にどのトラ
+  フィックも保証どおりに転送されなくなるおそれがあります。
+- **`diffserv-forward`/`diffserv-reverse`を有効にする場合は、必ず対応する
+  `diffservcode-forward`/`diffservcode-rev`も設定してください。** 一次
+  情報のとおり、DSCP値を設定せずに有効化のみを行うと、DSCP値が
+  `000000`にリセットされます。
+- **`tos`/`tos-mask`によるマッチは、送信元でDSCPマーキングが正しく行われ
+  ていることが前提です。** LAN側の端末やアプリケーションがマーキングを
+  行っていない場合、手順4のポリシーはマッチせず、重要トラフィックが優先
+  されません。
+- Traffic Shaping Policyは上から順に評価されるため、`{{ shaping_policy_important_name }}`
+  が`{{ shaping_policy_nonimportant_name }}`より先に評価される順序になって
+  いることを確認してください。順序が入れ替わると、意図しないShaperが適用
+  される可能性があります。
+- CLI/GUIへのログインに使う管理者パスワードやAPIトークンは、本手順書や
+  チケット、ログに平文で残さないでください。記録が必要な場合は
+  `********` のようにマスクし、秘密管理ツール等で別途安全に保管してくだ
+  さい。

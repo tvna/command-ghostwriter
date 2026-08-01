@@ -1,0 +1,43 @@
+sdwan_group_name: "sdwan-dual-isp"
+wan_links:
+  - interface: "X1"
+    isp_name: "ISP-A"
+    role: "Primary"
+    bandwidth_desc: "光回線 下り1Gbps/上り1Gbps"
+    probe_target_name: "isp-a-gateway-probe-target"
+    probe_target_ip: "203.0.113.1"
+    description: "本社の主回線。通常時のインターネット/クラウド向け通信を担う"
+  - interface: "X2"
+    isp_name: "ISP-B"
+    role: "Backup"
+    bandwidth_desc: "広域LTE回線 下り100Mbps/上り20Mbps"
+    probe_target_name: "isp-b-gateway-probe-target"
+    probe_target_ip: "198.51.100.1"
+    description: "ISP-A障害時の予備回線。平常時は待機し、Path Selection Profileの判定に応じて切り替わる"
+
+probe_name: "probe-isp-health"
+probe_interval_sec: 5
+probe_down_after_missed: 3
+probe_up_after_success: 1
+
+sla_class_name: "sla-voice-and-business"
+sla_latency_ms: 150
+sla_jitter_ms: 30
+sla_packet_loss_percent: 3
+
+psp_name: "psp-isp-a-primary-b-backup"
+psp_backup_interface: "X2"
+
+route_policies:
+  - name: "rt-voice-sip"
+    source: "lan-voice-subnet"
+    destination: "sip-trunk-provider"
+    service: "SIP (Group)"
+    business_reason: "IP電話のSIPトランクは遅延・ジッタに敏感なため、SLA基準を満たすWANのみを使わせたい"
+  - name: "rt-general-internet"
+    source: "Any"
+    destination: "Any"
+    service: "Any"
+    business_reason: "一般業務のインターネット/クラウドSaaS通信について、通常時はISP-Aを優先しつつ障害時はISP-Bへ自動フェイルオーバーさせたい"
+
+failure_simulation_interface: "X1"

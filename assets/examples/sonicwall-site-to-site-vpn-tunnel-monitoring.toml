@@ -1,0 +1,14 @@
+wan_interface = "X1"
+wan_zone = "WAN"
+vpn_policy_name = "S2S_HQ_TO_OSAKA_DR"
+ike_version = "IKEv1"
+primary_peer_ip = "203.0.113.50"
+secondary_peer_ip = "203.0.113.60"
+local_network_object = "NET_HQ_LAN"
+local_network_cidr = "10.10.0.0/24"
+remote_network_object = "NET_OSAKA_DR_LAN"
+remote_network_cidr = "10.20.0.0/24"
+dpd_interval_sec = 20
+dpd_failure_trigger_level = 3
+monitor_host = "10.20.0.10"
+verification_wait_sec = 90

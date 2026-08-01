@@ -1,0 +1,210 @@
+# SonicWall (SonicOS) 拠点間VPNトンネルの死活監視と自動再接続設定
+
+SonicOS の `NETWORK | IPSec VPN > Advanced`でIKE Dead Peer Detection(DPD)
+を有効化し、Dead Peer Detection Intervalを`{{ dpd_interval_sec }}`秒、
+Failure Trigger Levelを`{{ dpd_failure_trigger_level }}`回に設定すること
+で、Phase 1暗号化下のUDPハートビートによりピアの死活を継続的に監視しま
+す。あわせて`{{ vpn_policy_name }}`の`General`タブに
+`IPsec Secondary Gateway Name or Address`(`{{ secondary_peer_ip }}`)を
+登録し、プライマリピア`{{ primary_peer_ip }}`が応答しなくなった場合の
+フェイルオーバー先を用意します。最後に`Currently Active VPN Tunnels`と
+実際の疎通試験で、断絶検知・再接続・フェイルオーバーの動作を検証します。
+
+## 目的
+
+拠点間VPNトンネル`{{ vpn_policy_name }}`について、IKE Dead Peer Detection
+のハートビート間隔(`{{ dpd_interval_sec }}`秒)と失敗判定回数
+(`{{ dpd_failure_trigger_level }}`回)を明示的に設定し、ピア無応答を機械
+的に検知してトンネルを切断・再ネゴシエーションさせられるようになることを
+目指します。あわせて、IKEv2では利用できないSecondary Gatewayの制約を理解
+した上で、IKEv1構成の`{{ vpn_policy_name }}`にSecondary Gateway
+(`{{ secondary_peer_ip }}`)を設定してプライマリピア障害時のフェイルオー
+バー経路を確保し、`Currently Active VPN Tunnels`テーブルとpingによる疎通
+試験の両方で継続監視・自動復旧の動作を確認できるようになることを目指しま
+す。
+
+## 用語解説
+
+- **NETWORK | IPSec VPN > Advanced**: SonicOS 7.xの管理画面ナビゲーション
+  パス。この機器上の全VPN Policyに共通して適用されるグローバルなIPsec
+  VPN詳細設定(旧SonicOS 6.5系では`Manage`タブの`VPN | Advanced Settings`
+  ページに相当)を行う画面
+- **Enable IKE Dead Peer Detection**: 上記画面のチェックボックス。有効に
+  すると、アイドル状態のVPNトンネルに対してSonicWallがIKE DPDによる死活
+  監視を行うようになる
+- **Dead Peer Detection Interval**: DPDのハートビート送信間隔(秒)。既定
+  値は60秒。Phase 1暗号化で保護されたUDPパケットをハートビートとしてピア
+  へ送信する
+- **Failure Trigger Level**: ハートビートに対する応答が得られない回数の
+  閾値。既定値は3回。この回数に達するとSonicWallは当該トンネルを切断する
+- **NETWORK | IPSec VPN > Rules and Settings**: VPN Policyの一覧・追加・
+  編集を行う画面。同じ画面内に`Currently Active VPN Tunnels`テーブルが
+  表示される
+- **Currently Active VPN Tunnels**: 現在確立されているVPNトンネルの一覧
+  テーブル。VPN Policy名・ローカルネットワーク・リモートネットワーク・
+  ピアゲートウェイのIPアドレスなどが表示され、行の`Statistics`アイコンか
+  らそのトンネルの確立時刻(Create Time)等の統計情報を確認できる
+- **IPsec Primary Gateway Name or Address / IPsec Secondary Gateway Name or
+  Address**: Site-to-SiteのVPN Policy編集ダイアログの`General`タブにある
+  フィールド。前者に対向拠点のプライマリWAN側アドレスを、後者に対向拠点が
+  複数エンドポイントを持つ場合のセカンダリアドレスを指定する。Secondary
+  Gatewayは**IKEv2では利用できず、IKEv1構成でのみ利用可能**という制約が
+  ある
+
+## シナリオ設定
+
+今回、拠点間VPNトンネルの死活監視・自動再接続・フェイルオーバーを設定する
+対象は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| ローカル側WANインターフェース(wan_interface) | `{{ wan_interface }}` |
+| ローカル側WANゾーン(wan_zone) | `{{ wan_zone }}` |
+| VPN Policy名(vpn_policy_name) | `{{ vpn_policy_name }}` |
+| IKEバージョン(ike_version) | `{{ ike_version }}` |
+| プライマリピアIPアドレス(primary_peer_ip) | `{{ primary_peer_ip }}` |
+| セカンダリピアIPアドレス(secondary_peer_ip) | `{{ secondary_peer_ip }}` |
+| ローカルネットワーク用Address Object名(local_network_object) | `{{ local_network_object }}` |
+| ローカルネットワーク(local_network_cidr) | `{{ local_network_cidr }}` |
+| リモートネットワーク用Address Object名(remote_network_object) | `{{ remote_network_object }}` |
+| リモートネットワーク(remote_network_cidr) | `{{ remote_network_cidr }}` |
+| Dead Peer Detection Interval(dpd_interval_sec) | {{ dpd_interval_sec }}秒 |
+| Failure Trigger Level(dpd_failure_trigger_level) | {{ dpd_failure_trigger_level }}回 |
+| 監視対象ホスト(monitor_host) | `{{ monitor_host }}` |
+| 検証時の待機時間(verification_wait_sec) | {{ verification_wait_sec }}秒 |
+
+`{{ vpn_policy_name }}`は、ローカルネットワーク`{{ local_network_object }}`
+(`{{ local_network_cidr }}`)とリモートネットワーク
+`{{ remote_network_object }}`(`{{ remote_network_cidr }}`)を結ぶ既存の
+Site-to-Site VPN Policyであり、本手順ではそのPolicy自体の新規作成は行わ
+ず、DPD設定とSecondary Gatewayの追加のみを行います。
+
+## 手順
+
+### 1. 現在のDPD設定とVPN Policyの状態を確認する(変更前の基準を取る)
+
+設定変更の前に、現状を確認します。
+
+- `NETWORK | IPSec VPN > Advanced`を開き、`Enable IKE Dead Peer Detection`
+  のチェック状態、および現在の`Dead Peer Detection Interval`/
+  `Failure Trigger Level`の値を記録します。
+- `NETWORK | IPSec VPN > Rules and Settings`を開き、`{{ vpn_policy_name }}`
+  が一覧に存在し`Enabled`になっていることを確認します。
+- 同じ画面の`Currently Active VPN Tunnels`テーブルで、`{{ vpn_policy_name }}`
+  の現在の状態(トンネルが確立済みか、ローカル/リモートネットワークの表示
+  内容)を記録します。
+
+### 2. グローバルDPD設定を有効化し、間隔と失敗判定回数を設定する
+
+`NETWORK | IPSec VPN > Advanced`を開きます。
+
+- `Enable IKE Dead Peer Detection`にチェックを入れます。
+- `Dead Peer Detection Interval`に`{{ dpd_interval_sec }}`(秒)を入力し
+  ます。
+- `Failure Trigger Level`に`{{ dpd_failure_trigger_level }}`を入力しま
+  す。
+- `Accept`(または`Save`)をクリックして保存します。
+
+この設定はこの画面で一括管理されるグローバル設定であり、
+`{{ vpn_policy_name }}`だけでなく、この機器上に構成されている**すべての
+VPN Policyに適用される**点に注意してください。
+
+### 3. VPN PolicyのGeneralタブにSecondary Gatewayを設定する(フェイルオーバー経路の確保)
+
+`NETWORK | IPSec VPN > Rules and Settings`から`{{ vpn_policy_name }}`を
+開き、`General`タブを表示します。
+
+- `Authentication Method`配下のIKEバージョンが`{{ ike_version }}`である
+  ことを確認します(Secondary GatewayはIKEv2では設定できないため、
+  IKEv2構成の場合は本手順を適用できません)。
+- `IPsec Primary Gateway Name or Address`が`{{ primary_peer_ip }}`である
+  ことを確認します。
+- `IPsec Secondary Gateway Name or Address`に`{{ secondary_peer_ip }}`を
+  入力します。
+- `OK`をクリックして保存します。
+
+### 4. Currently Active VPN Tunnelsで現在の確立状態を確認する
+
+`NETWORK | IPSec VPN > Rules and Settings`の`Currently Active VPN Tunnels`
+テーブルで、`{{ vpn_policy_name }}`の行が表示され、ローカルネットワーク
+`{{ local_network_cidr }}`・リモートネットワーク`{{ remote_network_cidr }}`・
+ピアゲートウェイ`{{ primary_peer_ip }}`が設定内容と一致していることを確認
+します。行の`Statistics`アイコンをクリックし、トンネルのCreate Time等が
+表示されることを確認します。
+
+### 5. プライマリ経路を意図的に遮断し、DPDによる自動検知・再接続を確認する
+
+ローカルネットワーク内の端末から、リモート側の監視対象ホスト
+`{{ monitor_host }}`へ継続的にpingを実行しながら、プライマリピア
+`{{ primary_peer_ip }}`へ至る経路を一時的に遮断します(対向拠点側の
+機器停止や、ラボ環境であればプライマリ経路上のケーブル抜線・回線停止な
+ど、実際の障害を模擬できる方法で行ってください)。
+
+```bash
+ping {{ monitor_host }}
+```
+
+`Dead Peer Detection Interval`(`{{ dpd_interval_sec }}`秒)×
+`Failure Trigger Level`(`{{ dpd_failure_trigger_level }}`回)= 約
+{{ dpd_interval_sec * dpd_failure_trigger_level }}秒が経過すると、
+SonicWallが応答なしと判定してトンネルを切断します。念のため
+`{{ verification_wait_sec }}`秒待機した後、`Currently Active VPN Tunnels`
+テーブルで`{{ vpn_policy_name }}`のトンネルが一度切断されたこと(または
+`Secondary Gateway`である`{{ secondary_peer_ip }}`側へフェイルオーバーし
+て再確立されたこと)を確認します。
+
+### 6. プライマリ経路の復旧後、最終的な疎通を確認する
+
+遮断していたプライマリ経路を復旧し、`{{ monitor_host }}`への到達性を最終
+確認します。
+
+```bash
+ping -c 5 {{ monitor_host }}
+```
+
+すべてのパケットに応答があり、`Currently Active VPN Tunnels`テーブルで
+`{{ vpn_policy_name }}`が`{{ primary_peer_ip }}`との間で再確立されている
+ことを確認します。
+
+## 動作確認
+
+- `NETWORK | IPSec VPN > Advanced`で`Enable IKE Dead Peer Detection`が
+  有効、`Dead Peer Detection Interval`が{{ dpd_interval_sec }}秒、
+  `Failure Trigger Level`が{{ dpd_failure_trigger_level }}回に設定されて
+  いること
+- `{{ vpn_policy_name }}`の`General`タブで`IPsec Secondary Gateway Name or
+  Address`が`{{ secondary_peer_ip }}`に設定されていること
+- 手順5でプライマリ経路を遮断した際、約
+  {{ dpd_interval_sec * dpd_failure_trigger_level }}秒以内に
+  `Currently Active VPN Tunnels`上でトンネルの切断(またはSecondary
+  Gatewayへのフェイルオーバー)が確認できたこと
+- プライマリ経路の復旧後、`{{ monitor_host }}`への`ping`が再び成功し、
+  トンネルが`{{ primary_peer_ip }}`との間で再確立されていること
+- 手順1で記録した既存の`{{ vpn_policy_name }}`以外のVPN Policyの状態が、
+  グローバル設定であるDPD変更によって意図せず影響を受けていないこと
+  (他のトンネルも正常に確立され続けていること)
+
+## 注意事項
+
+- **DPD設定はグローバル設定です。** `NETWORK | IPSec VPN > Advanced`の
+  `Dead Peer Detection Interval`/`Failure Trigger Level`はこの機器上の
+  すべてのVPN Policyに適用されます。`{{ vpn_policy_name }}`向けに間隔を
+  短縮する場合、他の拠点間VPNトンネルの挙動にも影響することを踏まえ、
+  変更は保守時間帯に行い、他トンネルの状態も手順1・動作確認で必ず確認し
+  てください。
+- **Secondary GatewayはIKEv2では設定できません。** `{{ vpn_policy_name }}`
+  が`{{ ike_version }}`(IKEv1)以外、特にIKEv2で構成されている場合、
+  `IPsec Secondary Gateway Name or Address`フィールド自体が設定できない
+  ため、本手順のフェイルオーバー構成は適用できません。その場合は拠点間の
+  経路冗長化を別の方式(例: 経路側の冗長化)で検討してください。
+- **手順5の遮断試験は本番影響を伴います。** プライマリ経路の意図的な遮断
+  はトンネルの実切断を伴うため、本番稼働中のトラフィックへの影響を事前に
+  関係者と合意した上で、保守時間帯に実施してください。
+- 本手順書は一次情報(SonicOS技術ドキュメントのIPsec VPN Advanced Config
+  セクション)で確認できたGUI操作のみを扱います。SonicOS CLIによる同等の
+  設定投入方法は本ページでは確認できなかったため記載していません。CLIで
+  投入する場合は、別途SonicOSのCLIリファレンスで構文を確認してから実施し
+  てください。
+- 管理者パスワードやAPIキーなど認証情報は、本手順書やチケット、ログに
+  平文で残さないでください。記録が必要な場合は`********`のようにマスク
+  し、秘密管理ツール等で別途安全に保管してください。

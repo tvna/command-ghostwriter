@@ -1,0 +1,5 @@
+account_no,guest_username,receive_limit_mb,transmit_limit_mb,enforce_uniqueness,session_lifetime_min,idle_timeout_min,max_concurrent_guests,description
+1,guest-lobby-01,512,256,Yes,480,15,50,来客ロビー共用ゲストアカウント(反復利用者向け、同時ログインは1回に限定)
+2,guest-event-01,1024,512,No,240,10,50,展示会場ゲストアカウント(同一QRコードを複数端末で共用するため同時ログイン制限なし)
+3,guest-exec-01,2048,1024,Yes,600,20,50,役員応接室ゲストアカウント(来訪者用、他アカウントより高めの帯域枠)
+4,guest-temp-05,0,0,Yes,120,5,50,臨時発行ゲストアカウント(帯域上限は個別要件確定までUnlimitedのまま運用)
