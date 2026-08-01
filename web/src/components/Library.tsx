@@ -39,6 +39,13 @@ const NETWORK_VENDORS: { id: string; label: string }[] = [
 const NETWORK_VENDOR_LABELS = new Set(NETWORK_VENDORS.map((v) => v.label));
 const SERVER_SPLIT_LABELS = new Set(['Debian系', 'RHEL系', 'コンテナ']);
 
+// network-common sub-clusters (each < 50 templates; see
+// docs/superpowers/specs/2026-08-01-template-library-rail-rebalance-design.md).
+// Disjoint by construction; ネットワーク機器 (基盤・その他) is the residual
+// catch-all for every non-vendor subCategory not in the two sets below.
+const NETWORK_SECURITY = new Set(['IDS・IPS', 'トラフィック分析', 'パケット解析', '監視']);
+const NETWORK_VPN = new Set(['オーバーレイVPN', 'ZTNAオーバーレイ', 'トンネリング']);
+
 export const RAIL: RailEntry[] = [
   { id: 'all', label: 'すべて', icon: 'topology', filter: () => true },
   ...NETWORK_VENDORS.map(
@@ -51,11 +58,29 @@ export const RAIL: RailEntry[] = [
     }),
   ),
   {
-    id: 'network-common',
-    label: 'ネットワーク機器 (共通)',
+    id: 'network-common-security',
+    label: 'ネットワーク機器 (セキュリティ監視)',
     icon: 'router',
     group: 'ネットワーク機器',
-    filter: (t) => t.category === 'network' && !NETWORK_VENDOR_LABELS.has(t.subCategory),
+    filter: (t) => t.category === 'network' && NETWORK_SECURITY.has(t.subCategory),
+  },
+  {
+    id: 'network-common-vpn',
+    label: 'ネットワーク機器 (VPN・オーバーレイ)',
+    icon: 'router',
+    group: 'ネットワーク機器',
+    filter: (t) => t.category === 'network' && NETWORK_VPN.has(t.subCategory),
+  },
+  {
+    id: 'network-common-other',
+    label: 'ネットワーク機器 (基盤・その他)',
+    icon: 'router',
+    group: 'ネットワーク機器',
+    filter: (t) =>
+      t.category === 'network' &&
+      !NETWORK_VENDOR_LABELS.has(t.subCategory) &&
+      !NETWORK_SECURITY.has(t.subCategory) &&
+      !NETWORK_VPN.has(t.subCategory),
   },
   {
     id: 'server-common',
