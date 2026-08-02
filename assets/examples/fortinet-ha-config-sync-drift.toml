@@ -1,0 +1,12 @@
+ha_group_name = "docs-dc1-ha"
+ha_group_id = 24
+primary_hostname = "fw-dc1-01"
+primary_serial = "FGT60F0000000101"
+primary_mgmt_ip = "10.1.0.11"
+secondary_hostname = "fw-dc1-02"
+secondary_serial = "FGT60F0000000102"
+secondary_mgmt_ip = "10.1.0.12"
+audit_interval_minutes = 15
+audit_owner_team = "ネットワーク運用チーム"
+escalation_channel = "#net-ops-alert"
+max_out_of_sync_minutes = 30

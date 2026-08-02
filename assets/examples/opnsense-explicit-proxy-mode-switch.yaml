@@ -1,0 +1,18 @@
+proxy_port: 3128
+ca_name: "OPNsense-ProxyCA"
+segments:
+  - name: "本社LAN(社給PC)"
+    network: "10.0.10.0/24"
+    interface: "vlan_corp"
+    mode: "explicit"
+  - name: "来客用WiFi"
+    network: "10.0.50.0/24"
+    interface: "vlan_guest"
+    mode: "transparent"
+  - name: "IoTセグメント"
+    network: "10.0.60.0/24"
+    interface: "vlan_iot"
+    mode: "transparent"
+no_bump_domains:
+  - ".bank-example.co.jp"
+  - ".pay-example.com"

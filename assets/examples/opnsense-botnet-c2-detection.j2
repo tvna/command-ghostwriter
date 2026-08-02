@@ -1,0 +1,137 @@
+# OPNsenseによるボットネットC2通信の検知・遮断
+
+Suricataベースの侵入防御(IPS)機能に、abuse.chが提供する脅威インテリジェンス
+フィード({{ rulesets | length }}種)を取り込み、マルウェアに感染した端末が外部の
+C2(コマンド&コントロール)サーバーへ通信しようとした際に、自動的に検知・遮断
+できる状態を構築します。
+
+## 目的
+
+Services > Intrusion Detection でSuricataをIPSモードで有効化し、abuse.chの
+各ルールセットをダウンロードした上で、ポリシーにより既定動作をAlert(検知のみ)
+からDrop(遮断)へ切り替えることで、社内ネットワーク `{{ lan_network }}` 内の
+感染端末によるC2への callback 通信を自動的に遮断できるようにすることを目指します。
+
+## 用語解説
+
+- **IDS/IPSキャプチャモード**: SuricataがパケットをどのようにOSから受け取るかの
+  方式。アラートのみを行う "PCAP live mode (IDS)" と、実際にパケットを破棄
+  できる "Netmap (IPS)" / "Divert (IPS)" が存在する
+- **Policy(ポリシー)**: Services > Intrusion Detection > Policies で作成する
+  設定。マッチ対象のルールセットと優先度(priority)を指定し、個々のルールを
+  手作業で編集せずに動作(disable/alert/drop)をまとめて変更できる仕組み。
+  優先度の数値が低いポリシーほど先に評価される
+- **abuse.ch Feodo Tracker**: Feodo(Cridex/Bugat)系オンラインバンキング詐欺
+  マルウェアのC2サーバーIOC(痕跡情報)を提供するabuse.chのプロジェクト。
+  ルールファイルは `abuse.ch.feodotracker.rules`
+- **abuse.ch SSL Blacklist(SSLBL)**: マルウェアやボットネットの通信に使われる
+  不正なSSL証明書のIOCを提供するabuse.chのプロジェクト。ルールファイルは
+  `abuse.ch.sslblacklist.rules`
+- **abuse.ch ThreatFox**: 特定のマルウェア種別に限定せず、C2として使われている
+  IPアドレスやドメインなどのIOCを共有するabuse.chのプラットフォーム。ルール
+  ファイルは `abuse.ch.threatfox.rules`。IOCの追加・更新に応じてルールセットが
+  更新されるため、定期的な "Download & Update Rules" が必要
+- **Download & Update Rules**: Services > Intrusion Detection > Download タブで
+  有効化したルールセットを実際に取得し、Suricataへ反映するボタン
+
+## シナリオ設定
+
+監視対象インターフェース `{{ ips_interface|upper }}` を経由する、社内ネットワーク
+`{{ lan_network }}` からの通信を対象に、以下 {{ rulesets | length }} 件の
+abuse.chルールセットを取得します。
+
+| ルールセット | ルールファイル | 検知対象 |
+|---|---|---|
+{% for r in rulesets %}| {{ r["name"] }} | `{{ r["file"] }}` | {{ r["target"] }} |
+{% endfor %}
+
+取得直後はいずれのルールセットも既定動作(Alert)のまま {{ observation_days }} 日間
+運用し、正当な通信を誤検知していないことを確認したうえで、ポリシー
+`{{ policy_descr }}`(優先度 {{ policy_priority }})により動作をDropへ切り替えます。
+
+## 手順
+
+### 1. 前提条件を確認する
+
+*Interfaces > {{ ips_interface|upper }} > Settings* を開き、ハードウェア
+オフロード機能が無効になっていることを確認します(有効のままだとIPSモードでの
+パケット検査・破棄が正しく機能しません)。また、監視インターフェース
+`{{ ips_interface|upper }}` が、NATより手前で内部ホストの実際の送信元IPを
+観測できる位置にあることも確認してください。NATの内側で失われた送信元情報は
+ルールの判定に使えません。
+
+### 2. Suricataを{{ ips_interface|upper }}インターフェースでIPSモード有効化する
+
+*Services > Intrusion Detection* を開き、`Enabled` と `IPS mode` を選択します。
+対象インターフェースとして `{{ ips_interface|upper }}` を指定し、画面下部の
+**Apply** を押して反映します。
+
+### 3. abuse.chルールセットを取得する
+
+*Services > Intrusion Detection > Download* タブを開き、以下 {{ rulesets | length }}
+件のルールセットを `Enabled` にします。
+
+{% for r in rulesets %}#### 3-{{ loop.index }}. {{ r["name"] }}
+
+- ルールファイル: `{{ r["file"] }}`
+- 検知対象: {{ r["target"] }}
+- 状態: `Enabled`
+
+{% endfor %}
+すべて `Enabled` にしたら、**Download & Update Rules** を押してルールを取得
+します。
+
+### 4. Alertモードで{{ observation_days }}日間の検知状況を確認する
+
+ルール適用直後はDropへ切り替えず、*Services > Intrusion Detection > Alerts*
+タブで {{ observation_days }} 日間、`{{ lan_network }}` 内ホストからのアラートを
+確認します。正当な業務通信が上記いずれかのルールセットで誤検知(false positive)
+されていないことを確認するまでは、次の手順でDropへ切り替えません。
+
+### 5. ポリシーを作成し、動作をDropへ切り替える
+
+*Services > Intrusion Detection > Policies* を開き **Add** を押して、以下の
+内容でポリシーを作成します。
+
+- Description: `{{ policy_descr }}`
+- Enabled: 有効
+- Priority: `{{ policy_priority }}`
+- マッチ対象ルールセット: 手順3で取得した {{ rulesets | length }} 件のルールセット
+{% for r in rulesets %}  - {{ r["name"] }}(`{{ r["file"] }}`)
+{% endfor %}
+- New action: `drop`
+
+保存後 **Apply** を押し、続けて *Download* タブで再度 **Download & Update Rules**
+を押して、Drop動作を実際のルールへ反映します。
+
+## 動作確認
+
+- *Services > Intrusion Detection > Alerts* で、上記 {{ rulesets | length }} 件の
+  ルールセットに対応するアラートの action 列が `drop` になっていること
+{% for r in rulesets %}- ルールファイル `{{ r["file"] }}` が実際に取得され、Suricataの
+  ルールとして読み込まれていること(OPNsense本体で該当ファイルの存在と
+  ルール件数を確認)
+{% endfor %}
+- `{{ lan_network }}` 内の検証用端末から、既知のC2向け通信を模したテスト
+  (abuse.ch側が提供するテスト用IOC宛の通信など)を行い、当該通信が到達せず
+  遮断されることを確認する
+- ポリシー `{{ policy_descr }}` が *Policies* タブに `Enabled` の状態で表示され、
+  Priority `{{ policy_priority }}` として他のポリシーより先に評価される位置に
+  あること
+
+## 注意事項
+
+- Alertのまま{{ observation_days }}日間の様子見期間を置かず、いきなりDropへ
+  切り替えると、abuse.chのIOCと偶然一致した正当な通信(共用ホスティングの
+  IPやドメインなど)まで遮断してしまうおそれがある。手順4の観測期間は省略しない。
+- ハードウェアオフロードを無効化すると、`{{ ips_interface|upper }}` インター
+  フェースの通信量によってはOPNsense本体のCPU負荷が増加する点に留意する。
+- abuse.chの各ルールセットはIOCの追加・更新に伴って随時更新されるため、
+  *Download & Update Rules* を定期的に(スケジュール設定、または手動で)実行し、
+  最新のC2 IOCを取り込み続けること。取得を怠ると新しいC2サーバーを検知できない。
+- ポリシーの優先度(`{{ policy_priority }}`)は、他の既存ポリシーと衝突しないよう
+  事前に *Policies* タブの一覧を確認してから設定する。優先度が重複、または
+  他のポリシーが先に評価される番号になっていると、意図したDrop動作が適用
+  されない場合がある。
+- 設定変更前に *System > Configuration > Backups* からconfig.xmlのバックアップを
+  取得し、誤検知による意図しない通信断が発生した場合に切り戻せるようにしておく。

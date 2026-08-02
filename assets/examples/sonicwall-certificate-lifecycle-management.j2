@@ -1,0 +1,216 @@
+# SonicWall (SonicOS) TLS証明書ライフサイクル管理(発行・更新・失効・割当)
+
+SonicOS の `Device | Settings > Certificates`画面を起点に、管理画面/VPN等
+で使用するTLS証明書のCSR発行(New Signing Request)から、CA署名済み証明書
+のインポート(PKCS#7/.p7b、DER/.der・.cer)、管理画面・VPN・DPI-SSL再署名
+それぞれへの証明書割当までを一元的なGUI操作で実施します。有効期限切れに
+よるサービス断を防ぐため、更新予定日を事前に記録し、期限切れ前に更新
+サイクルを回します。
+
+## 目的
+
+証明書の発行・更新・失効(差し替え)を`Device | Settings > Certificates`
+画面に一元化し、CSR発行から署名済み証明書のインポート、管理画面/VPN/
+DPI-SSL再署名それぞれへの割当までを、GUIから再現可能な手順として運用でき
+るようになることを目指します。あわせて、証明書ごとの有効期限
+(`{{ expiry_date }}`)を事前に把握し、期限切れによる管理画面/VPN接続断や
+DPI-SSLインスペクション停止を未然に防げるようになることを目指します。
+
+## 用語解説
+
+- **Device | Settings > Certificates**: 証明書を発行・インポート・管理する
+  ための管理画面ナビゲーションパス。証明書の一覧、有効期限、発行者が表示
+  され、`New Signing Request`(CSR発行)と`Import`(証明書インポート)の
+  操作をここから行う
+- **New Signing Request ダイアログ(Generate Certificate Signing Request
+  フォーム)**: `Device | Settings > Certificates`で`New Signing Request`を
+  クリックすると開くCSR発行フォーム。`Certificate Alias`(証明書の識別名)、
+  Subject Distinguished Nameを構成する`Common Name`/`Organization`/
+  `Organization Unit`/`Locality`/`State`/`Country`の各項目、
+  `Subject Key Size/Curve`(RSAの場合は2048bit以上を選択)、任意項目の
+  `Subject Alternative Name`(種別と値)を入力し、`Generate`をクリックする
+  とCSRファイルが生成される
+- **Upload Certificate ダイアログ**: 生成済みのCSR(発行待ち状態の証明書
+  エントリ)に対して、CAから受け取った署名済み証明書を関連付けるための
+  ダイアログ。証明書一覧の該当エントリのアップロードアイコンから開き、
+  `Choose File`でファイルを選択して`Open`をクリックする
+- **Import Certificate ダイアログ**: `Device | Settings > Certificates`の
+  `Import`から開くダイアログ。ルート/中間CA証明書をPKCS#7(`.p7b`)または
+  DER(`.der`・`.cer`)形式のファイルからインポートし、ローカル証明書や
+  IKEネゴシエーションで使うピア証明書の検証チェーンに追加する。
+  `Add File`でファイルを選択し、`Import`をクリックする
+- **Certificate Selection(Device | Settings > Administration > Management
+  タブ)**: 管理画面(HTTPS Management)へのアクセスに使用する証明書を選択
+  するドロップダウン。自己署名証明書を使う`Use Self-signed Certificate`か、
+  `Device | Settings > Certificates`でインポート済みの証明書を選ぶ
+  `Use Imported Certificate`のいずれかを指定する
+- **Local Certificate(VPNポリシーのIKE Authentication)**: サイト間VPN
+  ポリシーの認証方式を3rd Party証明書とした場合に、IKEネゴシエーションで
+  自ホスト側の証明書として使う証明書を選択するプルダウン。あわせて
+  `Local IKE ID Type`(既定は`Distinguished Name (DN)`。証明書のSubject
+  Distinguished Nameを識別子として使う)を設定する
+- **Certificate Re-Signing Authority(POLICY | DPI-SSL > Client SSL >
+  Certificateセクション)**: DPI-SSLがインスペクション後の通信を再署名する
+  際に使うCA証明書を選択するプルダウン。既定値はDefault SonicWall DPI-SSL
+  CA証明書。任意のCA証明書を使う場合は、Certificate Signing/Certificate
+  Re-signing権限を持つ証明書を`Device | Settings > Certificates`で事前に
+  インポートしておく必要があり、同セクションの`(Manage Certificates)`
+  リンクから同画面へ遷移できる
+
+## シナリオ設定
+
+今回、証明書ライフサイクル管理の対象となる設定値は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| 証明書エイリアス(certificate_alias) | `{{ certificate_alias }}` |
+| Subject Common Name(subject_common_name) | `{{ subject_common_name }}` |
+| Subject Organization(subject_organization) | `{{ subject_organization }}` |
+| Subject Organization Unit(subject_organization_unit) | `{{ subject_organization_unit }}` |
+| Subject Locality(subject_locality) | `{{ subject_locality }}` |
+| Subject State(subject_state) | `{{ subject_state }}` |
+| Subject Country(subject_country) | `{{ subject_country }}` |
+| Subject Key Size(subject_key_size) | `{{ subject_key_size }}` bit(RSA) |
+| Subject Alternative Name種別(san_type) | `{{ san_type }}` |
+| Subject Alternative Name値(san_value) | `{{ san_value }}` |
+| 生成されるCSRファイル名(csr_file_name) | `{{ csr_file_name }}` |
+| CAから受領する署名済み証明書ファイル名(signed_cert_file_name) | `{{ signed_cert_file_name }}` |
+| 署名済み証明書の形式(signed_cert_format) | `{{ signed_cert_format }}` |
+| 中間CA証明書ファイル名(intermediate_ca_file_name) | `{{ intermediate_ca_file_name }}` |
+| 中間CA証明書の形式(intermediate_ca_format) | `{{ intermediate_ca_format }}` |
+| ルートCA証明書ファイル名(root_ca_file_name) | `{{ root_ca_file_name }}` |
+| ルートCA証明書の形式(root_ca_format) | `{{ root_ca_format }}` |
+| 証明書の有効期限(expiry_date) | `{{ expiry_date }}` |
+| 期限切れ前に更新を開始する日数(renewal_lead_days) | {{ renewal_lead_days }}日前 |
+| 管理画面のCertificate Selection設定値(management_certificate_option) | `{{ management_certificate_option }}` |
+| 割当先VPNポリシー名(vpn_policy_name) | `{{ vpn_policy_name }}` |
+| VPNポリシーのLocal IKE ID Type(local_ike_id_type) | `{{ local_ike_id_type }}` |
+| DPI-SSL再署名用CA証明書のエイリアス(dpi_ssl_ca_alias) | `{{ dpi_ssl_ca_alias }}` |
+| DPI-SSL再署名用CA証明書の有効期限(dpi_ssl_ca_expiry_date) | `{{ dpi_ssl_ca_expiry_date }}` |
+
+証明書ファイルおよびCSRファイルの実体、CAから発行される秘密鍵や署名値
+そのものは本手順書の対象外です。ファイル名のみを記載し、実際のファイル
+は安全な手段(社内PKI/CAの受け渡し手順)で入手・保管してください。
+
+## 手順
+
+### 1. 現状の証明書一覧を確認する(変更前の基準を取る)
+
+新しいCSRを発行する前に、`Device | Settings > Certificates`を開き、
+`{{ certificate_alias }}`と同名の証明書エントリが存在しないこと、および
+既存の証明書一覧の有効期限列を目視で確認します。特に`{{ dpi_ssl_ca_alias }}`
+(DPI-SSL再署名用CA証明書、有効期限`{{ dpi_ssl_ca_expiry_date }}`)が一覧に
+存在するかどうかも合わせて確認してください。
+
+### 2. CSR(証明書署名要求)を発行する
+
+`Device | Settings > Certificates`で`New Signing Request`をクリックし、
+`Generate Certificate Signing Request`フォームに次の値を入力して`Generate`
+をクリックします。
+
+- Certificate Alias: `{{ certificate_alias }}`
+- Common Name: `{{ subject_common_name }}`
+- Organization: `{{ subject_organization }}`
+- Organization Unit: `{{ subject_organization_unit }}`
+- Locality: `{{ subject_locality }}`
+- State: `{{ subject_state }}`
+- Country: `{{ subject_country }}`
+- Subject Key Size/Curve: `{{ subject_key_size }}` bit(RSA)
+- Subject Alternative Name: 種別 `{{ san_type }}` / 値 `{{ san_value }}`
+
+生成された証明書エントリは発行待ち(Pending)状態となり、CSRファイル
+`{{ csr_file_name }}`がダウンロードされます。このCSRファイルを社内PKIまた
+は外部認証局(CA)へ提出し、署名済み証明書の発行を依頼してください(CAへ
+の提出手順自体は本手順書の対象外です)。
+
+### 3. CAから受領した署名済み証明書をアップロードする
+
+CAから署名済み証明書`{{ signed_cert_file_name }}`(`{{ signed_cert_format }}`
+形式)を受領したら、`Device | Settings > Certificates`の証明書一覧で手順2
+の`{{ certificate_alias }}`(Pending状態)のアップロードアイコンをクリック
+し、`Upload Certificate`ダイアログを開きます。`Choose File`で
+`{{ signed_cert_file_name }}`を選択し、`Open`をクリックしてアップロードを
+完了させます。
+
+### 4. ルート/中間CA証明書をインポートする
+
+証明書チェーンの検証に必要なルート/中間CA証明書がまだ登録されていない
+場合は、`Device | Settings > Certificates`の`Import`をクリックし、
+`Import Certificate`ダイアログを開きます。次の2件をそれぞれ`Add File`で
+選択し、`Import`をクリックしてインポートします。
+
+- 中間CA証明書: `{{ intermediate_ca_file_name }}`(`{{ intermediate_ca_format }}`
+  形式)
+- ルートCA証明書: `{{ root_ca_file_name }}`(`{{ root_ca_format }}`形式)
+
+### 5. 管理画面(HTTPS Management)へ証明書を割り当てる
+
+`Device | Settings > Administration`の`Management`タブを開き、
+`Certificate Selection`ドロップダウンで`{{ management_certificate_option }}`
+を選択します。インポート済み証明書を使う場合は、手順3でアップロードした
+`{{ certificate_alias }}`を証明書一覧から選択して保存します。
+
+### 6. VPNポリシーへ証明書を割り当てる
+
+`{{ vpn_policy_name }}`のサイト間VPNポリシー(IKE Authenticationが3rd
+Party証明書方式のもの)を開き、`Local Certificate`のプルダウンから
+`{{ certificate_alias }}`を選択します。あわせて`Local IKE ID Type`が
+`{{ local_ike_id_type }}`(証明書のSubject Distinguished Nameを識別子と
+する設定)になっていることを確認し、保存します。
+
+### 7. DPI-SSLの再署名用CA証明書を確認・更新する
+
+`POLICY | DPI-SSL > Client SSL`を開き、`Certificate`をクリックして
+`Certificate Re-Signing Authority`セクションを表示します。プルダウンに
+`{{ dpi_ssl_ca_alias }}`が表示されていることを確認します。表示されない
+場合は、同セクションの`(Manage Certificates)`リンクから
+`Device | Settings > Certificates`へ遷移し、手順2〜4と同様の手順で
+Certificate Signing/Certificate Re-signing権限を持つCA証明書として
+`{{ dpi_ssl_ca_alias }}`を発行・インポートしたうえで、プルダウンから選択
+して保存します。
+
+## 動作確認
+
+- `Device | Settings > Certificates`の一覧に`{{ certificate_alias }}`が
+  Pendingではなく有効な状態で表示され、有効期限が`{{ expiry_date }}`に
+  なっていること
+- `Device | Settings > Administration`の`Management`タブで
+  `Certificate Selection`が`{{ management_certificate_option }}`に設定
+  され、ブラウザから管理画面へHTTPSアクセスした際に提示される証明書が
+  `{{ certificate_alias }}`(Common Name: `{{ subject_common_name }}`)に
+  更新されていること
+- `{{ vpn_policy_name }}`のVPNトンネルが確立し、IKEネゴシエーションが
+  `{{ certificate_alias }}`を使って正常に完了していること(VPNログで
+  証明書関連のエラーが出ていないこと)
+- `POLICY | DPI-SSL > Client SSL`の`Certificate Re-Signing Authority`に
+  `{{ dpi_ssl_ca_alias }}`が選択されており、DPI-SSL対象通信がこのCA証明書
+  で再署名されていること(クライアント側で提示される証明書の発行者を
+  確認する)
+- 手順1で確認した既存の証明書一覧・有効期限が、意図せず変更されていない
+  こと
+
+## 注意事項
+
+- **CSR発行(手順2)だけでは証明書は有効になりません。** 発行直後の証明書
+  エントリはPending状態であり、手順3でCAから受領した署名済み証明書を
+  アップロードするまで管理画面/VPN/DPI-SSLのいずれにも割り当てられません。
+- **証明書チェーンの検証には中間CA証明書のインポートが必要です。** 手順4
+  で中間CA証明書(`{{ intermediate_ca_file_name }}`)をインポートし忘れる
+  と、クライアント側で証明書チェーンを検証できず、管理画面/VPN接続で警告
+  やエラーが発生するおそれがあります。
+- **有効期限(`{{ expiry_date }}`)の`{{ renewal_lead_days }}`日前を目安に
+  更新サイクルを開始してください。** 期限切れ後に手順2からやり直すと、
+  新しい証明書が有効化されるまでの間、管理画面/VPN接続やDPI-SSLインスペ
+  クションが証明書エラーで停止するおそれがあります。
+- **DPI-SSL再署名用CA証明書(`{{ dpi_ssl_ca_alias }}`)は、Certificate
+  Signing/Certificate Re-signing権限を持つ証明書である必要があります。**
+  一般の商用CAはこの権限を持つ証明書を発行しないため、社内PKI等、
+  Re-signing権限を発行できる認証局から取得してください。
+- 本手順書は一次情報(SonicOS技術ドキュメントのCertificatesセクション、
+  DPI-SSL Client SSLセクション)で確認できたGUI操作のみを扱います。SonicOS
+  CLIによる同等の投入方法は本ページでは確認できなかったため記載していま
+  せん。CLIで投入する場合は、別途SonicOSのCLIリファレンスで構文を確認し
+  てから実施してください。
+- CAの秘密鍵、証明書のパスフレーズ、管理者パスワードなど認証情報は、本
+  手順書やチケット、ログに平文で残さないでください。記録が必要な場合は
+  `****`のようにマスクし、秘密管理ツール等で別途安全に保管してください。

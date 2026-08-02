@@ -1,0 +1,176 @@
+# OPNsense Web Proxyの明示的/透過型モード使い分け
+
+`Services > Web Proxy > Administration` の Squid(Web Proxy)を用いて、
+クライアント側にプロキシ設定が必要な**明示的プロキシモード**と、設定不要
+な**透過型プロキシモード**をセグメントごとに使い分けます。管理された
+社給PCには明示的モードを、クライアント設定を配布できないゲスト/IoT機器
+には透過型モードを適用します。
+
+## 目的
+
+OPNsenseのWeb Proxy(Squid)を有効化し、セグメントの性質(クライアント側
+の設定可否)に応じて明示的プロキシと透過型プロキシを使い分けられるように
+なることを目指します。あわせて、透過型モードでHTTPSを扱う際にMITM
+(中間者)動作となる制約を理解し、除外リストで安全側に倒す判断ができる
+ようになることを目指します。
+
+## 用語解説
+
+- **明示的プロキシ(Forward Proxy)**: クライアント側のブラウザ/OS設定で
+  プロキシのIPアドレスとポートを明示的に指定して利用する方式。設定変更
+  が可能な管理端末向け
+- **透過型プロキシ(Transparent Proxy)**: NATによる転送でクライアントの
+  通信を自動的にプロキシへ振り向ける方式。クライアント側の設定は不要だが、
+  HTTPSを扱う場合はTLSを一旦終端して再暗号化する動作(後述のMITM)になる
+- **Enable proxy**: `General Proxy Settings` タブにあるチェックボックス。
+  Web Proxyサービス全体のオン/オフを切り替えるマスタースイッチ
+- **Proxy interfaces / Proxy port**: `Forward Proxy` タブにある設定。
+  プロキシが待ち受けるインターフェースと、待受ポート(既定3128)を指定する
+- **Enable Transparent HTTP proxy**: 同じ `Forward Proxy` タブにある
+  チェックボックスで、有効化するとHTTP(80番)向けの通信をプロキシへ
+  自動転送できるようになる。実際の転送にはFirewallのNAT(Port Forward)
+  ルールを別途追加する必要がある
+- **Enable SSL mode / CA to use / SSL no bump sites**: 透過型プロキシで
+  HTTPSも扱う場合に使う設定。`CA to use` で指定したCAを使ってTLSを
+  再署名(SSL bump/MITM)し、`SSL no bump sites` に列挙したドメインは
+  この再署名の対象外(素通し)にする
+- **MITM(Man-in-the-Middle)**: 透過型プロキシでHTTPSを扱う際、Squidが
+  クライアントとサーバの間でTLSを一旦終端し別の証明書で再暗号化する
+  動作。銀行・決済サイトなど再署名と相性の悪い通信先は `SSL no bump
+  sites` で除外する必要がある
+
+## シナリオ設定
+
+Web Proxyの共通設定は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| プロキシ待受ポート(proxy_port) | {{ proxy_port }} |
+| SSL bump用CA(ca_name) | {{ ca_name }} |
+
+対象セグメント一覧(segments、{{ segments | length }} 件、モードは
+セグメントごとに個別設定):
+
+| # | セグメント名 | ネットワーク | インターフェース | モード |
+|---|--------------|--------------|-------------------|--------|
+{% for seg in segments %}| {{ loop.index }} | {{ seg.name }} | {{ seg.network }} | {{ seg.interface }} | {{ seg.mode }} |
+{% endfor %}
+
+SSL bumpの対象外(素通し)にするドメイン一覧(no_bump_domains、
+{{ no_bump_domains | length }} 件):
+
+| # | ドメイン |
+|---|----------|
+{% for d in no_bump_domains %}| {{ loop.index }} | {{ d }} |
+{% endfor %}
+
+## 手順
+
+### 1. 現状の設定をバックアップする
+
+Web Proxyの有効化やNATルール追加は既存の通信に影響しうるため、変更前の
+`config.xml` をAPI経由で退避します。`$OPNSENSE_API_KEY` /
+`$OPNSENSE_API_SECRET` には、`System > Access > Users` で発行した
+APIキー/シークレットをそれぞれ環境変数として設定してください(値は
+****のようにマスクし、コマンドやログに平文で残さないこと)。
+
+```bash
+export FW_HOST="10.0.0.1"
+curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" \
+  "https://${FW_HOST}/api/core/backup/download/this" \
+  -o "opnsense-config-backup-$(date +%Y%m%d%H%M).xml"
+```
+
+### 2. Web Proxyサービスを有効化し、待受インターフェースを設定する
+
+`Services > Web Proxy > Administration` を開きます。
+
+- **General Proxy Settings タブ**: `Enable proxy` にチェックを入れ、
+  `Save` を押す
+- **Forward Proxy タブ**:
+  - `Proxy interfaces` に、対象セグメントのインターフェースをすべて
+    追加する
+{% for seg in segments %}    - {{ seg.interface }}({{ seg.name }})
+{% endfor %}  - `Proxy port` に `{{ proxy_port }}` を入力する
+  - `Save` を押し、`Apply` で反映する
+
+### 3. 明示的プロキシ対象セグメントにクライアント設定を配布する
+
+以下のセグメントは明示的プロキシモードのため、クライアント側(ブラウザ
+またはOSのネットワーク設定)に、OPNsenseのIPアドレスと
+`{{ proxy_port }}` 番ポートをプロキシとして手動で登録する必要があります。
+
+{% for seg in segments %}{% if seg.mode == "explicit" %}- **{{ seg.name }}**({{ seg.network }} / {{ seg.interface }}):
+  ブラウザのプロキシ設定画面で、プロキシサーバに OPNsense の
+  `{{ seg.interface }}` 側インターフェースアドレスを、ポートに
+  `{{ proxy_port }}` を指定するよう管理端末に配布する
+{% endif %}{% endfor %}
+
+### 4. 透過型プロキシ対象セグメントのNAT転送ルールを追加する
+
+以下のセグメントは透過型プロキシモードのため、クライアント設定は不要
+ですが、代わりにFirewallのNAT(Port Forward)ルールでHTTP通信を
+プロキシへ転送する必要があります。
+
+{% for seg in segments %}{% if seg.mode == "transparent" %}- **{{ seg.name }}**({{ seg.network }} / {{ seg.interface }}):
+  `Forward Proxy` タブの `Enable Transparent HTTP proxy` にチェックを
+  入れたうえで、`Firewall > NAT > Port Forward` に次の内容でルールを
+  追加する
+  - `Interface`: {{ seg.interface }}
+  - `Protocol`: TCP
+  - `Destination port range`: HTTP(80)
+  - `Redirect target IP`: 127.0.0.1
+  - `Redirect target port`: {{ proxy_port }}
+{% endif %}{% endfor %}
+ルール追加後、`Apply changes` を押して反映してください。
+
+### 5. 透過型セグメントのHTTPS区間にSSL bump例外を設定する
+
+透過型プロキシでHTTPSも扱う場合は、`Forward Proxy` タブで
+`Enable SSL mode` にチェックを入れ、`CA to use` に `{{ ca_name }}` を
+選択します。銀行・決済サイトなどSSL bump(MITM)と相性の悪い通信先は、
+`SSL no bump sites` に次のドメインを1行ずつ登録し、再署名の対象外に
+してください。
+
+```
+{% for d in no_bump_domains %}{{ d }}
+{% endfor %}```
+
+登録後、`Save` を押し `Apply` で反映します。
+
+### 6. 設定を適用し、モード構成を再確認する
+
+`Forward Proxy` タブおよび `Firewall > NAT > Port Forward` の一覧画面
+を開き、セグメントごとのモード({{ segments | length }} 件)が
+シナリオ設定どおりに反映されていることを目視で確認してください。
+
+## 動作確認
+
+{% for seg in segments %}{% if seg.mode == "explicit" %}- **{{ seg.name }}**: プロキシ設定を行っていない端末からは通信が
+  従来どおり直接インターネットへ抜ける(=強制転送されていない)こと、
+  プロキシ設定を行った端末からは `{{ proxy_port }}` 経由でWebアクセス
+  できることを確認する
+{% else %}- **{{ seg.name }}**: プロキシ設定を一切行っていない端末から
+  HTTPサイトへアクセスし、クライアント側の設定なしにアクセスできる
+  こと(Squidのアクセスログに当該セグメントの送信元IPが記録される
+  こと)を確認する
+{% endif %}{% endfor %}
+- 透過型セグメントでHTTPSサイトへアクセスした際、`SSL no bump sites`
+  に列挙したドメイン({{ no_bump_domains | length }} 件)は再署名
+  されず直接接続になっていることを確認する
+
+## 注意事項
+
+- **明示的プロキシは、クライアント側の設定を忘れると素通りする。**
+  `Enable proxy` を有効にしただけでは通信は自動転送されないため、
+  対象端末に確実にプロキシ設定を配布・確認すること。
+- **透過型プロキシのHTTPS処理はMITM(中間者)動作である。** 銀行・決済
+  サイトなど証明書ピンニングや相互TLS認証を行う通信先は、SSL bumpに
+  よって接続エラーになる場合があるため、事前に `SSL no bump sites`
+  へ登録しておくこと。
+- あるセグメントのモードを透過型から明示的へ(またはその逆へ)切り替える
+  場合は、切替後に不要となったNATルールまたはクライアント側のプロキシ
+  設定を必ず整理すること。両方が残っていると、経路が二重になり通信が
+  意図せず失敗する原因になる。
+- APIキー/シークレットは平文でリポジトリやログに残さず、環境変数や
+  秘密管理ツール経由で扱うこと。

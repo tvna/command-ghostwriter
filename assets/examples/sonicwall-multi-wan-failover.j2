@@ -1,0 +1,233 @@
+# SonicWall (SonicOS) マルチWAN回線の自動フェイルオーバー構成
+
+`Network | SDWAN > Groups` で WAN 回線({{ wan_links | length }} 回線)を
+`{{ sdwan_group_name }}` という SD-WAN Group にまとめ、`Network | SDWAN >
+SLA Probes` で回線ごとの死活監視(Performance Probe)を、`Network | SDWAN >
+Path Selection Profiles` で許容できる遅延・ジッタ・パケットロスの基準
+(Custom SLA Class Object)とバックアップ回線を、`Network | SDWAN > Rules`
+で業務要件ごとの SD-WAN Route Policy を、それぞれ設定します。プローブの
+判定間隔から、回線障害を検知して切り替わるまでの時間と、復旧を検知して
+戻るまでの時間を数値として把握できるようにします。
+
+## 目的
+
+複数の WAN 回線(ISP)を SonicOS の SD-WAN Route Policy 機構でまとめ、
+プローブベースの経路選択により回線障害時に自動でフェイルオーバーできる
+状態を構築できるようになることを目指します。あわせて、フェイルオーバー
+に要する時間(検知までの時間)と、復旧時に元の回線へ戻る条件を、
+Performance Probe の設定値から具体的に説明できるようになることを目指し
+ます。
+
+## 用語解説
+
+- **Network | SDWAN > Groups**: 複数の WAN インターフェースを1つの
+  SD-WAN Group にまとめるための管理画面ナビゲーションパス。`Add` から
+  `Name` を入力し、`Not in Group` 側の一覧からメンバーにするインター
+  フェースを選んで右矢印(Right Arrow)で `In Group` 側に移動する。
+  `In Group` 内でインターフェースを選び、上矢印(Up Arrow)/下矢印
+  (Down Arrow)で優先順位を設定できる。1つのインターフェースは1つの
+  SD-WAN Group にしか所属できない
+- **Network | SDWAN > SLA Probes**: SD-WAN Group に属する各回線経路の
+  健全性を監視する Performance Probe を作成する管理画面ナビゲーション
+  パス。`Add` から `Name` / 対象とする `SD-WAN Group` / 到達確認先の
+  Address Object を指定する `Probe Target` / `Probe Type`(デフォルトは
+  `Ping (ICMP) - Explicit Route`)を設定する。加えて `Probe every ...
+  seconds`(プローブの送信間隔)、`Probe state is set to DOWN after ...
+  missed intervals`(連続して応答が無かった場合に DOWN と判定するまでの
+  回数)、`Probe state is set to UP after ... successful intervals`
+  (連続して応答があった場合に UP と判定するまでの回数)を設定する
+- **Network | SDWAN > Path Selection Profiles**: SD-WAN Group 内の
+  経路から、SLA 基準を満たす経路を動的に選び出すための Path Selection
+  Profile を作成する管理画面ナビゲーションパス。`Add` から `Name` /
+  判定基準となる `SLA Class`(`Lowest Latency` / `Lowest Jitter` /
+  `Lowest Packet Loss` / `Custom SLA Class Object` から選択)/ 基準を
+  満たす経路が1つも無い場合に使う `Backup Interface` を設定する
+- **Custom SLA Class Object**: `SLA Class` に `Custom SLA Class Object`
+  を選んだ場合に設定する許容しきい値。`Latency (ms)`(0〜1000、既定値
+  0)/ `Jitter (ms)`(0〜100、既定値 0)/ `Packet Loss (%)`(0〜100、
+  既定値 0)の3項目を設定し、これを上回る経路は Path Selection Profile
+  の判定から除外される
+- **Network | SDWAN > Rules(SD-WAN Route Policy)**: 送信元/宛先/
+  サービスの組み合わせごとに、どの Path Selection Profile を適用する
+  かを紐づける SD-WAN Route Policy を作成する管理画面ナビゲーション
+  パス。`Add` から `Source` / `Destination` / `Service` / 適用する
+  `Path Selection Profile` を設定する。一次情報では、Path Selection
+  Profile の基準を満たす経路が複数ある場合は自動的にロードバランスされ、
+  基準を満たす経路が無く `Backup Interface` も未設定または down の
+  場合はその Route 自体が無効化されると説明されている
+
+## シナリオ設定
+
+`{{ sdwan_group_name }}` という SD-WAN Group にまとめる WAN 回線は
+次の {{ wan_links | length }} 回線です。
+
+| # | Interface | ISP | 優先度 | 回線種別 | 用途 |
+|---|-----------|-----|--------|----------|------|
+{% for w in wan_links %}| {{ loop.index }} | {{ w["interface"] }} | {{ w["isp_name"] }} | {{ w["role"] }} | {{ w["bandwidth_desc"] }} | {{ w["description"] }} |
+{% endfor %}
+
+各回線の死活監視には、次の Probe Target(Address Object)を使用します。
+
+| # | Interface | Probe Target名 | Probe Target IP |
+|---|-----------|-----------------|------------------|
+{% for w in wan_links %}| {{ loop.index }} | {{ w["interface"] }} | {{ w["probe_target_name"] }} | {{ w["probe_target_ip"] }} |
+{% endfor %}
+
+Performance Probe `{{ probe_name }}` の判定間隔は次のとおりです。
+
+- `Probe every ... seconds`: {{ probe_interval_sec }} 秒
+- `Probe state is set to DOWN after ... missed intervals`:
+  {{ probe_down_after_missed }} 回
+- `Probe state is set to UP after ... successful intervals`:
+  {{ probe_up_after_success }} 回
+
+Path Selection Profile `{{ psp_name }}` の `SLA Class` は `Custom SLA
+Class Object`(`{{ sla_class_name }}`)とし、しきい値は次のとおりです。
+
+- `Latency (ms)`: {{ sla_latency_ms }}
+- `Jitter (ms)`: {{ sla_jitter_ms }}
+- `Packet Loss (%)`: {{ sla_packet_loss_percent }}
+
+いずれの回線もこのしきい値を満たさなくなった場合の `Backup Interface`
+には `{{ psp_backup_interface }}` を設定します。
+
+業務要件ごとに作成する SD-WAN Route Policy は次のとおりです。
+
+| # | Rule名 | Source | Destination | Service | 業務上の理由 |
+|---|--------|--------|--------------|---------|--------------|
+{% for r in route_policies %}| {{ loop.index }} | {{ r["name"] }} | {{ r["source"] }} | {{ r["destination"] }} | {{ r["service"] }} | {{ r["business_reason"] }} |
+{% endfor %}
+
+フェイルオーバーの動作確認は `{{ failure_simulation_interface }}` の
+リンクを意図的に落とすことで模擬します。
+
+## 手順
+
+### 1. WAN回線をSD-WAN Groupにまとめる
+
+`Network | SDWAN > Groups` を開き、`Add` から `Name` に
+`{{ sdwan_group_name }}` と入力します。`Not in Group` の一覧から
+シナリオ設定の {{ wan_links | length }} 回線を選び、右矢印(Right
+Arrow)で `In Group` へ移動します。
+
+{% for w in wan_links %}- {{ loop.index }}件目: `{{ w["interface"] }}`({{ w["isp_name"] }})
+{% endfor %}
+
+`In Group` 内で各インターフェースを選び、上矢印(Up Arrow)/下矢印
+(Down Arrow)を使って、シナリオ設定の優先度どおりの並び順(`Primary`
+の回線が最上位)にしてから `Save` します。
+
+### 2. 各WAN回線のPerformance Probeを作成する
+
+`Network | SDWAN > SLA Probes` を開き、`Add` から `Name` に
+`{{ probe_name }}` と入力し、`SD-WAN Group` に `{{ sdwan_group_name }}`
+を選択します。`Probe Target` には、シナリオ設定の各回線の Probe Target
+Address Object({% for w in wan_links %}`{{ w["probe_target_name"] }}`
+({{ w["probe_target_ip"] }}){% if not loop.last %} / {% endif %}
+{% endfor %})を割り当て、`Probe Type` は既定の `Ping (ICMP) - Explicit
+Route` のままとします。
+
+判定間隔は次のとおり設定します。
+
+- `Probe every ... seconds`: `{{ probe_interval_sec }}`
+- `Probe state is set to DOWN after ... missed intervals`:
+  `{{ probe_down_after_missed }}`
+- `Probe state is set to UP after ... successful intervals`:
+  `{{ probe_up_after_success }}`
+
+設定後、`Save` します。
+
+### 3. SLA基準からPath Selection Profileを作成する
+
+`Network | SDWAN > Path Selection Profiles` を開き、`Add` から `Name`
+に `{{ psp_name }}` と入力します。`SLA Class` は `Custom SLA Class
+Object` を選択し、`{{ sla_class_name }}` として次のしきい値を設定します。
+
+- `Latency (ms)`: `{{ sla_latency_ms }}`
+- `Jitter (ms)`: `{{ sla_jitter_ms }}`
+- `Packet Loss (%)`: `{{ sla_packet_loss_percent }}`
+
+`Backup Interface` には `{{ psp_backup_interface }}` を選択し、`Save`
+します。この設定により、SD-WAN Group 内の全回線がしきい値を満たさなく
+なった場合でも `{{ psp_backup_interface }}` への切替が確保されます。
+
+### 4. 業務要件ごとにSD-WAN Route Policyを作成する
+
+`Network | SDWAN > Rules` を開き、`Add` からシナリオ設定の各行につき
+`Source` / `Destination` / `Service` を設定し、`Path Selection Profile`
+には手順3で作成した `{{ psp_name }}` を割り当てて `Save` します。
+
+{% for r in route_policies %}- {{ loop.index }}件目: `{{ r["name"] }}` / Source={{ r["source"] }} / Destination={{ r["destination"] }} / Service={{ r["service"] }} / Path Selection Profile={{ psp_name }}({{ r["business_reason"] }})
+{% endfor %}
+
+### 5. Route Policyの優先順位と適用状況を確認する
+
+`Network | SDWAN > Rules` の一覧に戻り、手順4で作成した
+{{ route_policies | length }} 件の Route Policy がいずれも `Path
+Selection Profile` として `{{ psp_name }}` を参照していること、
+`Network | SDWAN > Groups` の `{{ sdwan_group_name }}` に含まれる回線
+の並び順が `{{ wan_links[0]["interface"] }}` を最上位とした優先順位に
+なっていることを確認します。
+
+### 6. WAN回線の障害を模擬してフェイルオーバーを検証する
+
+`Network | System | Interfaces` で `{{ failure_simulation_interface }}`
+のリンクを無効化(Disable)するか、物理的にケーブルを抜いて回線障害を
+模擬します。`Network | SDWAN > SLA Probes` の `{{ probe_name }}` の状態
+が `DOWN` に変わること、それに伴って業務トラフィックが
+`{{ psp_backup_interface }}` 経由に切り替わることを確認します。
+
+確認後、`{{ failure_simulation_interface }}` を再度有効化(Enable)する
+かケーブルを接続し直し、`{{ probe_name }}` の状態が `UP` に戻り、業務
+トラフィックが `{{ wan_links[0]["interface"] }}` へ復帰することを確認
+します。
+
+## 動作確認
+
+- `Network | SDWAN > Groups` の `{{ sdwan_group_name }}` に、シナリオ
+  設定どおりの {{ wan_links | length }} 回線が優先順位付きで登録されて
+  いること
+- `Network | SDWAN > SLA Probes` の `{{ probe_name }}` が各回線の
+  Probe Target に到達し、通常時は `UP` 状態であること
+- `Network | SDWAN > Path Selection Profiles` の `{{ psp_name }}` に、
+  `Latency (ms)={{ sla_latency_ms }}` / `Jitter (ms)={{ sla_jitter_ms }}`
+  / `Packet Loss (%)={{ sla_packet_loss_percent }}` のしきい値と
+  `Backup Interface={{ psp_backup_interface }}` が設定されていること
+- `Network | SDWAN > Rules` に {{ route_policies | length }} 件の
+  Route Policy が存在し、いずれも `{{ psp_name }}` を参照していること
+- `{{ failure_simulation_interface }}` の障害模擬時、最短でも
+  `{{ probe_interval_sec }}` 秒 x `{{ probe_down_after_missed }}` 回 =
+  約 {{ probe_interval_sec * probe_down_after_missed }} 秒以内に
+  `{{ probe_name }}` が `DOWN` と判定され、`{{ psp_backup_interface }}`
+  へフェイルオーバーすること
+- 障害解消後、最短でも `{{ probe_interval_sec }}` 秒 x
+  `{{ probe_up_after_success }}` 回 = 約
+  {{ probe_interval_sec * probe_up_after_success }} 秒以内に
+  `{{ probe_name }}` が `UP` と判定され、`{{ wan_links[0]["interface"] }}`
+  へ復帰すること
+
+## 注意事項
+
+- フェイルオーバーに要する時間は `Probe every ... seconds` と `Probe
+  state is set to DOWN after ... missed intervals` の掛け算が目安と
+  なりますが、実際のネットワーク状況によってはこれより遅れる場合が
+  あります。業務要件のSLAに対して余裕があるか、本手順の手順6で必ず
+  実測してください。
+- 復旧側についても同様に、`Probe state is set to UP after ...
+  successful intervals` の回数分だけ連続して応答が無いと
+  `{{ wan_links[0]["interface"] }}` へは復帰しません。復帰後すぐに
+  再障害が起きた場合、意図せず短時間で往復(フラッピング)する可能性が
+  あるため、実運用ではしきい値の妥当性を回線品質に応じて見直してくだ
+  さい。
+- 本手順書は一次情報(SonicOS 7系 SD-WAN技術ドキュメント)で確認でき
+  た `Network | SDWAN` 配下のGUI操作(Groups / SLA Probes / Path
+  Selection Profiles / Rules)のみを扱います。SonicOS 6.5以前の
+  Multiple WAN(MWAN)/WAN Failover & Load Balancing機能はメニュー
+  構成・用語が異なるため、該当バージョンを使用している場合は別途その
+  バージョン向けドキュメントを参照してください。
+- SonicOS CLIによる同等の投入方法は本ページでは確認できなかったため
+  記載していません。CLIで投入する場合は、別途SonicOSのCLIリファレンス
+  で構文を確認してから実施してください。
+- 管理者パスワードやAPIキーなどの認証情報は、本手順書やログに平文で
+  残さないでください。記録が必要な場合は `********` のようにマスクし、
+  秘密管理ツール等で別途安全に保管してください。

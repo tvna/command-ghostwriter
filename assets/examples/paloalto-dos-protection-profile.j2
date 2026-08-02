@@ -1,0 +1,179 @@
+# PAN-OS DoS Protection ProfileによるSYNフラッド対策
+
+Zone Protection Profile と DoS Protection Profile/Policy を組み合わせ、
+保護対象ゾーン({{ protected_zones | length }} 件)に対するSYNフラッドを
+CPS(接続数/秒)しきい値で検知・緩和します。しきい値はAlarm/Activate/
+Maximumの3段階で構成され、Maximumを厳しくしすぎると正常な通信まで
+遮断してしまうため、まず現状のCPS実測値をMonitor > Logsで確認してから
+値を調整することが前提になります。
+
+## 目的
+
+PAN-OS(Palo Alto Networks ファイアウォール)のZone Protection Profileと
+DoS Protection Profile/Policyを用いて、SYNフラッド攻撃をCPSしきい値
+(Alarm/Activate/Maximum)とドロップアクション(SYN Cookies/Random Early
+Drop)で検知・緩和しつつ、正常な通信への誤検知(過剰遮断)を避けられる
+よう設定・調整できるようになることを目指します。
+
+## 用語解説
+
+- **Zone Protection Profile**: `Network > Network Profiles > Zone
+  Protection` で作成し、ゾーン単位で適用するプロファイル。SYN/ICMP/
+  ICMPv6/UDP/Other IPの各フラッドに対するFlood Protection設定を持ち、
+  ゾーンを通過するトラフィック全体を対象にする
+- **DoS Protection Profile / Policy**: `Objects > Security Profiles >
+  DoS Protection` で作成するプロファイルと、`Policies > DoS Protection`
+  で作成するポリシー(ルールブック)の組み合わせ。特定のゾーン/アドレス
+  (デバイスや特定サーバー群など)に絞った、より粒度の細かい防御を行う
+- **Type(Aggregate/Classified)**: DoS Protection Profile作成時に選択する
+  防御単位。本手順書では Aggregate(保護対象全体の合算CPSにしきい値を
+  適用するタイプ)を使用する。Classifiedタイプの分類基準の詳細は、本
+  手順書が参照した一次情報の範囲外のため記載していない
+- **Alarm Rate**: アラームを生成するCPSしきい値
+- **Activate Rate**: フラッド防御(ドロップアクション)を起動するCPS
+  しきい値
+- **Maximum(Max Rate)**: ファイアウォールが許可する最大CPS。これを
+  超える接続はドロップされる
+- **Block Duration**: しきい値超過を理由にブロックされた送信元IPが、
+  ブロックリストに残る秒数
+- **SYN Cookies**: SYNパケットに対してCookieを用いた応答を行うことで
+  正規の接続を維持しながらフラッドを緩和するアクション
+- **Random Early Drop(RED)**: しきい値超過分のパケットをランダムに
+  ドロップするアクション
+
+## シナリオ設定
+
+保護対象ゾーン(protected_zones, {{ protected_zones | length }} 件)と、
+Zone Protection Profile / DoS Protection Profileの設定内容は次のとおり
+です。
+
+保護対象ゾーン一覧:
+
+| # | ゾーン名 |
+|---|----------|
+{% for zone in protected_zones %}| {{ loop.index }} | {{ zone }} |
+{% endfor %}
+
+| 項目 | 値 |
+|------|-----|
+| Zone Protection Profile名(zone_protection_profile_name) | {{ zone_protection_profile_name }} |
+| DoS Protection Profile名(dos_profile_name) | {{ dos_profile_name }} |
+| DoS Protection ProfileのType(dos_profile_type) | {{ dos_profile_type }} |
+| SYN Flood Alarm Rate(syn_alarm_rate) | {{ syn_alarm_rate }} cps |
+| SYN Flood Activate Rate(syn_activate_rate) | {{ syn_activate_rate }} cps |
+| SYN Flood Maximum Rate(syn_max_rate) | {{ syn_max_rate }} cps |
+| SYN Floodアクション(syn_action) | {{ syn_action }} |
+| Block Duration(block_duration) | {{ block_duration }} 秒 |
+
+DoS Protection Policyルール(dos_policy_rules, {{ dos_policy_rules | length }} 件):
+
+| # | ルール名 | 送信元ゾーン | 宛先ゾーン | 宛先アドレス | Action |
+|---|----------|--------------|------------|--------------|--------|
+{% for rule in dos_policy_rules %}| {{ loop.index }} | {{ rule["name"] }} | {{ rule["source_zone"] }} | {{ rule["destination_zone"] }} | {{ rule["destination_address"] }} | {{ rule["action"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. Zone Protection Profileを作成し、SYN Flood防御のしきい値を設定する
+
+`Network > Network Profiles > Zone Protection > Add` から新しいプロファイル
+を作成します。
+
+- Name: `{{ zone_protection_profile_name }}`
+- Flood Protection タブ > SYN タブで次を設定する
+  - Alarm Rate: `{{ syn_alarm_rate }}` cps
+  - Activate Rate: `{{ syn_activate_rate }}` cps
+  - Maximum Rate: `{{ syn_max_rate }}` cps
+  - Action: `{{ syn_action }}`
+
+設定後、`OK` をクリックして保存します(この時点ではまだ `Commit` しません)。
+
+### 2. Zone Protection Profileを保護対象ゾーンに適用する
+
+`Network > Zones` から各ゾーンを開き、`Zone Protection Profile` 欄に
+手順1で作成したプロファイルを選択します。
+
+{% for zone in protected_zones %}- ゾーン `{{ zone }}` > Zone Protection Profile = `{{ zone_protection_profile_name }}` > OK
+{% endfor %}
+
+### 3. DoS Protection Profileを作成する
+
+`Objects > Security Profiles > DoS Protection > Add` から新しいプロファイル
+を作成します。
+
+- Name: `{{ dos_profile_name }}`
+- Type: `{{ dos_profile_type }}`
+- Flood Protection タブ > SYN Flood タブで次を設定する
+  - Alarm Rate: `{{ syn_alarm_rate }}` cps
+  - Activate Rate: `{{ syn_activate_rate }}` cps
+  - Maximum Rate: `{{ syn_max_rate }}` cps
+  - Action: `{{ syn_action }}`
+  - Block Duration: `{{ block_duration }}` 秒
+
+設定後、`OK` をクリックして保存します。
+
+### 4. DoS Protection Policyのルールを作成し、プロファイルを適用する
+
+`Policies > DoS Protection > Add` から、シナリオ設定の各ルールを作成し
+ます。
+
+{% for rule in dos_policy_rules %}- ルール名 `{{ rule["name"] }}`: Source Zone = `{{ rule["source_zone"] }}` /
+  Destination Zone = `{{ rule["destination_zone"] }}` /
+  Destination Address = `{{ rule["destination_address"] }}` /
+  Action = `{{ rule["action"] }}` / DoS Protection Profile = `{{ dos_profile_name }}`
+{% endfor %}
+
+各ルールの保存後、ルールの並び順(ルールベース内の評価順序)を画面上で
+確認します。
+
+### 5. Commitし、設定内容を画面上で確認する
+
+`Commit` を実行し、設定を一括で反映します。反映後、次を確認します。
+
+- `Network > Zones` の各ゾーンで `Zone Protection Profile` に
+  `{{ zone_protection_profile_name }}` が設定されていること
+- `Objects > Security Profiles > DoS Protection` で
+  `{{ dos_profile_name }}` のSYN Flood設定値が手順1・3の入力どおりで
+  あること
+- `Policies > DoS Protection` の各ルールが有効(Disabledでない)状態で
+  表示されていること
+
+## 動作確認
+
+- `Network > Network Profiles > Zone Protection` で
+  `{{ zone_protection_profile_name }}` のSYN Flood Alarm/Activate/
+  Maximum Rateがそれぞれ `{{ syn_alarm_rate }}` / `{{ syn_activate_rate }}` /
+  `{{ syn_max_rate }}` cpsになっており、Actionが `{{ syn_action }}` に
+  なっていること
+{% for zone in protected_zones %}- ゾーン `{{ zone }}` の設定画面で、Zone Protection Profileに
+  `{{ zone_protection_profile_name }}` が割り当てられていること
+{% endfor %}
+{% for rule in dos_policy_rules %}- `Policies > DoS Protection` のルール `{{ rule["name"] }}` が
+  Source Zone `{{ rule["source_zone"] }}` → Destination Zone
+  `{{ rule["destination_zone"] }}`(宛先 `{{ rule["destination_address"] }}`)
+  に対して、Action `{{ rule["action"] }}` かつ DoS Protection Profile
+  `{{ dos_profile_name }}` を参照していること
+{% endfor %}
+- Commit後、`Monitor > Logs > Threat` をSubtype `flood` でフィルタし、
+  当該ゾーン/ルールに対する誤検知(意図しないアラーム発生)が出ていない
+  ことを、通常運用トラフィックの範囲で確認すること
+
+## 注意事項
+
+- **Maximum Rateをいきなり厳しい値に設定しないこと。** まずAlarm Rateの
+  みで一定期間監視し、`Monitor > Logs` 上の実測CPSを踏まえてActivate
+  Rate・Maximum Rateを調整することで、正常な通信の誤検知(過剰遮断)を
+  避けられる。
+- **Random Early Drop(RED)は超過分のパケットをランダムにドロップする
+  ため、SYN Cookiesに比べて正規の接続にも影響が及ぶ可能性がある。** どちらの
+  アクションを選択するかは、保護対象の通信特性を踏まえて判断すること。
+- **Block Durationの間は、しきい値超過を理由にブロックされた送信元から
+  の正規の通信も遮断され続ける。** 秒数を長く設定するほど、誤検知時の
+  影響が長引く点に注意すること。
+- DoS Protection ProfileのType(Aggregate/Classified)のうち、Classified
+  タイプの分類基準や、SYN Flood以外のフラッド種別(ICMP/ICMPv6/UDP/Other
+  IP)の個別デフォルト値については、本手順書が参照した一次情報の範囲外の
+  ため記載していない。適用前にベンダーの最新ドキュメントで確認すること。
+- ロックアウトや誤検知が発生した場合の復旧手順(プロファイルの一時無効化
+  など)は、本手順書が参照した一次情報の範囲外のため記載していない。
+  適用前に、変更のロールバック方法を別途確認しておくこと。

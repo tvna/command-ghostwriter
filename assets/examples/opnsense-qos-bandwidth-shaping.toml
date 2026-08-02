@@ -1,0 +1,42 @@
+wan_interface = "wan"
+lan_interface = "lan"
+uplink_mbit = 100
+downlink_mbit = 100
+critical_pipe_mbit = 70
+noncritical_pipe_mbit = 30
+critical_queue_weight = 80
+noncritical_queue_weight = 20
+congestion_test_host = "8.8.8.8"
+temp_shaper_disabled_descr = "TEMP-SHAPER-BYPASS-BASELINE"
+
+[[traffic_classes]]
+service = "erp-app"
+proto = "tcp"
+port = 443
+host = "10.0.20.10"
+priority = "critical"
+queue_name = "qCritical"
+
+[[traffic_classes]]
+service = "voip-sip"
+proto = "udp"
+port = 5060
+host = "10.0.20.11"
+priority = "critical"
+queue_name = "qCritical"
+
+[[traffic_classes]]
+service = "backup-sync"
+proto = "tcp"
+port = 8080
+host = "10.0.30.5"
+priority = "noncritical"
+queue_name = "qBulk"
+
+[[traffic_classes]]
+service = "web-browsing"
+proto = "tcp"
+port = 80
+host = "-"
+priority = "noncritical"
+queue_name = "qBulk"

@@ -1,0 +1,227 @@
+# SonicWall (SonicOS) DPI-SSLによるSSL/TLS通信の復号検査とプライバシー除外構成
+
+`POLICY | DPI-SSL > Client SSL`でLAN側端末が`{{ wan_zone }}`側のHTTPSサイト
+へアクセスする通信(アウトバウンド)を復号し、Intrusion Prevention/Gateway
+Anti-Virus/Gateway Anti-Spyware/Application Firewallで検査したうえで
+再暗号化します。あわせて`POLICY | DPI-SSL > Server SSL`で外部から
+`{{ server_dpi_ssl_target_name }}`(`{{ server_dpi_ssl_target_ip }}`)宛の
+インバウンド通信も同様に復号検査します。金融・医療等プライバシー配慮が
+必要な通信は、CFSカテゴリベースの除外・Common Name除外・Address Object
+除外の3種類のオブジェクトでDPI-SSLの検査対象から除外します。
+
+## 目的
+
+暗号化されたHTTPS通信の中身をDPI-SSL(Deep Packet Inspection for SSL)で
+復号・検査し、マルウェアや情報漏えいの兆候を検知できるようにすることを
+目指します。あわせて、オンラインバンキングや医療機関ポータルなど
+プライバシー配慮が必要な通信をCFSカテゴリ・Common Name・Address Object
+の各除外設定でDPI-SSLの検査対象から外し、「検査すべき通信は漏れなく検査し、
+除外すべき通信は確実に除外する」構成をGUIから再現できるようになることを
+目指します。
+
+## 用語解説
+
+- **DPI-SSL(Deep Packet Inspection for SSL)**: SonicOSがSSL/TLSで暗号化
+  された通信を一旦復号し、Intrusion Prevention・Gateway Anti-Virus・
+  Gateway Anti-Spyware・Application Firewall等のセキュリティサービスで
+  検査したのち再暗号化して転送する機能。Client DPI-SSLとServer DPI-SSLの
+  2系統がある
+- **Client DPI-SSL(`POLICY | DPI-SSL > Client SSL`)**: LAN側の端末が
+  `{{ wan_zone }}`側のHTTPSサイトへアクセスする通信(アウトバウンド)を
+  対象とする。SonicWallは`Certificate Re-Signing Authority`で指定した
+  CA証明書(既定値は`{{ client_dpi_ssl_ca_certificate }}`)でサーバー証明書
+  を再署名するため、対象端末がこのCA証明書を信頼している必要がある
+- **Server DPI-SSL(`POLICY | DPI-SSL > Server SSL`)**: `{{ wan_zone }}`側
+  から社内サーバーへアクセスする通信(インバウンド)を対象とする。事前に
+  `System > Certificates`へ社内サーバーの証明書をインポートし、`SSL
+  Servers`欄で`Address Object/Group`(対象サーバー)と`SSL Certificate`
+  (インポートした証明書)を組にして登録することで、その証明書の秘密鍵を
+  使って復号検査する
+- **Cleartext(SSL Servers欄のチェックボックス)**: 有効にするとSonicWall
+  と社内サーバー間の通信がSSLオフロードされ平文になる。本手順では復号・
+  検査・再暗号化までを行いサーバーとの区間は暗号化を維持するため、この
+  チェックボックスは無効のままにする
+- **Inclusion/Exclusion(Address Object/Group・User Object/Group)**:
+  Client SSL/Server SSLの各設定ページにある除外設定。`Exclude`プルダウン
+  でDPI-SSL検査から除外したいAddress Object/GroupまたはUser Object/Group
+  を選択する。`Include`プルダウンで除外対象の中から一部だけ検査に戻す
+  (除外の除外)ことも可能
+- **CFS Category-based Exclusions/Inclusions**: `POLICY | DPI-SSL > Client
+  SSL`ページから開く、Content Filtering Service(CFS)のカテゴリ単位で
+  DPI-SSL検査を除外/包含する設定。CFSライセンスが有効である必要がある。
+  カテゴリ`{{ excluded_cfs_category_banking_id }}`
+  (`{{ excluded_cfs_category_banking_name }}`)・
+  `{{ excluded_cfs_category_brokerage_id }}`
+  (`{{ excluded_cfs_category_brokerage_name }}`)・
+  `{{ excluded_cfs_category_health_id }}`
+  (`{{ excluded_cfs_category_health_name }}`)のように、通信先ドメインの
+  格付け(Rating/Category Server への問い合わせ結果)に基づいて除外できる
+- **Common Name Exclusions**: Client SSLページの除外設定。証明書のCommon
+  Name(ドメイン名、サフィックス指定)をテキストボックスへ入力し`Add`する
+  ことで、CFSカテゴリに未登録の個別ドメインをDPI-SSL検査から除外できる。
+  複数件は`^`区切りで保持され、合計8192バイトまで登録できる
+
+## シナリオ設定
+
+今回、DPI-SSLで検査・除外する設定値は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| LANゾーン(lan_zone) | `{{ lan_zone }}` |
+| WANゾーン(wan_zone) | `{{ wan_zone }}` |
+| DMZゾーン(dmz_zone) | `{{ dmz_zone }}` |
+| Client DPI-SSLの再署名CA証明書(client_dpi_ssl_ca_certificate) | `{{ client_dpi_ssl_ca_certificate }}` |
+| Common Name除外ドメイン(client_dpi_ssl_common_name_exclusion) | `{{ client_dpi_ssl_common_name_exclusion }}` |
+| 除外CFSカテゴリ1のID(excluded_cfs_category_banking_id) | {{ excluded_cfs_category_banking_id }} |
+| 除外CFSカテゴリ1の名称(excluded_cfs_category_banking_name) | `{{ excluded_cfs_category_banking_name }}` |
+| 除外CFSカテゴリ2のID(excluded_cfs_category_brokerage_id) | {{ excluded_cfs_category_brokerage_id }} |
+| 除外CFSカテゴリ2の名称(excluded_cfs_category_brokerage_name) | `{{ excluded_cfs_category_brokerage_name }}` |
+| 除外CFSカテゴリ3のID(excluded_cfs_category_health_id) | {{ excluded_cfs_category_health_id }} |
+| 除外CFSカテゴリ3の名称(excluded_cfs_category_health_name) | `{{ excluded_cfs_category_health_name }}` |
+| Server DPI-SSL対象サーバー名(server_dpi_ssl_target_name) | `{{ server_dpi_ssl_target_name }}` |
+| Server DPI-SSL対象サーバーIP(server_dpi_ssl_target_ip) | `{{ server_dpi_ssl_target_ip }}` |
+| 対象サーバー用Address Object名(server_dpi_ssl_target_address_object) | `{{ server_dpi_ssl_target_address_object }}` |
+| インポート済みサーバー証明書名(server_dpi_ssl_certificate_name) | `{{ server_dpi_ssl_certificate_name }}` |
+| Server DPI-SSL除外対象パートナーのAddress Object名(server_dpi_ssl_excluded_partner_object) | `{{ server_dpi_ssl_excluded_partner_object }}` |
+| Server DPI-SSL除外対象パートナーのIP(server_dpi_ssl_excluded_partner_ip) | `{{ server_dpi_ssl_excluded_partner_ip }}` |
+
+`{{ server_dpi_ssl_certificate_name }}`は本手順の対象外として、事前に
+`System > Certificates`へインポート済みであることを前提とします(秘密鍵
+そのものはこの手順書やチケットに記載しないでください)。CFSライセンスが
+無効の場合、CFSカテゴリベースの除外は選択できません。事前に
+`MANAGE | Security Configuration > Content Filter`等でライセンス状態を
+確認してください。
+
+## 手順
+
+### 1. 現状のDPI-SSL設定を確認する(変更前の基準を取る)
+
+- `POLICY | DPI-SSL > Client SSL`を開き、`Enable SSL Inspection`が現在
+  どちらの状態か、および既存のCFSカテゴリ除外・Common Name Exclusions・
+  Address/Service/User Object除外の登録内容を確認します。
+- `POLICY | DPI-SSL > Server SSL`を開き、`Enable SSL Inspection`の現状と、
+  `SSL Servers`欄に`{{ server_dpi_ssl_target_address_object }}`と同名の
+  エントリが存在しないことを確認します。
+- `System > Certificates`を開き、`{{ server_dpi_ssl_certificate_name }}`が
+  インポート済みであることを確認します。
+
+### 2. Client DPI-SSLを有効化する
+
+`POLICY | DPI-SSL > Client SSL`を開き、次の値を設定して`Accept`をクリック
+します。
+
+- `Enable SSL Inspection`: 有効
+- 検査対象サービス: `Intrusion Prevention`・`Gateway Anti-Virus`・
+  `Gateway Anti-Spyware`・`Application Firewall`をすべて有効
+- `Certificate Re-Signing Authority`: `{{ client_dpi_ssl_ca_certificate }}`
+  (LAN側端末はこのCA証明書を信頼済みである必要があります)
+
+### 3. Client DPI-SSLのプライバシー除外(CFSカテゴリ・Common Name)を設定する
+
+同じ`POLICY | DPI-SSL > Client SSL`ページで`CFS Category-based
+Exclusions/Inclusions`を開き、次のカテゴリを除外リストへ追加して`Accept`
+します。
+
+- カテゴリ{{ excluded_cfs_category_banking_id }}:
+  `{{ excluded_cfs_category_banking_name }}`
+- カテゴリ{{ excluded_cfs_category_brokerage_id }}:
+  `{{ excluded_cfs_category_brokerage_name }}`
+- カテゴリ{{ excluded_cfs_category_health_id }}:
+  `{{ excluded_cfs_category_health_name }}`
+
+続けて`Common Name Exclusions`のテキストボックスへ
+`{{ client_dpi_ssl_common_name_exclusion }}`を入力して`Add`をクリックし、
+`Accept`します。この項目はCFSカテゴリに未登録の個別ドメイン(自社ホスト
+の医療ポータル等)をカテゴリ判定を待たずに確実に除外するためのものです。
+
+### 4. Server DPI-SSL用の証明書とSSL Serversエントリを確認・登録する
+
+`System > Certificates`で`{{ server_dpi_ssl_certificate_name }}`がインポ
+ート済みであることを確認したら、`POLICY | DPI-SSL > Server SSL`を開き、
+`SSL Servers`欄の`Add`から次の値を設定して`Accept`をクリックします。
+
+- `Address Object/Group`: `{{ server_dpi_ssl_target_address_object }}`
+  (`{{ server_dpi_ssl_target_ip }}`を指すAddress Object)
+- `SSL Certificate`: `{{ server_dpi_ssl_certificate_name }}`
+- `Cleartext`: 無効のまま(SonicWallと`{{ server_dpi_ssl_target_name }}`
+  間の通信を平文化しない)
+
+### 5. Server DPI-SSLを有効化し、パートナー向けAddress Object除外を設定する
+
+`POLICY | DPI-SSL > Server SSL`ページで次の値を設定して`Accept`をクリック
+します。
+
+- `Enable SSL Inspection`: 有効
+- 検査対象サービス: `Intrusion Prevention`・`Gateway Anti-Virus`・
+  `Gateway Anti-Spyware`・`Application Firewall`をすべて有効
+- Inclusion/Exclusionの`Address Object/Group`欄`Exclude`プルダウン:
+  `{{ server_dpi_ssl_excluded_partner_object }}`
+  (`{{ server_dpi_ssl_excluded_partner_ip }}`を指すAddress Object。プラ
+  イバシー配慮が必要な提携先からの通信を検査対象から除外します)
+
+`{{ server_dpi_ssl_excluded_partner_object }}`は本手順の対象外として、
+事前に`MATCH OBJECTS | Addresses`で`{{ server_dpi_ssl_excluded_partner_ip }}`
+を指すHost Address Objectとして作成済みであることを前提とします。
+
+### 6. 動作確認のための通信を発生させる
+
+LAN側の端末から`{{ wan_zone }}`側の任意のHTTPSサイトへアクセスし、ブラウ
+ザで受け取った証明書の発行者が`{{ client_dpi_ssl_ca_certificate }}`に
+なっていることを確認します。
+
+```bash
+curl -k -m 5 -o /dev/null -w "HTTP %{http_code}\n" https://{{ server_dpi_ssl_target_ip }}/
+```
+
+`{{ server_dpi_ssl_target_ip }}`宛の接続が成功することも、あわせて確認し
+ます。
+
+## 動作確認
+
+- LAN側端末から`{{ wan_zone }}`側HTTPSサイトへの通信で、証明書の発行者が
+  `{{ client_dpi_ssl_ca_certificate }}`に再署名されていること(Client
+  DPI-SSLが有効に働いている証跡)
+- `{{ excluded_cfs_category_banking_name }}`・
+  `{{ excluded_cfs_category_brokerage_name }}`・
+  `{{ excluded_cfs_category_health_name }}`カテゴリに属するサイト、および
+  `{{ client_dpi_ssl_common_name_exclusion }}`宛の通信では、証明書の発行
+  者がサイト本来のものであり`{{ client_dpi_ssl_ca_certificate }}`に再署名
+  されていないこと(除外設定が効いている証跡)
+- `https://{{ server_dpi_ssl_target_ip }}/`への接続が成功し、
+  `{{ server_dpi_ssl_target_name }}`が応答すること
+- `{{ server_dpi_ssl_excluded_partner_ip }}`からの通信のみ、Server
+  DPI-SSLの検査ログに記録されないこと(除外設定が効いている証跡)
+- 手順1で確認した既存のDPI-SSL設定・除外リストが、意図せず上書きされて
+  いないこと
+
+## 注意事項
+
+- **Client DPI-SSLはLAN側端末がCA証明書を信頼していないと通信エラーに
+  なります。** `{{ client_dpi_ssl_ca_certificate }}`(既定のSonicWall CA、
+  または独自CAに差し替えた場合はその証明書)を対象端末の信頼済みルート
+  証明書ストアへ事前に配布してください。
+- **Cleartextは無効のままにしてください。** 手順4で`Cleartext`を有効化
+  すると、SonicWallと`{{ server_dpi_ssl_target_name }}`間の通信が平文化
+  され、DMZ・内部セグメント上で暗号化が失われます。復号・検査・再暗号化
+  という本来のDPI-SSLの目的から外れるため、意図的にSSLオフロードしたい
+  場合を除き無効のままにしてください。
+- **CFSカテゴリ除外はCFSライセンスが有効な場合のみ選択できます。** ライ
+  センスが失効すると`CFS Category-based Exclusions/Inclusions`の設定自体
+  が無効になり、金融・医療カテゴリの除外が意図せず外れる可能性があるため、
+  ライセンス状態を定期的に確認してください。
+- **除外はDPI-SSLの検査自体を止めるものであり、Access Ruleでの通信許可
+  とは独立です。** 本手順の除外設定は「検査するかどうか」のみを制御し、
+  通信そのものを許可/拒否するAccess Ruleの設定は別途必要です。
+- **除外対象を広げすぎないでください。** CFSカテゴリ除外・Common Name
+  除外・Address Object除外はいずれも、該当する通信のマルウェア検知・情
+  報漏えい検知が及ばなくなることを意味します。プライバシー配慮が真に必要
+  な範囲(オンラインバンキング・医療等)に限定して設定してください。
+- 本手順書は一次情報(SonicOS技術ドキュメントのDPI-SSLセクション)で確認
+  できたGUI操作のみを扱います。SonicOS CLIやスクリプトによる同等の投入
+  方法は本ページでは確認できなかったため記載していません。CLIで投入する
+  場合は、別途SonicOSのCLIリファレンスで構文を確認してから実施してくだ
+  さい。
+- インポートするサーバー証明書の秘密鍵や、CA証明書の管理者パスワードなど
+  認証情報は、本手順書やチケット、ログに平文で残さないでください。記録が
+  必要な場合は`********`のようにマスクし、秘密管理ツール等で別途安全に
+  保管してください。

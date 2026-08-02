@@ -1,0 +1,171 @@
+# OPNsenseによるテナント/部門別ネットワークセグメンテーション
+
+1台の物理アプライアンス({{ physical_if }})上で、{{ tenants | length }} 件の
+テナント/部門ごとに独立したVLANセグメントを作成し、サブネット・DHCP・
+ファイアウォールルールセットを個別に割り当てることで、設定・ポリシー・
+ログを論理的に分離します。
+
+## 目的
+
+複数テナント/部門が1台のOPNsenseを共有する環境で、テナントごとに
+独立したネットワークセグメント(サブネット・DHCP設定・ファイアウォール
+ルールセット)を構成し、テナント間トラフィックが既定で遮断される状態を
+実践できるようになることを目指します。他ベンダーのVDOM(Virtual Domain)
+のような独立した仮想ファイアウォールインスタンス機構とは異なり、
+OPNsenseにはFortinet VDOM相当の独立した仮想ファイアウォールインスタンス
+機構は存在しないため、本手順ではVLAN(802.1Qタグ)によるインターフェース
+分割と、セグメントごとの個別ルールセットという別機構で同じ運用課題を
+解決します。
+
+## 用語解説
+
+- **VLAN(802.1Qタグ)**: 1本の物理インターフェースを複数の論理セグメント
+  に分割するタグ付け方式。フレームにVLANタグを埋め込んで送出することで、
+  同じ配線上でも所属VLANが異なる端末同士の通信を分離できる
+- **Parent(親インターフェース)**: `Interfaces > Devices > VLAN` でVLAN
+  デバイスを作成する際に指定する、タグ付けの元になる物理インターフェース
+- **Device / VLAN tag / Description**: 同画面の入力項目。`Device`は生成
+  されるVLANデバイス名、`VLAN tag`はテナントごとに割り当てる802.1Qタグ
+  番号、`Description`は識別用の説明文字列
+- **Interfaces > Assignments**: 作成したVLANデバイスを、IPアドレス設定や
+  ファイアウォールルールの対象にできる通常のインターフェースとして
+  割り当てる画面。割り当てるまでVLANデバイスはファイアウォールから
+  制御できない
+- **VLAN境界を越える通信**: OPNsenseでは、VLAN間(テナント間)を越える
+  通信は自動的には転送されず、ファイアウォールルールで明示的に許可
+  しない限り遮断される。この既定拒否の性質を利用してテナント間の論理
+  分離を実現する
+
+## シナリオ設定
+
+物理親インターフェース(physical_if): `{{ physical_if }}`
+
+テナント一覧({{ tenants | length }} 件):
+
+| # | テナント | VLAN tag | サブネット | ゲートウェイ | DHCP | インターネット |
+|---|----------|----------|------------|--------------|------|----------------|
+{% for t in tenants %}| {{ loop.index }} | {{ t.display_name }} | {{ t.vlan_tag }} | {{ t.subnet_cidr }} | {{ t.gateway_ip }} | {{ t.dhcp_enabled }} | {{ t.allow_internet }} |
+{% endfor %}
+
+## 手順
+
+### 1. 現状の設定をバックアップする
+
+VLAN・インターフェース割り当て・ファイアウォールルールの変更前に、
+`config.xml` をAPI経由で退避します。`$OPNSENSE_API_KEY` /
+`$OPNSENSE_API_SECRET` には、`System > Access > Users` で発行した
+APIキー/シークレットをそれぞれ環境変数として設定してください
+(値はマスクして扱い、コマンド中に直書きしないこと)。
+
+```bash
+export FW_HOST="10.0.0.1"
+curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" \
+  "https://${FW_HOST}/api/core/backup/download/this" \
+  -o "opnsense-config-backup-$(date +%Y%m%d%H%M).xml"
+```
+
+### 2. テナントごとにVLANデバイスを作成する
+
+`Interfaces > Devices > VLAN` で、テナントごとに次の値を入力して
+VLANデバイスを作成します。
+
+| テナント | Parent | VLAN tag | Description |
+|----------|--------|----------|--------------|
+{% for t in tenants %}| {{ t.display_name }} | {{ physical_if }} | {{ t.vlan_tag }} | {{ t.vlan_descr }} |
+{% endfor %}
+
+- `Parent`: `{{ physical_if }}`(全テナント共通の物理インターフェース)
+- `VLAN tag`: テナントごとに一意な802.1Qタグ番号
+- `Description`: テナントを識別できる説明文字列
+- 各行を入力後 `Save` を押し、最後に一括で `Apply` する
+
+### 3. VLANインターフェースを割り当ててIPアドレスを設定する
+
+`Interfaces > Assignments` で、手順2で作成したVLANデバイスを
+それぞれ新しいインターフェースとして割り当てます。割り当て後、
+各インターフェースの設定画面で次のとおり有効化・IP設定を行います。
+
+{% for t in tenants %}- **{{ t.display_name }}**(割り当て名称の目安:
+  `{{ t.if_name }}`): `Enable interface` にチェックを入れ、
+  `IPv4 Configuration Type` を `Static IPv4` に設定し、
+  `IPv4 address` に `{{ t.gateway_ip }}/{{ t.subnet_bits }}` を入力して
+  `Save` する
+{% endfor %}
+
+`Interfaces > Assignments` の割り当て名称欄には目安として
+`{{ tenants[0].if_name }}` のような名称を入力できますが、ファイア
+ウォールAPI・ルール設定で実際に指定するインターフェース識別子
+(`optX` 等)は環境ごとに割り当て後の画面表示で確認してください。
+
+### 4. DHCPが必要なテナントにDHCPサーバーを設定する
+
+`Services > DHCPv4 > [手順3で割り当てたインターフェース]` を開き、
+DHCPを有効化するテナントについてのみ、`Enable` にチェックを入れ、
+`Range` の `from` / `to` に払い出し範囲を設定します。
+
+{% for t in tenants %}{% if t.dhcp_enabled %}- **{{ t.display_name }}**: `Enable` を有効化し、
+  `Range` に `{{ t.dhcp_range_start }}` から `{{ t.dhcp_range_end }}` を設定する
+{% if t.dns_override != "-" %}  (DNSサーバーを既定のOPNsense自身から `{{ t.dns_override }}` に
+  変更する場合は、同画面の `DNS servers` にも入力する)
+{% endif %}{% else %}- **{{ t.display_name }}**: DHCPは有効化しない(固定IP運用のみ)
+{% endif %}{% endfor %}
+
+### 5. テナントごとのファイアウォールルールを設定する
+
+各テナントのVLANインターフェースにルールを追加します。何も追加
+しない限りVLAN間通信・外部への通信は既定で遮断されるため、
+インターネットアクセスを許可するテナントにのみ許可ルールを追加し、
+それ以外のテナントは既定の遮断のままにします。`interface` には、
+手順3で確認した実際のインターフェース識別子を指定してください
+(ここでは説明用に `{{ tenants[0].if_name }}` 相当の名称で表記しています)。
+
+```bash
+{% for t in tenants %}{% if t.allow_internet %}curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST \
+  "https://${FW_HOST}/api/firewall/filter/addRule" \
+  -H "Content-Type: application/json" \
+  -d '{"rule":{"action":"pass","quick":"1","interface":"{{ t.if_name }}","direction":"in","ipprotocol":"inet","protocol":"any","source_net":"{{ t.subnet_cidr }}","destination_net":"any","description":"tenant-segmentation: {{ t.name }} to internet","log":"1"}}'
+{% else %}# {{ t.display_name }} はインターネットアクセスを許可しないため、
+# 許可ルールを追加せず既定の遮断のままにする({{ t.if_name }})
+{% endif %}{% endfor %}
+curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST "https://${FW_HOST}/api/firewall/filter/apply"
+```
+
+## 動作確認
+
+- `Interfaces > Assignments` で、{{ tenants | length }} 件のテナント
+  すべてが個別のインターフェースとして割り当て済みであること
+- 各テナント端末から自セグメントのゲートウェイ(例:
+  {{ tenants[0].gateway_ip }})宛の通信が疎通すること
+- インターネットアクセスを許可していないテナント(`allow_internet`が
+  `false`)から外部への通信が失敗すること
+- 異なるテナントのサブネット同士(例: {{ tenants[0].subnet_cidr }} と
+  {{ tenants[1].subnet_cidr }})の間で、明示的な許可ルールを追加して
+  いない限り通信が失敗すること(VLAN境界での既定遮断の確認)
+- `Firewall > Log Files > Live View` を対象インターフェースで絞り込み、
+  テナントごとの通信ログが他テナントと混在せず個別に確認できること
+- DHCPを有効化したテナント配下の端末が、設定した範囲
+  ({{ tenants[0].dhcp_range_start }} 〜 {{ tenants[0].dhcp_range_end }} 等)
+  内のアドレスを取得できること
+
+## 注意事項
+
+- OPNsenseにはFortinet VDOMのようなテナントごとの独立した仮想
+  ファイアウォールインスタンスは存在しない。本手順のVLANベースの
+  分離は、同一のファイアウォールエンジン上でインターフェース単位に
+  ルールセットを分けているに過ぎず、OPNsense自体の設定操作(GUI/API
+  ユーザーやシステム設定)はテナント間で分離されない。管理者権限を
+  テナントごとに分離したい場合は別途 `System > Access` 側での権限
+  設計が必要になる
+- `Interfaces > Assignments` で割り当てた後の実際のインターフェース
+  識別子(`optX` 等)は環境によって異なる。本手順中の `{{ tenants[0].if_name }}`
+  のような名称は識別用の目安であり、ファイアウォールAPI・ルール
+  設定を行う前に必ず割り当て後の画面表示で実際の識別子を確認する
+  こと
+- VLAN境界を越える通信はファイアウォールルールで明示的に許可しない
+  限り転送されない。テナント間連携が必要になった場合も、双方向の
+  許可ルールを個別に検討し、安易に全許可(any-any)にしないこと
+- APIキー/シークレットは平文でリポジトリやログに残さず、環境変数や
+  秘密管理ツール経由で扱うこと
+- 手順2でVLANタグ番号を割り当てる際は、上流スイッチ側のトランク
+  ポート設定で同じタグ番号がすでに別用途で使われていないか事前に
+  確認すること

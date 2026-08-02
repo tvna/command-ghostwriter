@@ -1,0 +1,176 @@
+# SonicWall (SonicOS) Botnet Filterによるマルウェア感染端末のC2通信検知・遮断
+
+SonicOS の`POLICY | Security Services > Botnet Filter`で`Settings`を開き、
+「Block connections to/from Botnet Command and Control Servers」を有効化
+することで、SonicWall提供の既知Botnet C2サーバーIPデータベースと照合した
+双方向通信のブロックを行います。フィルタモードは`{{ filter_mode }}`を選択
+し、誤検知を避けるための`Botnet Exclusion Object`(`{{ botnet_exclusion_object }}`)
+と、データベース未収載の疑わしいC2サーバーIP(`{{ custom_botnet_ip }}`)を
+補完登録するCustom Botnet Listを設定した上で、LAN側端末
+`{{ affected_host_ip }}`からの遮断動作を検証します。
+
+## 目的
+
+感染端末が外部のC2サーバーへ通信(コールバック)しようとした際に、SonicOS
+のネイティブ機構であるBotnet Filterで検知・遮断できる状態を作ることを
+目指します。あわせて、SonicWall提供のBotnet C2サーバーIPデータベースに
+まだ収載されていない疑わしいIPアドレスをCustom Botnet Listで補完登録する
+方法と、正当な通信を誤って遮断しないためのBotnet Exclusion Objectの使い方
+を理解し、設定後に実際の遮断動作を検証できるようになることを目指します。
+
+## 用語解説
+
+- **POLICY | Security Services > Botnet Filter**: Botnet Filterの機能を
+  管理する画面ナビゲーションパス。このページの`Settings`をクリックすると
+  Botnet Filterの設定ダイアログが開く
+- **Block connections to/from Botnet Command and Control Servers**:
+  `Settings`ダイアログのチェックボックス。既定では無効(未選択)。有効化
+  すると、SonicWall提供の既知Botnet C2サーバーIPデータベースと照合し、
+  該当するIPアドレスとの間の通信を(inbound/outbound双方向とも)ブロック
+  するようになる
+- **All Connections / Firewall Rule-Based Connections**: 上記チェックボックス
+  を有効化すると選択できるようになる2つのフィルタモード。`All Connections`
+  はファイアウォールを通過する全接続を対象にBotnet判定を行う。
+  `Firewall Rule-Based Connections`は、Access Ruleの`Security Profiles`
+  タブで`BotNet/CC`オプションを有効化したルールに一致する接続のみを対象に
+  する
+- **Botnet Exclusion Object**: `Settings`ダイアログで選択するAddress Object
+  /Address Groupのドロップダウン。ここで選択したオブジェクトに含まれる
+  IPアドレスは、Botnet C2サーバーIPデータベースに該当していてもブロック
+  対象から除外される
+- **Custom Botnet List**: `Settings`ダイアログから開ける、管理者が独自に
+  登録するBotnet IPアドレスの一覧。`Add`アイコンから`Add Custom Botnet List`
+  ダイアログを開き、`Host`/`Range`/`Network`、またはこれらの組み合わせの
+  `Group`のいずれかの種類のAddress Objectを選択(または新規作成)して追加
+  する。SonicWall提供のデータベースにまだ収載されていない疑わしいIPアドレ
+  スを補完的にブロック対象へ加えたい場合に用いる
+
+## シナリオ設定
+
+今回のBotnet Filter設定値は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| フィルタモード(filter_mode) | `{{ filter_mode }}` |
+| Botnet Exclusion Object名(botnet_exclusion_object) | `{{ botnet_exclusion_object }}` |
+| 疑わしいC2サーバーIP用Address Object名(custom_botnet_address_object) | `{{ custom_botnet_address_object }}` |
+| 疑わしいC2サーバーIP(custom_botnet_ip) | `{{ custom_botnet_ip }}` |
+| 検証対象のLAN側端末IP(affected_host_ip) | `{{ affected_host_ip }}` |
+| 検証対象端末が属するゾーン(lan_zone) | `{{ lan_zone }}` |
+
+`{{ botnet_exclusion_object }}`には、誤ってBotnet C2サーバーIPデータベース
+に一致してしまうと業務影響が大きい正当な通信先(取引先API等)のAddress
+Object/Groupを事前に登録しておきます(このAddress Object自体の作成は本
+手順書の対象外です)。
+
+## 手順
+
+### 1. 現状のBotnet Filter設定を確認する(変更前の基準を取る)
+
+新しい設定を投入する前に、現状を確認します。
+
+- `POLICY | Security Services > Botnet Filter`を開き、`Settings`をクリック
+  します。「Block connections to/from Botnet Command and Control Servers」
+  が現在どちらの状態か、有効な場合は現在のフィルタモードと
+  `Botnet Exclusion Object`の設定値を記録します。
+- `Settings`ダイアログの`Custom Botnet List`を確認し、
+  `{{ custom_botnet_address_object }}`/`{{ custom_botnet_ip }}`がまだ登録
+  されていないことを確認します。
+- `MATCH OBJECTS | Addresses`を開き、`{{ custom_botnet_address_object }}`
+  と同名のAddress Objectが存在しないことを確認します。
+
+### 2. 疑わしいC2サーバーIP用のAddress Objectを作成する
+
+`MATCH OBJECTS | Addresses`の`Address Objects`タブで`Add`アイコンをクリック
+し、`Name`・`Zone Assignment`・`Type`(`Host`)・`IP Address`を入力して
+`Save`をクリックします。
+
+- Name: `{{ custom_botnet_address_object }}` / Type: `Host` / IP Address:
+  `{{ custom_botnet_ip }}`
+
+### 3. Custom Botnet Listへ疑わしいC2サーバーIPを追加登録する
+
+`POLICY | Security Services > Botnet Filter`の`Settings`ダイアログを開き、
+`Custom Botnet List`の`Add`アイコンから`Add Custom Botnet List`ダイアログ
+を開きます。`A Botnet IP Address`の一覧から手順2で作成した
+`{{ custom_botnet_address_object }}`を選択して追加します。
+
+これにより、SonicWall提供のBotnet C2サーバーIPデータベースにまだ収載され
+ていない`{{ custom_botnet_ip }}`も、以降のBotnet Filterによるブロック対象
+に含まれるようになります。
+
+### 4. Botnet Exclusion Objectを設定する(誤検知防止)
+
+同じ`Settings`ダイアログで、`Botnet Exclusion Object`のドロップダウンから
+`{{ botnet_exclusion_object }}`を選択します。これにより、
+`{{ botnet_exclusion_object }}`に含まれるIPアドレスは、Botnet C2サーバーIP
+データベースやCustom Botnet Listに該当していてもブロック対象から除外され
+ます。
+
+### 5. Botnet Filterを有効化する
+
+同じ`Settings`ダイアログで「Block connections to/from Botnet Command and
+Control Servers」チェックボックスを有効化し、フィルタモードとして
+`{{ filter_mode }}`を選択します。すべての項目を設定したら設定を保存しま
+す。
+
+`{{ filter_mode }}`が`Firewall Rule-Based Connections`の場合、この設定
+だけでは既存のAccess Ruleに対するBotnet判定は行われません。判定を有効に
+したいAccess Ruleごとに、`Security Profiles`タブで`BotNet/CC`オプションを
+個別に有効化する必要があります。
+
+### 6. 遮断動作を検証する
+
+`{{ lan_zone }}`ゾーンに属するLAN側端末`{{ affected_host_ip }}`から、
+手順3でCustom Botnet Listへ追加した`{{ custom_botnet_ip }}`宛に接続を試み
+ます。
+
+```bash
+curl -k -m 5 -o /dev/null -w "HTTP %{http_code}\n" https://{{ custom_botnet_ip }}/
+```
+
+対象がHTTP以外のポートの場合は、`curl`の代わりに
+`nc -zv {{ custom_botnet_ip }} 443`等、実際に確認したいポートに応じた疎通
+確認コマンドに読み替えてください。Botnet Filterが正しく機能していれば、
+この接続は到達せず失敗(タイムアウトまたは接続拒否)します。
+
+## 動作確認
+
+- `POLICY | Security Services > Botnet Filter`の`Settings`ダイアログで、
+  「Block connections to/from Botnet Command and Control Servers」が有効
+  になっており、フィルタモードが`{{ filter_mode }}`になっていること
+- 同ダイアログの`Botnet Exclusion Object`が`{{ botnet_exclusion_object }}`
+  になっていること
+- 同ダイアログの`Custom Botnet List`に`{{ custom_botnet_address_object }}`
+  (`{{ custom_botnet_ip }}`)が登録されていること
+- 手順6の接続試行が失敗し、`{{ affected_host_ip }}`から
+  `{{ custom_botnet_ip }}`への通信が到達していないこと
+- `{{ botnet_exclusion_object }}`に含まれる正当な通信先への接続は、この
+  設定変更後も引き続き到達できること(誤検知によるブロックが発生していない
+  こと)
+- 手順1で確認した既存のBotnet Filter設定・Access Rulesが、意図せず変更さ
+  れていないこと
+
+## 注意事項
+
+- **`All Connections`モードはファイアウォールを通過する全接続が対象になり
+  ます。** 業務上必要な正当な通信先が誤ってBotnet C2サーバーIPデータベース
+  に一致した場合、手順4で設定した`{{ botnet_exclusion_object }}`に含まれて
+  いない限りブロックされます。本番投入前に、主要な業務通信先が
+  `{{ botnet_exclusion_object }}`でカバーされているか確認してください。
+- **`Firewall Rule-Based Connections`モードを選択した場合、手順5の設定
+  だけではどのAccess Ruleに対してもBotnet判定は行われません。** 対象にし
+  たいAccess Ruleごとに`Security Profiles`タブで`BotNet/CC`オプションを
+  個別に有効化してください。手順5までしか実施しないまま「設定した」と判断
+  しないでください。
+- **Custom Botnet Listはあくまで補完用です。** SonicWall提供のBotnet C2
+  サーバーIPデータベース自体を管理者が編集することはできません。データ
+  ベース未収載の疑わしいIPアドレスを個別にブロックしたい場合にのみ、手順
+  2・3のとおりCustom Botnet Listへ追加してください。
+- 本手順書は一次情報(SonicOS技術ドキュメントのBotnet Filterセクション)で
+  確認できたGUI操作のみを扱います。SonicOS CLIによる同等の投入方法は本
+  ページでは確認できなかったため記載していません。CLIで投入する場合は、
+  別途SonicOSのCLIリファレンスで構文を確認してから実施してください。
+- 管理者パスワードやAPIキーなど認証情報は、本手順書やチケット、ログに平文
+  で残さないでください。記録が必要な場合は`********`のようにマスクし、
+  秘密管理ツール等で別途安全に保管してください。

@@ -1,0 +1,165 @@
+# OPNsense管理者アカウントのMFA(TOTP)必須化
+
+`System > Access > Servers` にTOTP(RFC 6238)認証サーバーを追加し、対象の
+管理者アカウント({{ target_users | length }} 件)にOTP seedを発行した上で、
+`System > Settings > Administration` のAuthentication設定をこのTOTP
+サーバーに切り替えます。切り替えは「新経路(トークン込みログイン)を
+別セッションで検証してから、旧セッションを閉じる」順序を守り、MFAデバイス
+紛失時の復旧手段(config.xmlバックアップとコンソールからの復元)を事前に
+確立しておきます。
+
+## 目的
+
+OPNsenseのローカル管理者ログインにTOTPベースの多要素認証を必須化し、
+不正アクセスへの耐性を高めます。同時に、MFAデバイス紛失・認証設定ミス
+によって管理者自身がロックアウトされないよう、変更前のバックアップ取得・
+別セッションでの事前検証・コンソールからの復旧手段確保を運用手順として
+定着させることを目指します。
+
+## 用語解説
+
+- **TOTP(Time-based One-Time Password, RFC 6238)**: 時刻とseedから
+  一定間隔(通常30秒)で6桁の使い捨てトークンを生成する方式
+- **Authentication server(Type: Local+Timebased One Time Password)**:
+  `System > Access > Servers` で追加する認証サーバー種別。ローカル
+  データベース認証にTOTPトークンの検証を組み合わせる
+- **OTP seed**: ユーザーごとに生成する160bitの秘密鍵。
+  `System > Access > Users` の対象ユーザー編集画面にある `OTP seed` 欄で
+  `Generate new (160bit) secret` を選ぶと発行され、保存後に再度プロファイル
+  を開くとQRコードで表示される。値そのものは機密情報であり、本手順書や
+  ログ・コマンド出力には残さないこと
+- **System > Access > Tester**: 認証設定を切り替える前に、対象の
+  Authentication serverとユーザー名・トークン+パスワードの組み合わせが
+  正しく認証されるかを確認できる検証画面。OPNsense公式ドキュメントも
+  「切り替え前に必ずトークンをテストすること」を明記している
+- **Administration認証設定**: `System > Settings > Administration` の
+  Authenticationセクションにある設定。既定は `Local Database` で、ここを
+  作成したTOTPサーバーに切り替えるとローカル管理者ログインにTOTP入力が
+  必須になる。OPNsense公式ドキュメントは「OPNsenseの各種サービスがこの
+  2FA構成を利用できる」旨を述べているが、対象範囲の詳細(GUI以外への
+  影響有無)までは明記していないため、切り替え後は影響範囲を実際に
+  確認すること
+- **コンソールメニュー(物理/シリアルコンソール)**: OPNsense起動後に
+  表示される番号選択式メニュー。`13) Restore a configuration` を選ぶと
+  退避済みの設定ファイルを読み込んで復元でき、MFAデバイス紛失等で
+  ロックアウトした場合の復旧手段になる
+
+## シナリオ設定
+
+今回MFAを必須化する認証サーバーと対象アカウントは次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| TOTPサーバーのDescriptive name(totp_server_name) | {{ totp_server_name }} |
+| Token length(token_length) | {{ token_length }} |
+
+対象アカウント一覧(target_users, {{ target_users | length }} 件):
+
+| # | ユーザー名 |
+|---|-----------|
+{% for u in target_users %}| {{ loop.index }} | {{ u }} |
+{% endfor %}
+
+## 手順
+
+### 1. 変更前の設定をバックアップする
+
+MFA必須化の設定変更前に `config.xml` をAPI経由で退避します。ロックアウト
+時にコンソールから復元する際の復旧点になります。`$OPNSENSE_API_KEY` /
+`$OPNSENSE_API_SECRET` には `System > Access > Users` で発行したAPI
+キー/シークレットをそれぞれ環境変数として設定してください。
+
+```bash
+export FW_HOST="10.0.0.1"
+curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" \
+  "https://${FW_HOST}/api/core/backup/download/this" \
+  -o "opnsense-config-backup-$(date +%Y%m%d%H%M).xml"
+```
+
+退避したファイルは管理セグメント外に持ち出さず、アクセス制御された
+場所に保管してください。
+
+### 2. TOTP認証サーバーを追加する
+
+`System > Access > Servers` を開き `Add server` を選択して、次の内容で
+TOTP認証サーバーを追加します。
+
+- `Descriptive name`: `{{ totp_server_name }}`
+- `Type`: `Local+Timebased One Time Password`
+- `Token length`: `{{ token_length }}`
+- `Time window` / `Grace period`: 既定(空欄)のまま変更しない
+- `Save` を押す
+
+### 3. 対象ユーザーごとにOTP seedを発行する
+
+{% for u in target_users %}`System > Access > Users` で `{{ u }}` を開き、`OTP seed` 欄で
+`Generate new (160bit) secret` を選んで保存します。保存後にもう一度
+プロファイルを開くとQRコードが表示されるので、`{{ u }}` の利用者が持つ
+認証アプリ(Google Authenticator / FreeOTP等)でスキャンして登録して
+もらいます。seed値やQRコードの画像はコマンド出力や本手順書、チャット
+等に残さないでください。
+{% endfor %}
+
+### 4. Testerで事前検証する(Administration設定はまだ切り替えない)
+
+`System > Settings > Administration` のAuthenticationはまだ
+`Local Database` のまま変更せず、`System > Access > Tester` で先に
+動作確認します。
+
+- `Authentication server`: 手順2で追加した `{{ totp_server_name }}` を選択
+- `Username`: 対象ユーザー名を入力
+- `Password`: 現在の6桁トークンに続けてパスワードを入力(例:
+  `<6桁トークン><パスワード>` の順で1つの欄に入力)
+- 対象ユーザー全員について認証が成功することを確認する
+
+この検証が全員分成功するまで、次の手順には進まないでください。
+
+### 5. 別セッションを維持したまま、Administration認証設定を切り替える
+
+現在ログイン中のGUIセッションは切断せずに残したまま、
+`System > Settings > Administration` のAuthenticationセクションで、
+Authenticationサーバーを `Local Database` から手順2で追加した
+`{{ totp_server_name }}` に切り替えて `Save` を押します。
+
+### 6. 別セッションで実ログインを検証する
+
+**今使っているセッションは切断せずに**、別のブラウザタブまたは別端末から
+新しくGUIへログインし、パスワードに続けて現在のTOTPトークンを入力して
+ログインできることを確認します。
+
+対象ユーザー全員分の実ログインが確認できるまで、元のセッションを
+閉じないでください。確認できない場合は手順1のバックアップから復旧して
+手順2〜5をやり直します。
+
+## 動作確認
+
+- 手順4のTesterで、対象ユーザー({{ target_users | length }} 件)全員に
+  ついてトークン込みの認証が成功すること
+- 手順6で、対象ユーザー全員が別セッションからの実ログインでトークンを
+  要求され、かつ正しいトークンでログインできること
+- `System > Settings > Administration` のAuthenticationが
+  `{{ totp_server_name }}` に切り替わっており、`Local Database` のみでの
+  ログインができなくなっていること
+- 手順1で取得した `config.xml` バックアップが、管理セグメント外から
+  読み取れない場所に保管されていること
+
+## 注意事項
+
+- **適用順序を厳守すること。** Testerでの事前検証(手順4)→
+  Administration設定の切り替え(手順5)→ 別セッションでの実ログイン確認
+  (手順6)の順を守り、元のセッションは手順6の確認が終わるまで切断しない。
+- **MFAデバイス紛失時の復旧手段**: 物理/シリアルコンソールに接続し、
+  起動時のコンソールメニューから `13) Restore a configuration` を選択して
+  手順1で退避した `config.xml` を復元すると、Administrationの
+  Authentication設定を `Local Database` に戻せる。この復旧手段は
+  コンソールへの到達性が前提となるため、本手順を実施する前に物理/
+  シリアルコンソールへ実際にアクセスできることを確認しておくこと。
+- OPNsense公式ドキュメントは「OPNsenseの各種サービスがこの2FA構成を
+  利用できる」と述べているが、GUI以外のどのサービスまで対象になるかは
+  明記されていない。切り替え後は、想定していないサービスまで認証方式が
+  変わっていないか実環境で確認すること。
+- OTP seed・APIキー/シークレットは機密情報であり、平文でリポジトリや
+  ログ、チャットに残さないこと。
+- 対象アカウント({{ target_users | length }} 件)のうち1件でもOTP seedの
+  登録・Testerでの検証が完了していない状態でAdministration設定を
+  切り替えないこと。

@@ -1,0 +1,192 @@
+# OPNsenseによるマルチWAN自動フェイルオーバー構成
+
+複数のWAN回線を OPNsense の Gateway Group(マルチWAN)機能で束ね、
+回線障害を DPinger(死活監視デーモン)で検知して自動的に予備回線へ
+切り替えます。切替に要するおおよその時間と、回線復旧時の挙動を
+あらかじめ把握したうえで適用してください。
+
+## 目的
+
+{{ gateways | length }} 本のWAN回線を Tier(優先順位階層)で束ねた
+Gateway Group `{{ gateway_group_name }}` を構成し、DPingerによる
+死活監視でパケットロス/遅延を検知した際に自動的に下位Tierの回線へ
+フェイルオーバーできるようにします。あわせてポリシーベースルーティング
+で実際のトラフィックを Gateway Group 経由に向け、業務継続性を確保
+します。
+
+## 用語解説
+
+- **Gateway Group(ゲートウェイグループ)**: `System > Gateway groups`
+  で作成する、複数のゲートウェイを優先順位付きでまとめた論理グループ。
+  ポリシーベースルーティングの宛先として指定できる
+- **Tier(ティア)**: Gateway Group内でゲートウェイに割り当てる優先順位
+  階層。数字が小さいほど優先度が高く、OPNsenseでは最大5段階まで設定
+  できる。同一Tier内の複数ゲートウェイはロードバランシングになり、
+  異なるTier間ではフェイルオーバーの挙動になる
+- **DPinger**: OPNsenseがゲートウェイごとに常駐させるICMP監視デーモン。
+  `Monitor IP` へ定期的にプローブを送り、遅延・パケットロスを計測する
+- **Monitor IP**: `System > Gateways` の個別ゲートウェイ設定で指定する、
+  死活監視のプローブ送信先IPアドレス
+- **Probe Interval / Down**: DPingerがICMPプローブを送信する間隔(秒)と、
+  プローブ失敗が何秒続いたらアラーム(ダウン扱い)にするかを決める設定
+- **Latency thresholds / Packet Loss thresholds**: 遅延(ミリ秒)と
+  パケットロス(%)それぞれについて、正常/異常を分ける閾値(low/high)
+- **Trigger Level(トリガーレベル)**: Gateway Group側で、Tier内の
+  ゲートウェイをどの条件で「オフライン」とみなすかを選ぶ設定。
+  `Member Down`(パケットロス100%)、`Packet Loss`(ロス閾値超過)、
+  `High Latency`(遅延閾値超過)、`Packet Loss or High Latency`
+  (いずれか)の4択がある
+- **ポリシーベースルーティング(Policy Based Routing)**: `Firewall >
+  Rules` の各ルールにある `Gateway` 列に Gateway Group を指定し、
+  そのルールに一致するトラフィックを指定したGateway Group経由で
+  送出させる仕組み。OPNsenseのマルチWANはこの仕組み上に成り立っている
+
+## シナリオ設定
+
+Gateway Group `{{ gateway_group_name }}` を構成するWAN回線
+({{ gateways | length }} 本)は次のとおりです。
+
+| Tier | ゲートウェイ名 | インターフェース | ゲートウェイIP | Monitor IP | 回線 |
+|------|----------------|-------------------|-----------------|------------|------|
+{% for gw in gateways %}| {{ gw.tier }} | {{ gw.name }} | {{ gw.interface }} | {{ gw.gateway_ip }} | {{ gw.monitor_ip }} | {{ gw.isp_desc }} |
+{% endfor %}
+
+死活監視(DPinger)のパラメータは全ゲートウェイ共通で次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| Probe Interval(probe_interval_sec) | {{ probe_interval_sec }} 秒 |
+| Down(down_sec) | {{ down_sec }} 秒 |
+| Latency thresholds(latency_low_ms / latency_high_ms) | {{ latency_low_ms }} ms / {{ latency_high_ms }} ms |
+| Packet Loss thresholds(loss_low_pct / loss_high_pct) | {{ loss_low_pct }} % / {{ loss_high_pct }} % |
+| Trigger Level(trigger_level_label) | {{ trigger_level_label }} |
+
+ポリシーベースルーティングを適用する対象は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| ルール適用インターフェース(policy_routing_interface) | {{ policy_routing_interface }} |
+| 優先対象セグメント(critical_traffic.source_net) | {{ critical_traffic.source_net }} |
+| 優先対象の説明(critical_traffic.description) | {{ critical_traffic.description }} |
+
+## 手順
+
+### 1. 現状の設定をバックアップする
+
+Gateway GroupやFirewall Ruleを変更する前に、`config.xml` をAPI経由で
+退避します。`$OPNSENSE_API_KEY` / `$OPNSENSE_API_SECRET` には
+`System > Access > Users` で発行したAPIキー/シークレットをそれぞれ
+環境変数として設定してください(値はマスクして扱う想定です)。
+
+```bash
+export FW_HOST="10.0.0.1"
+export OPNSENSE_API_KEY="****"
+export OPNSENSE_API_SECRET="****"
+curl -ks -u "${OPNSENSE_API_KEY}:${OPNSENSE_API_SECRET}" \
+  "https://${FW_HOST}/api/core/backup/download/this" \
+  -o "opnsense-config-backup-$(date +%Y%m%d%H%M).xml"
+```
+
+### 2. 各WANゲートウェイの死活監視(DPinger)パラメータを設定する
+
+`System > Gateways` で、{{ gateways | length }} 本それぞれのゲートウェイ
+編集画面を開き、`Monitor IP` と監視パラメータを設定します。
+
+{% for gw in gateways %}#### {{ loop.index }}. {{ gw.name }}({{ gw.interface }} / Tier {{ gw.tier }})
+
+- `Monitor IP`: `{{ gw.monitor_ip }}` を指定する({{ gw.isp_desc }}経由で
+  疎通する外部IPを選ぶこと)
+- `Probe Interval`: `{{ probe_interval_sec }}`(秒)
+- `Down`: `{{ down_sec }}`(秒)
+- `Latency thresholds`: low `{{ latency_low_ms }}` ms / high
+  `{{ latency_high_ms }}` ms
+- `Packet Loss thresholds`: low `{{ loss_low_pct }}` % / high
+  `{{ loss_high_pct }}` %
+- `Save` を押して個別ゲートウェイ設定を保存する
+
+{% endfor %}すべてのゲートウェイを保存したら、`System > Gateways` の一覧画面で
+各ゲートウェイの状態が `Online` になっていることを確認してください。
+
+### 3. Gateway Groupを作成し、Tierを割り当てる
+
+`System > Gateway groups` で新規グループ `{{ gateway_group_name }}` を
+作成し、以下のTierを割り当てます。
+
+{% for gw in gateways %}- Tier {{ gw.tier }}: `{{ gw.name }}`({{ gw.isp_desc }})
+{% endfor %}
+`Trigger Level` には `{{ trigger_level_label }}` を選択します。
+{% if trigger_level_label == "Member Down" %}このレベルでは、対象ゲートウェイのパケットロスが100%(完全な
+不通)になった場合のみフェイルオーバーが発生します。回線品質の劣化
+(部分的なパケットロスや遅延増加)では切り替わらない点に注意してください。
+{% else %}このレベルでは、完全な不通に加えて、上記のPacket Loss/Latency
+thresholdsを超えた品質劣化の段階でもフェイルオーバーが発生します。
+{% endif %}`Save` を押してGateway Groupを保存します。
+
+### 4. ポリシーベースルーティングでGateway Groupを適用する
+
+`Firewall > Rules > {{ policy_routing_interface }}` の該当ルールを開き、
+`Gateway` 列(欄)に `{{ gateway_group_name }}` を指定します。
+
+- まず優先対象セグメント `{{ critical_traffic.source_net }}`
+  ({{ critical_traffic.description }})からの通信に対するルールを作成
+  または編集し、`Gateway` に `{{ gateway_group_name }}` を設定して
+  最上位に配置する
+- 続いて `{{ policy_routing_interface }}` 全体のデフォルトルール
+  (すべての送信元)についても、同様に `Gateway` を
+  `{{ gateway_group_name }}` に設定する
+- `Save` の後、画面上部の `Apply changes` を押してルールを適用する
+
+### 5. フェイルオーバー動作を段階的に検証する
+
+いずれか1本(まずTier {{ gateways[1].tier }} 以降ではなく、優先度の
+低いTierから)のWAN回線を意図的に切断し、DPingerのアラームと
+実トラフィックの切り替わりを確認します。
+
+```bash
+# 例: Tier 2以降のゲートウェイに紐づくWANインターフェースを一時的に
+# ダウンさせて挙動を確認する(インターフェース名は環境に合わせて読み替え)
+{% for gw in gateways %}{% if gw.tier > 1 %}ifconfig {{ gw.interface }} down
+{% endif %}{% endfor %}
+```
+
+`System > Gateways` の一覧で対象ゲートウェイが `Down` 表示に変わるまでの
+時間と、`{{ policy_routing_interface }}` 側の通信が生き残っている
+Tierへ切り替わることを確認してください。確認後は必ず
+`ifconfig <interface> up` で回線を復旧させてください。
+
+## 動作確認
+
+- `System > Gateways` の一覧で、{{ gateways | length }} 本すべてが
+  `Online` と表示されていること(通常運用時)
+- 手順5でTierの低いゲートウェイを切断した際、およそ
+  `{{ probe_interval_sec }}` 秒間隔のプローブが `{{ down_sec }}` 秒
+  失敗し続けた時点でそのゲートウェイが `Down` 扱いになること
+- `{{ policy_routing_interface }}` 配下の端末からの通信が、切断した
+  Tierから次のTierの回線へ自動的に切り替わり、継続して疎通できること
+- 切断した回線を復旧させた後、`System > Gateways` の表示が
+  `Online` に戻り、Tierの高い(優先度が高い)回線へ自動的に
+  戻ることを確認すること
+- `Firewall > Rules > {{ policy_routing_interface }}` の対象ルールで
+  `Gateway` 列に `{{ gateway_group_name }}` が設定されたままであること
+
+## 注意事項
+
+- `Trigger Level` に `Member Down` のみを選ぶと、完全な不通以外の
+  品質劣化(高いパケットロスや遅延)では切り替わりません。業務継続性の
+  要件に応じて `{{ trigger_level_label }}` のような品質劣化も検知する
+  設定を検討してください。
+- フェイルオーバーに要する時間は、おおよそ `Probe Interval`
+  ({{ probe_interval_sec }} 秒)と `Down`({{ down_sec }} 秒)の設定値
+  に依存します。切替を早めたい場合はこれらの値を短くできますが、
+  一時的な瞬断でも過敏に切り替わる(フラッピング)リスクとのトレード
+  オフになります。
+- `Monitor IP`({{ gateways[0].monitor_ip }} など)は、各WAN回線を
+  経由して実際に疎通できる外部IPを選んでください。同一の監視先を
+  複数回線から到達不能な場所に設定すると、誤検知の原因になります。
+- 手順5の動作確認は、監視画面上の表示だけでなく、実際に回線を
+  切断した状態での通信継続を確認してから完了としてください。
+- 本手順はGateway GroupとDPingerというOPNsense標準(Deciso公式)の
+  機能のみを使用しており、サードパーティ製プラグインや
+  Business Edition限定機能には依存していません。
+- APIキー/シークレットは平文でリポジトリやログに残さず、環境変数や
+  秘密管理ツール経由で扱ってください。

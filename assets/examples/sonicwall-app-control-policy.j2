@@ -1,0 +1,152 @@
+# SonicWall (SonicOS) App Controlによるアプリケーション単位のポリシー適用
+
+ポート番号だけでは判別できないアプリケーション(SaaS、P2P、迂回通信等)を、
+SonicOSのApp Control(Application Control)がアプリケーションシグネチャ
+データベースに基づきレイヤ7で識別します。本手順書は、CSVで定義した
+{{ csv_rows | length }}件のエントリを `POLICY | Rules and Policies >
+App Control` に登録し、`action` の値に応じて可視化(Log)・帯域制御
+(BWM)・遮断(Block)のいずれかのApp Controlポリシーを適用します。
+最後にApplication Visualization機能で、識別されたアプリケーションと
+適用結果を確認します。
+
+## 目的
+
+SaaS・P2P・迂回通信など、ポート番号のみでは判別できないアプリケーション
+通信を、SonicOSのApp Controlのシグネチャベース識別によってレイヤ7で
+可視化できるようになることを目指します。あわせて、識別したアプリケー
+ションごとに可視化(Log)・帯域制御(BWM)・遮断(Block)のいずれかの
+ポリシーを `POLICY | Rules and Policies > App Control` に登録し、
+Application Visualizationで意図したとおりに識別・適用されていることを
+検証できるようになることを目指します。
+
+## 用語解説
+
+- **App Control(Application Control)**: SonicWallのアプリケーション
+  シグネチャデータベースに基づき、ポート番号によらずレイヤ7でアプリ
+  ケーションを識別する機構。識別したアプリケーションに対してログ・
+  ブロック・帯域制御のポリシーを構成できる
+- **App Rules**: App Controlと合わせてSonicOSのアプリケーション層制御
+  を担う機構の総称として、ネイティブ機構の説明文中で併記される名称。
+  本手順書では、そのうち `POLICY | Rules and Policies > App Control`
+  から構成する部分のみを扱う
+- **POLICY | Rules and Policies > App Control**: App Controlポリシー
+  を登録・確認するための管理画面ナビゲーションパス
+- **Log(アクション)**: 通信を許可しつつ、識別したアプリケーション
+  トラフィックをログに記録するアクション。ブロックはせず可視化のみを
+  目的とする場合に使用する
+- **Block(アクション)**: 識別したアプリケーションのトラフィックを
+  遮断するアクション
+- **BWM(アクション)**: 識別したアプリケーションのトラフィックに
+  帯域制御を適用するアクション。具体的な帯域幅の数値設定は環境ごとの
+  BWM関連設定に依存するため、本手順書では対象アプリケーションをBWM
+  ポリシーの対象として登録するところまでを扱う
+- **Application Visualization**: App Controlが識別したアプリケーション
+  トラフィックを可視化する機能。登録したポリシーが意図したアプリケー
+  ションに対して意図したとおりに動作しているかを確認する際に用いる
+
+## シナリオ設定
+
+今回 `POLICY | Rules and Policies > App Control` に登録するApp Control
+ポリシーは、次の{{ csv_rows | length }}件です。
+
+| policy_no | app_name | traffic_type | action | description |
+|-----------|----------|---------------|--------|--------------|
+{% for r in csv_rows %}| {{ r["policy_no"] }} | {{ r["app_name"] }} | {{ r["traffic_type"] }} | {{ r["action"] }} | {{ r["description"] }} |
+{% endfor %}
+
+`traffic_type` 列(SaaS / P2P / Circumvention)は、この手順書内で通信の
+性質を整理するための運用上の分類であり、SonicOSのGUI上に存在する項目
+ではありません。`app_name` は、App Controlのアプリケーションシグネチャ
+データベースに登録済みのアプリケーション名を前提とします。シグネチャ
+データベースは更新により内容が変動するため、対象環境で実際に検出・
+選択可能なアプリケーション名を、登録前に必ず確認してください。
+
+## 手順
+
+### 1. 現状のApp Controlポリシーを確認する(変更前の基準を取る)
+
+新しいApp Controlポリシーを1件も追加する前に、現状を確認します。
+
+- `POLICY | Rules and Policies > App Control` を開きます。
+- シナリオ設定に登場する `app_name`({% for r in csv_rows %}`{{ r["app_name"] }}`{% if not loop.last %}、{% endif %}{% endfor %})に対応するポリシーが
+  既に存在しないことを確認します。
+- Application Visualizationを開き、変更前の時点でこれらのアプリケー
+  ションがどのように識別・記録されているかを記録しておきます。
+
+### 2. 可視化のみを目的としたLogポリシーを登録する(action が Log の行)
+
+シナリオ設定の `action` が `Log` の行を、`POLICY | Rules and Policies >
+App Control` から登録します。対象アプリケーションを許可したまま、
+トラフィックをログに記録します。
+
+{% for r in csv_rows %}{% if r["action"] == "Log" %}- policy_no {{ r["policy_no"] }}: `{{ r["app_name"] }}` / Action=Log({{ r["description"] }})
+{% endif %}{% endfor %}
+
+### 3. 帯域制御(BWM)ポリシーを登録する(action が BWM の行)
+
+シナリオ設定の `action` が `BWM` の行を登録します。対象アプリケーション
+のトラフィックを帯域制御の対象とします。具体的な帯域幅の数値は、対象
+環境のBWM関連設定にあわせて別途決定してください(本手順書の対象外)。
+
+{% for r in csv_rows %}{% if r["action"] == "BWM" %}- policy_no {{ r["policy_no"] }}: `{{ r["app_name"] }}` / Action=BWM({{ r["description"] }})
+{% endif %}{% endfor %}
+
+### 4. 遮断を目的としたBlockポリシーを登録する(action が Block の行)
+
+シナリオ設定の `action` が `Block` の行を登録します。対象アプリケー
+ションのトラフィックを遮断します。
+
+{% for r in csv_rows %}{% if r["action"] == "Block" %}- policy_no {{ r["policy_no"] }}: `{{ r["app_name"] }}` / Action=Block({{ r["description"] }})
+{% endif %}{% endfor %}
+
+### 5. Application Visualizationで識別・適用結果を検証する
+
+シナリオ設定の各アプリケーションに対応する通信を実際に発生させたうえ
+で、Application Visualizationを開き、次の点を確認します。
+
+1. `action` が `Log` の行({% for r in csv_rows %}{% if r["action"] == "Log" %}`{{ r["app_name"] }}`{% if not loop.last %}、{% endif %}{% endif %}{% endfor %})について、
+   対応する通信が許可されたまま、アプリケーションとして識別・記録され
+   ていることを確認します。
+2. `action` が `BWM` の行({% for r in csv_rows %}{% if r["action"] == "BWM" %}`{{ r["app_name"] }}`{% if not loop.last %}、{% endif %}{% endif %}{% endfor %})について、
+   帯域制御ポリシーの対象として識別されていることを確認します。
+3. `action` が `Block` の行({% for r in csv_rows %}{% if r["action"] == "Block" %}`{{ r["app_name"] }}`{% if not loop.last %}、{% endif %}{% endif %}{% endfor %})について、
+   対応する通信が遮断され、許可された通信として記録されていないことを
+   確認します。
+
+## 動作確認
+
+- `POLICY | Rules and Policies > App Control` に、シナリオ設定の
+  {{ csv_rows | length }}件すべてのポリシーが登録されていること
+- Application Visualizationで、`action` が `Log` のアプリケーション
+  ({% for r in csv_rows %}{% if r["action"] == "Log" %}`{{ r["app_name"] }}`{% if not loop.last %}、{% endif %}{% endif %}{% endfor %})の通信が許可・記録されていること
+- Application Visualizationで、`action` が `BWM` のアプリケーション
+  ({% for r in csv_rows %}{% if r["action"] == "BWM" %}`{{ r["app_name"] }}`{% if not loop.last %}、{% endif %}{% endif %}{% endfor %})が帯域制御ポリシーの対象として識別されていること
+- Application Visualizationで、`action` が `Block` のアプリケーション
+  ({% for r in csv_rows %}{% if r["action"] == "Block" %}`{{ r["app_name"] }}`{% if not loop.last %}、{% endif %}{% endif %}{% endfor %})の通信が遮断され、許可トラフィックとして記録されていないこと
+- 手順1で記録した既存のApp Control設定が、シナリオ設定にない部分では
+  変更されていないこと
+
+## 注意事項
+
+- 本手順書は、SonicWall公開の一次情報(Application Control Overview)
+  で確認できた範囲(`POLICY | Rules and Policies > App Control` という
+  ナビゲーションパス、アプリケーションシグネチャデータベースに基づく
+  レイヤ7識別、ログ・ブロック・帯域制御のポリシー構成、Application
+  Visualizationによる可視化)のみを扱います。本手順書の作成時点では
+  一次情報ページへの自動アクセスがボット対策により阻まれたため、
+  ポリシー登録ダイアログの具体的な項目名・ボタン名など、確認できな
+  かった細部は記載していません。実際の登録操作を行う前に、対象環境の
+  SonicOS管理画面またはSonicWall公式ドキュメントで最新の画面構成を
+  確認してください。
+- **`app_name` に指定するアプリケーション名は、App Controlのシグネ
+  チャデータベースの更新により内容が変動します。** 本手順書のCSV値を
+  そのまま別環境に流用せず、必ず対象環境のGUIで実際に検出・選択可能な
+  アプリケーション名を確認してから登録してください。
+- 新しいアプリケーションをいきなり `Block` に設定する前に、まず `Log`
+  で一定期間可視化し、業務影響が無いことを確認してから `Block` へ切り
+  替えることを推奨します。
+- `BWM` の具体的な帯域幅の数値設定は、本手順書の対象外です。対象環境の
+  BWM関連設定にあわせて、業務影響を確認したうえで別途決定してください。
+- 管理者パスワードやAPIキーなど認証情報は、本手順書やログに平文で残さ
+  ないでください。記録が必要な場合は `****` のようにマスクし、秘密
+  管理ツール等で別途安全に保管してください。

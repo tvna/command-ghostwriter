@@ -1,0 +1,187 @@
+# SonicWall (SonicOS) ファイアウォールログの外部SIEM転送信頼性確保
+
+対象ファイアウォール`{{ target_firewall }}`の{{ log_category_scope }}を、
+SonicOSのSyslogサーバー転送機能(`Device | Log | Syslog > Syslog Servers`)
+を使って外部SIEM(`{{ siem_platform }}`)へ転送します。転送プロトコルは
+`{{ syslog_protocol }}`とし、SonicOS 8が備える暗号化Syslog機能により
+`{{ tls_min_version }}`以上で保護します。設定後は、SonicOSが自動送出する
+{{ heartbeat_interval_sec }}秒間隔のハートビートSyslogと、実際のパケット
+キャプチャの両方で転送が途切れていないことを確認し、転送遅延・欠落を防ぎ
+ます。変更管理チケット`{{ change_ticket_id }}`に基づく作業として実施しま
+す。
+
+## 目的
+
+ファイアウォールの{{ log_category_scope }}を外部SIEM(`{{ siem_platform }}`)
+へ確実に転送し、転送遅延・欠落を防げるようになることを目指します。あわ
+せて、SonicOSのSyslogサーバー転送機能が備えるハートビート
+Syslog(`{{ heartbeat_interval_sec }}`秒間隔)と、監視コンソール
+(`{{ monitoring_console }}`)側の既定のダウン判定条件
+(連続`{{ missed_heartbeat_down_threshold }}`回のハートビート欠落)という
+既存のネイティブな死活監視の仕組みを理解し、独自の監視スクリプトを新たに
+作らずに、GUI設定とパケットキャプチャによる直接検証だけで転送の健全性を
+継続的に確認できるようになることを目指します。
+
+## 用語解説
+
+- **`Device | Log | Syslog > Syslog Servers`**: SonicOSでSyslogサーバーへ
+  のログ転送を設定する管理画面のナビゲーションパス。ここに転送先のSyslog
+  サーバーを追加すると、SonicOSは{{ log_category_scope }}を含むログイベン
+  トを転送先へ送出するようになる
+- **Syslogサーバー転送**: SonicOSのログサブシステムが持つ機能で、ファイア
+  ウォール自身に保存されたログイベントを、UDP・TCPいずれかのトランスポー
+  トで外部のSyslogサーバー(SIEM等)へリアルタイムに転送する
+- **暗号化Syslog(TLS)**: SonicOS 8で追加された、Syslog転送をTLS 1.2/
+  TLS 1.3で暗号化する機能。RFC 5425(TLS Transport Mapping for Syslog)に
+  準拠したトランスポートで、平文のUDP/TCP Syslogに対して転送経路上の盗聴
+  ・改ざんへの耐性を高める
+- **ハートビートSyslog**: SonicOSが転送先のSyslogサーバーに対して自動的
+  に送出する生存確認用のSyslogメッセージ。既定では1分間隔で送出され、
+  SIEM側や監視コンソール側でこのメッセージの到達間隔を監視することで、
+  ログ転送そのものが生きているかどうかを判定できる
+- **監視コンソール(GMS/NSM)でのダウン判定**: SonicWallのGMS(Global
+  Management System)/NSM(Network Security Manager)がファイアウォール
+  を監視する際、ハートビートSyslogが既定で連続3回途絶えると、そのユニット
+  を「down」と判定する仕組み。本手順では`{{ monitoring_console }}`を監視
+  コンソールとして使用する前提とする
+- **パケットキャプチャによる直接検証**: SonicOSのパケットキャプチャ機能
+  を使って、実際にSyslog転送先へ向けたUDP/TCPパケットが送出されているか
+  を直接確認する手法。SIEM側のダッシュボードだけに頼らず、ファイアウォー
+  ル側の送出そのものを検証できる。具体的な画面のメニュー位置はSonicOSの
+  GUIバージョンによって異なる場合があるため、実施前にご利用のバージョン
+  の管理者ガイドで確認してください
+
+## シナリオ設定
+
+今回、外部SIEMへのログ転送で設定する値は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| 対象ファイアウォール(target_firewall) | `{{ target_firewall }}` |
+| 変更管理チケット(change_ticket_id) | `{{ change_ticket_id }}` |
+| 転送対象ログの範囲(log_category_scope) | {{ log_category_scope }} |
+| 転送先SIEM(siem_platform) | {{ siem_platform }} |
+| Syslogサーバーの宛先IPアドレス(syslog_server_ip) | `{{ syslog_server_ip }}` |
+| Syslogサーバーの宛先ポート(syslog_server_port) | {{ syslog_server_port }} |
+| 転送プロトコル(syslog_protocol) | `{{ syslog_protocol }}` |
+| 暗号化Syslogの最低TLSバージョン(tls_min_version) | `{{ tls_min_version }}` |
+| ハートビートSyslogの送出間隔(heartbeat_interval_sec) | {{ heartbeat_interval_sec }}秒 |
+| 監視コンソール側のダウン判定閾値(missed_heartbeat_down_threshold) | 連続{{ missed_heartbeat_down_threshold }}回欠落 |
+| 監視コンソール(monitoring_console) | `{{ monitoring_console }}` |
+| パケットキャプチャの実施時間(capture_duration_sec) | {{ capture_duration_sec }}秒 |
+| SIEM側の検証時の遡り時間(verification_lookback_min) | 過去{{ verification_lookback_min }}分 |
+
+{% if syslog_protocol == "TLS" %}
+本シナリオでは転送プロトコルに`{{ syslog_protocol }}`を選択するため、
+SonicOS 8の暗号化Syslog機能により`{{ tls_min_version }}`以上でSyslog
+サーバーへの通信路を暗号化します。転送先ポート`{{ syslog_server_port }}`
+は、RFC 5425が定めるTLS Syslogの標準ポートに合わせています。
+{% else %}
+本シナリオでは転送プロトコルに`{{ syslog_protocol }}`(平文)を選択して
+います。転送経路の機密性が求められる場合は、`syslog_protocol`を`TLS`に
+変更し、SonicOS 8の暗号化Syslog機能(TLS 1.2/TLS 1.3、RFC 5425準拠)を
+利用することを検討してください。
+{% endif %}
+
+## 手順
+
+### 1. 現状のSyslog Servers設定を確認する(変更前の基準を取る)
+
+新しいSyslogサーバーを1件も追加する前に、現状を確認します。
+
+- `Device | Log | Syslog > Syslog Servers`を開き、`{{ syslog_server_ip }}`
+  (ポート`{{ syslog_server_port }}`)宛の既存エントリが存在しないことを
+  確認します。既存の転送先が別に設定されている場合は、今回の追加によっ
+  て既存の転送が意図せず置き換わらないことも確認してください。
+- 確認結果と現状のエントリ一覧を、変更管理チケット`{{ change_ticket_id }}`
+  に変更前の基準として記録します。
+
+### 2. Syslogサーバーエントリを追加する
+
+`Device | Log | Syslog > Syslog Servers`で新規のSyslogサーバーエントリを
+追加し、宛先IPアドレスに`{{ syslog_server_ip }}`、宛先ポートに
+`{{ syslog_server_port }}`、転送プロトコルに`{{ syslog_protocol }}`を指定
+して保存します。
+
+{% if syslog_protocol == "TLS" %}
+転送プロトコルとして`{{ syslog_protocol }}`(暗号化Syslog)を選択した場合
+は、あわせてTLSバージョンとして`{{ tls_min_version }}`以上を選択します。
+SonicOS 8の暗号化Syslog機能はTLS 1.2とTLS 1.3の両方をサポートしており、
+`{{ siem_platform }}`側が新しいバージョンに対応済みであれば、より安全な
+TLS 1.3を優先して選択してください。
+{% endif %}
+
+保存後、転送対象のログ範囲が{{ log_category_scope }}を含んでいることを、
+同じ設定画面上で確認します。
+
+### 3. ハートビートSyslogによる転送死活の監視を確認する
+
+SonicOSは設定変更の有無にかかわらず、Syslogサーバーへ既定で
+{{ heartbeat_interval_sec }}秒間隔のハートビートSyslogを自動送出します。
+この仕組み自体を新たに設定する必要はありませんが、監視コンソール側の
+受信状況を確認します。
+
+- `{{ monitoring_console }}`を開き、`{{ target_firewall }}`からの
+  ハートビートSyslogが{{ heartbeat_interval_sec }}秒間隔で継続的に届いて
+  いることを確認します。
+- `{{ monitoring_console }}`のダウン判定閾値が、既定値である連続
+  `{{ missed_heartbeat_down_threshold }}`回のハートビート欠落のままである
+  ことを確認します。この既定値を変更する場合は、値を大きくするほど転送
+  障害の検知が遅れる点に注意してください。
+
+### 4. パケットキャプチャで実際の送出を直接検証する
+
+SIEM側の受信表示だけに頼らず、ファイアウォール自身がパケットを送出して
+いることをSonicOSのパケットキャプチャ機能で直接確認します。
+
+- パケットキャプチャのフィルタ条件を、宛先IPアドレス
+  `{{ syslog_server_ip }}`・宛先ポート`{{ syslog_server_port }}`・
+  プロトコル`{{ syslog_protocol }}`に設定します。
+- キャプチャを開始し、{{ capture_duration_sec }}秒間実行します。
+- キャプチャ結果に、`{{ syslog_server_ip }}:{{ syslog_server_port }}`宛の
+  パケットが{{ heartbeat_interval_sec }}秒間隔のハートビート相当の頻度で
+  含まれていることを確認します。
+
+### 5. SIEM側で受信ログを確認する
+
+`{{ siem_platform }}`側で、`{{ target_firewall }}`から送られた
+{{ log_category_scope }}が、過去{{ verification_lookback_min }}分の範囲で
+継続的に受信できていることを確認します。
+
+## 動作確認
+
+- `Device | Log | Syslog > Syslog Servers`の一覧に
+  `{{ syslog_server_ip }}:{{ syslog_server_port }}`(`{{ syslog_protocol }}`)
+  のエントリが表示されていること
+- 手順4のパケットキャプチャで、`{{ syslog_server_ip }}:{{ syslog_server_port }}`
+  宛のパケットが{{ capture_duration_sec }}秒間の観測中に継続して記録され
+  ていること
+- `{{ monitoring_console }}`で`{{ target_firewall }}`のハートビート
+  Syslogが{{ heartbeat_interval_sec }}秒間隔で届き続けており、ダウン判定
+  (連続{{ missed_heartbeat_down_threshold }}回欠落)に至っていないこと
+- `{{ siem_platform }}`で、過去{{ verification_lookback_min }}分の
+  {{ log_category_scope }}が欠落なく受信できていること
+- 手順1で確認した既存のSyslogサーバーエントリの設定内容が、意図せず変更
+  されていないこと
+
+## 注意事項
+
+- **ハートビートSyslogの欠落は転送障害の兆候です。**
+  `{{ monitoring_console }}`で連続`{{ missed_heartbeat_down_threshold }}`
+  回のハートビート欠落を検知した場合、SIEM側のログ欠落を示す先行指標とし
+  て扱い、ネットワーク経路やSyslogサーバー側の受信設定を優先的に調査して
+  ください。
+- **SIEM側の受信表示だけで転送成功と判断しないでください。** SIEM側の
+  受信パイプラインに問題があると、ファイアウォール側は正常に送出してい
+  てもSIEM側では欠落として見える場合があります。手順4のパケットキャプ
+  チャで、ファイアウォール側からの送出そのものを直接確認してください。
+- **転送プロトコルを`{{ syslog_protocol }}`から変更する場合は、宛先ポート
+  `{{ syslog_server_port }}`も見直してください。** 暗号化Syslog(TLS)と
+  平文のUDP/TCPでは、SIEM側で待ち受けるポートが異なる場合があります。
+- 本手順書で扱うSonicOSのパケットキャプチャ機能の具体的なメニュー位置は、
+  GUIバージョンによって異なる場合があるため、一次情報(ご利用のSonicOSの
+  管理者ガイド)で確認してから実施してください。
+- Syslogサーバーの認証情報(共有鍵、クライアント証明書の秘密鍵等)を利用
+  する構成の場合、値そのものを本手順書やチケット、ログに平文で残さない
+  でください。記録が必要な場合は`****`のようにマスクし、秘密管理ツール等
+  で別途安全に保管してください。

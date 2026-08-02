@@ -1,0 +1,32 @@
+zone_name: "hr-user-policy"
+capture_interface: "vlan_hr"
+zone_id: 1
+auth_backend: "ldap"
+
+ldap_host: "dc01.corp.example.local"
+ldap_port: 636
+ldap_bind_dn: "CN=svc-opnsense-bind,OU=ServiceAccounts,DC=corp,DC=example,DC=local"
+ldap_bind_password: "****"
+ldap_base_dn: "DC=corp,DC=example,DC=local"
+ldap_extended_query: "&(memberOf=CN=fw-policy-hr,CN=Users,DC=corp,DC=example,DC=local)"
+
+radius_host: "radius01.corp.example.local"
+radius_port: 1812
+radius_secret: "****"
+radius_class_group: "fw-policy-hr"
+
+sync_local_group: "fw-policy-hr"
+
+idle_timeout_minutes: 30
+hard_timeout_minutes: 480
+allow_concurrent_logins: false
+
+policy_rules:
+  - description: "HRグループ→HRファイルサーバー SMB"
+    destination_net: "10.20.30.10/32"
+    destination_port: 445
+    protocol: "TCP"
+  - description: "HRグループ→人事SaaSプロキシ HTTPS"
+    destination_net: "10.20.40.0/24"
+    destination_port: 443
+    protocol: "TCP"

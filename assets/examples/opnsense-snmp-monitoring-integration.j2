@@ -1,0 +1,196 @@
+# OPNsenseのSNMPポーリングによる外部監視連携(Zabbix等)
+
+外部監視基盤(Zabbix等)からSNMPでファイアウォールのヘルスチェック(CPU・
+メモリ・インターフェース状態等)を行えるようにするため、公式プラグイン
+`os-net-snmp`(`Services > NET-SNMP`、Net-SNMP実装)のGeneral設定と
+SNMPv3ユーザー({{ snmpv3_users | length }} 件)を構成し、監視セグメント
+(`{{ monitoring_network }}`)からのみポーリングを許可します。
+
+## 目的
+
+`Services > NET-SNMP` のGeneral設定(Listen/Community/SysLocation/
+SysContact/L3 Visibility)とSNMPv3ユーザーをAPI経由で構成し、監視セグメント
+限定のファイアウォール許可ルールと合わせて、外部監視基盤からの安全な
+SNMPポーリングを実現できるようになることを目指します。
+
+## 用語解説
+
+- **NET-SNMP(`Services > NET-SNMP`)**: OPNsense公式プラグイン
+  `os-net-snmp` が提供する、Net-SNMPスイート(`snmpd`)ベースのSNMP
+  v1/v2c/v3ポーリング機構。`Firmware > Plugins` で `os-net-snmp` を
+  インストールすると `Services` メニューに現れる
+- **General設定**: `/api/netsnmp/general/get` / `/api/netsnmp/general/set`
+  が扱う全体設定。`listen`(待受アドレス、未設定時の既定は
+  `udp:161,udp6:[::1]:161`)、`community`(v1/v2c向け読み取り専用
+  コミュニティ文字列)、`syslocation`、`syscontact`、`l3visibility`
+  (有効にすると `sysServices` OIDの値が72から76になり、L3ルーティング
+  機能を持つ機器であることを外部に示す)を含む
+- **コミュニティ文字列(community)**: SNMP v1/v2cにおいて、ユーザー名と
+  パスワードを兼ねる共有シークレット。平文でネットワークを流れるため、
+  値そのものは本手順書には記載せず `****` で表記する
+- **SNMPv3ユーザー(`/api/netsnmp/user/*`)**: `username`・認証パスフレーズ
+  `password`・暗号化パスフレーズ `enckey`・読み書き権限を表す
+  `readwrite`(有効で `rwuser`、無効で `rouser` として `snmpd.conf` に
+  反映される)から成る個別ユーザー。`password`・`enckey` とも8〜64文字の
+  制約がある
+- **Net-SNMPサービス制御API**: `/api/netsnmp/service/start` /
+  `/api/netsnmp/service/stop` / `/api/netsnmp/service/restart` /
+  `/api/netsnmp/service/reconfigure` / `/api/netsnmp/service/status`。
+  設定変更後は `reconfigure` で `snmpd.conf` を再生成・再読み込みする
+
+## シナリオ設定
+
+今回、SNMPポーリングを許可する監視セグメントと、Net-SNMPの設定内容は
+次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| SysLocation(snmp_syslocation) | {{ snmp_syslocation }} |
+| SysContact(snmp_syscontact) | {{ snmp_syscontact }} |
+| Community(snmp_community) | `{{ snmp_community }}` |
+| L3 Visibility(enable_l3visibility) | {{ enable_l3visibility }} |
+| 監視セグメント(monitoring_network) | {{ monitoring_network }} |
+| 監視インターフェース(monitoring_interface) | {{ monitoring_interface }} |
+| Zabbixサーバー(zabbix_server_ip) | {{ zabbix_server_ip }} |
+
+Listen対象アドレス一覧(snmp_listen_ips、{{ snmp_listen_ips | length }} 件):
+
+| # | アドレス |
+|---|----------|
+{% for ip in snmp_listen_ips %}| {{ loop.index }} | {{ ip }} |
+{% endfor %}
+
+SNMPv3ユーザー一覧(snmpv3_users、{{ snmpv3_users | length }} 件):
+
+| # | ユーザー名 | 読み書き権限(readwrite) |
+|---|-----------|--------------------------|
+{% for u in snmpv3_users %}| {{ loop.index }} | {{ u.username }} | {{ u.readwrite }} |
+{% endfor %}
+
+## 手順
+
+### 1. 現状のSNMP設定を確認する
+
+変更前の状態を記録します。`$OPNSENSE_API_KEY` / `$OPNSENSE_API_SECRET` には
+`System > Access > Users` で発行したAPIキー/シークレットをそれぞれ環境変数
+として設定してください。
+
+```bash
+export FW_HOST="10.0.0.1"
+curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" \
+  "https://${FW_HOST}/api/netsnmp/general/get" \
+  -o "netsnmp-general-before-$(date +%Y%m%d%H%M).json"
+curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" \
+  "https://${FW_HOST}/api/netsnmp/user/get" \
+  -o "netsnmp-users-before-$(date +%Y%m%d%H%M).json"
+```
+
+### 2. General設定(Listen/Community/SysLocation/SysContact/L3 Visibility)を適用する
+
+`community` には実際のコミュニティ文字列を、`****` の代わりに秘密管理
+ツールから取得して設定してください(本手順書には値を記載しません)。
+
+```bash
+curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST \
+  "https://${FW_HOST}/api/netsnmp/general/set" \
+  -H "Content-Type: application/json" \
+  -d '{"general":{"enabled":"1","listen":"{{ snmp_listen_ips | join(",") }}","community":"{{ snmp_community }}","syslocation":"{{ snmp_syslocation }}","syscontact":"{{ snmp_syscontact }}","l3visibility":"{{ 1 if enable_l3visibility else 0 }}"}}'
+curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST \
+  "https://${FW_HOST}/api/netsnmp/service/reconfigure"
+```
+
+### 3. 監視用SNMPv3ユーザーを追加する
+
+読み取り専用の監視ユーザーは `readwrite` を無効のまま追加し(`rouser` と
+して反映)、書き込みを許可する運用ユーザーのみ有効にします。
+`password`・`enckey` の実際の値も、`****` の代わりに秘密管理ツールから
+取得して設定してください。
+
+```bash
+{% for u in snmpv3_users %}curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST \
+  "https://${FW_HOST}/api/netsnmp/user/add_user" \
+  -H "Content-Type: application/json" \
+  -d '{"user":{"enabled":"1","username":"{{ u.username }}","password":"{{ u.auth_password }}","enckey":"{{ u.priv_enckey }}","readwrite":"{{ 1 if u.readwrite else 0 }}"}}'
+{% endfor %}
+curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST \
+  "https://${FW_HOST}/api/netsnmp/service/reconfigure"
+```
+
+### 4. 監視セグメントからのUDP/161アクセスを許可する
+
+Listenアドレスを開いただけでは他セグメントからの到達を止められないため、
+監視セグメント(`{{ monitoring_network }}`)からOPNsense自身(`(self)`)の
+UDP/161宛てのみを許可するFloating Ruleを追加します。
+
+```bash
+curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST \
+  "https://${FW_HOST}/api/firewall/filter/addRule" \
+  -H "Content-Type: application/json" \
+  -d '{"rule":{"action":"pass","quick":"1","interface":"{{ monitoring_interface }}","direction":"in","ipprotocol":"inet","protocol":"UDP","source_net":"{{ monitoring_network }}","destination_net":"(self)","destination_port":"161","description":"snmp-monitoring-integration: Zabbix polling from {{ monitoring_network }}","log":"1"}}'
+curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST \
+  "https://${FW_HOST}/api/firewall/filter/apply"
+```
+
+`interface` に指定した `{{ monitoring_interface }}` は、環境ごとの実際の
+監視VLANインターフェース名に読み替えてください。
+
+### 5. Net-SNMPサービスを起動・反映する
+
+```bash
+curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST \
+  "https://${FW_HOST}/api/netsnmp/service/start"
+curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" \
+  "https://${FW_HOST}/api/netsnmp/service/status"
+```
+
+`status` が稼働中を示さない場合は `/api/netsnmp/service/restart` を実行
+してから再度 `status` を確認してください。
+
+### 6. Zabbix側で使用する接続情報を整理する
+
+Zabbix側のホスト設定に投入する接続情報を整理します(Zabbix側の設定操作
+自体は本手順書の対象外です)。
+
+| 項目 | 値 |
+|------|-----|
+| SNMP対象アドレス | {{ snmp_listen_ips | join(", ") }} |
+| ポート | 161/udp |
+| v2c コミュニティ | `{{ snmp_community }}`(実値は秘密管理ツールから取得) |
+| v3 ユーザー | {% for u in snmpv3_users %}{{ u.username }}{% if not loop.last %}, {% endif %}{% endfor %} |
+| Zabbixサーバー送信元 | {{ zabbix_server_ip }}({{ monitoring_network }} 内) |
+
+## 動作確認
+
+- 監視セグメント内の `{{ zabbix_server_ip }}` から、v2cコミュニティ
+  (実値に読み替え)で `snmpget -v2c -c <community> {{ snmp_listen_ips[0] }} sysDescr.0`
+  が応答すること
+- 同じくv2cで取得した `sysServices.0` の値が、`enable_l3visibility` が
+  `{{ enable_l3visibility }}` の場合は {% if enable_l3visibility %}76{% else %}72{% endif %} であること
+- SNMPv3ユーザーごとに、authPriv(認証・暗号化あり)のセキュリティ
+  レベルで対象のパスフレーズ(`password`/`enckey`)を用いてポーリングが
+  成功すること(認証・暗号化アルゴリズムの選択はOPNsense実機側の初期
+  設定に依存するため、Zabbix/監視ツール側の設定はOPNsense実機で確認した
+  組み合わせに合わせること)
+- `monitoring_network`(`{{ monitoring_network }}`)以外のネットワークから
+  UDP/161への到達が失敗すること
+- `/api/netsnmp/service/status` が稼働中を示すこと
+
+## 注意事項
+
+- **コミュニティ文字列・パスフレーズを平文でリポジトリやログに残さない
+  こと。** `snmp_community`・`auth_password`・`priv_enckey` はいずれも
+  `****` のマスク表記とし、実値は秘密管理ツール経由で都度取得すること
+- SNMP v1/v2cのコミュニティ文字列は暗号化されずネットワークを流れるため、
+  可能な限りSNMPv3(authPriv)を優先し、v2cは監視セグメントを狭く絞った
+  上での互換性維持用途に限定すること
+- `readwrite` を有効にしたユーザー(`rwuser`)はSNMP経由での値変更(SET)
+  が可能になるため、監視専用ユーザーは `readwrite` を無効(`rouser`)の
+  ままにし、書き込み権限は本当に必要なユーザーのみに限定すること
+- `listen` はOPNsenseが応答を待ち受けるアドレスを絞るだけで、送信元の
+  制限にはならない。手順4のファイアウォール許可ルールと必ず組み合わせる
+  こと
+- `os-net-snmp` は `Firmware > Plugins` からのインストールが前提の公式
+  プラグインであり、未インストールの環境では `Services > NET-SNMP` は
+  表示されない
+- APIキー/シークレットは平文でリポジトリやログに残さず、環境変数や秘密
+  管理ツール経由で扱うこと

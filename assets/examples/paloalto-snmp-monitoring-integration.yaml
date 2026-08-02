@@ -1,0 +1,34 @@
+device_name: fw-edge-01
+zabbix_server_name: zbx-mon01
+zabbix_server_ip: 10.10.5.20
+mgmt_interface_snmp_enabled: true
+interface_mgmt_profile_name: snmp-poll-mgmt
+snmp_polled_interfaces:
+  - name: ethernet1/1
+    zone: dmz
+  - name: ethernet1/2.100
+    zone: internal
+snmpv3_view_group_name: zabbix-view
+snmpv3_view_oid: "1.3.6.1.2.1"
+snmpv3_view_mask: "0xff"
+snmpv3_view_match_type: include
+snmpv3_user_name: zbx-poll-svc
+snmpv3_auth_password: "****"
+snmpv3_priv_password: "****"
+snmp_trap_profile_name: zabbix-snmp-trap
+snmp_trap_servers:
+  - name: zbx-trap-primary
+    manager_ip: 10.10.5.20
+    user: pan-trap-svc
+    auth_password: "****"
+    priv_password: "****"
+  - name: zbx-trap-secondary
+    manager_ip: 10.10.5.21
+    user: pan-trap-svc
+    auth_password: "****"
+    priv_password: "****"
+log_forwarding_profile_name: to-zabbix-snmp
+forwarded_log_severities:
+  - critical
+  - high
+  - medium

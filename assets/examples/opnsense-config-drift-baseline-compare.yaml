@@ -1,0 +1,36 @@
+fw_host: "10.0.0.1"
+
+baseline_label: "2026-06-01 変更セット(v2026.1 承認済みベースライン)"
+baseline_saved_at: "2026-06-01 09:12 JST"
+current_label: "最新(未保存の現在の稼働設定を含む)"
+review_interval: "毎週月曜 09:00(JST)"
+retention_count: 60
+
+reviewers:
+  - "ネットワーク運用チーム(netops@example.com)"
+  - "セキュリティ担当(secops@example.com)"
+
+drift_alert_recipients:
+  - "netops-alert@example.com"
+
+known_noise_items:
+  - item: "DHCPリース(動的に払い出されたIPアドレスの一覧)"
+    reason: "通信のたびに更新されるため、意図した設定変更ではない"
+  - item: "RRDグラフの統計データ"
+    reason: "監視によって常時自動更新されるため、意図した設定変更ではない"
+
+approved_changes:
+  - item: "管理VLANの許可ルール追加"
+    description: "issue #123 に基づく一時許可ルールの追加"
+    change_ticket: "OPS-123"
+  - item: "NTPサーバーの変更"
+    description: "社内NTPサーバーへの切り替え"
+    change_ticket: "-"
+
+git_backup_enabled: true
+git_backup_url: "ssh://git.internal.example.com/opnsense-config-backup.git"
+git_backup_branch: "main"
+git_backup_user_name: "opnsense-backup-bot"
+git_backup_ssh_key_mask: "****"
+git_backup_password_mask: "****"
+git_backup_force_push: false

@@ -1,0 +1,64 @@
+ldap_server:
+  name: "ADserver-Tokyo"
+  server_ip: "10.20.30.160"
+  base_dn: "dc=corp,dc=example,dc=com"
+  bind_dn: "cn=fsso-bind,cn=users,dc=corp,dc=example,dc=com"
+
+collector_agent:
+  name: "FSSO-DC1-CollectorAgent"
+  server_ip: "10.20.30.50"
+  ad_access_mode: "Advanced"
+
+monitored_ad_groups:
+  - name: "Engineering"
+    dn: "CN=Engineering,CN=Users,DC=corp,DC=example,DC=com"
+  - name: "Sales"
+    dn: "CN=Sales,CN=Users,DC=corp,DC=example,DC=com"
+  - name: "Finance"
+    dn: "CN=Finance,CN=Users,DC=corp,DC=example,DC=com"
+
+fsso_user_groups:
+  - name: "FSSO_Corp_Staff"
+    members:
+      - name: "Engineering"
+        dn: "CN=Engineering,CN=Users,DC=corp,DC=example,DC=com"
+      - name: "Sales"
+        dn: "CN=Sales,CN=Users,DC=corp,DC=example,DC=com"
+  - name: "FSSO_Finance_Only"
+    members:
+      - name: "Finance"
+        dn: "CN=Finance,CN=Users,DC=corp,DC=example,DC=com"
+
+policy_addresses:
+  - name: "Corp_LAN"
+    subnet: "10.20.40.0/24"
+    interface: "port3"
+  - name: "Finance_LAN"
+    subnet: "10.20.41.0/24"
+    interface: "port4"
+
+legacy_ip_policies:
+  - policy_id: 5
+    source_address: "Corp_LAN"
+  - policy_id: 6
+    source_address: "Finance_LAN"
+
+firewall_policies:
+  - policy_id: 10
+    incoming_interface: "port3"
+    outgoing_interface: "port1"
+    source_address: "Corp_LAN"
+    source_user_group: "FSSO_Corp_Staff"
+    destination_address: "all"
+    schedule: "always"
+    service: "ANY"
+    nat: true
+  - policy_id: 11
+    incoming_interface: "port4"
+    outgoing_interface: "port1"
+    source_address: "Finance_LAN"
+    source_user_group: "FSSO_Finance_Only"
+    destination_address: "all"
+    schedule: "always"
+    service: "ANY"
+    nat: true

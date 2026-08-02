@@ -1,0 +1,328 @@
+# FortiGateの拠点間VPNトンネル死活監視とフェイルオーバー構成
+
+FortiGate (FortiOS) の IPsec Dead Peer Detection(DPD)で拠点間VPNトンネル
+`{{ primary_tunnel_name }}`(プライマリ、`{{ wan_interface_primary }}`経由)の
+死活を継続的に監視し、対向Peerからの応答が途絶えたことを検知したら、あらかじめ
+`set monitor`でプライマリを監視対象に指定しておいたセカンダリトンネル
+`{{ secondary_tunnel_name }}`(`{{ wan_interface_secondary }}`経由)へ自動的に
+切り替えます。SD-WANルール(Performance SLA)による切替も選択肢になりますが、
+本手順書では一次情報で構文を確認できた「セカンダリトンネルの`set monitor`設定」
+方式を採用します。GUIとCLIの両方の手順を併記し、最後にプライマリ切断時の
+自動フェイルオーバーを実際に検証します。
+
+## 目的
+
+`{{ primary_tunnel_name }}`にDPD(`{{ dpd_mode }}`モード)を設定してプライマリ
+の死活を継続的に監視し、`{{ secondary_tunnel_name }}`に`set monitor`で
+プライマリを監視対象として指定することで、プライマリがダウンしている間だけ
+セカンダリが自動的に起動する構成を作れるようになることを目指します。あわせて、
+`config router static`のdistance値でプライマリを優先させつつ、フェイルオーバー
+発生時にはセカンダリ経路が自動的に有効になる仕組みを理解し、GUI・CLIのどちらか
+らでも同じ構成を再現し、意図的な切断試験で自動フェイルオーバーを検証できるよう
+になることを目指します。
+
+## 用語解説
+
+- **Dead Peer Detection (DPD)**: IPsecトンネルの対向Peerが生きているかを
+  確認する仕組み。一次情報では「sending empty INFORMATIONAL requests」に
+  よってPeerへ生存確認を送り、「when no response after dpd-retryinterval
+  happened for dpd-retrycount times, the peer is concluded dead」と説明
+  されている。プライマリのダウンをこのDPDで検知することが、フェイルオーバー
+  の起点になる
+- **dpd(`config vpn ipsec phase1-interface`のDPDモード)**: DPDの動作条件を
+  `disable`(無効)/`on-idle`(トラフィックが流れていないアイドル時のみ送信)/
+  `on-demand`(送信したいトラフィックがあるのに応答がない場合に送信)から選択
+  する設定。今回のシナリオでは`{{ dpd_mode }}`を使用する
+- **dpd-retryinterval / dpd-retrycount**: 上記の生存確認を送る間隔(秒)と、
+  応答がない場合に何回まで再試行するかの回数。この回数分連続で応答がないと
+  Peerがダウンしたと判断される。今回のシナリオでは間隔`{{ dpd_retryinterval }}`
+  秒、リトライ回数`{{ dpd_retrycount }}`回とする
+- **monitor(`config vpn ipsec phase1-interface`の冗長化用設定)**: バックアップ
+  側のphase1-interfaceに`set monitor <プライマリのphase1-interface名>`を設定
+  しておくと、指定したプライマリのトンネルがダウンしている間だけ、このバック
+  アップトンネルが自動的に起動する。今回は`{{ secondary_tunnel_name }}`に
+  `set monitor {{ primary_tunnel_name }}`を設定し、プライマリダウン時のみ
+  セカンダリを起動させる
+- **SD-WANルール(Performance SLA)による切替**: SD-WANのヘルスチェックで
+  リンクのSLA未達を検知し、プライマリからセカンダリへトラフィックを切り替える
+  方式。本手順が扱う`set monitor`方式と並ぶ選択肢だが、具体的なCLI構文は本
+  手順書の検証時点で一次情報から確認できなかったため、今回は扱わない
+- **config router static**: 静的ルートをCLIで作成するブロック構文。
+  `distance`(値が小さいほど優先)を使うと、プライマリ経路(distance
+  `{{ route_distance_primary }}`)とセカンダリ経路(distance
+  `{{ route_distance_secondary }}`)のどちらを通常時に優先するかを制御できる
+- **config system zone**: 複数のインターフェースを1つの名前にまとめ、
+  Firewall Policyの`srcintf`/`dstintf`から参照できるようにする機能。
+  プライマリ・セカンダリ両方のトンネルインターフェースを`{{ vpn_zone_name }}`
+  というゾーンにまとめておくことで、フェイルオーバーが起きてもFirewall Policy
+  を作り直す必要がなくなる
+- **diagnose vpn ike gateway list / diagnose vpn tunnel list**: 現在の
+  IKEゲートウェイ(phase1)とIPsecトンネル(phase2)の状態を確認するCLI
+  コマンド。トンネルの状態がup/downのどちらか、選択している経路がプライマリ
+  /セカンダリのどちらかを確認できる
+
+## シナリオ設定
+
+今回、`{{ remote_site_label }}`拠点との間で設定するVPNトンネル監視・
+フェイルオーバーの設定値は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| プライマリWAN側インターフェース(wan_interface_primary) | `{{ wan_interface_primary }}` |
+| セカンダリWAN側インターフェース(wan_interface_secondary) | `{{ wan_interface_secondary }}` |
+| LAN側インターフェース(lan_interface) | `{{ lan_interface }}` |
+| 対向拠点(remote_site_label) | {{ remote_site_label }} |
+| プライマリトンネル名(primary_tunnel_name) | `{{ primary_tunnel_name }}` |
+| セカンダリトンネル名(secondary_tunnel_name) | `{{ secondary_tunnel_name }}` |
+| トンネルインターフェースをまとめるゾーン名(vpn_zone_name) | `{{ vpn_zone_name }}` |
+| プライマリ対向ゲートウェイ(remote_gateway_primary) | `{{ remote_gateway_primary }}` |
+| セカンダリ対向ゲートウェイ(remote_gateway_secondary) | `{{ remote_gateway_secondary }}` |
+| ローカル側サブネット(local_subnet) | `{{ local_subnet }}` |
+| リモート側サブネット(remote_subnet) | `{{ remote_subnet }}` |
+| 事前共有鍵(PSK) | `****`(本手順書には記載しない) |
+| DPDモード(dpd_mode) | `{{ dpd_mode }}` |
+| DPD再送間隔(dpd_retryinterval、秒) | {{ dpd_retryinterval }} |
+| DPD再送回数(dpd_retrycount) | {{ dpd_retrycount }} |
+| プライマリ経路のdistance(route_distance_primary) | {{ route_distance_primary }} |
+| セカンダリ経路のdistance(route_distance_secondary) | {{ route_distance_secondary }} |
+| LAN→VPNのFirewall Policy名/ID(policy_name_out / policy_id_out) | `{{ policy_name_out }}` / {{ policy_id_out }} |
+| VPN→LANのFirewall Policy名/ID(policy_name_in / policy_id_in) | `{{ policy_name_in }}` / {{ policy_id_in }} |
+
+`route_distance_primary`({{ route_distance_primary }})は
+`route_distance_secondary`({{ route_distance_secondary }})より小さいため、
+両トンネルが共に起動している状態でも通常はプライマリ経路が優先されます。
+
+## 手順
+
+### 1. 現状のトンネル・ルート・Firewall Policy一覧を確認する(変更前の基準を取る)
+
+新しい設定を1件も追加する前に、現状を確認します。
+
+- `VPN > IPsec Tunnels` を開き、`{{ primary_tunnel_name }}` および
+  `{{ secondary_tunnel_name }}` と同名のトンネルが存在しないことを確認します。
+- CLIで既存のIKEゲートウェイとトンネルの状態を確認します。
+
+```bash
+diagnose vpn ike gateway list
+diagnose vpn tunnel list
+```
+
+- `Network > Static Routes` を開き、`{{ remote_subnet }}` 宛の既存ルートが
+  ないことを確認します。
+
+### 2. プライマリのIPsecトンネル(phase1/phase2)をDPD付きで作成する
+
+CLI:
+
+```bash
+config vpn ipsec phase1-interface
+    edit "{{ primary_tunnel_name }}"
+        set interface "{{ wan_interface_primary }}"
+        set peertype any
+        set remote-gw {{ remote_gateway_primary }}
+        set psksecret ****
+        set dpd {{ dpd_mode }}
+        set dpd-retryinterval {{ dpd_retryinterval }}
+        set dpd-retrycount {{ dpd_retrycount }}
+    next
+end
+
+config vpn ipsec phase2-interface
+    edit "{{ primary_tunnel_name }}"
+        set phase1name "{{ primary_tunnel_name }}"
+        set src-subnet {{ local_subnet }}
+        set dst-subnet {{ remote_subnet }}
+    next
+end
+```
+
+GUIから作成する場合は `VPN > IPsec Tunnels > Create New > Custom` を開き、
+`Network` セクションの `Interface` に `{{ wan_interface_primary }}`、
+`Remote Gateway` に `{{ remote_gateway_primary }}` を設定します。
+`Authentication` の `Pre-shared Key` は画面上で直接入力し、控えや記録には
+`****` としてマスクしてください。`Phase 1 Proposal` の詳細設定内にある
+`Dead Peer Detection` を `{{ dpd_mode | capitalize }}` に相当する項目に設定
+します。`Phase 2 Selectors` では `Local Address` を `{{ local_subnet }}`、
+`Remote Address` を `{{ remote_subnet }}` に設定します。
+
+### 3. セカンダリのIPsecトンネル(phase1/phase2)をmonitor設定付きで作成する
+
+セカンダリはプライマリがダウンしている間だけ自動的に起動するバックアップ
+トンネルとして構成します。
+
+```bash
+config vpn ipsec phase1-interface
+    edit "{{ secondary_tunnel_name }}"
+        set interface "{{ wan_interface_secondary }}"
+        set peertype any
+        set remote-gw {{ remote_gateway_secondary }}
+        set psksecret ****
+        set dpd {{ dpd_mode }}
+        set dpd-retryinterval {{ dpd_retryinterval }}
+        set dpd-retrycount {{ dpd_retrycount }}
+        set monitor "{{ primary_tunnel_name }}"
+    next
+end
+
+config vpn ipsec phase2-interface
+    edit "{{ secondary_tunnel_name }}"
+        set phase1name "{{ secondary_tunnel_name }}"
+        set src-subnet {{ local_subnet }}
+        set dst-subnet {{ remote_subnet }}
+    next
+end
+```
+
+`set monitor "{{ primary_tunnel_name }}"` により、`{{ primary_tunnel_name }}`
+がDPDでダウンと判定されている間だけ `{{ secondary_tunnel_name }}` が起動
+します。GUIで設定する場合も、`{{ secondary_tunnel_name }}` の作成手順は
+手順2と同様ですが、`Remote Gateway` を `{{ remote_gateway_secondary }}`、
+`Interface` を `{{ wan_interface_secondary }}` に変更してください。
+
+### 4. トンネルインターフェースをゾーンにまとめ、静的ルートを設定する
+
+プライマリ・セカンダリどちらのトンネルが起動していてもFirewall Policyを
+作り直さずに済むよう、両方のトンネルインターフェースを1つのゾーンにまとめます。
+
+```bash
+config system zone
+    edit "{{ vpn_zone_name }}"
+        set interface "{{ primary_tunnel_name }}" "{{ secondary_tunnel_name }}"
+    next
+end
+```
+
+続けて、`{{ remote_subnet }}` 宛の静的ルートをプライマリ・セカンダリの両方に
+設定します。distance値の小さいプライマリが通常時は優先されます。
+
+```bash
+config router static
+    edit 0
+        set dst {{ remote_subnet }}
+        set device "{{ primary_tunnel_name }}"
+        set distance {{ route_distance_primary }}
+    next
+    edit 0
+        set dst {{ remote_subnet }}
+        set device "{{ secondary_tunnel_name }}"
+        set distance {{ route_distance_secondary }}
+    next
+end
+```
+
+GUIで設定する場合は、`Network > Interfaces > Create New > Zone` で
+`{{ vpn_zone_name }}` を作成して両トンネルインターフェースを追加し、
+`Network > Static Routes > Create New` で上記と同じ2件のルートを追加して
+ください。
+
+### 5. Firewall PolicyをGUI/CLIで作成する
+
+`srcintf`/`dstintf` にトンネルインターフェース個別ではなく、手順4で作成した
+ゾーン `{{ vpn_zone_name }}` を指定することで、フェイルオーバー後もPolicyの
+変更が不要になります。
+
+CLI:
+
+```bash
+config firewall policy
+    edit {{ policy_id_out }}
+        set name "{{ policy_name_out }}"
+        set srcintf "{{ lan_interface }}"
+        set dstintf "{{ vpn_zone_name }}"
+        set srcaddr "all"
+        set dstaddr "all"
+        set action accept
+        set schedule "always"
+        set service "ALL"
+        set nat disable
+    next
+    edit {{ policy_id_in }}
+        set name "{{ policy_name_in }}"
+        set srcintf "{{ vpn_zone_name }}"
+        set dstintf "{{ lan_interface }}"
+        set srcaddr "all"
+        set dstaddr "all"
+        set action accept
+        set schedule "always"
+        set service "ALL"
+        set nat disable
+    next
+end
+```
+
+GUIから作成する場合は `Policy & Objects > Firewall Policy > Create New` を
+それぞれの向きについて実行し、`Incoming Interface` / `Outgoing Interface`
+に上記と同じ組み合わせ(`{{ lan_interface }}` と `{{ vpn_zone_name }}`)を
+設定してください。実運用では `srcaddr`/`dstaddr` を `{{ local_subnet }}` /
+`{{ remote_subnet }}` に絞り込むことを推奨しますが、対応するアドレス
+オブジェクトの作成は本手順書の対象外です。
+
+### 6. プライマリを意図的にダウンさせ、自動フェイルオーバーを検証する
+
+まず現在の状態がプライマリ経由であることを確認します。
+
+```bash
+diagnose vpn tunnel list
+```
+
+`{{ primary_tunnel_name }}` の状態が `up` であることを確認したら、プライマリ
+のIPsecトンネルを手動でダウンさせ、DPDが検知するまで待ちます。
+
+```bash
+diagnose vpn tunnel down {{ primary_tunnel_name }}
+```
+
+`dpd-retryinterval`({{ dpd_retryinterval }}秒)× `dpd-retrycount`
+({{ dpd_retrycount }}回)にあたる時間が経過したのち、再度状態を確認します。
+
+```bash
+diagnose vpn ike gateway list
+diagnose vpn tunnel list
+```
+
+`{{ secondary_tunnel_name }}` が自動的に `up` になっていることを確認したら、
+`diagnose vpn tunnel up {{ primary_tunnel_name }}` でプライマリを復旧させ、
+プライマリへ経路が戻ることを確認します。
+
+## 動作確認
+
+- `diagnose vpn ike gateway list` で、通常時は `{{ primary_tunnel_name }}` の
+  Phase 1が確立(status up)していること
+- `diagnose vpn tunnel list` で、通常時は `{{ primary_tunnel_name }}` の
+  Phase 2が `up`、`{{ secondary_tunnel_name }}` が起動していない(または
+  `down`)こと
+- 手順6でプライマリを `diagnose vpn tunnel down` した後、
+  `dpd-retryinterval`({{ dpd_retryinterval }}秒)× `dpd-retrycount`
+  ({{ dpd_retrycount }}回)以内に `{{ secondary_tunnel_name }}` が自動的に
+  `up` になること
+- フェイルオーバー中も `{{ local_subnet }}` から `{{ remote_subnet }}` への
+  通信(pingや実サービスの疎通確認)が継続できること
+- `{{ primary_tunnel_name }}` を `diagnose vpn tunnel up` で復旧させたのち、
+  `config router static` のdistance値(プライマリ`{{ route_distance_primary }}`
+  < セカンダリ`{{ route_distance_secondary }}`)どおりに経路がプライマリへ
+  戻ること
+- 手順1で確認した既存のトンネル・ルート・Firewall Policyの内容が、意図せず
+  変更されていないこと
+
+## 注意事項
+
+- **`set monitor` はセカンダリのphase1-interfaceに設定するものです。**
+  プライマリ側に設定しても意図した冗長化になりません。手順3のとおり、
+  `{{ secondary_tunnel_name }}` 側に `set monitor "{{ primary_tunnel_name }}"`
+  を設定してください。
+- **DPDの検知には最短でも`dpd-retryinterval`×`dpd-retrycount`(今回は
+  {{ dpd_retryinterval }}秒×{{ dpd_retrycount }}回)の時間がかかります。**
+  値を小さくしすぎると誤検知(瞬間的な遅延をダウンと誤判定)の可能性が、
+  大きくしすぎるとフェイルオーバーまでの通信断時間が延びるおそれがあります。
+  拠点間の回線品質に応じて調整してください。
+- **SD-WANルール(Performance SLA)による切替は、本手順書では扱っていません。**
+  一次情報からCLIの詳細な構文を確認できなかったため、確実に構文を確認できた
+  `set monitor` によるバックアップトンネル方式のみを記載しています。SD-WAN
+  方式を採用する場合は、あらためて一次情報を確認したうえで別途手順化して
+  ください。
+- **手順6の`diagnose vpn tunnel down`/`up`は営業時間外など、通信断が許容
+  できる時間帯に実施してください。** 検証中は`{{ local_subnet }}`と
+  `{{ remote_subnet }}`間の通信が一時的に切断されます。
+- CLI/GUIへのログインに使う管理者パスワードや、`psksecret`(事前共有鍵)は
+  本手順書やチケット、ログに平文で残さないでください。記録が必要な場合は
+  `****` のようにマスクし、秘密管理ツール等で別途安全に保管してください。

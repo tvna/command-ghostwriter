@@ -1,0 +1,315 @@
+# Palo Alto Networks(PAN-OS)のSSL/TLS復号(SSL Forward Proxy)とプライバシー除外の構成
+
+暗号化された通信(SSL/TLS)の中身をマルウェア検知・情報漏えい対策のために
+検査するため、SSL Forward Proxyによるアウトバウンド復号を`{{ trust_zone }}`
+→`{{ untrust_zone }}`間に構成し、中間CA証明書`{{ forward_trust_ca_name }}`を
+エンドポイントの信頼ストアへ配布します。一方で、金融・医療等プライバシー
+配慮が必要な通信は復号対象から除外するため、URLカテゴリに基づくNo Decrypt
+ルール`{{ privacy_no_decrypt_rule_name }}`を復号ルールより先に評価される
+位置へ配置し、証明書ピン留め等の技術的理由で復号できないサービスは
+`Device > Certificate Management > SSL Decryption Exclusion`に個別登録
+します。最後にDecryption/SSL Policy Matchツールと`test
+decryption-policy-match`でルール一致を検証します。
+
+## 目的
+
+PAN-OSのSSL Forward Proxyが、中間CA証明書でアウトバウンドSSL/TLS通信を
+復号・検査した上で再暗号化する仕組みであり、その中間CA証明書をエンド
+ポイントの信頼chainに組み込むにはエンドポイント側の証明書ストアへの配布が
+別途必要であることを理解した上で、最小限の復号ルールを構成できるように
+なることを目指します。あわせて、プライバシー・法令上の理由による除外
+(URLカテゴリ等に基づくNo Decryptルール、ルール評価順が重要)と、証明書
+ピン留め・非対応暗号スイートといった技術的理由による除外(`Device >
+Certificate Management > SSL Decryption Exclusion`への個別登録)という
+2種類の除外の性質の違いを区別できるようになることを目指します。最後に
+Decryption/SSL Policy Matchツールと`test decryption-policy-match`を用いて、
+プライバシー対象通信が復号されず、それ以外の通信が復号される状態を
+それぞれ検証できるようになることを目指します。
+
+## 用語解説
+
+- **SSL Forward Proxy**: PAN-OSがクライアント(社内端末)とサーバー(外部
+  サイト)の間に入り、アウトバウンドのSSL/TLS通信を一旦復号して検査した
+  上で再暗号化する仕組み。`Policies > Decryption`にAction=`Decrypt`・
+  Type=`SSL Forward Proxy`のルールを登録して構成する
+- **Forward Trust Certificate**: `Device > Certificate Management >
+  Certificates > Custom Certificates`で発行・インポートした証明書を選択し、
+  証明書情報ダイアログで有効化するオプション。サーバー証明書がクライアント
+  にとって信頼済みCAのチェーンで検証できる場合に、PAN-OSがその場で発行する
+  代理証明書の署名に使うCAとして指定する
+- **Forward Untrust Certificate**: 同じく`Custom Certificates`で`Signed
+  By`を指定せず生成する証明書を、証明書情報ダイアログで指定するオプション。
+  サーバー証明書が信頼できない場合(自己署名・期限切れ等)に、その旨を
+  クライアントへ明示的に伝えるための代理証明書の署名に使う
+- **エンドポイントへのCA証明書配布**: Forward Trust Certificateの秘密鍵で
+  署名された代理証明書をクライアントが警告なく受け入れるには、対応する
+  ルートCA証明書をエンドポイントの信頼ストアに事前配布しておく必要がある。
+  GlobalProtect経由であれば`Network > GlobalProtect > Portals >
+  {{ globalprotect_portal_name }}`の`Agent`設定で`Trusted Root CA`に追加し
+  `Install in Local Root Certificate Store`を有効化する方法、あるいは証明書
+  をPEM形式でエクスポートしクライアント側の`Trusted Root Certification
+  Authorities`ストアへ手動またはグループポリシーで配布する方法がある
+- **Decryption Policyルール(Policies > Decryption)**: `General`・
+  `Source`・`Destination`・`Service/URL Category`・`Options`の各タブで
+  構成する。`Options`タブで`Action`(`Decrypt`/`No Decrypt`)と`Type`
+  (`SSL Forward Proxy`等)、任意で`Decryption Profile`を指定する
+- **No Decryptアクションとルール評価順**: `Policies > Decryption`のルール
+  はSecurity Policyと同様に上から順に評価され最初に一致したルールが適用
+  される。プライバシー・法令上の理由で復号対象から除外する通信は、一次
+  情報が「Move the exclusion rule to the top of the decryption rulebase」
+  と説明するとおり、一般的な復号ルールより上に配置しないと先に復号ルール
+  に一致してしまい除外が機能しない
+- **Service/URL Categoryタブでのカテゴリ指定**: No Decryptルールの一致
+  条件として、`financial-services`・`health-and-medicine`のようなURL
+  カテゴリを`Service/URL Category`タブに追加できる。プライバシー配慮が
+  必要な通信をIPアドレス個別指定ではなくカテゴリ単位で除外できる
+- **SSL Decryption Exclusion(Device > Certificate Management > SSL
+  Decryption Exclusion)**: 証明書ピン留め・クライアント証明書認証・
+  非対応暗号スイート等、技術的理由で復号すると通信が壊れるサーバーを
+  個別に登録し復号対象から除外する仕組み。事前定義済みの除外リストに加え、
+  `Hostname`(ワイルドカード`*`使用可)・`Shared`・`Description`・`Exclude`
+  の各フィールドを持つカスタムエントリを追加できる。カスタムエントリは
+  一致する事前定義エントリより優先される
+- **Local SSL Decryption Exclusion Cache**: 技術的理由で復号に失敗した
+  通信をPAN-OSが自動的に12時間だけ除外登録する一時的なキャッシュ。
+  `Device > Certificate Management > SSL Decryption Exclusion`の`Show
+  Local Exclusion Cache`から参照できるが、12時間で失効するため恒久的な
+  除外にはカスタムエントリへの登録が必要
+- **Decryption/SSL Policy Match(Device > Troubleshooting)**: `Select
+  Test`で該当のテストを選び、`From`/`To`/`Source`/`Destination`等を入力
+  して、実際にどのDecryptionルールに一致するかをGUIから確認できる診断
+  ツール
+- **test decryption-policy-match**: 指定した送信元/宛先/URLカテゴリの
+  組み合わせが、実際にどのDecryptionルールに一致するかをCLIから確認できる
+  テストコマンド。一次情報の例では`test decryption-policy-match category
+  financial-services from trust source <src> destination <dst>`のように
+  実行し、出力に`Matched rule: '<rule>' action: no-decrypt`のような一致
+  ルールとactionが表示される
+- **commit**: PAN-OSはcandidate configとrunning configを分離する二段階
+  構成モデルを採る。GUIで`OK`を押しただけの設定もcommitするまで実機の
+  動作には反映されない
+
+## シナリオ設定
+
+今回、SSL Forward Proxyによるアウトバウンド復号とプライバシー除外として
+構成する値は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| 社内側ゾーン(trust_zone) | `{{ trust_zone }}` |
+| 外部側ゾーン(untrust_zone) | `{{ untrust_zone }}` |
+| Forward Trust CA証明書名(forward_trust_ca_name) | `{{ forward_trust_ca_name }}` |
+| Forward Trust CA証明書のCommon Name(forward_trust_ca_common_name) | `{{ forward_trust_ca_common_name }}` |
+| Forward Untrust CA証明書名(forward_untrust_ca_name) | `{{ forward_untrust_ca_name }}` |
+| CA証明書配布に使うGlobalProtectポータル名(globalprotect_portal_name) | `{{ globalprotect_portal_name }}` |
+| 一般アウトバウンド復号ルール名(decrypt_rule_name) | `{{ decrypt_rule_name }}` |
+| 復号プロファイル名(decryption_profile_name) | `{{ decryption_profile_name }}` |
+| プライバシー除外用No Decryptルール名(privacy_no_decrypt_rule_name) | `{{ privacy_no_decrypt_rule_name }}` |
+| No Decrypt用プロファイル名(privacy_no_decrypt_profile_name) | `{{ privacy_no_decrypt_profile_name }}` |
+| プライバシー除外対象のURLカテゴリ(privacy_url_categories) | {% for cat in privacy_url_categories %}`{{ cat }}`{% if not loop.last %}, {% endif %}{% endfor %} |
+| 検証用クライアント送信元IP(test_client_source) | `{{ test_client_source }}` |
+| 一般通信の検証先(test_general_destination) | `{{ test_general_destination }}` |
+| プライバシー対象通信の検証先(test_privacy_destination) | `{{ test_privacy_destination }}` |
+
+技術的理由による除外(証明書ピン留め・非対応暗号スイート等)の対象は
+次のとおりです。
+
+| Hostname | 除外理由(description) |
+|----------|------------------------|
+{% for ex in technical_exclusions %}| `{{ ex.hostname }}` | {{ ex.description }} |
+{% endfor %}
+
+## 手順
+
+### 1. 現状を確認する(変更前の基準を取る)
+
+新しいルール・証明書を1件も登録する前に、現状を確認します。
+
+- `Policies > Decryption`を開き、既存ルールの並び順(評価順)と、
+  `{{ decrypt_rule_name }}`・`{{ privacy_no_decrypt_rule_name }}`と同名の
+  ルールが存在しないことを確認します。
+- `Device > Certificate Management > Certificates`を開き、
+  `{{ forward_trust_ca_name }}`・`{{ forward_untrust_ca_name }}`と同名の
+  証明書が存在しないことを確認します。
+- `Device > Certificate Management > SSL Decryption Exclusion`を開き、
+  技術的理由による除外の対象と同名のカスタムエントリが存在しないことを
+  確認します。
+
+### 2. 中間CA証明書を準備する(Device > Certificate Management > Certificates)
+
+`Custom Certificates`で`Generate`をクリックし、次の2件を作成します。
+
+- Forward Trust用: Name=`{{ forward_trust_ca_name }}` / Common
+  Name=`{{ forward_trust_ca_common_name }}`。自己署名ルートCAとして生成
+  する場合は証明書情報ダイアログで`Trusted Root CA`を有効化します。
+  生成後、一覧から`{{ forward_trust_ca_name }}`を選択し証明書情報
+  ダイアログで`Forward Trust Certificate`を有効化して`OK`を押します。
+- Forward Untrust用: Name=`{{ forward_untrust_ca_name }}` / `Signed By`は
+  指定せず生成します。生成後、証明書情報ダイアログで`Forward Untrust
+  Certificate`を有効化して`OK`を押します。
+
+この時点ではまだ`Commit`は実行しません。
+
+### 3. CA証明書をエンドポイントへ配布する
+
+`{{ forward_trust_ca_name }}`の代理証明書をクライアントが警告なく受け
+入れるよう、対応するルートCA証明書をエンドポイントの信頼ストアへ配布
+します。GlobalProtect経由の場合は`Network > GlobalProtect > Portals >
+{{ globalprotect_portal_name }}`の`Agent`設定を開き、`Trusted Root CA`に
+`{{ forward_trust_ca_name }}`を追加し`Install in Local Root Certificate
+Store`を有効化します。GlobalProtectを使わない場合は、証明書を秘密鍵を
+含めずPEM形式でエクスポートし、クライアント側の`Trusted Root
+Certification Authorities`ストアへ手動またはグループポリシーで配布し
+ます。
+
+### 4. プライバシー除外用No Decryptルールを作成する(Policies > Decryption)
+
+一般的な復号ルールより先に評価される位置に、プライバシー除外用ルールを
+作成します。`Policies > Decryption`で`Add`をクリックし、次のタブを設定
+します。
+
+- General タブ: `Name`に`{{ privacy_no_decrypt_rule_name }}`を入力
+  します。
+- Source タブ: `Source Zone`は既定の`any`のままにします。
+- Destination タブ: `Destination Zone`は既定の`any`のままにします。
+- Service/URL Category タブ: `Add`から、次のURLカテゴリを追加します。
+  {% for cat in privacy_url_categories %}`{{ cat }}`{% if not loop.last %}、{% endif %}{% endfor %}
+- Options タブ: `Action`を`No Decrypt`にし、`Decryption Profile`に
+  `{{ privacy_no_decrypt_profile_name }}`(証明書の有効性を検証する
+  no-decryptionプロファイル)を選択します。
+
+入力後は`OK`のみを行い、保存後にルール一覧で`{{ privacy_no_decrypt_rule_name }}`
+を選択して`Move Up`(または一覧のドラッグ操作)でルールベースの最上位へ
+移動します。この並び順が、手順5で作成する一般復号ルールより先に評価
+されることを保証します。
+
+### 5. 一般アウトバウンド復号ルールを作成する(Policies > Decryption)
+
+`Policies > Decryption`で`Add`をクリックし、次のタブを設定します。
+
+- General タブ: `Name`に`{{ decrypt_rule_name }}`を入力します。
+- Source タブ: `Source Zone`に`{{ trust_zone }}`を追加します。
+- Destination タブ: `Destination Zone`に`{{ untrust_zone }}`を追加
+  します。
+- Options タブ: `Action`を`Decrypt`にし、`Type`を`SSL Forward Proxy`に
+  します。`Decryption Profile`に`{{ decryption_profile_name }}`を選択
+  します。
+
+入力後は`OK`のみを行い、ルール一覧で`{{ decrypt_rule_name }}`が
+`{{ privacy_no_decrypt_rule_name }}`より下に配置されていることを確認
+します。
+
+### 6. 技術的理由による除外を登録する(Device > Certificate Management > SSL Decryption Exclusion)
+
+`Device > Certificate Management > SSL Decryption Exclusion`を開き、
+`Add`から次のカスタムエントリを追加します。
+
+{% for ex in technical_exclusions %}- Hostname=`{{ ex.hostname }}` / Description=`{{ ex.description }}` /
+  `Exclude`にチェックを入れます。
+{% endfor %}
+
+入力後は`OK`のみを行います。
+
+### 7. 変更を確定する(commit)
+
+`Commit`を実行し、候補設定(candidate config)を実行中の設定(running
+config)へ反映します。commitが完了するまで、手順2〜6で入力した内容は
+実機の動作に反映されません。
+
+### 8. Decryption/SSL Policy Matchとtest decryption-policy-matchで一致状況を確認する
+
+commit完了後、`Device > Troubleshooting`を開き、`Select Test`で
+Decryption/SSL Policy Matchのテストを選び、次の値を入力して実行します。
+
+- From: {{ trust_zone }}
+- To: {{ untrust_zone }}
+- Source: {{ test_client_source }}
+- Destination: {{ test_privacy_destination }}
+- Category: {% for cat in privacy_url_categories %}{{ cat }}{% if not loop.last %}, {% endif %}{% endfor %}
+
+`Results`に、手順4で作成した`{{ privacy_no_decrypt_rule_name }}`が一致
+ルールとして表示されることを確認します。
+
+続けてCLIから`test decryption-policy-match`を実行し、同じ組み合わせの
+一致状況を確認します。
+
+```bash
+test decryption-policy-match category financial-services from {{ trust_zone }} source {{ test_client_source }} destination {{ test_privacy_destination }}
+```
+
+出力の`Matched rule:`に`{{ privacy_no_decrypt_rule_name }}`、`action:`に
+`no-decrypt`が表示されることを確認します。
+
+続けて、プライバシー対象外の一般通信についても一致を確認します。
+
+```bash
+test decryption-policy-match category any from {{ trust_zone }} source {{ test_client_source }} destination {{ test_general_destination }}
+```
+
+出力の`Matched rule:`に`{{ decrypt_rule_name }}`、`action:`に`decrypt`が
+表示されることを確認します。
+
+### 9. 実際の通信で動作を確認する
+
+社内端末(`{{ test_client_source }}`が属するセグメント)から、一般
+通信先とプライバシー対象通信先へそれぞれ接続します。
+
+```bash
+curl -k -m 5 -o /dev/null -w "HTTP %{http_code}\n" https://{{ test_general_destination }}/
+curl -k -m 5 -o /dev/null -w "HTTP %{http_code}\n" https://{{ test_privacy_destination }}/
+```
+
+`Monitor > Logs > Traffic`のDecryption列(またはDecryption Logs)で、
+`{{ test_general_destination }}`宛の通信は`{{ decrypt_rule_name }}`に
+一致し復号されていること、`{{ test_privacy_destination }}`宛の通信は
+`{{ privacy_no_decrypt_rule_name }}`に一致し復号されていないことを確認
+します。
+
+## 動作確認
+
+- Decryption/SSL Policy Matchで、送信元`{{ test_client_source }}`から
+  宛先`{{ test_privacy_destination }}`(カテゴリ: {% for cat in privacy_url_categories %}{{ cat }}{% if not loop.last %}, {% endif %}{% endfor %})
+  への通信が`{{ privacy_no_decrypt_rule_name }}`に一致すること
+- `test decryption-policy-match`で、同じ通信のactionが`no-decrypt`で
+  あること
+- `test decryption-policy-match`で、`{{ test_general_destination }}`宛の
+  一般通信が`{{ decrypt_rule_name }}`に一致し、actionが`decrypt`である
+  こと
+- `Policies > Decryption`の一覧で`{{ privacy_no_decrypt_rule_name }}`が
+  `{{ decrypt_rule_name }}`より上に配置されていること
+- `Device > Certificate Management > SSL Decryption Exclusion`の一覧に、
+  技術的理由による除外対象のHostnameが`Exclude`有効の状態で表示される
+  こと
+- エンドポイントのブラウザで`{{ test_general_destination }}`等の
+  一般サイトに接続した際、証明書エラーが表示されず`{{
+  forward_trust_ca_name }}`を発行元とする代理証明書が信頼されていること
+- 手順1で確認した既存のDecryptionルール・証明書・SSL Decryption
+  Exclusionエントリの並び順・内容が意図せず変更されていないこと
+
+## 注意事項
+
+- **No Decryptルールは必ず一般復号ルールより上に配置すること。**
+  `Policies > Decryption`のルールはSecurity Policyと同様に上から順に
+  評価され最初に一致したルールが適用されるため、`{{
+  privacy_no_decrypt_rule_name }}`が`{{ decrypt_rule_name }}`より下に
+  あると、プライバシー対象の通信が先に一般復号ルールへ一致し復号されて
+  しまいます。
+- **no-decryptionプロファイルをTLSv1.3向けのルールに適用しないこと。**
+  NGFWがTLSv1.3では暗号化された証明書情報を読み取れないため、証明書
+  検証を行うno-decryptionプロファイルの効果が得られません。
+- **Local SSL Decryption Exclusion Cacheは恒久的な除外ではないこと。**
+  技術的理由で自動除外された通信は12時間で失効するため、継続的に除外が
+  必要なサービスは手順6のカスタムエントリとして登録してください。
+- **カスタムのSSL Decryption Exclusionエントリは一致する事前定義エントリ
+  より優先されること。** 事前定義の除外リストを個別に無効化しなくても、
+  同じHostnameのカスタムエントリを追加すれば動作を上書きできます。
+- **エンドポイントへのCA証明書配布が完了するまで、一般復号ルールを
+  有効化しないこと。** 配布前に`{{ decrypt_rule_name }}`が有効になると、
+  クライアントに証明書エラーが表示され通信が阻害されるおそれがあります。
+- `Commit`を実行するまでcandidate configはrunning configに反映されません。
+  手順2〜6で入力した内容は、手順7のcommitまで実機の動作に影響しません。
+- CLI/GUIへのログインに使う管理者パスワードやAPIキー、証明書の秘密鍵は、
+  本手順書やチケット、ログに平文で残さないでください。記録が必要な場合は
+  `****`のようにマスクし、秘密管理ツール等で別途安全に保管してください。
+- プライバシー除外対象のURLカテゴリ({% for cat in privacy_url_categories %}`{{ cat }}`{% if not loop.last %}、{% endif %}{% endfor %})は、
+  自組織のコンプライアンス要件に応じて追加・変更してください。

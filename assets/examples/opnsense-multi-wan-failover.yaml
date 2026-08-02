@@ -1,0 +1,25 @@
+gateway_group_name: GW_WAN_FAILOVER
+trigger_level_label: "Packet Loss or High Latency"
+probe_interval_sec: 1
+down_sec: 10
+latency_low_ms: 200
+latency_high_ms: 500
+loss_low_pct: 10
+loss_high_pct: 20
+policy_routing_interface: "LAN"
+gateways:
+  - tier: 1
+    name: WAN1_GW
+    interface: wan1
+    gateway_ip: 203.0.113.1
+    monitor_ip: 8.8.8.8
+    isp_desc: "ISP-A 光回線(主回線)"
+  - tier: 2
+    name: WAN2_GW
+    interface: wan2
+    gateway_ip: 198.51.100.1
+    monitor_ip: 1.1.1.1
+    isp_desc: "ISP-B モバイル回線(バックアップ回線)"
+critical_traffic:
+  source_net: "10.0.10.0/24"
+  description: "基幹業務セグメント"

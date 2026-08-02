@@ -1,0 +1,36 @@
+sdwan_zone: "wan-zone"
+wan_members:
+  - seq: 1
+    interface: "wan1"
+    gateway: "192.0.2.1"
+    cost: 0
+    role: "本線(光回線)"
+  - seq: 2
+    interface: "wan2"
+    gateway: "198.51.100.1"
+    cost: 0
+    role: "予備回線(広域イーサネット)"
+  - seq: 3
+    interface: "lte1"
+    gateway: "203.0.113.1"
+    cost: 10
+    role: "非常用回線(LTEモデム)"
+health_check_name: "internet_sla"
+health_check_server: "8.8.8.8"
+health_check_protocol: "ping"
+health_check_interval: 500
+health_check_failtime: 5
+health_check_recoverytime: 5
+latency_threshold_ms: 200
+jitter_threshold_ms: 50
+packetloss_threshold_percent: 5
+sdwan_rule_id: 1
+sdwan_rule_mode: "sla"
+priority_member_seqs:
+  - 1
+  - 2
+  - 3
+current_default_interface: "wan1"
+source_address: "all"
+destination_address: "all"
+target_failover_seconds: 30

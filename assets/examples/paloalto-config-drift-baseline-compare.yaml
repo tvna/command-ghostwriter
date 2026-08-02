@@ -1,0 +1,26 @@
+managed_device_group: dc-edge-fw
+baseline_commit_description: Q2定期棚卸し承認ベースライン(CR-2026-0512)
+baseline_committed_by: netadmin01
+baseline_commit_date: "2026-05-12 10:00 JST"
+comparison_cadence: 毎週月曜 09:00(JST)
+review_owner: network-secops
+config_change_size_limit_mb: 25
+drift_escalation_contact: netops-secops@example.com
+focus_config_objects:
+  - category: Security Policy Rule
+    object_name: allow-outbound-web
+  - category: NAT Rule
+    object_name: snat-dc-egress
+  - category: Address Object
+    object_name: dmz-web-servers
+change_operation_types:
+  - operation: Set
+    meaning: New configuration object was added.
+  - operation: Edit
+    meaning: Existing configuration object was modified.
+  - operation: Rename
+    meaning: Existing configuration object was renamed.
+  - operation: Move
+    meaning: Reordering or moving policy rules within a rulebase.
+  - operation: Delete
+    meaning: Configuration object was deleted.

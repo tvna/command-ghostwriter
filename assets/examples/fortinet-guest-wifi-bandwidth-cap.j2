@@ -1,0 +1,185 @@
+# FortiGateでゲストWiFiの帯域・同時接続数を制限する
+
+FortiGate (FortiOS) のWiFiコントローラとTraffic Shapingを用いて、CSVで定義
+した{{ csv_rows | length }}件のゲスト用SSIDそれぞれに、同時接続クライアント
+数の上限と、SSIDインターフェース単位の最大帯域を設定します。VAP(Virtual
+Access Point)への同時接続数上限はCLIで、帯域制御用のTraffic Shaping
+ProfileはGUIとCLIの両方で設定内容を併記し、最後にWiFi Client Monitorと
+インターフェース設定の両面から実際の反映状況を確認します。
+
+## 目的
+
+ゲストWiFi利用者が社内ネットワークのリソースを専有しないよう、SSIDごとに
+同時接続クライアント数の上限(`max-clients`)と、インターフェース単位の
+最大帯域(egress Traffic Shaping Profileの`maximum-bandwidth-percentage`
+と`outbandwidth`の組み合わせ)を設定できるようになることを目指します。
+あわせて、設定した上限値がWiFi Client Monitorやインターフェース設定画面に
+正しく反映されていることを検証し、変更前の既存設定を意図せず壊さないよう
+基準を取ってから作業できるようになることを目指します。
+
+## 用語解説
+
+- **VAP (Virtual Access Point)**: FortiGateがSSIDごとに保持する無線設定の
+  単位。CLIでは`config wireless-controller vap`のブロックで、GUIでは
+  `WiFi & Switch Controller > SSIDs`の編集画面で設定する。VAP名は、
+  そのSSIDに対応してFortiGate上に自動生成されるネットワークインターフェース
+  の名前としても使われる
+- **max-clients**: VAPに設定する、同時に接続できる無線クライアント数の
+  上限値。`config wireless-controller vap`のブロック内で`set max-clients
+  <整数>`として設定する。既定値は`0`(無制限)
+- **Interface-based Traffic Shaping Profile**: `Policy & Objects >
+  Traffic Shaping`画面の`Shaping Profile`タブ(GUIでは`Traffic Shaping
+  Profile`)、CLIでは`config firewall shaping-profile`で作成するオブジェ
+  クト。トラフィッククラスごとに`config shaping-entries`で
+  `class-id`・`guaranteed-bandwidth-percentage`(保証帯域の割合)・
+  `maximum-bandwidth-percentage`(最大帯域の割合)・`priority`
+  (`high`/`medium`/`low`)を設定し、`default-class-id`で既定クラスを
+  指定する
+- **egress-shaping-profile / outbandwidth**: 作成したTraffic Shaping
+  Profileを実際のインターフェースに適用するための、`config system
+  interface`ブロックの設定項目。`set outbandwidth <kbps>`でそのインター
+  フェースの送信帯域そのものを定義したうえで、`set egress-shaping-profile
+  "<プロファイル名>"`で紐付ける。`outbandwidth`が未設定だと、Traffic
+  Shaping Profileの割合設定(guaranteed/maximum-bandwidth-percentage)が
+  基準にする母数が無いため、帯域制御が機能しない
+- **他ベンダーとの違い(適応)**: 他ベンダーのネイティブ機能とは異なり、
+  Fortinet (FortiOS)では単一の「ゲストWiFi帯域上限」機能は存在せず、VAPの
+  `max-clients`(同時接続数制限)とInterface-based Traffic Shaping Profile
+  (帯域制限)という既存の汎用機構を組み合わせて実現するという別機構で、
+  同じ運用課題を解決する
+
+## シナリオ設定
+
+今回設定するゲストSSIDと、共通で適用するTraffic Shaping Profileの内容は
+次の{{ csv_rows | length }}件です。`shaping_profile_name`・
+`default_class_id`・`guaranteed_bw_pct`・`maximum_bw_pct`・`priority`は
+全SSIDで共通の1つのProfileを指すため、値も揃えてあります。
+
+| rule_no | vap_name | ssid | max_clients | outbandwidth_kbps | shaping_profile_name | default_class_id | guaranteed_bw_pct | maximum_bw_pct | priority | description |
+|---------|----------|------|-------------|--------------------|-----------------------|-------------------|--------------------|-----------------|----------|--------------|
+{% for r in csv_rows %}| {{ r["rule_no"] }} | {{ r["vap_name"] }} | {{ r["ssid"] }} | {{ r["max_clients"] }} | {{ r["outbandwidth_kbps"] }} | {{ r["shaping_profile_name"] }} | {{ r["default_class_id"] }} | {{ r["guaranteed_bw_pct"] }} | {{ r["maximum_bw_pct"] }} | {{ r["priority"] }} | {{ r["description"] }} |
+{% endfor %}
+`vap_name`列の値は、SSID作成時にFortiGate上へ自動生成されるインターフェース
+名としてもそのまま使用します(手順5参照)。
+
+## 手順
+
+### 1. 現状のSSID設定とインターフェース帯域を確認する(変更前の基準を取る)
+
+新しい上限を1件も設定する前に、現状を確認します。
+
+- `WiFi & Switch Controller > SSIDs`を開き、シナリオ設定の`vap_name`列に
+  ある各SSIDが既に存在すること、および現在の同時接続数上限の設定値を確認
+  して記録します(SSID自体の新規作成は本手順書の対象外です)。
+- `Network > Interfaces`を開き、各SSIDに対応するインターフェースの現在の
+  帯域設定(Traffic Shaping Profileの適用有無、`outbandwidth`の値)を確認
+  して記録します。
+
+### 2. 同時接続クライアント数の上限をCLIでVAPに設定する
+
+シナリオ設定の`max_clients`列の値を、`config wireless-controller vap`で
+各SSIDのVAPに設定します。
+
+```bash
+{% for r in csv_rows %}config wireless-controller vap
+    edit "{{ r["vap_name"] }}"
+        set ssid "{{ r["ssid"] }}"
+        set max-clients {{ r["max_clients"] }}
+    next
+end
+{% endfor %}```
+
+### 3. 帯域制御用のTraffic Shaping ProfileをGUIで作成する
+
+`Policy & Objects > Traffic Shaping`を開き、`Shaping Profile`タブから
+`Create New`を選択します。シナリオ設定の1行目(全SSID共通)の値を使い、
+次の内容で1件だけ作成します。
+
+{% for r in csv_rows %}{% if loop.first %}- Name: `{{ r["shaping_profile_name"] }}`
+- Default Class ID: `{{ r["default_class_id"] }}`
+- Default Shaping Group(Class ID `{{ r["default_class_id"] }}`)の
+  Guaranteed Bandwidth: `{{ r["guaranteed_bw_pct"] }}`%、Maximum
+  Bandwidth: `{{ r["maximum_bw_pct"] }}`%、Priority: `{{ r["priority"] }}`
+{% endif %}{% endfor %}
+入力後は`OK`で保存します。このProfileは手順5で複数のSSIDインターフェース
+に共通適用するため、SSIDの数だけ作成する必要はありません。
+
+### 4. 同じProfileをCLIでも作成する
+
+GUIと同じ内容を、`config firewall shaping-profile`でも作成します。
+
+```bash
+{% for r in csv_rows %}{% if loop.first %}config firewall shaping-profile
+    edit "{{ r["shaping_profile_name"] }}"
+        set default-class-id {{ r["default_class_id"] }}
+        config shaping-entries
+            edit 1
+                set class-id {{ r["default_class_id"] }}
+                set guaranteed-bandwidth-percentage {{ r["guaranteed_bw_pct"] }}
+                set maximum-bandwidth-percentage {{ r["maximum_bw_pct"] }}
+                set priority {{ r["priority"] }}
+            next
+        end
+    next
+end
+{% endif %}{% endfor %}```
+
+### 5. 各ゲストSSIDインターフェースにProfileと帯域上限を適用する
+
+手順3・4で作成したProfileを、シナリオ設定の各行の`vap_name`インターフェース
+(SSID作成時に自動生成されたインターフェース)に、`outbandwidth_kbps`の値
+とあわせて適用します。
+
+```bash
+{% for r in csv_rows %}config system interface
+    edit "{{ r["vap_name"] }}"
+        set outbandwidth {{ r["outbandwidth_kbps"] }}
+        set egress-shaping-profile "{{ r["shaping_profile_name"] }}"
+    next
+end
+{% endfor %}```
+
+### 6. GUI/CLIで反映内容を確認する
+
+1. `WiFi & Switch Controller > SSIDs`の各SSID編集画面で、手順2で設定した
+   同時接続数上限がシナリオ設定の`max_clients`列と一致していることを確認
+   します。
+2. `Network > Interfaces`の各`vap_name`インターフェース編集画面で、
+   `Traffic Shaping`の項目に手順3・4のProfile名(`{{ csv_rows[0]["shaping_profile_name"] }}`)
+   と、シナリオ設定の`outbandwidth_kbps`列の値が反映されていることを確認
+   します。
+
+## 動作確認
+
+- `Monitor > WiFi Client Monitor`で、シナリオ設定の`ssid`列に対応する各
+  SSIDに接続しているクライアント数が、`max_clients`列の上限を超えていない
+  こと(上限に達すると、それ以上のクライアントは新規に接続できないこと)
+- `show wireless-controller vap "{{ csv_rows[0]["vap_name"] }}"`等の`show`
+  コマンドで、各VAPの`max-clients`がシナリオ設定の値と一致していること
+- `show system interface "{{ csv_rows[0]["vap_name"] }}"`等の`show`
+  コマンドで、`outbandwidth`と`egress-shaping-profile`がシナリオ設定の
+  値と一致していること
+- 実際にゲストWiFi経由で帯域測定を行うクライアントで、スループットが
+{% for r in csv_rows %}  `{{ r["vap_name"] }}`: 概ね{{ (r["outbandwidth_kbps"] * r["maximum_bw_pct"] // 100) }}kbps
+  ({{ r["outbandwidth_kbps"] }}kbps × {{ r["maximum_bw_pct"] }}%)を上回らないこと
+{% endfor %}
+- 手順1で記録した既存のSSID設定・インターフェース帯域設定が、意図せず
+  変更されていないこと
+
+## 注意事項
+
+- **`outbandwidth`を設定しない限り、Traffic Shaping Profileの割合設定は
+  機能しません。** `maximum-bandwidth-percentage`や
+  `guaranteed-bandwidth-percentage`は、あくまで`outbandwidth`で定義した
+  帯域に対する割合であるため、手順5の`set outbandwidth`を省略しないで
+  ください。
+- **1つのTraffic Shaping Profileを複数のSSIDインターフェースへ共通適用
+  できます。** シナリオ設定のように、SSIDごとに`outbandwidth`だけを変え、
+  同じ`shaping_profile_name`(割合設定)を使い回すことで、上限帯域が異な
+  る複数のゲストSSIDでも保証・最大帯域の考え方を統一できます。
+- `max-clients`を実際の利用人数より過度に低く設定すると、正当な利用者が
+  接続できなくなります。手順1で確認した既存の利用実態を踏まえて値を決めて
+  ください。
+- CLI/GUIへのログインに使う管理者パスワードやAPIトークンは、本手順書や
+  ログに平文で残さないでください。値を記録する場合は`********`のように
+  マスクし、秘密管理ツール等で別途安全に保管してください。

@@ -1,0 +1,236 @@
+# SonicWall (SonicOS) QoS帯域制御による重要トラフィックの優先制御
+
+SonicOS の Bandwidth Management(BWM)機能を使い、回線輻輳時に重要な業務
+セグメント`{{ critical_address_object }}`(`{{ critical_address_network }}`/
+`{{ critical_address_netmask }}`)の通信を優先し、一般ユーザーセグメント
+`{{ noncritical_address_object }}`(`{{ noncritical_address_network }}`/
+`{{ noncritical_address_netmask }}`)の通信帯域を制限します。SonicOSは
+Egress/Ingressの両方向でトラフィックシェーピングを行い、0(Realtime)から
+7(Lowest)までの8段階の優先度キューへトラフィックを割り当てます。優先度・
+保証帯域(Guaranteed Bandwidth)・最大帯域(Maximum Bandwidth)は`PROFILE
+OBJECTS | Bandwidth`で作成するBandwidth Objectにまとめて定義し、
+`POLICY | Rules and Policies > Access Rules`の各Access RuleのTraffic
+Shapingタブから参照させることで、Access Rule単位のトラフィック分類に
+適用します。
+
+## 目的
+
+WAN回線`{{ wan_interface }}`(`{{ wan_uplink_mbps }}` Mbps契約)が輻輳した
+場合でも、重要な業務セグメント`{{ critical_address_object }}`の通信が
+最低`{{ critical_guaranteed_bandwidth }}` {{ critical_guaranteed_unit }}の
+帯域を確保できる状態にし、一般ユーザーセグメント
+`{{ noncritical_address_object }}`の通信は最大
+`{{ noncritical_maximum_bandwidth }}` {{ noncritical_maximum_unit }}までに
+制限することで、輻輳による業務影響を最小化することを目指します。あわせて、
+Bandwidth Object(Guaranteed/Maximum Bandwidth/Priority)とAccess Rule
+のTraffic Shaping設定の対応関係を理解し、GUIから同じ構成を再現し、輻輳を
+模した状態で優先度どおりに帯域が配分されることを検証できるようになること
+を目指します。
+
+## 用語解説
+
+- **PROFILE OBJECTS | Bandwidth**: Bandwidth Object を作成・編集するための
+  管理画面ナビゲーションパス。このページの`Add`から`Add Bandwidth Object`
+  ダイアログを開いて作成する
+- **Bandwidth Object**: BWMにおけるトラフィッククラスの実体。`Name`(名前)、
+  `Priority`(0=Realtime〜7=Lowestの優先度。複数のトラフィッククラスが帯域
+  を奪い合う輻輳時は優先度が高いクラスから優先して帯域が割り当てられる)、
+  `Guaranteed Bandwidth`(このクラスへ常に保証する帯域。数値と単位
+  (`Kbps`/`Mbps`)を指定する)、`Maximum Bandwidth`(このクラスへ許可する
+  上限帯域。数値と単位を指定する)を1つのオブジェクトにまとめて定義する
+- **8段階の優先度キュー**: SonicOSのBWMが備えるクラスベースキューイングの
+  仕組み。0(Realtime)〜7(Lowest)の8段階があり、Bandwidth Objectの
+  `Priority`で選択したキューへ、そのBandwidth Objectを参照するAccess Rule
+  のトラフィックが割り当てられる。輻輳時にどのキューが優先的にサービスさ
+  れるかは各キューの`Guaranteed Bandwidth`/`Maximum Bandwidth`設定に従う
+- **Access RuleのTraffic Shapingタブ**: `POLICY | Rules and Policies >
+  Access Rules`のAccess Rule作成/編集ダイアログにあるタブ。`Enable Egress
+  Bandwidth Management`(WAN側へ向かう方向にBWMを適用)/`Enable Ingress
+  Bandwidth Management`(WAN側から戻ってくる方向にBWMを適用)をそれぞれ
+  有効にしたうえで、適用するBandwidth Objectを選択する
+- **MATCH OBJECTS | Addresses**: Address Object を作成・管理するSonicOSの
+  画面。`Add`ダイアログでは`Name`・`Zone Assignment`・`Type`
+  (セグメント全体を指定する場合は`Network`)・`Network`(ネットワークアド
+  レス)・`Netmask`(サブネットマスク)を入力する
+
+## シナリオ設定
+
+今回、QoS帯域制御の設定値は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| WAN側インターフェース(wan_interface) | `{{ wan_interface }}` |
+| WANゾーン(wan_zone) | `{{ wan_zone }}` |
+| LAN側インターフェース(lan_interface) | `{{ lan_interface }}` |
+| LANゾーン(lan_zone) | `{{ lan_zone }}` |
+| WAN回線の契約帯域(wan_uplink_mbps) | {{ wan_uplink_mbps }} Mbps |
+| 重要業務セグメント用Address Object名(critical_address_object) | `{{ critical_address_object }}` |
+| 重要業務セグメントのネットワークアドレス(critical_address_network) | `{{ critical_address_network }}` |
+| 重要業務セグメントのサブネットマスク(critical_address_netmask) | `{{ critical_address_netmask }}` |
+| 重要業務用Bandwidth Object名(critical_bandwidth_object) | `{{ critical_bandwidth_object }}` |
+| 重要業務用の優先度(critical_priority) | {{ critical_priority }}(Realtime) |
+| 重要業務用の保証帯域(critical_guaranteed_bandwidth) | {{ critical_guaranteed_bandwidth }} {{ critical_guaranteed_unit }} |
+| 重要業務用の最大帯域(critical_maximum_bandwidth) | {{ critical_maximum_bandwidth }} {{ critical_maximum_unit }} |
+| 重要業務用Access Rule名(critical_access_rule_name) | `{{ critical_access_rule_name }}` |
+| 一般ユーザーセグメント用Address Object名(noncritical_address_object) | `{{ noncritical_address_object }}` |
+| 一般ユーザーセグメントのネットワークアドレス(noncritical_address_network) | `{{ noncritical_address_network }}` |
+| 一般ユーザーセグメントのサブネットマスク(noncritical_address_netmask) | `{{ noncritical_address_netmask }}` |
+| 一般ユーザー用Bandwidth Object名(noncritical_bandwidth_object) | `{{ noncritical_bandwidth_object }}` |
+| 一般ユーザー用の優先度(noncritical_priority) | {{ noncritical_priority }}(Lowest) |
+| 一般ユーザー用の保証帯域(noncritical_guaranteed_bandwidth) | {{ noncritical_guaranteed_bandwidth }} {{ noncritical_guaranteed_unit }} |
+| 一般ユーザー用の最大帯域(noncritical_maximum_bandwidth) | {{ noncritical_maximum_bandwidth }} {{ noncritical_maximum_unit }} |
+| 一般ユーザー用Access Rule名(noncritical_access_rule_name) | `{{ noncritical_access_rule_name }}` |
+
+重要業務セグメントと一般ユーザーセグメントはネットワークアドレスが重ならな
+い別セグメントとして設計しているため、2本のAccess Ruleは互いに他方の通信
+を誤って一致させることはなく、`POLICY | Rules and Policies > Access
+Rules`一覧内での並び順(上下関係)を厳密に管理する必要はありません。
+
+## 手順
+
+### 1. 現状のBandwidth Object一覧とAccess Rules一覧を確認する(変更前の基準を取る)
+
+新しいオブジェクトやルールを1件も追加する前に、現状を確認します。
+
+- `PROFILE OBJECTS | Bandwidth`を開き、`{{ critical_bandwidth_object }}`/
+  `{{ noncritical_bandwidth_object }}`と同名のBandwidth Objectが存在しな
+  いことを確認します。
+- `MATCH OBJECTS | Addresses`を開き、`{{ critical_address_object }}`/
+  `{{ noncritical_address_object }}`と同名のAddress Objectが存在しない
+  ことを確認します。
+- `POLICY | Rules and Policies > Access Rules`を開き、
+  `{{ critical_access_rule_name }}`/`{{ noncritical_access_rule_name }}`
+  と同名のAccess Ruleが存在しないこと、および`{{ wan_zone }}`↔
+  `{{ lan_zone }}`間の既存ルールの並び順を確認します。
+
+### 2. Address Object(重要業務セグメント/一般ユーザーセグメント)を作成する
+
+`MATCH OBJECTS | Addresses`の`Address Objects`タブで`Add`アイコンをクリック
+し、`Name`・`Zone Assignment`・`Type`(`Network`)・`Network`・`Netmask`を
+入力して`Save`をクリックします。
+
+- Name: `{{ critical_address_object }}` / Zone Assignment: `{{ lan_zone }}` /
+  Type: `Network` / Network: `{{ critical_address_network }}` /
+  Netmask: `{{ critical_address_netmask }}`
+- Name: `{{ noncritical_address_object }}` / Zone Assignment: `{{ lan_zone }}` /
+  Type: `Network` / Network: `{{ noncritical_address_network }}` /
+  Netmask: `{{ noncritical_address_netmask }}`
+
+### 3. Bandwidth Object(重要業務用/一般ユーザー用)を作成する
+
+`PROFILE OBJECTS | Bandwidth`を開き、テーブル下部の`Add`をクリックして
+`Add Bandwidth Object`ダイアログを開きます。`Name`・`Priority`・
+`Guaranteed Bandwidth`(数値+単位)・`Maximum Bandwidth`(数値+単位)を入力
+して`Save`をクリックします。
+
+- Name: `{{ critical_bandwidth_object }}` / Priority: `{{ critical_priority }} - Realtime` /
+  Guaranteed Bandwidth: `{{ critical_guaranteed_bandwidth }}` `{{ critical_guaranteed_unit }}` /
+  Maximum Bandwidth: `{{ critical_maximum_bandwidth }}` `{{ critical_maximum_unit }}`
+- Name: `{{ noncritical_bandwidth_object }}` / Priority: `{{ noncritical_priority }} - Lowest` /
+  Guaranteed Bandwidth: `{{ noncritical_guaranteed_bandwidth }}` `{{ noncritical_guaranteed_unit }}` /
+  Maximum Bandwidth: `{{ noncritical_maximum_bandwidth }}` `{{ noncritical_maximum_unit }}`
+
+この時点ではBandwidth Object(優先度・保証帯域・最大帯域の定義)を作成した
+だけで、まだどのトラフィックにも適用されていません。手順4でAccess Ruleの
+Traffic Shapingタブから参照するまで、シェーピングは実際には行われません。
+
+### 4. 重要業務セグメント用Access RuleにTraffic Shapingを設定する
+
+`POLICY | Rules and Policies > Access Rules`を開き、`{{ lan_zone }}`から
+`{{ wan_zone }}`向けのテーブル下部の`+Add`から`Adding Rule`ダイアログを
+開いて次の値を設定します。
+
+- My Rule Name: `{{ critical_access_rule_name }}`
+- Action: `Allow`
+- Source/Destination タブの`Source Zone/Interface`: `{{ lan_zone }}`
+- Source/Destination タブの`Destination Zone/Interface`: `{{ wan_zone }}`
+- Source/Destination タブの Source `Address`: `{{ critical_address_object }}`
+- Source/Destination タブの Destination `Address`: `Any`
+- Source/Destination タブの`Port/Services`: `Any`
+- Traffic Shapingタブの`Enable Egress Bandwidth Management`: 有効化し、
+  Bandwidth Object: `{{ critical_bandwidth_object }}`を選択
+- Traffic Shapingタブの`Enable Ingress Bandwidth Management`: 有効化し、
+  Bandwidth Object: `{{ critical_bandwidth_object }}`を選択
+
+すべての項目を設定したら`Enable`を有効にし、`Save`をクリックして保存し
+ます。
+
+### 5. 一般ユーザーセグメント用Access RuleにTraffic Shapingを設定する
+
+同じく`POLICY | Rules and Policies > Access Rules`の`{{ lan_zone }}`から
+`{{ wan_zone }}`向けのテーブルで`+Add`から`Adding Rule`ダイアログを開いて
+次の値を設定します。
+
+- My Rule Name: `{{ noncritical_access_rule_name }}`
+- Action: `Allow`
+- Source/Destination タブの`Source Zone/Interface`: `{{ lan_zone }}`
+- Source/Destination タブの`Destination Zone/Interface`: `{{ wan_zone }}`
+- Source/Destination タブの Source `Address`: `{{ noncritical_address_object }}`
+- Source/Destination タブの Destination `Address`: `Any`
+- Source/Destination タブの`Port/Services`: `Any`
+- Traffic Shapingタブの`Enable Egress Bandwidth Management`: 有効化し、
+  Bandwidth Object: `{{ noncritical_bandwidth_object }}`を選択
+- Traffic Shapingタブの`Enable Ingress Bandwidth Management`: 有効化し、
+  Bandwidth Object: `{{ noncritical_bandwidth_object }}`を選択
+
+すべての項目を設定したら`Enable`を有効にし、`Save`をクリックして保存し
+ます。
+
+### 6. 輻輳を再現し、優先度どおりに帯域が配分されることを検証する
+
+WAN回線(`{{ wan_uplink_mbps }}` Mbps)が輻輳に近い状態になるよう、
+`{{ noncritical_address_object }}`側の端末から大容量ファイルのダウンロード
+を複数同時に開始し、回線をほぼ埋める負荷をかけます。
+
+```bash
+curl -o /dev/null -w "download_speed_mbps=%{speed_download}\n" https://example.com/testfile.bin
+```
+
+その状態のまま、`{{ critical_address_object }}`側の端末からも同様のダウン
+ロードを行い、両セグメントの実測スループットを比較します。
+
+```bash
+curl -o /dev/null -w "download_speed_mbps=%{speed_download}\n" https://example.com/testfile.bin
+```
+
+## 動作確認
+
+- 輻輳状態(手順6)において、`{{ critical_address_object }}`側の実測スルー
+  プットが`{{ critical_guaranteed_bandwidth }}` {{ critical_guaranteed_unit }}
+  を下回らないこと
+- 同じ輻輳状態において、`{{ noncritical_address_object }}`側の実測スルー
+  プットが`{{ noncritical_maximum_bandwidth }}` {{ noncritical_maximum_unit }}
+  を超えないこと
+- `PROFILE OBJECTS | Bandwidth`の一覧に`{{ critical_bandwidth_object }}`/
+  `{{ noncritical_bandwidth_object }}`が表示され、`Priority`/`Guaranteed
+  Bandwidth`/`Maximum Bandwidth`の設定値がシナリオ設定と一致していること
+- `POLICY | Rules and Policies > Access Rules`の一覧に
+  `{{ critical_access_rule_name }}`/`{{ noncritical_access_rule_name }}`
+  が表示され、それぞれのTraffic ShapingタブでEgress/Ingress双方の
+  Bandwidth Managementが有効になっており、対応するBandwidth Objectが
+  正しく選択されていること
+- 手順1で確認した既存のBandwidth Object・Access Ruleの並び順・内容が、
+  意図せず変更されていないこと
+
+## 注意事項
+
+- **Bandwidth Objectの作成だけではシェーピングは適用されません。**
+  Bandwidth Objectはあくまで優先度・保証帯域・最大帯域の定義であり、実際
+  にトラフィックへ適用するのは手順4・5のAccess RuleのTraffic Shapingタブ
+  です。手順3までしか実施しないまま「設定した」と判断しないでください。
+- **Guaranteed Bandwidthの合計が回線の実効帯域(`{{ wan_uplink_mbps }}`
+  Mbps)を超えないようにしてください。** 各Bandwidth ObjectのGuaranteed
+  Bandwidthの合計が回線の実効帯域を超える設定にすると、輻輳時にすべての
+  クラスへ保証帯域どおりの帯域を配分できず、意図した優先制御が機能しない
+  おそれがあります。
+- **Egress/Ingressの双方を有効にしたか確認してください。** 片方向のみ
+  有効化すると、有効化していない方向の通信(重要業務セグメント宛の応答
+  トラフィックなど)は優先度・帯域制限の対象外のままになります。
+- 本手順書は一次情報(SonicOS技術ドキュメントのBandwidth Objects/Access
+  Rulesセクション)で確認できた範囲のGUI操作のみを扱います。SonicOS CLI
+  による同等の投入方法は本ページでは確認できなかったため記載していませ
+  ん。CLIで投入する場合は、別途SonicOSのCLIリファレンスで構文を確認して
+  から実施してください。
+- 管理者パスワードやAPIキーなど認証情報は、本手順書やチケット、ログに
+  平文で残さないでください。記録が必要な場合は`********`のようにマスク
+  し、秘密管理ツール等で別途安全に保管してください。

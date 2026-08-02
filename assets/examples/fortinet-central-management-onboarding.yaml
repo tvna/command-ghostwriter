@@ -1,0 +1,13 @@
+target_adom: "ADOM-Branch-Kansai"
+current_adom_label: "root"
+policy_package_name: "Branch-Standard-Policy"
+devices:
+  - site_label: "大阪支店"
+    mgmt_ip: "10.10.21.5"
+  - site_label: "名古屋支店"
+    mgmt_ip: "10.10.22.5"
+  - site_label: "福岡支店"
+    mgmt_ip: "10.10.23.5"
+rollback_allow_reboot: true
+schedule_install: true
+install_schedule_time: "2026-08-02 02:00 JST"

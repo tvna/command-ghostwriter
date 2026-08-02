@@ -1,0 +1,208 @@
+# SonicWall (SonicOS) 明示的プロキシモードへの切り替え(Client DPI-SSL)
+
+{{ target_branch_name }} のクライアント群を、これまでの透過型(Transparent
+Deployment、クライアント側の設定変更不要でアプライアンスが透過的に
+HTTPS通信をインターセプトする方式)から、明示的プロキシ(Proxy
+Deployment、クライアントブラウザが明示的にプロキシサーバー
+`{{ proxy_object_name }}` へ転送するよう設定され、アプライアンスが
+クライアントとプロキシの間に位置してインスペクションする方式)へ
+切り替えます。`POLICY | DPI-SSL > Client SSL` の `General` タブで
+IP-based exclusion cacheを無効化したうえで、既存のIPベース除外を
+Common Name(ドメイン名)ベースの除外へ移行し、切替後にプロキシ経由・
+非経由それぞれの挙動を検証します。
+
+## 目的
+
+状況(拠点のネットワーク構成やブラウザへのプロキシ配布可否)に応じて、
+SonicOS Client DPI-SSLをTransparent DeploymentからProxy Deploymentへ
+安全に切り替えられるようになることを目指します。あわせて、Proxy
+Deploymentでは複数ドメインが同一のプロキシサーバーIPを共有して見える
+ため、除外設定をIPベースからCommon Nameベースへ移行し、IP-based
+exclusion cacheを無効化しておく必要があることを理解し、切替後に
+除外漏れ・誤除外が起きていないことを検証する手順を身につけます。
+
+## 用語解説
+
+- **POLICY | DPI-SSL > Client SSL**: Client DPI-SSL(LAN側クライアントが
+  WAN側コンテンツへアクセスする際のHTTPS通信を検査する機能)の設定を
+  行う管理画面ナビゲーションパス。デフォルトで開く `General` タブに
+  `Enable SSL Client Inspection` チェックボックスがあり、これがオフの
+  場合はTransparent/Proxyいずれの方式でもHTTPS通信は検査されない
+- **Transparent Deployment**: クライアント側の設定変更が不要で、
+  アプライアンスが透過的にHTTPS通信をインターセプトして検査する
+  デプロイシナリオ。今回切り替える前の{{ target_branch_name }}の状態
+- **Proxy Deployment**: クライアントブラウザが明示的にプロキシサーバー
+  へ転送するよう設定され、アプライアンスがクライアントとプロキシの間に
+  位置してインスペクションするデプロイシナリオ。一次情報では、この
+  シナリオにおいてバーチャルホスティングサーバーやクラウド環境のように
+  同一サーバーIPを複数ドメインが共有するケースでもドメイン単位の除外を
+  サポートすると案内されている
+- **IP-based exclusion cache**: `Client SSL` の `General` タブにある
+  設定。有効なままだと、除外判定の結果を宛先IPアドレス単位でキャッシュ
+  する。Proxy Deploymentでは、アプライアンスから見た宛先IPが実際の
+  Webサーバーではなくプロキシサーバー`{{ proxy_object_name }}`の
+  IPになるため、このキャッシュが有効なままだと同じプロキシIP宛の
+  他ドメインの通信まで誤って除外・誤除外される可能性がある。一次情報
+  では、Proxy Deploymentにおいてこの設定を無効化することが必須と
+  案内されている
+- **Common Name Exclusion / CFS Category-based Exclusions/Inclusions**:
+  `Client SSL` 画面内の除外設定タブ。宛先IPアドレスではなく、証明書の
+  Common Name(ドメイン名)や、コンテンツフィルタリングのカテゴリ単位で
+  DPI-SSLの除外対象を指定できる。同一IPを複数ドメインが共有する
+  Proxy Deploymentでも、ドメインやカテゴリ単位であれば正しく除外できる
+
+## シナリオ設定
+
+{{ target_branch_name }}のクライアントが新たに明示的プロキシ経由で
+WANへ出るよう変更するにあたり、`OBJECT | Match Objects | Addresses`
+に登録するプロキシサーバーのAddress Objectは次のとおりです(Zone
+Assignmentは`{{ proxy_zone }}`)。
+
+| 項目 | 値 |
+|------|-----|
+| Name | {{ proxy_object_name }} |
+| Zone Assignment | {{ proxy_zone }} |
+| IP Address | {{ proxy_server_ip }} |
+| Port(クライアントのブラウザプロキシ設定に配布する値) | {{ proxy_server_port }} |
+
+既存のIPベース除外のうち、Proxy Deploymentへの移行に伴いCommon Name
+ベースの除外へ移行が必要な件数は {{ exclusion_migrations | length }}
+件です。
+
+| # | 移行元 Address Object(IPベース除外) | 対象IP | 移行先 Common Name | 理由 |
+|---|--------------------------------------|--------|---------------------|------|
+{% for m in exclusion_migrations %}| {{ loop.index }} | {{ m["address_object_name"] }} | {{ m["server_ip"] }} | {{ m["common_name"] }} | {{ m["reason"] }} |
+{% endfor %}
+
+CFS Category-based Exclusions/Inclusionsで維持・見直しするカテゴリは
+次のとおりです。
+
+| # | Category | 除外の維持 | 理由 |
+|---|----------|------------|------|
+{% for c in cfs_category_exclusions %}| {{ loop.index }} | {{ c["category"] }} | {% if c["keep_excluded"] %}維持する(除外のまま){% else %}維持しない(通常どおり検査する){% endif %} | {{ c["reason"] }} |
+{% endfor %}
+
+検証には、Common Nameベース除外の対象ドメイン
+`{{ verification_test_domain }}` と、除外対象ではないが同じプロキシ
+IPを経由するドメイン`{{ verification_shared_ip_test_domain }}`を
+使用します。
+
+## 手順
+
+### 1. 現状のClient DPI-SSL設定を確認する(変更前の基準を取る)
+
+`POLICY | DPI-SSL > Client SSL` を開き、`General` タブで
+`Enable SSL Client Inspection` が有効になっていること、および
+`IP-based exclusion cache` が現在どちらの状態かを記録します。あわせて
+既存の除外タブで、これから移行するIPベース除外
+({{ exclusion_migrations | length }} 件)が現在どのAddress Objectで
+登録されているかを確認します。
+
+### 2. プロキシサーバーのAddress Objectを作成する
+
+`OBJECT | Match Objects | Addresses` の `Address Objects` タブを開き、
+`Add` からシナリオ設定のとおり `Name`: `{{ proxy_object_name }}` /
+`Zone Assignment`: `{{ proxy_zone }}` / `Type`: `Host` /
+`IP Address`: `{{ proxy_server_ip }}` を設定し、`Save` で保存します。
+このAddress Objectは、後続の手順やアクセスルールの参照、および
+クライアントのブラウザプロキシ設定(手順6)先を明確にするために
+使用します。
+
+### 3. IP-based exclusion cacheを無効化する
+
+`POLICY | DPI-SSL > Client SSL` の `General` タブに戻り、
+`IP-based exclusion cache` を無効化します。Proxy Deploymentでは
+アプライアンスから見た宛先IPが`{{ proxy_object_name }}`
+(`{{ proxy_server_ip }}`)に集約されるため、このキャッシュを有効の
+ままにすると除外判定がドメインを跨いで誤って引き継がれるおそれが
+あります。設定後、`Enable SSL Client Inspection` は無効化せず有効の
+まま維持します。
+
+### 4. IPベースの除外をCommon Nameベースの除外へ移行する
+
+`Client SSL` 画面のCommon Name Exclusionタブを開き、シナリオ設定の
+移行表に沿って、移行元Address Objectに対応するCommon Nameエントリを
+追加します。
+
+{% for m in exclusion_migrations %}- {{ loop.index }}件目: 移行元
+  `{{ m["address_object_name"] }}`(対象IP {{ m["server_ip"] }}) →
+  Common Name `{{ m["common_name"] }}` を追加({{ m["reason"] }})
+{% endfor %}
+
+Common Nameエントリの追加を確認できた後に、対応する移行元のIPベース
+除外エントリ({{ exclusion_migrations | length }} 件)を無効化または
+削除します。移行元と移行先が両方有効な状態が短時間残っても動作上の
+問題はありませんが、移行完了後は移行元のIPベース除外を残さないように
+してください。
+
+### 5. CFS Category-based Exclusions/Inclusionsを見直す
+
+`Client SSL` 画面のCFS Category-based Exclusions/Inclusionsタブを
+開き、シナリオ設定のとおりカテゴリごとの除外設定を反映します。
+
+{% for c in cfs_category_exclusions %}- `{{ c["category"] }}`:
+  {% if c["keep_excluded"] %}チェックを入れたまま維持する(除外を継続){% else %}チェックを外す(通常どおりDPI-SSLで検査する){% endif %}
+  — {{ c["reason"] }}
+{% endfor %}
+
+### 6. Client DPI-SSLの証明書信頼設定を確認する
+
+対象クライアント端末にSonicWall DPI-SSLのCA証明書が信頼されたルート
+ストアへ配布済みであることを確認します。次の手順7でプロキシ経由に
+切り替えた後にこの証明書が未配布のクライアントが残っていると、除外
+対象外のHTTPSサイトすべてで証明書エラーが発生するため、プロキシ配布
+より先にここで確認しておきます。
+
+### 7. クライアントブラウザのプロキシ設定を配布する
+
+この手順はSonicOS側の設定ではなく、{{ target_branch_name }}の
+クライアント端末(ブラウザ)側の作業です。手順2で作成した
+`{{ proxy_object_name }}` の実体である `{{ proxy_server_ip }}:
+{{ proxy_server_port }}` を、GPOや端末管理ツールなど既存の配布手段で
+各クライアントのブラウザ/OSのプロキシ設定に投入します。配布が完了
+するまでは、対象クライアントの通信は引き続きTransparent Deployment
+と同じ経路のままになります。
+
+## 動作確認
+
+- `POLICY | DPI-SSL > Client SSL` の `General` タブで、
+  `Enable SSL Client Inspection` が有効、`IP-based exclusion cache`
+  が無効になっていること
+- Common Name Exclusionタブに、{{ exclusion_migrations | length }} 件
+  の移行先エントリ(`{{ exclusion_migrations[0]["common_name"] }}` 等)
+  が存在し、対応する移行元のIPベース除外エントリが残っていないこと
+- プロキシ設定を配布済みのクライアントから
+  `{{ verification_test_domain }}` へアクセスし、証明書エラーなく
+  (=正しく除外されて)閲覧できること
+- 同じクライアントから、除外対象ではない
+  `{{ verification_shared_ip_test_domain }}` へアクセスし、DPI-SSLに
+  よる検査(SonicWallのDPI-SSL証明書での再署名)が行われていることを
+  確認し、手順3のIP-based exclusion cache無効化により、上記の除外が
+  この宛先まで誤って及んでいないことを確認する
+- CFS Category-based Exclusions/Inclusionsで維持対象とした各
+  Categoryのサイトが除外のまま、維持しないとしたCategoryのサイトは
+  通常どおり検査対象になっていること
+
+## 注意事項
+
+- **移行元のIPベース除外を削除し忘れないこと。** 手順4でCommon Name
+  エントリを追加した後、移行元のIPベース除外エントリを残したままに
+  すると、`{{ proxy_server_ip }}` 宛の他ドメイン通信まで意図せず除外
+  されたままになるおそれがあります。
+- **証明書配布確認(手順6)を済ませてから、クライアントブラウザの
+  プロキシ配布(手順7)を展開してください。** 手順6を飛ばして手順7の
+  プロキシ配布を先に展開すると、除外対象外のサイトでブラウザの
+  証明書エラーが多発し、利用者からの問い合わせが集中するおそれが
+  あります。
+- 逆にProxy DeploymentからTransparent Deploymentへ戻す場合は、手順6の
+  クライアント側プロキシ設定を撤去したうえで、IP-based exclusion
+  cacheの無効化を維持するか有効に戻すかを、除外対象サーバーが引き続き
+  IPを共有しているかどうかで個別に判断してください。
+- 本手順書は一次情報(SonicOS DPI-SSL技術ドキュメントのDeployment
+  Scenarios、およびClient SSL設定に関する記事)で確認できた範囲の
+  設定項目のみを扱います。SonicOSのバージョンによりGUIのタブ構成が
+  異なる場合があるため、実際の画面と一致しない場合は該当バージョンの
+  一次情報を確認してください。
+- 管理者パスワードやAPIキーなどの認証情報は、本手順書やログに平文で
+  残さないでください。記録が必要な場合は `********` のようにマスク
+  し、秘密管理ツール等で別途安全に保管してください。

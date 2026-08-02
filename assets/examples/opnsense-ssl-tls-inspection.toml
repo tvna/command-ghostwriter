@@ -1,0 +1,25 @@
+proxy_interface = "lan"
+proxy_ip = "10.0.20.1"
+proxy_port = 3128
+inspect_network = "10.0.20.0/24"
+ca_descr = "OPNsense-SSLInspect-CA"
+verify_domain = "example.com"
+sni_trial_days = 7
+
+[[no_bump_sites]]
+category = "オンラインバンキング"
+domain = "*.example-bank.co.jp"
+verify_host = "www.example-bank.co.jp"
+reason = "決済資格情報を含む通信のため復号対象から除外"
+
+[[no_bump_sites]]
+category = "医療機関ポータル"
+domain = "*.example-clinic.jp"
+verify_host = "portal.example-clinic.jp"
+reason = "要配慮個人情報(診療情報)を可視化しないため除外"
+
+[[no_bump_sites]]
+category = "証券取引"
+domain = "*.example-securities.co.jp"
+verify_host = "trade.example-securities.co.jp"
+reason = "口座情報の漏えいリスクを避けるため除外"

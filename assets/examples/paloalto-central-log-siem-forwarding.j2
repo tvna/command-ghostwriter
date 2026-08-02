@@ -1,0 +1,245 @@
+# Palo Alto Networks(PAN-OS)のファイアウォールログ外部SIEM転送構成
+
+`Objects > Log Forwarding`でTraffic/Threatログ種別ごとの転送ルール(Match List)
+を持つLog Forwarding Profile`{{ log_forwarding_profile_name }}`を作成し、
+`Device > Server Profiles > Syslog`で冗長化した2台のSyslogサーバーへ、
+`Device > Server Profiles > HTTP`でTLS化したHTTPS宛先へそれぞれ転送します。
+`Policies > Security`のSecurity Policyルールにこのプロファイルを適用して
+commitした後、CLIの`debug log-receiver statistics`とPanoramaの
+`Managed Collectors`のHealth列で、転送遅延・欠落がないことを確認します。
+
+## 目的
+
+PAN-OSのLog Forwarding Profileにおいて、ログ種別(Log Type)ごとに独立した
+Match Listを作成し、各Match List内でSyslog/HTTPそれぞれの外部サービス種別
+向けにサーバープロファイルを追加するという構成モデルを理解した上で、
+1個のSyslogサーバープロファイルに複数台のサーバーを登録して冗長送信を構成
+できるようになることを目指します。あわせて、Security Policyルールの
+`Actions`タブにLog Forwarding Profileを適用してはじめて実際のログ転送が
+有効になること、および`debug log-receiver statistics`のSend Count/Drop
+Countと、Panoramaの`Log Collector Health Monitoring`によるLog Collector
+プロセス健全性の2系統から転送遅延・欠落を検知できるようになることを目指し
+ます。
+
+## 用語解説
+
+- **Log Forwarding Profile**: `Objects > Log Forwarding`で`Add`して作成する
+  プロファイル。ログ種別ごとの転送ルール(Match List)をまとめて管理し、
+  Security Policyルールに適用することで初めて有効になる
+- **Match List**: Log Forwarding Profile内の個々の転送ルール。一次情報には
+  「Enter a Name to identify the profile」「Select the Log Type」
+  「In the Filter drop-down, select Filter Builder」と説明されており、
+  `Name`・`Log Type`・`Filter`(Connector logic、Log Attribute、Operator、
+  Attribute Valueで条件を組み立てるFilter Builder)を設定する。さらに
+  「For each type of external service that you use for monitoring (SNMP,
+  Email, Syslog, and HTTP), Add one or more server profiles」とあり、
+  Match List内でSyslog/HTTP等の外部サービス種別ごとにサーバープロファイル
+  を`Add`する
+- **Syslog Server Profile**: `Device > Server Profiles > Syslog`で作成する
+  プロファイル。一次情報には「To increase availability, define multiple
+  servers (up to four) in a single profile」とあり、1プロファイルに最大
+  4台までのサーバーを登録して冗長送信できる。各サーバーには`Name`・
+  `Syslog Server`(IPアドレスまたはFQDN)・`Transport`(TCP/UDP/SSL(TLS)から
+  選択)・`Port`・`Format`(BSDまたはIETF)・`Facility`を設定する
+- **HTTP Server Profile**: `Device > Server Profiles > HTTP`で作成する
+  プロファイル。一次情報には「Select the Protocol (HTTP or HTTPS)」
+  「Select the TLS Version supported on the server—1.0, 1.1, or 1.2」
+  「Select the Certificate Profile to use for the TLS connection」と
+  あり、`Protocol`を`HTTPS`にすることでTLSでの送信を構成できる。
+  `Certificate Profile`はこの手順の対象外で、事前に作成済みのものを選択
+  する前提とする
+- **Actions タブのLog Forwarding**: 一次情報には「Select Policies→Security
+  and edit the rule」「Select Actions and select the Log Forwarding
+  profile」とあり、Security Policyルールの`Actions`タブでLog Forwarding
+  Profileを選択して初めて、そのルールを通過した通信のログが実際に転送
+  対象になる
+- **commit**: PAN-OSはcandidate configとrunning configを分離する二段階構成
+  モデルを採る。GUIで`OK`を押しただけの設定もcommitするまで実機の動作には
+  反映されない
+- **debug log-receiver statistics**: ログの外部転送状況を確認するCLI
+  コマンド。出力にはsyslog/http等の宛先種別ごとにSend Count(送信済み件数)
+  ・Drop Count(破棄件数)・Enqueue Count・Queue Depth・Send Rate(last
+  1min)が含まれ、複数回実行してSend Countが増加し続けていることを確認
+  することで転送継続を確認できる
+- **Log Collector Health Monitoring**: Panoramaの機能。一次情報には
+  「Select Panorama Managed Collectors and navigate to the Health
+  column」とあり、`Panorama > Managed Collectors`のHealth列で、管理対象
+  Log Collectorの健全性が「A green circle indicates that the Log
+  Collector is healthy」「a red circle indicates that one or more log
+  collection processes are experiencing degraded health」の2値で近
+  リアルタイムに表示される。監視対象プロセスは`logd`(ログ受信)・
+  `vldmgr`・`vlds`(ロギングディスク管理)・`es`(ElasticSearch)の4種類
+
+## シナリオ設定
+
+今回、ファイアウォールログの外部SIEM転送として構成する値は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| Log Forwarding Profile名(log_forwarding_profile_name) | `{{ log_forwarding_profile_name }}` |
+| TrafficログのMatch List名(traffic_match_list_name) | `{{ traffic_match_list_name }}` |
+| ThreatログのMatch List名(threat_match_list_name) | `{{ threat_match_list_name }}` |
+| Syslog Server Profile名(syslog_profile_name) | `{{ syslog_profile_name }}` |
+| Syslogサーバー1台目の名前(syslog_server1_name) | `{{ syslog_server1_name }}` |
+| Syslogサーバー1台目のアドレス(syslog_server1_address) | `{{ syslog_server1_address }}` |
+| Syslogサーバー2台目の名前(syslog_server2_name) | `{{ syslog_server2_name }}` |
+| Syslogサーバー2台目のアドレス(syslog_server2_address) | `{{ syslog_server2_address }}` |
+| Syslog Transport(syslog_transport) | `{{ syslog_transport }}` (TLS) |
+| Syslog Port(syslog_port) | {{ syslog_port }} |
+| Syslog Format(syslog_format) | `{{ syslog_format }}` |
+| Syslog Facility(syslog_facility) | `{{ syslog_facility }}` |
+| HTTP Server Profile名(http_profile_name) | `{{ http_profile_name }}` |
+| HTTPサーバーの名前(http_server_name) | `{{ http_server_name }}` |
+| HTTPサーバーのアドレス(http_server_address) | `{{ http_server_address }}` |
+| HTTP Protocol(http_protocol) | `{{ http_protocol }}` |
+| HTTP Port(http_port) | {{ http_port }} |
+| HTTP TLS Version(http_tls_version) | {{ http_tls_version }} |
+| 使用するCertificate Profile名(certificate_profile_name) | `{{ certificate_profile_name }}` |
+| プロファイルを適用するSecurity Policyルール名(security_rule_name) | `{{ security_rule_name }}` |
+| 健全性を確認するManaged Collector名(managed_collector_name) | `{{ managed_collector_name }}` |
+| Send Count確認の実行間隔(verify_interval_minutes) | {{ verify_interval_minutes }}分 |
+| Send Count確認の実行回数(verify_attempts) | {{ verify_attempts }}回 |
+
+`{{ certificate_profile_name }}`は事前に作成済みのCertificate Profileである
+前提とし、本手順ではその作成手順自体は扱いません。
+
+## 手順
+
+### 1. 現状を確認する(変更前の基準を取る)
+
+新しいプロファイル・ルールを1件も登録する前に、現状を確認します。
+
+- `Objects > Log Forwarding`を開き、`{{ log_forwarding_profile_name }}`と
+  同名のプロファイルが存在しないことを確認します。
+- `Device > Server Profiles > Syslog`および`Device > Server Profiles >
+  HTTP`を開き、`{{ syslog_profile_name }}`・`{{ http_profile_name }}`と
+  同名のプロファイルが存在しないことを確認します。
+- `Policies > Security`を開き、`{{ security_rule_name }}`の`Actions`タブ
+  で現在`Log Forwarding`が未設定(none)であることを確認します。
+
+### 2. Syslog Server Profileを作成する(冗長送信構成)
+
+`Device > Server Profiles > Syslog`で`Add`をクリックし、`Name`に
+`{{ syslog_profile_name }}`を入力します。可用性を高めるため、1プロファ
+イルに複数台(最大4台)まで登録できる仕組みを使い、次の2台を登録します。
+
+- 1台目: `Add`をクリックし、Name=`{{ syslog_server1_name }}` /
+  Syslog Server=`{{ syslog_server1_address }}` / Transport=
+  `{{ syslog_transport }}` / Port={{ syslog_port }} / Format=
+  `{{ syslog_format }}` / Facility=`{{ syslog_facility }}`を入力します。
+- 2台目: 同様に`Add`をクリックし、Name=`{{ syslog_server2_name }}` /
+  Syslog Server=`{{ syslog_server2_address }}` / Transport=
+  `{{ syslog_transport }}` / Port={{ syslog_port }} / Format=
+  `{{ syslog_format }}` / Facility=`{{ syslog_facility }}`を入力します。
+
+入力後は`OK`のみを行います。
+
+### 3. HTTP Server ProfileをTLSで作成する
+
+`Device > Server Profiles > HTTP`で`Add`をクリックし、`Name`に
+`{{ http_profile_name }}`を入力します。サーバー欄で`Add`をクリックし、
+Name=`{{ http_server_name }}` / Server=`{{ http_server_address }}` /
+Protocol=`{{ http_protocol }}` / Port={{ http_port }}を入力します。
+`Protocol`を`{{ http_protocol }}`にすることでTLS Versionと
+Certificate Profileの入力欄が表示されるので、TLS Versionに
+`{{ http_tls_version }}`を選択し、Certificate Profileに事前作成済みの
+`{{ certificate_profile_name }}`を選択します。
+
+入力後は`OK`のみを行います。認証用のヘッダーやトークンをこのプロファイル
+に設定する場合は、値をチケットやログに平文で残さず`****`のようにマスク
+してください。
+
+### 4. Log Forwarding Profileを作成する(Objects > Log Forwarding)
+
+`Objects > Log Forwarding`で`Add`をクリックし、`Name`に
+`{{ log_forwarding_profile_name }}`を入力します。Match Listを2件追加
+します。
+
+- Match List 1: `Name`に`{{ traffic_match_list_name }}`、`Log Type`に
+  `Traffic`を選択します。今回はTrafficログ全体を対象とするため、Filter
+  Builderで個別のLog Attribute/Operator/Attribute Valueの条件は追加しま
+  せん。Syslogのセクションで`Add`をクリックし、
+  `{{ syslog_profile_name }}`を選択します。
+- Match List 2: `Name`に`{{ threat_match_list_name }}`、`Log Type`に
+  `Threat`を選択します。同様にFilter Builderでの追加条件は設定しません。
+  Syslogのセクションで`Add`をクリックし`{{ syslog_profile_name }}`を、
+  HTTPのセクションで`Add`をクリックし`{{ http_profile_name }}`をそれぞれ
+  選択します(ThreatログはSyslogとHTTPS(TLS)の両方でSIEMへ送ります)。
+
+入力後は`OK`のみを行い、この時点ではまだ`Commit`は実行しません。
+
+### 5. Security Policyルールにプロファイルを適用する(Policies > Security)
+
+`Policies > Security`で`{{ security_rule_name }}`を開き、`Actions`タブ
+で`Log Forwarding`に`{{ log_forwarding_profile_name }}`を選択します。
+このルールを通過した通信のログが、手順4で設定したMatch Listの条件に
+従って転送されるようになります。
+
+入力後は`OK`のみを行います。
+
+### 6. 変更を確定する(commit)
+
+`Commit`を実行し、候補設定(candidate config)を実行中の設定(running
+config)へ反映します。commitが完了するまで、手順2〜5で入力した内容は実機
+の動作に反映されません。
+
+### 7. CLIとPanoramaで転送状況・健全性を確認する
+
+commit完了後、CLIで次のコマンドを{{ verify_interval_minutes }}分間隔で
+{{ verify_attempts }}回実行し、外部転送統計を確認します。
+
+```bash
+debug log-receiver statistics
+```
+
+syslog/http宛先それぞれのSend Countが実行のたびに増加していること、Drop
+Countが増加していないことを確認します。
+
+続けてPanoramaにログインし、`Panorama > Managed Collectors`を開いて
+`Health`列を確認します。`{{ managed_collector_name }}`のHealthがgreenの
+円で表示されていることを確認します。redの円が表示されている場合は、詳細
+(Health Status details)でどのプロセス(logd/vldmgr/vlds/es)が異常かを
+確認します。
+
+## 動作確認
+
+- `debug log-receiver statistics`の出力で、syslog宛先とhttp宛先それぞれの
+  Send Countが{{ verify_attempts }}回の実行を通じて増加し続けていること
+- 同コマンドの出力で、syslog宛先とhttp宛先それぞれのDrop Countが増加して
+  いないこと
+- `Panorama > Managed Collectors`のHealth列で`{{ managed_collector_name }}`
+  がgreenであること
+- `Objects > Log Forwarding`の`{{ log_forwarding_profile_name }}`に、
+  `{{ traffic_match_list_name }}`(Syslogのみ)と
+  `{{ threat_match_list_name }}`(SyslogとHTTPの両方)が設定されている
+  こと
+- `Policies > Security`の`{{ security_rule_name }}`の`Actions`タブで
+  `Log Forwarding`に`{{ log_forwarding_profile_name }}`が設定されている
+  こと
+- 手順1で確認した既存のプロファイル・ルール設定が意図せず変更されていない
+  こと
+
+## 注意事項
+
+- **Log Forwarding Profileを作成しただけでは転送は始まりません。**
+  `Policies > Security`の該当ルールの`Actions`タブに適用して初めてログが
+  転送されます。手順1で`{{ security_rule_name }}`が未設定であることを
+  確認したのはこのためです。
+- **Syslog Server Profileは1プロファイルにつき最大4台までしか登録でき
+  ません。** 今回は冗長化のため2台を登録していますが、3台目以降を追加
+  する場合はこの上限に注意してください。
+- **HTTP Server Profileの`Protocol`は`{{ http_protocol }}`のまま維持して
+  ください。** `HTTP`に変更するとTLSが無効になり、`TLS Version`・
+  `Certificate Profile`の入力欄も表示されなくなります。
+- **認証情報をこの手順書やチケット、ログに平文で残さないでください。**
+  HTTP Server Profileに設定する認証用ヘッダーやトークン、Certificate
+  Profileが参照する秘密鍵のパスフレーズ等は、記録が必要な場合`****`の
+  ようにマスクし、秘密管理ツール等で別途安全に保管してください。
+- `Commit`を実行するまでcandidate configはrunning configに反映されません。
+  手順2〜5で入力した内容は、手順6のcommitまで実機の動作に影響しません。
+- **`Panorama > Managed Collectors`のHealth列はgreen/redの2値表示です。**
+  redの場合にどのプロセスが異常かを特定するには、Health Status detailsを
+  別途確認する必要があります。
+- `debug log-receiver statistics`のSend Countは、対象ログが実際に発生した
+  場合にのみ増加します。確認時にTraffic/Threatログが発生していない環境
+  では、テスト通信を発生させてから確認してください。

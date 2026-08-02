@@ -1,0 +1,8 @@
+row_no,row_type,zone,name,match_source,match_application,qos_class,priority,egress_max,egress_guaranteed,unit,dos_max_sessions,description
+1,interface,guest-wifi,GuestWiFi-QoS-Interface,-,-,-,-,500,100,Mbps,-,ゲストWiFi収容インターフェースでQoSを有効化し全体のEgress Maxを設定
+2,qos_class,guest-wifi,Class4-Guest-Default,-,-,4,medium,20,5,Mbps,-,ゲストの既定トラフィックに割り当てる帯域上限クラス(1クラスあたりの目安値)
+3,qos_class,guest-wifi,Class8-Guest-Bulk,-,-,8,low,5,1,Mbps,-,大容量ダウンロード等の低優先トラフィックを抑制するクラス
+4,qos_rule,guest-wifi,QOS-GUEST-DEFAULT,any,any,4,-,-,-,-,-,ゲストゾーンの既定トラフィックをClass4に割り当てるQoS Policyルール
+5,qos_rule,guest-wifi,QOS-GUEST-BULK-SSL,any,ssl,8,-,-,-,-,-,大容量になりやすいアプリケーション(例としてssl)をClass8に割り当てるQoS Policyルール
+6,dos_profile,guest-wifi,DOS-GUEST-SRC-SESSION,-,-,-,-,-,-,-,50,送信元IPごとの最大同時セッション数を制限するClassified DoS Protection Profile(Address=source-ip-only)
+7,dos_rule,guest-wifi,DOS-RULE-GUEST,any,any,-,-,-,-,-,-,ゲストゾーン宛の通信にDOS-GUEST-SRC-SESSIONプロファイルを適用するDoS Protectionポリシールール

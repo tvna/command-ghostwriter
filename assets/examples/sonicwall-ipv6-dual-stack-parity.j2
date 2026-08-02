@@ -1,0 +1,210 @@
+# SonicWall (SonicOS) IPv6デュアルスタック Default-Denyパリティ確保
+
+SonicOS の Access Rules は `Adding Rule` ダイアログの `IP Version` ドロップ
+ダウンで `IPv4` / `IPv6` を切り替えることで、同じ `POLICY | Rules and
+Policies > Access Rules` ページ上に IPv4 と同等の Allow/Deny/Discard ルール
+を IPv6 用として作成できます。本手順書は、CSV で定義した
+{{ csv_rows | length }} 件のうち既存の IPv4 Allow ルール(基準)に対応する
+IPv6 Allow ルールを新規登録し、あわせて IPv6 側にも明示的な Deny ルールを
+整備することで、IPv4 環境と同様に「明示的に許可されない通信はデフォルトで
+拒否される」ポリシー設計(default-denyパリティ)を IPv6 側にも担保します。
+
+## 目的
+
+IPv4 側で既に運用している Allow ルールを基準に、IPv6 側にも同等の Allow
+ルールが存在することを確認・登録し、あわせて IPv6 側の明示的な Deny ルール
+を整備することで、IPv4/IPv6 いずれの通信であっても「許可リストにない通信は
+既定で拒否される」状態を均等に保てるようになることを目指します。IP Version
+の切り替え漏れによって IPv6 側だけ想定より広く通信が許可される、または
+逆に必要な通信が塞がれる、といった片肺状態を防ぎます。
+
+## 用語解説
+
+- **POLICY | Rules and Policies > Access Rules**: Access Rule を作成・編集
+  するための管理画面ナビゲーションパス。IPv4/IPv6 いずれのルールもこの
+  同じページから作成する
+- **IP Version ドロップダウン**: `Adding Rule` ダイアログ内で `IPv4` /
+  `IPv6` を選択するフィールド。同じ From Zone/To Zone/Action の組み合わせ
+  であっても、この値が異なれば別ルールとして扱われるため、IPv4用に作成した
+  ルールは自動的に IPv6 側へは適用されない
+- **Adding Rule ダイアログ**: Access Rules テーブル下部の `+Add` から開く
+  ルール追加ダイアログ。`My Rule Name` / `Description` / `Action`
+  (`Allow` / `Deny` / `Discard` のいずれか) / `IP Version`
+  (`IPv4` / `IPv6`) / `Priority`(`Auto Prioritize` / `Insert at the End`
+  / `Manual`) / `Schedule` を設定したうえで `Enable` を有効にし、`Save`
+  で保存する
+- **Source/Destination タブ**: 同ダイアログ内のタブ。`Source Zone/
+  Interface` と `Destination Zone/Interface` のドロップダウンでゾーンを
+  指定し、送信元・宛先それぞれの `Address` ドロップダウンで事前登録済みの
+  network address object を選ぶ。IPv6 ルールでは IPv6 用に登録済みの
+  address object を選択する。`Port/Services` では事前登録済みの Service
+  Object または Service Group を選ぶ
+- **Zone Matrix / Zone Matrix Selector**: Access Rules ページ上部の
+  Zone Matrix アイコンから開く選択ダイアログ。ゾーンペア(From Zone /
+  To Zone)を選ぶと、そのペア専用の Access Rule テーブルを表示できる。
+  IPv4 ルールと IPv6 ルールは同じゾーンペアのテーブル内に IP Version の
+  違いとして共存する
+- **the Any rule**: 各ゾーンペアの Access Rule テーブル最下段に存在する
+  既定ルール。ここまでに作成したどの Allow/Deny ルールにも一致しなかった
+  通信は、最終的にこの Any ルールによって扱われる。IPv4/IPv6 それぞれの
+  ゾーンペアテーブルに個別に存在する
+- **Traffic Statistics**: `POLICY | Rules and Policies > Access Rules`
+  ページで各ルール行左側の右矢印アイコンをクリックすると表示される、
+  そのルールに一致した通信量(`Rx Bytes` / `Rx Packets` / `Tx Bytes` /
+  `Tx Packets`)
+- **default-denyパリティ(本手順書独自の運用用語)**: ベンダー固有の設定
+  項目ではなく、本手順書がIPv4/IPv6双方の通信制御方針を指して用いる運用
+  上の呼び名。「IPv4 側で許可されている通信と同じ範囲だけが IPv6 側でも
+  許可され、それ以外は既定で拒否される」状態を指す
+
+## シナリオ設定
+
+今回パリティ確認・登録の対象とする {{ csv_rows | length }} 件は次のとおり
+です。`parity_of` 列は、その IPv6 ルールが対応する既存 IPv4 ルールの
+`rule_name` を示し、対応する IPv4 ルールが存在しない行(基準ルールや
+Deny ルール)は `-` です。
+
+| rule_no | ip_version | from_zone | to_zone | rule_name | action | parity_of | source_addr | dest_addr | service | priority | description |
+|---------|------------|-----------|---------|-----------|--------|-----------|--------------|-----------|---------|----------|--------------|
+{% for r in csv_rows %}| {{ r["rule_no"] }} | {{ r["ip_version"] }} | {{ r["from_zone"] }} | {{ r["to_zone"] }} | {{ r["rule_name"] }} | {{ r["action"] }} | {{ r["parity_of"] }} | {{ r["source_addr"] }} | {{ r["dest_addr"] }} | {{ r["service"] }} | {{ r["priority"] }} | {{ r["description"] }} |
+{% endfor %}
+
+`source_addr` / `dest_addr` 列のうち `Any` 以外の値(`dmz-web-server-v6`
+等)は network address object の名称、`service` 列の値(`HTTPS` 等)は
+Service Object / Service Group の名称です。いずれも `Address` /
+`Port/Services` ドロップダウンで選択する既存オブジェクトを前提とし、
+これらオブジェクト自体の新規作成は本手順書の対象外です。
+
+## 手順
+
+### 1. 既存IPv4 Allowルールを基準として確認する(パリティ照合の基準を取る)
+
+新しい IPv6 ルールを1件も追加する前に、パリティ確認の基準となる既存の
+IPv4 Allow ルールを確認します。
+
+- `POLICY | Rules and Policies > Access Rules` を開きます。
+- `Adding Rule` ダイアログを開かず一覧表示のまま、`IP Version` が `IPv4`
+  の既存ルールのうち、次の基準ルールが現在も有効であることを確認します。
+
+{% for r in csv_rows %}{% if r["ip_version"] == "IPv4" %}- rule_no {{ r["rule_no"] }}: `{{ r["rule_name"] }}` / From {{ r["from_zone"] }} To {{ r["to_zone"] }} / Source={{ r["source_addr"] }} / Destination={{ r["dest_addr"] }} / Service={{ r["service"] }}({{ r["description"] }})
+{% endif %}{% endfor %}
+
+これらの基準ルール自体は変更しません。以降の手順で、これらと同じ範囲の
+通信を IPv6 側にも許可する対応ルールを登録します。
+
+### 2. IP VersionをIPv6に切り替え、対応するIPv6 Allowルールを登録する
+
+シナリオ設定のうち `ip_version` が `IPv6` かつ `action` が `Allow` の行を、
+`rule_no` の昇順で1件ずつ `Access Rules` テーブル下部の `+Add` から登録
+します。`Adding Rule` ダイアログで、各行につき次のフィールドを表の値の
+まま設定します。
+
+- `My Rule Name`: `rule_name`
+- `Description`: `description`
+- `Action`: `Allow`
+- `IP Version`: `IPv6`(手順1の基準ルールと取り違えないよう必ず切り替える)
+- `Priority`: `priority`(`Auto Prioritize`)
+- `Schedule`: `Always`
+- Source/Destination タブの `Source Zone/Interface`: `from_zone`
+- Source/Destination タブの `Destination Zone/Interface`: `to_zone`
+- Source/Destination タブの Source `Address`: `source_addr`
+- Source/Destination タブの Destination `Address`: `dest_addr`
+- Source/Destination タブの `Port/Services`: `service`
+
+{% for r in csv_rows %}{% if r["ip_version"] == "IPv6" and r["action"] == "Allow" %}- rule_no {{ r["rule_no"] }}: `{{ r["rule_name"] }}` は IPv4側 `{{ r["parity_of"] }}` に対応するIPv6パリティルール / From {{ r["from_zone"] }} To {{ r["to_zone"] }} / Source={{ r["source_addr"] }} / Destination={{ r["dest_addr"] }} / Service={{ r["service"] }}({{ r["description"] }})
+{% endif %}{% endfor %}
+
+`Logging` タブは既定の有効状態(チェック済み)のまま変更しません。すべて
+の項目を設定したら `Enable` を有効にし、`Save` をクリックして保存します。
+
+### 3. IPv6側の明示的Denyルールを登録し、default-denyパリティを可視化する
+
+シナリオ設定のうち `ip_version` が `IPv6` かつ `action` が `Deny` の行は、
+IPv4 側の既定拒否動作と同じ範囲の拒否を IPv6 側でもログとして可視化する
+ためのルールです。手順2で登録した Allow ルールより**必ず後ろ**(評価順で
+最後)に置く必要があるため、`Priority` は `Insert at the End` を選択し
+ます。
+
+{% for r in csv_rows %}{% if r["ip_version"] == "IPv6" and r["action"] == "Deny" %}- rule_no {{ r["rule_no"] }}: `{{ r["rule_name"] }}` / From {{ r["from_zone"] }} To {{ r["to_zone"] }} / Action=Deny / Priority={{ r["priority"] }}({{ r["description"] }})
+{% endif %}{% endfor %}
+
+`My Rule Name` / `Description` / `Action`(`Deny`) / `IP Version`(`IPv6`)
+/ `Schedule`(`Always`)を設定し、Source/Destination タブの `Source Zone/
+Interface` / `Destination Zone/Interface` / `Address` / `Port/Services`
+は表の `source_addr` / `dest_addr` / `service` の値(いずれも `Any`)の
+まま設定します。`Logging` タブは既定の有効状態を維持し、`Enable` を有効
+にしてから `Save` をクリックします。
+
+### 4. Zone MatrixでIPv4/IPv6双方のテーブル並び順を確認する
+
+`Zone Matrix Selector` からシナリオ設定に登場する `From WAN To DMZ` /
+`From WAN To LAN` / `From WAN To WLAN` のそれぞれのゾーンペアを選択し、
+対応する Access Rule テーブルを表示します。各テーブルには `IP Version`
+が `IPv4` のルールと `IPv6` のルールが混在して表示されるため、次の2点を
+確認します。
+
+1. 手順2で登録した `IPv6` の Allow ルールが、そのゾーンペアの `Any`
+   ルールより上位(評価順で先)に並んでいること
+2. 手順3で登録した `IPv6` の Deny ルールが、`Any` ルールの直前に並んで
+   いること
+
+並び順が意図と異なる場合は、対象ルールの `Priority` 設定を見直して修正
+してください。
+
+### 5. Traffic StatisticsでIPv4/IPv6双方の許可・拒否挙動を検証する
+
+シナリオ設定の各ルールに対応する通信を、IPv4アドレスとIPv6アドレスの
+双方で実際に発生させたうえで、`POLICY | Rules and Policies > Access
+Rules` に戻り、各ルール行左側の右矢印アイコンをクリックして Traffic
+Statistics(`Rx Bytes` / `Rx Packets` / `Tx Bytes` / `Tx Packets`)を
+確認します。
+
+1. 手順1の IPv4 基準ルールと、手順2で登録した対応する IPv6 ルールの
+   両方について、それぞれのプロトコルで通信を発生させた後に `Rx Packets`
+   が増加していることを確認し、許可範囲が一致していることを確かめます。
+2. シナリオ設定に無い IPv6 通信(未許可の宛先ポート等)を `From WAN To
+   LAN` および `From WAN To WLAN` ゾーンへ発生させ、手順3で登録した
+   `Deny` ルールの `Rx Packets` が増加していることを確認します。
+3. 検証が終わったら、テーブル上部の Clear アイコンでカウンタをリセット
+   し、通常運用時の計測に影響を残さないようにします。
+
+## 動作確認
+
+- `POLICY | Rules and Policies > Access Rules` の `Zone Matrix Selector`
+  で、`From WAN To DMZ` テーブルに手順2の `IPv6` Allow ルールが存在し、
+  対応する `IPv4` Allow ルールと同じ Source/Destination/Service 範囲に
+  なっていること
+- `From WAN To LAN` / `From WAN To WLAN` テーブルに手順3の `IPv6` Deny
+  ルールが存在し、それぞれの `Any` ルールの直前に並んでいること
+- 各 IPv6 Allow ルールの Traffic Statistics(`Rx Packets`)が、対応する
+  許可対象の通信発生後に増加すること
+- 手順3の IPv6 Deny ルールの Traffic Statistics(`Rx Packets`)が、未許可
+  の IPv6 通信発生後に増加すること
+- 手順1で確認した IPv4 基準ルールが、本手順のいずれの段階でも変更されて
+  いないこと
+
+## 注意事項
+
+- **`IP Version` の切り替え忘れに注意すること。** `Adding Rule` ダイアログ
+  を複製・流用して IPv6 ルールを作成する場合、`IP Version` が `IPv4` の
+  まま保存されると、意図した IPv6 側のパリティが確保されないまま気づかず
+  に運用してしまうおそれがあります。手順2・3で必ず値を確認してください。
+- **各ゾーンペアの `Any` ルールを削除・編集しないこと。** `Any` ルールは
+  IPv4/IPv6 それぞれについて既定拒否動作を最終的に担保する砦であり、
+  本手順のいずれの段階でも変更しません。
+- **`Priority` の設定を誤らないこと。** Allow ルールより先に評価される
+  位置へ Deny ルールを置くと、後続の Allow ルールが一致する前に通信が
+  拒否されるおそれがあります。手順4のZone Matrix確認で並び順を必ず再確認
+  してください。
+- 本手順書は SonicOS の Access Rules(IPv6)機能で確認できる範囲の GUI
+  操作のみを扱います。SonicOS CLI やスクリプトによる同等の投入方法は
+  本手順書では確認できなかったため記載していません。CLI で投入する場合
+  は、別途 SonicOS の CLI リファレンスで構文を確認してから実施してくだ
+  さい。
+- `source_addr` / `dest_addr` / `service` に指定した network address
+  object・Service Object・Service Group は、IPv4/IPv6 それぞれ事前登録
+  済みであることを前提とします。これらオブジェクトの新規作成手順は本
+  手順書には含まれません。
+- 管理者パスワードや API キーなど認証情報は、本手順書やログに平文で残さ
+  ないでください。記録が必要な場合は `********` のようにマスクし、秘密
+  管理ツール等で別途安全に保管してください。

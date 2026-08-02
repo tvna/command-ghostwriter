@@ -1,0 +1,152 @@
+# SonicWall (SonicOS) URLカテゴリフィルタリングと誤検知例外運用
+
+SonicOS の Content Filtering Service(CFS)は、`Security Services > Content
+Filter` で50以上のURLカテゴリ(Phishing、Hacking など、危険性の高いセキュ
+リティ関連カテゴリを含む)ごとに Block/Allow 等のアクションを設定できる
+機能です。本手順書は、CSV で定義した {{ csv_rows | length }} 件のうち
+`row_type` が `category` の行を危険なURLカテゴリのBlock設定として登録し、
+続けて `row_type` が `exception` の行を `Excluded Address`
+(`Security Services > Content Filter > Excluded Address`)にアドレス
+オブジェクト単位の例外として登録することで、危険なURLカテゴリの自動遮断
+と、誤検知(過検知)時の迅速な例外設定を両立させる運用手順を示します。
+
+## 目的
+
+フィッシング詐欺サイトやハッキング支援サイト等の危険なURLカテゴリを
+SonicOS の Content Filtering Service(CFS)で自動的に遮断したまま維持し、
+かつ業務上正当なサイトが誤って(過検知で)ブロックされた場合には、
+`Excluded Address` を使ってアドレスオブジェクト単位の例外を最小範囲・
+最短手順で設定できるようになることを目指します。カテゴリ単位の既定
+遮断そのものを弱めず、例外は個別アドレスにのみ限定して適用します。
+
+## 用語解説
+
+- **Content Filtering Service (CFS)**: SonicOS が提供するURLカテゴリ
+  ベースのフィルタリング機能。50以上の事前定義カテゴリごとに
+  Block/Allow 等のアクションを設定でき、Phishing や Hacking のような
+  危険性の高いセキュリティ関連カテゴリは既定でBlockが推奨される
+- **Security Services > Content Filter**: CFS のカテゴリアクション設定
+  および `Excluded Address` の登録をあわせて行う管理画面のナビゲーション
+  パス
+- **カテゴリアクション (Block/Allow)**: `Security Services > Content
+  Filter` のカテゴリ一覧で、カテゴリごとに設定するアクション。`Block`
+  に設定したカテゴリに一致するURLへのアクセスは遮断される
+- **Excluded Address**: `Security Services > Content Filter` 内にある
+  除外設定。ここに登録したアドレスオブジェクトに該当する通信は、CFSの
+  カテゴリアクションによる遮断対象から外れる(content filtering is
+  disabled for IP addresses in the CFS exclusion list)。除外対象の
+  アドレスオブジェクトは同画面から新規作成できる
+- **address object**: 除外対象を表す、事前に登録済みまたは本手順で新規
+  作成するIPアドレス・アドレス範囲の名称付きオブジェクト。`Excluded
+  Address` にはこのオブジェクト単位で登録する
+
+## シナリオ設定
+
+今回 `Security Services > Content Filter` に設定するカテゴリアクション
+と、誤検知時に `Excluded Address` へ登録する例外は、次の
+{{ csv_rows | length }} 件です。
+
+| no | row_type | target_name | action | ip_or_range | reason | description |
+|----|----------|-------------|--------|-------------|--------|-------------|
+{% for r in csv_rows %}| {{ r["no"] }} | {{ r["row_type"] }} | {{ r["target_name"] }} | {{ r["action"] }} | {{ r["ip_or_range"] }} | {{ r["reason"] }} | {{ r["description"] }} |
+{% endfor %}
+
+`row_type` が `category` の行は `target_name` 列がCFSのカテゴリ名、
+`action` 列がそのカテゴリに設定するアクションです。`ip_or_range` /
+`reason` 列は該当しないため `-` としています。`row_type` が
+`exception` の行は `target_name` 列が新規作成する address object の
+名称、`ip_or_range` 列がそのオブジェクトに設定するIPアドレス、`reason`
+列が誤検知(過検知)によって例外が必要になった理由です。
+
+## 手順
+
+### 1. 現状のCFS設定を確認する(変更前の基準を取る)
+
+新しい設定を1件も変更する前に、現状を確認します。
+
+- `Security Services > Content Filter` を開きます。
+- カテゴリ一覧を確認し、シナリオ設定に登場するカテゴリ(`Phishing and
+  other Frauds` / `Hacking`)の現在のアクションを記録します。
+- `Excluded Address` の一覧を確認し、シナリオ設定の `exception` 行と
+  重複するアドレスオブジェクトが既に登録されていないことを確認します。
+
+### 2. 危険なURLカテゴリをBlockに設定する(row_type が category の行)
+
+シナリオ設定の `row_type` が `category` の行を、`no` の昇順で
+`Security Services > Content Filter` のカテゴリ一覧から1件ずつ設定
+します。
+
+{% for r in csv_rows %}{% if r["row_type"] == "category" %}- no {{ r["no"] }}: カテゴリ `{{ r["target_name"] }}` のアクションを `{{ r["action"] }}` に設定({{ r["description"] }})
+{% endif %}{% endfor %}
+
+各カテゴリ行のアクションを表の値に設定したら、画面の保存操作で確定
+します。この手順は既存のBlock設定を上書きしないよう、手順1で記録した
+現状のアクションと表の値が矛盾しないことを確認したうえで実施します。
+
+### 3. 誤検知時の例外をExcluded Addressに登録する(row_type が exception の行)
+
+シナリオ設定の `row_type` が `exception` の行を、`no` の昇順で
+`Security Services > Content Filter > Excluded Address` から1件ずつ
+登録します。`Excluded Address` の新規作成操作で、対象のIPアドレスを
+指定した address object を作成し、`Excluded Address` の一覧に追加
+します。
+
+{% for r in csv_rows %}{% if r["row_type"] == "exception" %}- no {{ r["no"] }}: address object `{{ r["target_name"] }}`(IP: {{ r["ip_or_range"] }})を Excluded Address に登録。理由: {{ r["reason"] }}
+{% endif %}{% endfor %}
+
+`Excluded Address` に登録したアドレスオブジェクトは、手順2で設定した
+すべてのカテゴリアクションの遮断対象から外れます。カテゴリ単位の除外
+ではなく対象アドレス全体の除外となるため、`ip_or_range` は誤検知の
+発生源となった最小範囲(単一IPまたは必要最小限のアドレス範囲)に限定
+します。
+
+### 4. 設定を保存し反映する
+
+手順2・手順3で行った設定をすべて保存し、`Security Services > Content
+Filter` の画面を再読み込みして、カテゴリ一覧のアクションと `Excluded
+Address` の一覧の双方が表の内容と一致していることを確認します。
+
+### 5. 実際のアクセスで動作確認する
+
+設定が反映されたことを確認したうえで、実際の通信を発生させて動作を
+検証します(詳細は次節「動作確認」を参照)。
+
+## 動作確認
+
+- `Security Services > Content Filter` のカテゴリ一覧で、シナリオ設定
+  の `category` 行それぞれについて `target_name` のカテゴリの
+  アクションが `action` 列の値(`Block`)になっていること
+- シナリオ設定の `category` 行に該当するURLカテゴリのサイトへアクセス
+  した際に、遮断(ブロック)される挙動になっていること
+- `Excluded Address` の一覧に、シナリオ設定の `exception` 行それぞれ
+  の `target_name` の address object が登録されていること
+- `exception` 行の `ip_or_range` に対応するアドレスからのアクセスが、
+  手順2で `Block` に設定したカテゴリに該当するURLであっても遮断され
+  ず、誤検知(過検知)が解消されていること
+- `exception` に登録していない他のアドレスからは、引き続き手順2の
+  `Block` カテゴリが遮断として機能していること
+- 手順1で記録した既存のカテゴリアクション・`Excluded Address` の構成
+  が、シナリオ設定にない部分では変更されていないこと
+
+## 注意事項
+
+- **`Excluded Address` はカテゴリ単位ではなくアドレス単位で全カテゴリ
+  の遮断を解除する例外です。** 誤検知の原因となったアドレスに限定して
+  登録し、必要以上に広いIPアドレス範囲(サブネット全体等)を登録しない
+  でください。
+- **セキュリティ関連カテゴリ(`Phishing and other Frauds` /
+  `Hacking` 等)のBlockアクションを恒常的に解除しないこと。** 誤検知が
+  発生した場合でも、カテゴリ全体のアクションを `Allow` に変更するの
+  ではなく、`Excluded Address` による個別アドレス単位の例外で対処し
+  ます。
+- 本手順書はSonicWall公式ドキュメント(CFS概要ページ)への直接アクセス
+  を試みましたが、Bot対策により本文を取得できなかったため、検索エンジン
+  経由で確認できた同ドキュメント系列の記述(メニューパス、`Excluded
+  Address` の登録手順、カテゴリ数、カテゴリ名)の範囲内でのみ記載して
+  います。カテゴリ一覧テーブルの詳細なUI項目(チェックボックスの正確な
+  配置等)やCLIによる同等の設定投入方法は確認できなかったため、本ページ
+  には記載していません。CLIで投入する場合は、別途SonicOSのCLIリファ
+  レンスで構文を確認してから実施してください。
+- 管理者パスワードやAPIキーなど認証情報は、本手順書やログに平文で残さ
+  ないでください。記録が必要な場合は `********` のようにマスクし、秘密
+  管理ツール等で別途安全に保管してください。

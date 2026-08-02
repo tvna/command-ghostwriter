@@ -1,0 +1,17 @@
+feed_name = "ExternalThreatIntelFeed01"
+server_ip = "198.51.100.25"
+protocol = "HTTPS"
+directory_path = "/feeds/malicious-ip"
+file_name = "malicious-ips.txt"
+download_interval = "1 hour"
+auth_required = true
+block_mode = "Firewall Rule-Based Connections"
+bot_access_rule_name = "ACC_WAN_TO_LAN_DEFAULT"
+block_public_if_db_missing = true
+enable_logging = true
+enable_custom_list = true
+custom_list_ip = "203.0.113.77"
+custom_list_reason = "自社SaaS連携基盤の踏み台IPを誤検知したため除外"
+geoip_enabled = true
+geoip_block_countries = ["CN", "RU", "KP"]
+geoip_exclusion_object = "AO_GRP_PARTNER_ALLOWLIST"

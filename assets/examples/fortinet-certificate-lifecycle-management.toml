@@ -1,0 +1,10 @@
+admin_fqdn = "fw01.example.jp"
+admin_cert_name = "acme-fw01-admin"
+vpn_fqdn = "vpn01.example.jp"
+vpn_cert_name = "acme-vpn01-portal"
+acme_email = "network-ops@example.jp"
+acme_interface = "wan1"
+acme_service = "Let's Encrypt"
+cert_expire_warning_days = 30
+automation_stitch_name = "cert-expiry-notify"
+notify_email_address = "noc-alert@example.jp"

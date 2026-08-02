@@ -1,0 +1,5 @@
+entry_id,url,type,exempt_scope,status,blocked_category,requester,ticket_no,description
+1,*partner-portal.example.com,wildcard,fortiguard,enable,Phishing,sales-dept,INC-2031,取引先向け発注ポータルがPhishingカテゴリに誤分類されアクセス不可のため例外化
+2,*billing.example.co.jp,wildcard,fortiguard web-content,enable,Malware,finance-dept,INC-2044,請求書発行システムの添付ファイル取得ページがMalwareカテゴリに誤分類されたため例外化
+3,*static.cdn-assets.example.net,wildcard,all,enable,Spyware,marketing-dept,INC-2058,社内向けCDN配信ドメインがSpywareカテゴリに誤分類され画像取得が失敗するため全面exemptで例外化
+4,*legacy-survey.example.org,wildcard,fortiguard,disable,Phishing,hr-dept,INC-1987,運用終了したアンケートサイトの例外設定を無効化(記録として行は残す)

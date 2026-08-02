@@ -1,0 +1,18 @@
+pbf_rule_name: pbf-wan-failover
+path_quality_profile_name: wan-quality-profile
+wan_links:
+  - name: ethernet1/1
+    zone: wan-primary
+    role: Primary
+    monitor_ip: 8.8.8.8
+    fail_action: fail-over
+  - name: ethernet1/2
+    zone: wan-backup
+    role: Backup
+    monitor_ip: 8.8.4.4
+    fail_action: wait-recover
+latency_threshold_ms: 100
+jitter_threshold_ms: 100
+packet_loss_threshold_pct: 1
+bandwidth_threshold_pct: 100
+sensitivity: Medium

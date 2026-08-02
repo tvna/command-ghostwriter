@@ -1,0 +1,23 @@
+target_branch_name: "大阪支社"
+proxy_object_name: "fwd-proxy-osaka"
+proxy_zone: "LAN"
+proxy_server_ip: "10.20.30.5"
+proxy_server_port: "8080"
+exclusion_migrations:
+  - address_object_name: "excl-ipbased-crm-vendor"
+    server_ip: "203.0.113.55"
+    common_name: "crm.vendor-example.com"
+    reason: "CRMベンダーのTLS終端がバーチャルホスティング構成で同一IPを複数ドメインと共有しており、Proxy DeploymentではこのIPが常にプロキシサーバー自身のIPとして見えてしまうため、IPベース除外のままでは他ドメインまで誤って除外(または除外漏れ)する"
+  - address_object_name: "excl-ipbased-partner-portal"
+    server_ip: "198.51.100.77"
+    common_name: "portal.partner-example.net"
+    reason: "パートナーポータルもCDN背後の共有IPで提供されており、Proxy Deployment移行後はCommon Name(ドメイン名)ベースの除外に切り替える必要がある"
+cfs_category_exclusions:
+  - category: "Financial Services"
+    keep_excluded: true
+    reason: "オンラインバンキングサイトの証明書ピンニング対策として、DPI-SSLによる復号の対象外を維持する"
+  - category: "Health and Medicine"
+    keep_excluded: false
+    reason: "大阪支社の対象クライアントセグメントでは業務上の除外理由がないため、今回は除外しない(通常どおりDPI-SSLで復号・検査する)"
+verification_test_domain: "portal.partner-example.net"
+verification_shared_ip_test_domain: "example-noexcl-shared-host.com"

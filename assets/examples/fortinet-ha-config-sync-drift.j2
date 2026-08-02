@@ -1,0 +1,171 @@
+# FortiGate HAクラスタの設定同期(Configuration Status)ドリフト監査
+
+FortiGate (FortiOS) のHA (High Availability) クラスタでは、プライマリで行った
+設定変更はハートビートリンク経由で自動的にセカンダリへ配布されますが、リンクの
+瞬断や同時変更などにより、まれにペア機器間の設定が非同期(out-of-sync)になる
+ことがあります。本手順書では、GUIのHA StatusウィジェットとCLIの
+`get system ha status`(Configuration Status)を用いてクラスタ
+`{{ ha_group_name }}`(グループID `{{ ha_group_id }}`)の同期状態を定期的に監査
+し、非同期を検知した場合は原因テーブルを特定したうえで是正する手順を示します。
+
+## 目的
+
+`{{ primary_hostname }}`(`{{ primary_serial }}`)と`{{ secondary_hostname }}`
+(`{{ secondary_serial }}`)からなるHAクラスタ`{{ ha_group_name }}`について、
+`{{ audit_interval_minutes }}`分ごとの定期監査でConfiguration Statusを確認し、
+非同期を早期に検知・是正できるようになることを目指します。あわせて、GUI・CLIの
+どちらからでも同期状態と非同期の原因テーブルを特定できるようになること、および
+非同期が`{{ max_out_of_sync_minutes }}`分を超えて継続する場合に
+`{{ escalation_channel }}`へエスカレーションする運用を定着させることを目指しま
+す。
+
+## 用語解説
+
+- **HA (High Availability) / Configuration Status**: FortiOSのHAクラスタを構成
+  するメンバー間の設定同期状態を示す値。CLIで`get system ha status`を実行する
+  と出力に`Configuration Status:`セクションが含まれ、各メンバーが
+  `<serial>(updated N seconds ago): in-sync`または`out-of-sync`のいずれかで
+  表示される
+- **HA Status ウィジェット**: HAセットアップ後にDashboardへ追加できるウィジェッ
+  ト。同期しているメンバーには緑のチェックマークが表示され、非同期のメンバーは
+  赤色でハイライトされる。非同期のメンバーにカーソルを合わせると、非同期の原因
+  となっているテーブル(オブジェクト種別)とチェックサム値がツールチップ表示さ
+  れる
+- **System > HAページ**: Dashboardウィジェットのほか`System > HA`ページでも
+  同様にメンバーの同期状態を確認できる。非同期のメンバーには赤いアイコンが表示
+  され、カーソルを合わせると非同期のテーブルとチェックサム値が確認できる
+- **チェックサム(checksum)**: FortiOSが設定テーブルごとに算出するハッシュ値。
+  `diagnose sys ha checksum cluster`を実行すると、クラスタの各メンバーについて
+  `debugzone`と`checksum`のglobal・root(VDOM別)・all各チェックサムが一覧表示
+  され、出力冒頭の`is_manage_master()=1`によってどのメンバーがプライマリかを
+  判別できる。両メンバーのチェックサムが一致していれば、そのテーブル(VDOM)
+  は同期済みと判断できる
+- **FGCP (FortiGate Clustering Protocol)**: FortiGateのHAクラスタ全体を制御す
+  るプロトコル。プライマリで行われた設定変更をハートビートリンク経由でセカン
+  ダリへ自動配布する仕組みもFGCPが担っている
+
+## シナリオ設定
+
+今回監査対象とするHAクラスタの設定値は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| HAグループ名(ha_group_name) | `{{ ha_group_name }}` |
+| HAグループID(ha_group_id) | {{ ha_group_id }} |
+| プライマリ機器ホスト名(primary_hostname) | `{{ primary_hostname }}` |
+| プライマリ機器シリアル番号(primary_serial) | `{{ primary_serial }}` |
+| プライマリ管理インターフェースIP(primary_mgmt_ip) | `{{ primary_mgmt_ip }}` |
+| セカンダリ機器ホスト名(secondary_hostname) | `{{ secondary_hostname }}` |
+| セカンダリ機器シリアル番号(secondary_serial) | `{{ secondary_serial }}` |
+| セカンダリ管理インターフェースIP(secondary_mgmt_ip) | `{{ secondary_mgmt_ip }}` |
+| 監査実施間隔(audit_interval_minutes) | {{ audit_interval_minutes }}分ごと |
+| 監査担当チーム(audit_owner_team) | `{{ audit_owner_team }}` |
+| エスカレーション先チャンネル(escalation_channel) | `{{ escalation_channel }}` |
+| 非同期許容時間(max_out_of_sync_minutes) | {{ max_out_of_sync_minutes }}分 |
+
+監査担当は`{{ audit_owner_team }}`とし、`{{ audit_interval_minutes }}`分ごとに
+本手順の手順1〜4を実施します。非同期が`{{ max_out_of_sync_minutes }}`分を超えて
+継続する場合は、手順5の是正を行ったうえで`{{ escalation_channel }}`へ状況を共有
+してください。
+
+## 手順
+
+### 1. Dashboardに HA Status ウィジェットを追加する(未追加の場合)
+
+1. `{{ primary_mgmt_ip }}`へGUIでログインし、`Dashboard`を開きます。
+2. 右上の`+ Widget`(ウィジェット追加)をクリックします。
+3. ウィジェット一覧から`HA Status`を選択して追加します。
+4. 追加した`HA Status`ウィジェットに、`{{ primary_hostname }}`
+   (`{{ primary_serial }}`)と`{{ secondary_hostname }}`
+   (`{{ secondary_serial }}`)の2メンバーが表示されることを確認します。
+
+### 2. CLIで現状のConfiguration Statusを確認する(監査の基準取得)
+
+`{{ primary_mgmt_ip }}`へSSHでログインし、`get system ha status`を実行します。
+
+```bash
+get system ha status
+```
+
+出力の`Configuration Status:`セクションに、`{{ primary_serial }}`と
+`{{ secondary_serial }}`の両方が`in-sync`と表示されていることを確認します。
+この時点の出力を、次回以降の監査で比較するための基準として記録してください。
+
+### 3. GUIのHA Status ウィジェット/System > HAページで同期状態を確認する
+
+1. `Dashboard`の`HA Status`ウィジェットを開き、`{{ primary_hostname }}`と
+   `{{ secondary_hostname }}`の両方に緑のチェックマークが表示されていることを
+   確認します。
+2. あわせて`System > HA`を開き、同じ2メンバーが同期済みの表示になっていること
+   を確認します。
+3. いずれかのメンバーが赤色でハイライトされている、または赤いアイコンが表示さ
+   れている場合は非同期です。手順4へ進み、原因テーブルを特定してください。
+
+### 4. 非同期を検知した場合、原因テーブルをGUI/CLIで特定する
+
+1. GUIの`HA Status`ウィジェットまたは`System > HA`ページで、赤色ハイライトさ
+   れているメンバー(`{{ secondary_hostname }}`など)にカーソルを合わせ、
+   ツールチップに表示される非同期のテーブル(オブジェクト種別)とチェックサム
+   値を確認します。
+2. CLIでも同様に、`diagnose sys ha checksum cluster`を実行し、
+   `{{ primary_serial }}`と`{{ secondary_serial }}`それぞれのdebugzone/checksum
+   (global・VDOM別・all)を比較します。
+
+```bash
+diagnose sys ha checksum cluster
+```
+
+`is_manage_master()=1`と表示されるメンバーがプライマリです。プライマリと
+セカンダリで`all`のチェックサムが異なる場合、手順4-1で確認した非同期テーブルの
+配下に、両ユニットの設定差分が存在します。
+
+### 5. 特定した設定差分を是正する
+
+1. まず`{{ audit_interval_minutes }}`分未満の一時的な非同期でないかを確認しま
+   す。FGCPはプライマリの設定変更をハートビートリンク経由で自動的にセカンダリ
+   へ配布するため、変更直後やハートビートリンクの瞬断直後は、数十秒〜数分程度
+   で自然に`in-sync`へ戻ることがあります。1〜2分後に手順2・手順3を再実施し、
+   自然に解消していないかを確認してください。
+2. 解消していない場合、手順4で特定したテーブルに対応するオブジェクト(Firewall
+   Policy、Addressオブジェクト等)をGUIで開き、`{{ primary_hostname }}`側の
+   設定内容を正として内容を確認します。
+3. `{{ secondary_hostname }}`側で該当オブジェクトが`{{ primary_hostname }}`側
+   と異なっている場合は、`{{ primary_hostname }}`側で当該オブジェクトを開いて
+   そのまま`OK`をクリックし直す(保存し直す)ことで、FGCPによる当該テーブルの
+   再同期を促します。
+4. 再同期後、手順2・手順3を再実施し、`Configuration Status`と`HA Status`ウィ
+   ジェットの両方で`{{ primary_serial }}`・`{{ secondary_serial }}`が
+   `in-sync`(緑のチェックマーク)に戻っていることを確認します。
+
+## 動作確認
+
+- CLIで`get system ha status`を実行し、`Configuration Status:`セクションで
+  `{{ primary_serial }}`・`{{ secondary_serial }}`の両方が`in-sync`と表示され
+  ること
+- GUIの`HA Status`ウィジェットおよび`System > HA`ページで、
+  `{{ primary_hostname }}`・`{{ secondary_hostname }}`の両方に緑のチェックマー
+  クが表示され、赤色ハイライト・赤いアイコンが表示されていないこと
+- `diagnose sys ha checksum cluster`の出力で、`{{ primary_serial }}`と
+  `{{ secondary_serial }}`の`all`のチェックサムが一致していること
+- 是正直後だけでなく、`{{ audit_interval_minutes }}`分後の次回定期監査でも再度
+  非同期に戻っていない(フラッピングしていない)こと
+
+## 注意事項
+
+- **Configuration Statusは即時反映ではありません。** `get system ha status`の
+  出力には`(updated N seconds ago)`のように直近の更新時刻が付与されており、
+  確認したタイミングによっては一瞬だけ非同期表示になることがあります。単発の
+  非同期表示だけで即座に障害と判断せず、手順5-1のとおり1〜2分後に再確認してく
+  ださい。
+- **非同期が`{{ max_out_of_sync_minutes }}`分を超えて継続する場合は、
+  `{{ escalation_channel }}`へ速やかにエスカレーションしてください。** 監査担
+  当(`{{ audit_owner_team }}`)の判断だけで是正を継続せず、影響範囲の大きい
+  オブジェクト(Firewall Policy等)の差分は関係者と共有したうえで是正してくだ
+  さい。
+- 本手順はFortiGate/FortiOS公式ドキュメント「Check HA synchronization status」
+  に基づく監視手順です。是正操作(手順5)は同ドキュメントで明示されたFGCPの
+  自動再同期の仕組みを前提としており、外部の監視スクリプトやcronジョブ等、本
+  手順に記載のないFortiOS外部の仕組みを追加で作成しないでください。
+- CLI/GUIへのログインに使う管理者パスワードやAPIトークンは、本手順書やチケッ
+  ト、ログに平文で残さないでください。記録が必要な場合は`********`のように
+  マスクし、秘密管理ツール等で別途安全に保管してください。

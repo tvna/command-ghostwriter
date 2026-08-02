@@ -1,0 +1,209 @@
+# FortiGate Webフィルタ誤検知URLのexempt登録
+
+FortiGate (FortiOS) の Web Filter プロファイルで FortiGuard カテゴリベース
+フィルタ(Phishing/Malware/Spyware等)による block を有効化済みであること
+を前提に、業務上必要な正当なURLが誤検知でブロックされた際、CSV で定義した
+{{ csv_rows | length }}件のうち `status` が enable の行を、静的URLフィルタ
+(Static URL Filter)の `exempt` アクションとして登録します。GUIでの登録手順
+と、同内容を投入するCLI(`config webfilter urlfilter`)手順を併記し、最後に
+セキュリティイベントログで実際に exempt が適用されたかを検証します。
+
+## 目的
+
+FortiGuard カテゴリベースフィルタが Phishing/Malware/Spyware 等の危険カテ
+ゴリを block に設定している状態を変更せずに、誤検知(過検知)でブロックさ
+れた業務上必要なURLだけを静的URLフィルタの `exempt` アクションで個別に例
+外化できるようになることを目指します。カテゴリ全体の動作(allow/monitor
+への変更)には触れず、URLパターン単位の狭い例外だけを追加・無効化できる
+状態を作ります。あわせて、セキュリティイベントログで exempt が意図どおり
+適用されたことを確認できるようになることを目指します。
+
+## 用語解説
+
+- **Web Filter プロファイル (`config webfilter profile`)**: GUIでは
+  `Security Profiles > Web Filter` から作成・編集するプロファイル。
+  FortiGuard カテゴリベースフィルタや静的URLフィルタなど、複数の子機能を
+  束ねる設定単位。Firewall Policyに割り当てて初めて有効になる
+- **FortiGuard カテゴリベースフィルタ (FortiGuard Category Based Filter)**:
+  Web Filter プロファイルの機能。カテゴリ単位で `Allow`/`Monitor`/`Block`/
+  `Warning`/`Authenticate`/`Disable` のいずれかの既定動作を設定できる。本
+  テンプレートは、対象カテゴリ(Phishing/Malware/Spyware等)がすでに
+  `Block` に設定済みであることを前提とし、この設定自体は変更しない
+- **静的URLフィルタ (Static URL Filter) / URL filter
+  (`config webfilter urlfilter`)**: 特定のURLパターン(Simple/Wildcard/
+  Regular expression)ごとに `exempt`/`block`/`allow`/`monitor` のいずれか
+  のアクションを設定できる機能。`urlfilter` テーブル(`edit <id>` で識別)
+  の配下に `config entries` で個々のURLパターンを登録する
+- **URL filter アクション `exempt` と `allow` の違い**: `allow` は「残りの
+  FortiGuard Webフィルタ等の処理に渡す」動作のため、カテゴリベースフィルタ
+  が対象カテゴリを `Block` に設定していれば結局ブロックされる。`exempt` は
+  「残りのFortiGuard Webフィルタ、Web content filter、Webスクリプトフィル
+  タ、アンチウイルススキャン、DLPプロキシ処理をバイパスする」動作のため、
+  カテゴリベースフィルタの `Block` 判定より優先して通信を通す。誤検知の例
+  外化には `exempt` を使う必要があり、`allow` では上書きできない
+- **`exempt` のスキップ範囲 (`set exempt`)**: URL filter エントリの
+  `action` が `exempt` の場合、どのセキュリティプロファイル処理をスキップ
+  するかを `av`(アンチウイルス) / `web-content`(Web content filter) /
+  `activex-java-cookie` / `dlp` / `fortiguard`(FortiGuard Webフィルタ) /
+  `range-block` / `pass` / `antiphish` / `all`(すべて) から個別に選択でき
+  る。この設定はGUIには表示されずCLIでのみ設定可能
+- **`urlfilter-table` (Web Filter プロファイルとの紐付け)**: Web Filter
+  プロファイルの `config web` 内で `set urlfilter-table <id>` を設定する
+  ことで、`config webfilter urlfilter` で作成したテーブルIDをそのプロファ
+  イルに適用する。テーブルへのエントリ追加だけであれば、この紐付けは初回
+  のみでよい
+
+## シナリオ設定
+
+Web Filter プロファイル `web-filter-standard` は Firewall Policy に適用済
+みで、FortiGuard カテゴリベースフィルタにより Phishing/Malware/Spyware等
+のカテゴリが `Block` に設定済みです(前提条件、本手順の対象外)。誤検知の
+申請を受けたURLを、静的URLフィルタのテーブルID `10`(名前
+`exempt-false-positives`)に次の{{ csv_rows | length }}件として登録・管理
+します。
+
+| entry_id | url | type | exempt_scope | status | blocked_category | requester | ticket_no | description |
+|----------|-----|------|--------------|--------|------------------|-----------|-----------|-------------|
+{% for r in csv_rows %}| {{ r["entry_id"] }} | {{ r["url"] }} | {{ r["type"] }} | {{ r["exempt_scope"] }} | {{ r["status"] }} | {{ r["blocked_category"] }} | {{ r["requester"] }} | {{ r["ticket_no"] }} | {{ r["description"] }} |
+{% endfor %}
+`blocked_category`/`requester`/`ticket_no` はドキュメント目的の記録用列で
+あり、FortiOSの設定パラメータには使用しません。`status` が `enable` の行
+は現在有効な例外、`disable` の行は過去に登録した例外を無効化した記録です。
+
+## 手順
+
+### 1. 現状のWebフィルタ運用を確認する(変更前の基準を取る)
+
+新しい例外を1件も追加する前に、現状を確認します。
+
+- `Security Profiles > Web Filter` を開き、`web-filter-standard` プロファ
+  イルの `FortiGuard Category Based Filter` で、シナリオ設定の
+  `blocked_category` 列にあるカテゴリ(Phishing/Malware/Spyware等)が
+  `Block` に設定されていることを確認します(この設定自体は変更しません)。
+- 同プロファイルの `Static URL Filter > URL Filter` に、テーブルID `10`
+  (`exempt-false-positives`)がすでに存在するか確認し、既存の例外エントリ
+  の内容を記録します。存在しない場合は手順2で新規作成します。
+
+### 2. 例外URLをGUIで登録する(status が enable の行)
+
+`Security Profiles > Web Filter` で `web-filter-standard` プロファイルを
+編集し、`Static URL Filter` セクションで `URL Filter` を有効化して
+`Create New` から、シナリオ設定の `status` が `enable` の行を登録します。
+
+{% for r in csv_rows %}{% if r["status"] == "enable" %}- entry_id {{ r["entry_id"] }}: URL=`{{ r["url"] }}` / Type=`Wildcard` /
+  Action=`Exempt` / Status=`Enable`(申請元: {{ r["requester"] }} /
+  チケット: {{ r["ticket_no"] }})
+{% endif %}{% endfor %}
+入力後は `OK` で保存します。
+
+### 3. 同じ内容をCLIでも登録する
+
+GUIと同じ内容を、`config webfilter urlfilter` でも登録します。`entries`
+配下の `edit` に続くIDは `entry_id` の値をそのまま使用します。
+
+```bash
+config webfilter urlfilter
+    edit 10
+        set name "exempt-false-positives"
+        config entries
+{% for r in csv_rows %}{% if r["status"] == "enable" %}            edit {{ r["entry_id"] }}
+                set url "{{ r["url"] }}"
+                set type wildcard
+                set action exempt
+                set exempt {{ r["exempt_scope"] }}
+                set status enable
+            next
+{% endif %}{% endfor %}        end
+    next
+end
+```
+
+### 4. Web Filter プロファイルにテーブルを紐付ける
+
+手順1で未紐付けを確認した場合のみ実施します。すでに紐付け済みの場合、この
+コマンドを再実行しても設定内容は変わりません。
+
+```bash
+config webfilter profile
+    edit "web-filter-standard"
+        config web
+            set urlfilter-table 10
+        end
+    next
+end
+```
+
+### 5. 過去の例外を無効化する(status が disable の行)
+
+業務上の必要性がなくなった例外は、行を削除せず `Status` を `Disable` にし
+て記録を残します。
+
+{% for r in csv_rows %}{% if r["status"] == "disable" %}- entry_id {{ r["entry_id"] }}: URL=`{{ r["url"] }}`(チケット:
+  {{ r["ticket_no"] }})を `Disable` にします。GUIでは対象行を編集して
+  `Status` を `Disable` に変更し `OK` で保存します。CLIでは次のとおり
+  `set status disable` のみを変更します。
+
+```bash
+config webfilter urlfilter
+    edit 10
+        config entries
+            edit {{ r["entry_id"] }}
+                set status disable
+            next
+        end
+    next
+end
+```
+{% endif %}{% endfor %}
+
+### 6. セキュリティイベントログでexemptの適用を検証する
+
+`Log & Report > Security Events` を開き、`Web Filter` カードを表示して
+`Add Filter` から `Event Type > urlfilter` で絞り込みます。CLIで確認する
+場合は次のコマンドを使用します。
+
+```bash
+execute log filter category utm-webfilter
+execute log display
+```
+
+1. シナリオ設定の `status` が `enable` の行それぞれについて、対応するURLに
+   実際にアクセスし、ブラウザでページが正常に表示される(ブロック用の置換
+   ページが表示されない)ことを確認します。
+2. 同じ通信のログエントリで `urlfilteridx` が対応する `entry_id` と一致し、
+   `action` が `blocked` になっていないことを確認します。
+
+## 動作確認
+
+- シナリオ設定の `status` が `enable` の行に対応するURLへアクセスした際、
+  ブロック用の置換ページが表示されず、正常にページが表示されること
+- セキュリティイベントログで、該当通信の `urlfilteridx` が対応する
+  `entry_id` と一致し、`action` が `blocked` になっていないこと
+- `status` が `disable` の行に対応するURLは、この手順書の対象外(例外が
+  無効化されているため、通常どおりFortiGuardカテゴリベースフィルタの
+  `Block` 判定に従いブロックされます)
+- 手順1で記録した既存の例外エントリの内容が、意図せず変更されていないこと
+- `FortiGuard Category Based Filter` のカテゴリ設定(Phishing/Malware/
+  Spyware等が `Block`)が、本手順の前後で変更されていないこと
+
+## 注意事項
+
+- **`exempt` は対象URLパターンに一致した通信について、指定したセキュリテ
+  ィプロファイル処理を丸ごとスキップします。** `exempt_scope` に `all` を
+  指定した行は、アンチウイルスやDLPも含めて全面的にスキップされるため、本
+  当にそのURLの通信内容を検査不要と判断できる場合にのみ使用してください。
+  安易に `all` を使わず、必要最小限のスコープ(例: `fortiguard` のみ)を
+  優先してください。
+- **URLパターンは可能な限り対象を絞り込んでください。** ワイルドカード
+  (`*`)を広く使うと、意図しないサブドメインやパスまで例外化されるおそれ
+  があります。
+- 静的URLフィルタの `exempt` は、`FortiGuard Category Based Filter` のカ
+  テゴリ設定そのものは変更しません。カテゴリ全体を `Allow`/`Monitor` に変
+  更する操作ではないため、他の通信への影響はURLパターンに一致した範囲に限
+  定されます。
+- 例外の追加・無効化はすべて、申請元(`requester`)とチケット番号
+  (`ticket_no`)を記録した上で行い、対応履歴を追跡できる状態を維持してく
+  ださい。
+- CLI/GUIへのログインに使う管理者パスワードやAPIトークンは、本手順書や
+  ログに平文で残さないでください。値を記録する場合は `********` のように
+  マスクし、秘密管理ツール等で別途安全に保管してください。

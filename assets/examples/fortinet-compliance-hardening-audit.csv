@@ -1,0 +1,20 @@
+check_no,check_item,current_value,target_value,easy_apply,remediation_cli
+1,Telnetによる管理アクセスの許可,allowaccessにtelnetを含む(暗号化されない管理アクセスを許可),allowaccessをhttps/sshのみに限定,yes,-
+2,管理者パスワードの複雑性ポリシー,パスワードポリシーが無効,12文字以上かつ大小英字・数字・記号を必須にしたポリシーを有効化,no,"config system password-policy
+    set status enable
+    set minimum-length 12
+    set min-lower-case-letter 1
+    set min-upper-case-letter 1
+    set min-number 1
+    set min-non-alphanumeric 1
+end"
+3,管理者ログイン試行のロックアウト,ロックアウト閾値・ロックアウト時間が未設定,3回失敗で60秒間ロックアウト,no,"config system global
+    set admin-lockout-threshold 3
+    set admin-lockout-duration 60
+end"
+4,管理者セッションのアイドルタイムアウト,admintimeoutが既定値(長時間)のまま,アイドル5分でGUI/CLIセッションを自動切断,yes,-
+5,管理アクセス元IPアドレスの制限,trusthostが未設定(全IPアドレスから到達可能),管理セグメントのみtrusthost1で許可,no,"config system admin
+    edit ""admin""
+        set trusthost1 10.0.0.0 255.255.255.0
+    next
+end"

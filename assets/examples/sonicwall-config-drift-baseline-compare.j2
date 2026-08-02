@@ -1,0 +1,186 @@
+# SonicWall (SonicOS) 設定ドリフト検知(承認済みベースライン比較)
+
+上位管理プラットフォームSonicWall Network Security Manager (NSM) 上で
+承認済みベースラインを `{{ baseline_template_name }}` テンプレートとして
+登録し、`{{ target_group_name }}` グループの対象機器を Configuration
+Auditor とドリフト検知で継続的に監査します。検知した逸脱は
+`Accept`(テンプレートへ反映して承認)または `Remediate`(機器側の設定を
+テンプレートへ巻き戻す)のいずれかで判定し、テンプレートの変更履歴と
+ロールバックで確定した変更を追跡します。
+
+## 目的
+
+稼働中の SonicWall firewall の設定が承認済みベースライン
+(`{{ baseline_version_label }}`)から逸脱していないかを定期的に検知し、
+意図しない変更(コンフィグドリフト)を早期に発見して、`Accept` /
+`Remediate` の判断につなげられるようになることを目指します。他ベンダー
+のネイティブ機能とは異なり、SonicWall (SonicOS)では上位管理プラット
+フォームSonicWall Network Security Manager (NSM)の「Configuration
+Auditor」機能が稼働中設定をベストプラクティスと自動的に突合し逸脱を
+検出するという別機構で同じ運用課題を解決します。あわせて、テンプレート
+の変更履歴とロールバック機能を使って、承認済みの変更を安全に基準へ
+取り込む進め方を身につけます。
+
+## 用語解説
+
+- **NSM (Network Security Manager)**: SonicWallの上位管理プラット
+  フォーム。複数のSonicWall firewallを一元管理するコンソールで、本手順の
+  テンプレート登録・Configuration Auditor実行・ドリフト検知はいずれも
+  SonicOS単体ではなくNSM側の機能として提供される
+- **Template(テンプレート)**: NSMで複数のfirewallに一括適用できる設定
+  のまとまり。承認済みの設定内容をテンプレートとして登録し、firewallまた
+  はグループへ割り当てることで、そのfirewallの「あるべき設定」の基準
+  (ベースライン)として機能する
+- **Configuration Auditor**: NSMの機能。firewallの設定を事前定義された
+  ベストプラクティス基準と突き合わせて評価し、各チェック項目をpass/fail
+  で判定したうえでセキュリティポスチャスコアを算出するレポート機能。
+  自動的なスケジュール実行にも対応する
+- **Drift(ドリフト)検知**: NSMがテンプレートを割り当て済みのfirewallを
+  継続的に監視し、SonicOS側で直接(NSM経由でなく)ローカルに変更が加え
+  られてテンプレートの内容と異なる状態になった場合に検知・アラートする
+  機能
+- **Accept / Remediate**: ドリフトが検知された際にNSM管理者が選べる2つの
+  対応。`Accept` はローカルの変更内容をテンプレート側に反映して承認する
+  対応、`Remediate` はfirewallの設定をテンプレートの内容に戻す(巻き戻
+  す)対応
+- **テンプレートの変更履歴とロールバック**: テンプレートに対する変更を
+  バージョンとして記録し、必要に応じて過去のバージョンへ戻せる機能
+
+## シナリオ設定
+
+承認済みベースラインは `{{ baseline_template_name }}`
+(`{{ baseline_version_label }}`、承認: {{ baseline_owner }})という
+テンプレートとして登録済みで、`{{ target_group_name }}` グループに属する
+次の {{ target_firewalls | length }} 台の firewall に割り当てます。
+
+| # | Name | Site | Role |
+|---|------|------|------|
+{% for f in target_firewalls %}| {{ loop.index }} | {{ f["name"] }} | {{ f["site"] }} | {{ f["role"] }} |
+{% endfor %}
+
+Configuration Auditor で継続的に監査するカテゴリと、その理由は次のとおり
+です(セキュリティポスチャスコアのアラート閾値: {{ posture_score_threshold }}
+点未満)。
+
+| # | Category | 監査する理由 |
+|---|----------|--------------|
+{% for c in audit_categories %}| {{ loop.index }} | {{ c["category"] }} | {{ c["reason"] }} |
+{% endfor %}
+
+ドリフトが検知された場合の推奨対応方針は次のとおりです。
+
+| # | Category | 推奨対応 | 理由 |
+|---|----------|----------|------|
+{% for d in drift_response_policy %}| {{ loop.index }} | {{ d["category"] }} | {% if d["recommended_action"] == "Remediate" %}`Remediate`(巻き戻す){% else %}`Accept`(承認する){% endif %} | {{ d["reason"] }} |
+{% endfor %}
+
+検証時は、`{{ target_group_name }}` グループのうち
+`{{ verification_target_firewall }}` に対して、
+{{ verification_change_description }} ことで意図的にドリフトを発生させ、
+検知からアラート通知({{ notification_recipients | join(", ") }} 宛)まで
+の流れを確認します。
+
+## 手順
+
+### 1. 承認済みベースラインをテンプレートとして登録する
+
+NSMのTemplate機能で、承認済みの設定内容を `{{ baseline_template_name }}`
+(`{{ baseline_version_label }}`)として登録します。承認者は
+{{ baseline_owner }} です。
+
+### 2. 対象グループにテンプレートを割り当てる
+
+`{{ target_group_name }}` グループに属する次の
+{{ target_firewalls | length }} 台の firewall へ、手順1のテンプレートを
+割り当てます。
+
+{% for f in target_firewalls %}- {{ loop.index }}台目: `{{ f["name"] }}`({{ f["site"] }} / {{ f["role"] }})
+{% endfor %}
+
+### 3. Configuration Auditorの監査カテゴリと自動実行を有効化する
+
+シナリオ設定の {{ audit_categories | length }} カテゴリを対象に
+Configuration Auditor を有効化し、自動的なスケジュール実行を設定します。
+併せて、セキュリティポスチャスコアが {{ posture_score_threshold }} 点を
+下回った場合にアラートが上がるよう設定します。
+
+{% for c in audit_categories %}- {{ c["category"] }}: {{ c["reason"] }}
+{% endfor %}
+
+### 4. ドリフト検知のアラート通知先を設定する
+
+手順2でテンプレートを割り当てた firewall に対するドリフト検知アラートの
+通知先として、{{ notification_recipients | join(", ") }} を登録します。
+
+### 5. 監査レポートを確認する(変更前の基準を取る)
+
+Configuration Auditorの実行結果を開き、各カテゴリのpass/fail判定と
+セキュリティポスチャスコアが現状どうなっているかを記録します。この時点
+ではまだドリフトが検知されていないことを前提とします。
+
+### 6. 検証用に意図的なドリフトを発生させる
+
+**この手順を飛ばして手順9に進まないでください。** 検知からAccept /
+Remediateの判定、通知までの一連の流れを確認するため、
+`{{ verification_target_firewall }}` に対して
+{{ verification_change_description }}。
+
+### 7. ドリフト検知アラートを確認する
+
+手順4で登録した通知先({{ notification_recipients | join(", ") }})に
+ドリフト検知アラートが届くこと、および `{{ verification_target_firewall }}`
+がテンプレート `{{ baseline_template_name }}` から逸脱した状態として
+表示されることを確認します。
+
+### 8. 検知したドリフトをシナリオ設定の推奨対応に従って判定する
+
+手順6で加えた変更について、対応するカテゴリの推奨対応
+({% for d in drift_response_policy %}{{ d["category"] }}: {% if d["recommended_action"] == "Remediate" %}`Remediate`{% else %}`Accept`{% endif %}{% if not loop.last %} / {% endif %}{% endfor %})
+に従って `Remediate`(`{{ verification_target_firewall }}` の設定を
+`{{ baseline_template_name }}` の内容に巻き戻す)を実行します。
+
+### 9. テンプレートの変更履歴を確認する
+
+`{{ baseline_template_name }}` の変更履歴(バージョン一覧)を開き、
+手順1で登録したバージョン `{{ baseline_version_label }}` から意図しない
+変更が加わっていないことを確認します。必要な場合は、変更履歴から以前の
+バージョンへロールバックできることも確認します。
+
+## 動作確認
+
+- `{{ target_group_name }}` グループの {{ target_firewalls | length }} 台
+  すべてに `{{ baseline_template_name }}`(`{{ baseline_version_label }}`)
+  が割り当てられていること
+- Configuration Auditor が {{ audit_categories | length }} カテゴリすべて
+  を対象に自動実行され、セキュリティポスチャスコアが記録されていること
+- 手順6で `{{ verification_target_firewall }}` に加えた意図的な変更が、
+  ドリフトとして検知されていること
+- 手順4で登録した通知先({{ notification_recipients | join(", ") }})に
+  ドリフト検知アラートが届いたこと
+- 手順8の `Remediate` 実行後、`{{ verification_target_firewall }}` の設定
+  が `{{ baseline_template_name }}` の内容に一致し、ドリフトが解消されて
+  いること
+- `{{ baseline_template_name }}` の変更履歴に、手順1のベースライン以降の
+  意図しない変更が含まれていないこと
+
+## 注意事項
+
+- 本手順書は、SonicWall公式サイト・ナレッジベースおよび検索結果で確認
+  できた範囲のNSMの機能名(Template、Configuration Auditor、Drift検知、
+  `Accept` / `Remediate`、変更履歴とロールバック)のみを扱います。具体的
+  な画面のナビゲーションパスやボタン名は、一次情報への直接アクセスでは
+  確認できなかったため本手順書には記載していません。実施前に、お使いの
+  NSMのバージョンの管理コンソール上の実際の表示に従って読み替えてくだ
+  さい。
+- `Remediate` は firewall 側の設定を強制的にテンプレートの内容へ巻き戻す
+  操作です。承認前の正当な緊急変更まで巻き戻してしまわないよう、実行前
+  に変更内容と申請の有無を必ず確認してください。
+- `Accept` はローカルの変更をテンプレート側の恒久的な基準として取り込む
+  操作です。安易に `Accept` すると、意図しない変更がそのままベースライン
+  化されてしまうため、承認プロセスを経た変更であることを確認してから
+  実行してください。
+- SonicOS CLIやAPIによる同等のドリフト比較方法は本手順書の一次情報では
+  確認できなかったため記載していません。
+- 管理者パスワードやAPIキーなどの認証情報は、本手順書やログに平文で
+  残さないでください。記録が必要な場合は `********` のようにマスクし、
+  秘密管理ツール等で別途安全に保管してください。

@@ -1,0 +1,156 @@
+# PAN-OSにおける複数WAN回線の自動フェイルオーバー
+
+Policy-Based Forwarding(PBF)のPath MonitoringとSD-WANのPath Quality
+Profileを組み合わせ、{{ wan_links | length }} 本のWAN回線
+(`{{ pbf_rule_name }}`)について、回線障害時に自動的に経路を切り替え、
+業務継続性を確保します。切替に要した時間と、通信がPrimary回線へ戻る
+復旧条件は、動作確認の手順で実測して記録します。
+
+## 目的
+
+複数のWAN回線を持つPAN-OSファイアウォールにおいて、ICMPハートビートに
+よる到達性監視(Path Monitoring)としきい値ベースの回線品質監視(Path
+Quality Profile)を設定し、回線障害発生時に自動でフェイルオーバーさせ、
+切替時間と復旧条件を把握できるようになることを目指します。
+
+## 用語解説
+
+- **PBF(Policy-Based Forwarding)**: 送信元・宛先・アプリケーションなどの
+  条件に基づき、通常のルーティングテーブルとは異なる転送先インター
+  フェースを指定できるPAN-OSのポリシー。`Policies > Policy Based
+  Forwarding` で設定する
+- **Path Monitoring(PBF)**: 一次情報には "Path monitoring allows you to
+  verify connectivity to an IP address so that the firewall can direct
+  traffic through an alternate route, when needed."(Path Monitoringは
+  IPアドレスへの疎通を確認し、必要に応じてファイアウォールが別経路へ
+  トラフィックを転送できるようにする)と記載されている。ICMPハートビート
+  で監視先IPアドレス(Monitor IP)への到達性を確認し、しきい値
+  (heartbeat数)を下回ると設定したアクションを実行する
+- **Path Monitoringの失敗時アクション**: 一次情報には `fail-over`
+  (ルーティングテーブルに従って転送する。新規セッションでは、残りの
+  PBFルールも確認したうえでルーティングテーブルを使用する)と
+  `wait-recover`(PBFで指定した発信インターフェースを使い続けながら
+  監視を継続する。新規セッションはルーティングテーブル側の判断に
+  委ねられる)の2種類が挙げられている
+- **SD-WANのPath Quality Profile**: `Objects > SD-WAN Link Management >
+  Path Quality Profile` で作成する、回線品質のしきい値を定義する
+  プロファイル。Latency・Jitter・Packet Loss・Bandwidthの4指標について
+  しきい値と感度(Low/Medium/High)を設定でき、いずれか1つの指標が
+  しきい値を超えるとフェイルオーバーの対象となる(OR条件)
+- **Aggressive/Relaxedモード**: 一次情報には、ISP接続(リンクタイプ)を
+  定義する際に "aggressive or relaxed path monitoring" を選択できると
+  記載されている。プロービングの頻度に関わる設定だが、具体的な間隔秒数
+  は本手順書が参照した一次情報の範囲には含まれていないため、本手順書
+  には記載していない
+- **Monitor IP**: Path Monitoringが疎通確認の対象とするIPアドレス。
+  ISP側のゲートウェイや、インターネット上の安定した既知のIPアドレスを
+  指定するのが一般的
+
+## シナリオ設定
+
+対象のWAN回線は次のとおりです(wan_links, {{ wan_links | length }} 本):
+
+| # | 役割 | インターフェース | ゾーン | Monitor IP | 失敗時アクション |
+|---|------|-------------------|--------|------------|-------------------|
+{% for link in wan_links %}| {{ loop.index }} | {{ link["role"] }} | {{ link["name"] }} | {{ link["zone"] }} | {{ link["monitor_ip"] }} | {{ link["fail_action"] }} |
+{% endfor %}
+
+| 項目 | 値 |
+|------|-----|
+| PBFルール名(pbf_rule_name) | {{ pbf_rule_name }} |
+| Path Quality Profile名(path_quality_profile_name) | {{ path_quality_profile_name }} |
+| Latencyしきい値(latency_threshold_ms) | {{ latency_threshold_ms }} ms |
+| Jitterしきい値(jitter_threshold_ms) | {{ jitter_threshold_ms }} ms |
+| Packet Lossしきい値(packet_loss_threshold_pct) | {{ packet_loss_threshold_pct }} % |
+| Bandwidth使用率しきい値(bandwidth_threshold_pct) | {{ bandwidth_threshold_pct }} % |
+| 各指標の感度(sensitivity) | {{ sensitivity }} |
+
+## 手順
+
+### 1. 現状のWAN回線構成と既定ルートを確認する
+
+設定変更の前に、各WAN回線が現在どのゾーンに属し、既定のルーティング
+テーブル上でどちらが優先されているかを確認します。
+
+{% for link in wan_links %}- {{ link["role"] }}: `{{ link["name"] }}`({{ link["zone"] }})、Monitor IP =
+  `{{ link["monitor_ip"] }}`
+{% endfor %}
+
+### 2. PBFルールを作成し、Path Monitoringを有効にする
+
+`Policies > Policy Based Forwarding > Add` から `{{ pbf_rule_name }}` を
+作成し、対象トラフィックの転送先インターフェースを指定したうえで、
+Path Monitoringを有効にします。各回線について、監視先IPアドレスと
+失敗時アクションを次のとおり設定します。
+
+{% for link in wan_links %}- {{ link["role"] }}(`{{ link["name"] }}`): Monitor IP = `{{ link["monitor_ip"] }}` /
+  Action = `{{ link["fail_action"] }}`
+{% endfor %}
+設定後、保存します(この時点ではまだ `Commit` しません)。
+
+### 3. SD-WANのPath Quality Profileを作成する
+
+`Objects > SD-WAN Link Management > Path Quality Profile > Add` から
+`{{ path_quality_profile_name }}` を作成し、次のしきい値と感度を設定
+します。
+
+| 指標 | しきい値 | 感度 |
+|------|----------|------|
+| Latency | {{ latency_threshold_ms }} ms | {{ sensitivity }} |
+| Jitter | {{ jitter_threshold_ms }} ms | {{ sensitivity }} |
+| Packet Loss | {{ packet_loss_threshold_pct }} % | {{ sensitivity }} |
+| Bandwidth | {{ bandwidth_threshold_pct }} % | {{ sensitivity }} |
+
+これらの指標はOR条件で評価されるため、いずれか1つでもしきい値を超えると
+フェイルオーバーの対象になります。
+
+### 4. ISP接続(リンクタイプ)の監視モードを確認する
+
+ISP接続(リンクタイプ)の定義画面で、Aggressive/Relaxedいずれの監視
+モードが選択されているかを確認します。具体的なプロービング間隔の値は
+本手順書が参照した一次情報の範囲に含まれていないため、実機のGUI上で
+現在の設定値を直接確認してください。
+
+### 5. Commitし、切替時間・復旧条件を計測する準備をする
+
+`Commit` を実行して設定を反映します。反映後、動作確認の手順に進む前に、
+現在時刻を記録し、フェイルオーバー試験の基準時刻とします。
+
+## 動作確認
+
+- Primary回線(`{{ wan_links[0]["name"] }}`)のMonitor IP
+  (`{{ wan_links[0]["monitor_ip"] }}`)への疎通を意図的に遮断し、
+  Action(`{{ wan_links[0]["fail_action"] }}`)に応じた経路切替が発生する
+  ことを確認する
+- 遮断してから通信が継続可能になるまでの時間(切替時間)を計測し記録する
+- Backup回線(`{{ wan_links[1]["name"] }}`)経由で通信が継続することを
+  確認する
+- Path Quality Profile(`{{ path_quality_profile_name }}`)のLatency・
+  Jitter・Packet Loss・Bandwidthのいずれかがしきい値を超えた場合にも、
+  同様に経路切替が行われることを確認する
+- Primary回線の疎通を復旧させ、Monitor IPへの到達性がしきい値を再び
+  上回ってから、通信がPrimary回線へ戻る(または戻らない)までの時間と
+  条件を記録する
+
+## 注意事項
+
+- **`fail-over` と `wait-recover` の挙動の違いを事前に理解しておく
+  こと。** 一次情報には、`fail-over` はルーティングテーブルに従って
+  転送し新規セッションでは残りのPBFルールも確認したうえでルーティング
+  テーブルを使用する、`wait-recover` はPBFで指定した発信インター
+  フェースを使い続けながら監視を継続し新規セッションはルーティング
+  テーブル側の判断に委ねられる、とそれぞれ記載されている。両者の詳細な
+  復旧タイミングの違いは、適用前に実機のGUI上のヘルプ説明でも必ず
+  再確認すること
+- ICMPハートビートによる疎通確認は、あくまで指定したMonitor IPへの
+  到達性を確認するものであり、実際のアプリケーション通信の到達性を
+  保証するものではない
+- Path Quality Profileの4指標(Latency/Jitter/Packet Loss/Bandwidth)は
+  OR条件で評価されるため、感度(sensitivity)を高く設定するほど、
+  想定より早いタイミングでフェイルオーバーが発生する可能性がある
+- Aggressive/Relaxedモードにおける具体的なプロービング間隔の秒数は、
+  本手順書が参照した一次情報の範囲には含まれていないため記載していない。
+  導入前に実機のGUIで現在の設定値を必ず確認すること
+- 切替時間はMonitor IPへのハートビート間隔・しきい値・Path Quality
+  Profileの各しきい値・感度設定に依存するため、環境ごとに実測して
+  記録すること

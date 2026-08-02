@@ -1,0 +1,6 @@
+rule_no,category,application,action,description
+1,P2P,BitTorrent,block,ポート番号に依存しないP2Pファイル共有トラフィックを遮断
+2,Anonymizer,Tor,block,ポート偽装や迂回通信に使われるTorプロトコルを遮断
+3,Cloud Storage,Dropbox,monitor,未承認SaaSストレージの利用実態を可視化するため監視のみ行う
+4,Cloud Storage,Google Drive,allow,承認済みSaaSストレージとして業務利用を許可
+5,Collaboration,Slack,allow,承認済みコラボレーションツールとして業務利用を許可

@@ -1,0 +1,209 @@
+# PAN-OSによるネットワークデバイスの自動検出とトポロジ可視化
+
+SNMP Network Discovery(既設スイッチ経由でのパッシブ検出)と、そのデータを
+受け取るDevice Security(旧IoT Security、クラウドサービス連携)を組み合わせ、
+探索範囲({{ discovery_scope_cidrs | length }} 件のCIDRブロック)内のL2/L3
+デバイスを自動検出し、Monitor > IoT Devices のAsset Inventoryで一覧化します。
+既知の静的デバイス({{ known_static_devices | length }} 台)を事前登録した上で、
+検出された各デバイスの信頼度スコアを確認し、未確認(=信頼度スコアが100%
+未満)のデバイスを未許可デバイス候補として洗い出します。
+
+## 目的
+
+ネットワーク上のデバイスを自動検出しL2/L3トポロジを可視化するとともに、
+未許可デバイスの接続を検知できるようになることを目指します。他ベンダーの
+ネイティブ機能とは異なり、Palo Alto Networks (PAN-OS)ではSNMP Network
+Discovery(既設スイッチ経由でのパッシブ検出)およびDevice Security(旧IoT
+Security、クラウドサービス連携)によるL2/L3デバイスインベントリ・トポロジ
+可視化という別機構で同じ運用課題を解決します。
+
+## 用語解説
+
+- **SNMP Network Discovery**: `Device > IoT Security > Network Discovery` の
+  SNMP Network Discoveryセクションで歯車アイコンから設定するダイアログ。
+  エントリーポイントスイッチを起点にSNMPv2cで既設スイッチへ問い合わせ、
+  最大ホップ数の範囲でパッシブにL2/L3デバイスを探索する
+- **エントリーポイントスイッチ**: SNMP探索の起点となるスイッチのIP
+  アドレス。ここから最大ホップ数の範囲でスイッチをたどりながら接続機器を
+  収集する
+- **Device Security(旧IoT Security)**: SNMPジョブの実行結果はEnhanced
+  Application logsに変換されてロギングサービスへ送られ、ロギングサービスが
+  Device Securityへストリーミングする。Device Securityはこのデータを
+  分析してデバイス識別とインベントリ化を行うクラウドサービスであり、
+  ファイアウォールがDevice Securityのサブスクリプションを有効化していないと
+  Monitor > IoT Devices にデータは表示されない
+- **Monitor > IoT Devices**: PAN-OS 11.1以降、Device Securityが収集した
+  デバイス情報をIoT Securityポータルを開かずにPAN-OS Web UI上で直接閲覧
+  できる画面。Summary(デバイスカテゴリ・デバイスプロファイル・OSの上位
+  10件のパネル)とAsset Inventory(デバイス単位の一覧テーブル)から構成
+  される
+- **Asset Inventory**: {{ asset_inventory_columns | length }} 列
+  ({% for col in asset_inventory_columns %}{{ col }}{% if not loop.last %}・{% endif %}{% endfor %})
+  で検出済みデバイスを一覧するテーブル。手動でのAdd Static IP Deviceの
+  追加、デバイスのConfirm Device Identity、Create Device-IDによる
+  カスタムポリシー向けのDevice-IDオブジェクト作成が行える
+- **信頼度スコア(Confidence Score)**: デバイスの身元がConfirm Device
+  Identityで確認されるまでは100%未満となる値。Confirm Device Identityを
+  実行すると即座に100%になり、PanoramaおよびDevice Securityへ同期される
+- **Add Static IP Device**: 既知の固定IPデバイスをAsset Inventoryへ手動で
+  事前登録する操作。IPアドレスは必須で、ホスト名やOSグループなどの属性は
+  任意項目となる
+
+## シナリオ設定
+
+SNMP Network Discoveryの設定値は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| SNMPコミュニティ文字列(snmp_community_string) | {{ snmp_community_string }} |
+| ポーリング間隔(polling_interval_minutes) | {{ polling_interval_minutes }} 分 |
+| 最大ホップ数(max_hop_count) | {{ max_hop_count }} |
+| SNMPタイムアウト(snmp_timeout_ms) | {{ snmp_timeout_ms }} ms |
+| SNMPリトライ回数(snmp_retry_count) | {{ snmp_retry_count }} 回 |
+
+エントリーポイントスイッチ一覧(entry_point_switches,
+{{ entry_point_switches | length }} 台):
+
+| # | スイッチ名 | IPアドレス |
+|---|-----------|-----------|
+{% for sw in entry_point_switches %}| {{ loop.index }} | {{ sw["name"] }} | {{ sw["ip_address"] }} |
+{% endfor %}
+
+探索範囲(discovery_scope_cidrs, {{ discovery_scope_cidrs | length }} 件):
+
+{% for cidr in discovery_scope_cidrs %}- `{{ cidr }}`
+{% endfor %}
+
+事前登録する既知の静的デバイス(known_static_devices,
+{{ known_static_devices | length }} 台):
+
+| # | ホスト名 | IPアドレス | OSグループ |
+|---|---------|-----------|-----------|
+{% for dev in known_static_devices %}| {{ loop.index }} | {{ dev["hostname"] }} | {{ dev["ip_address"] }} | {% if dev["os_group"] != "-" %}{{ dev["os_group"] }}{% else %}(未指定){% endif %} |
+{% endfor %}
+
+Asset Inventoryの確認対象列(asset_inventory_columns,
+{{ asset_inventory_columns | length }} 列):
+
+{% for col in asset_inventory_columns %}- {{ col }}
+{% endfor %}
+
+未確認デバイスの再レビュー間隔(review_cycle_days):
+{{ review_cycle_days }} 日ごと
+
+## 手順
+
+### 1. Device Securityのサブスクリプション状態を確認する
+
+`Device > IoT Security` を開き、Device Security(旧IoT Security)の
+サブスクリプションが有効であることを確認します。サブスクリプションが
+無効な場合、SNMP Network DiscoveryでSNMPジョブ自体は実行できても、
+Enhanced Application logsがロギングサービス経由でDevice Securityへ届かず
+Monitor > IoT Devices にデータが表示されないため、後続の手順に進む前に
+必ず確認してください。
+
+### 2. SNMP Network Discoveryを設定する
+
+`Device > IoT Security > Network Discovery` を開き、SNMP Network
+Discoveryセクションの歯車アイコン(Edit)をクリックしてSNMP Network
+Discovery Settingsダイアログを開きます。
+
+- エントリーポイントスイッチ:
+{% for sw in entry_point_switches %}  - {{ sw["name"] }}(`{{ sw["ip_address"] }}`)
+{% endfor %}
+- SNMPコミュニティ文字列: `{{ snmp_community_string }}`(実際の値は環境の
+  秘匿情報管理に従って別途入力してください)
+- スコープ(IP CIDRブロック):
+{% for cidr in discovery_scope_cidrs %}  - `{{ cidr }}`
+{% endfor %}
+- ポーリング間隔: {{ polling_interval_minutes }} 分
+- 最大ホップ数: {{ max_hop_count }}
+- タイムアウト: {{ snmp_timeout_ms }} ms
+- リトライ回数: {{ snmp_retry_count }} 回
+
+入力後、`OK` をクリックして保存します。
+
+### 3. 既知の静的デバイスを事前登録する
+
+`Monitor > IoT Devices > Asset Inventory` を開き、`Add`(Add Static IP
+Device)から既知の固定IPデバイスを1件ずつ登録します。IPアドレスは必須、
+ホスト名やOSグループなどの属性は任意項目です。
+
+{% for dev in known_static_devices %}- IPアドレス: `{{ dev["ip_address"] }}` / ホスト名: `{{ dev["hostname"] }}`{% if dev["os_group"] != "-" %} / OSグループ: `{{ dev["os_group"] }}`{% endif %}
+
+{% endfor %}
+
+### 4. SNMPジョブの実行結果を確認し、L2/L3デバイスインベントリを可視化する
+
+SNMP Network Discoveryのポーリング間隔({{ polling_interval_minutes }} 分)
+の経過後、`Monitor > IoT Devices > Summary` でデバイスカテゴリ・デバイス
+プロファイル・OSそれぞれの上位10件のパネルを確認し、探索範囲内にどのような
+デバイスが分布しているかを俯瞰します。
+
+続けて `Monitor > IoT Devices > Asset Inventory` を開き、次の列でデバイス
+単位の詳細(L2/L3の検出結果)を確認します。
+
+{% for col in asset_inventory_columns %}- {{ col }}
+{% endfor %}
+
+### 5. 未確認デバイス(未許可デバイス候補)を洗い出す
+
+Asset Inventoryで信頼度スコアが100%未満のデバイスを抽出します。これらは
+Confirm Device Identityがまだ実行されていない、身元未確認のデバイスです。
+
+- 手順3で事前登録した既知の静的デバイスや、他の管理台帳と突き合わせて
+  正当だと判断できたデバイスについては、`Confirm Device Identity` を
+  実行します。実行すると信頼度スコアが即座に100%になり、Panorama
+  およびDevice Securityへ同期されるため、対象デバイスの身元を確認して
+  から実行してください。
+- 管理台帳やスイッチのポート台帳と突き合わせても身元が特定できない
+  デバイスは、未許可デバイス候補として `Confirm Device Identity` を
+  実行せずに残し、ネットワーク管理者へエスカレーションします。
+- 必要に応じて `Create Device-ID` から、カスタムセキュリティポリシーで
+  参照するDevice-IDオブジェクトを作成します。
+
+### 6. 定期レビューをスケジュールする
+
+{{ review_cycle_days }} 日ごとに `Monitor > IoT Devices > Asset Inventory`
+を再確認し、信頼度スコアが100%未満のまま残っているデバイスがないかを
+確認します。新規に検出された未確認デバイスがあれば、手順5と同じ手順で
+身元確認またはエスカレーションを行います。
+
+## 動作確認
+
+- `Monitor > IoT Devices > Asset Inventory` に、エントリーポイントスイッチ
+  ({{ entry_point_switches | length }} 台)経由で探索範囲
+  ({{ discovery_scope_cidrs | length }} 件のCIDR)内のデバイスが一覧
+  表示されること
+- 手順3で登録した既知の静的デバイス({{ known_static_devices | length }} 台)
+  が、登録したIPアドレス・ホスト名でAsset Inventoryに表示されること
+- `Monitor > IoT Devices > Summary` でデバイスカテゴリ・デバイスプロファイル
+  ・OSそれぞれの上位10件のパネルが表示されること
+- 信頼度スコアが100%未満のデバイスが、未確認デバイスとしてAsset Inventory
+  上で識別できること
+- Confirm Device Identityを実行したデバイスの信頼度スコアが100%になって
+  いること
+
+## 注意事項
+
+- **Device Securityのサブスクリプションが無効な場合、Monitor > IoT
+  Devices にはデータが表示されない。** SNMP Network Discovery自体はSNMP
+  ジョブとして動作しても、Enhanced Application logsがロギングサービス
+  経由でDevice Securityへ届かない限りインベントリは可視化されないため、
+  手順1でのサブスクリプション確認を省略しないこと。
+- **SNMPコミュニティ文字列は認証情報に相当するため、実際の値をこの手順書
+  や設定管理システムに平文で残さないこと。** 本手順書ではマスク表記
+  (`{{ snmp_community_string }}`)のみを記載している。
+- **Confirm Device Identityは実行すると即座にPanoramaおよびDevice
+  Securityへ同期される。** 誤ったデバイスに対して実行すると信頼度スコアが
+  誤って100%になったまま同期されるため、対象デバイスの身元を管理台帳等で
+  必ず確認してから実行すること。
+- 本手順書が参照した一次情報には、トポロジ図(ネットワーク構成図)を
+  専用の画面として表示する機能名の記載がない。そのため本手順書では、
+  L2/L3のトポロジ可視化をAsset InventoryとSummaryダッシュボードの各
+  パネル経由での確認として扱っており、専用のトポロジ表示画面の操作は
+  記載していない。
+- 未許可デバイスを検知した場合の遮断・隔離などの自動対応機構は、本手順書
+  が参照した一次情報の範囲には含まれていないため記載していない。検知後の
+  対応は、既存のネットワーク管理台帳との突き合わせとエスカレーションに
+  留めること。

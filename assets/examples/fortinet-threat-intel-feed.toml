@@ -1,0 +1,9 @@
+connector_name = "ThreatIntel_Malicious_IP_Feed"
+feed_url = "https://intel.example.com/feeds/malicious-ips.txt"
+server_identity_check = "full"
+lan_interface = "internal"
+wan_interface = "wan1"
+egress_source = "internal_subnet"
+policy_name = "deny_out_threat-intel-feed"
+policy_id = 42
+dns_filter_profile_name = "df-threat-intel-block"

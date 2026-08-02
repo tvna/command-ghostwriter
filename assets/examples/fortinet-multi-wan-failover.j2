@@ -1,0 +1,248 @@
+# FortiGate複数WAN回線のSD-WANによる自動フェイルオーバー構成
+
+FortiGate(FortiOS)のSD-WAN機能を用いて、{{ wan_members | length }}本のWAN回線
+({% for m in wan_members %}`{{ m.interface }}`{% if not loop.last %}・{% endif %}{% endfor %})
+を1つのSD-WANゾーン `{{ sdwan_zone }}` にまとめ、Performance SLA(ヘルスチェック
+`{{ health_check_name }}`)でレイテンシ/ジッタ/パケットロスを継続監視します。
+SLA未達のリンクをSD-WANルール(`Lowest Cost (SLA)` モード)のロードバランス
+グループから自動的に除外し、SLA復帰後は自動的に経路へ復帰させることで、
+回線障害時の業務継続性を確保します。
+
+## 目的
+
+複数のWAN回線({{ wan_members | length }}本)を対象に、FortiGateのSD-WAN
+Performance SLA(ヘルスチェック)とSD-WANルールを組み合わせて構成できるように
+なることを目指します。あわせて、SLA未達によるフェイルオーバーが発生するまでの
+おおよその所要時間と、SLA復帰によって自動的に切り戻る(フェイルバックする)
+条件を把握し、業務継続性の目標値(本手順書では{{ target_failover_seconds }}秒)
+と照らして妥当かどうかを判断できるようになることを目指します。
+
+## 用語解説
+
+- **SD-WANゾーン(zone)/メンバー(members)**: `config system sdwan` 配下の
+  `config zone` でグループ化する論理的な集合(本手順書では `{{ sdwan_zone }}`)
+  と、`config members` でそのゾーンに参加させる物理/論理インターフェース
+  (ゲートウェイ、コスト等の付随情報を含む)
+- **Performance SLA(ヘルスチェック)**: `config system sdwan` 配下の
+  `config health-check` で定義する、SD-WANメンバー宛てのプローブ設定。
+  `server`(プローブ先)、`protocol`(ping/tcp-echo/udp-echo/http等)、
+  `interval`(実行間隔)に加え、`config sla` サブブロックで
+  `latency-threshold`(許容レイテンシ)・`jitter-threshold`(許容ジッタ)・
+  `packetloss-threshold`(許容パケットロス率)というSLA基準値を持つ。単位や
+  既定値はFortiOSのバージョンにより異なる場合があるため、GUI(`Network >
+  SD-WAN > Performance SLA`)の入力欄表示もあわせて確認すること
+- **failtime / recoverytime**: 同じくヘルスチェック設定内のパラメータ。
+  プローブが連続して失敗・成功したと判定するまでの回数を指定し、リンクを
+  「SLA未達」「SLA復帰」と判定するタイミングに影響する
+- **SD-WANルール(service)とLowest Cost (SLA)モード**: `config system sdwan`
+  配下の `config service` で定義するポリシーベースルーティングのルール。
+  `mode sla` を指定すると、`config sla` で紐付けたヘルスチェックのSLA基準を
+  満たしているメンバーの中から、`priority-members` で指定した優先順(コストの
+  低い順)で経路を選択する。SLAを満たすメンバーがなくなった場合や優先度上位の
+  メンバーがSLA未達になった場合、ロードバランスグループの実際の経路から除外
+  され(フェイルオーバー)、SLA復帰時に自動的に再評価される
+- **GUIメニュー**: `Network > SD-WAN > Members and Zones`(ゾーン/メンバー)、
+  `Network > SD-WAN > Performance SLA`(ヘルスチェック)、`Network > SD-WAN >
+  SD-WAN Rules`(ルール)にそれぞれ対応する
+- **diagnose系コマンドによる詳細な状態確認**: 一次情報のこのページには
+  具体的なdiagnose CLI構文の記載が確認できなかったため、本手順書では扱わず、
+  GUIのダッシュボード表示のみで動作確認を行います。詳細なCLI診断が必要な場合は
+  最新のFortiOSドキュメントを別途確認してください
+
+## シナリオ設定
+
+SD-WANゾーン `{{ sdwan_zone }}` に参加させるWANメンバー
+({{ wan_members | length }}本、`priority-members` の優先順もこの順序):
+
+| # | インターフェース | ゲートウェイ | コスト | 用途 |
+|---|-------------------|--------------|--------|------|
+{% for m in wan_members %}| {{ m.seq }} | {{ m.interface }} | {{ m.gateway }} | {{ m.cost }} | {{ m.role }} |
+{% endfor %}
+Performance SLA(ヘルスチェック `{{ health_check_name }}`)の設定値:
+
+| 項目 | 値 |
+|------|-----|
+| プローブ先(server) | {{ health_check_server }} |
+| プロトコル(protocol) | {{ health_check_protocol }} |
+| 実行間隔(interval) | {{ health_check_interval }} |
+| 失敗判定回数(failtime) | {{ health_check_failtime }} |
+| 復帰判定回数(recoverytime) | {{ health_check_recoverytime }} |
+| 許容レイテンシ(latency-threshold, ms) | {{ latency_threshold_ms }} |
+| 許容ジッタ(jitter-threshold, ms) | {{ jitter_threshold_ms }} |
+| 許容パケットロス率(packetloss-threshold, %) | {{ packetloss_threshold_percent }} |
+
+SD-WANルールの設定値:
+
+| 項目 | 値 |
+|------|-----|
+| ルールID(sdwan_rule_id) | {{ sdwan_rule_id }} |
+| モード(mode) | {{ sdwan_rule_mode }} |
+| 送信元(src) | {{ source_address }} |
+| 宛先(dst) | {{ destination_address }} |
+| 優先順(priority-members、seq番号) | {% for s in priority_member_seqs %}{{ s }}{% if not loop.last %} > {% endif %}{% endfor %} |
+
+現状(移行前)の既定ルート経由インターフェース(current_default_interface):
+`{{ current_default_interface }}`
+
+業務継続性の目標値: フェイルオーバーに要する時間の許容上限
+(target_failover_seconds) = {{ target_failover_seconds }}秒
+
+## 手順
+
+### 1. 現状の構成を確認する
+
+SD-WANを導入する前に、現在の既定ルートが `{{ current_default_interface }}`
+経由になっていることを `Network > Static Routes` で確認し、記録します。
+また、対象のWANインターフェース
+({% for m in wan_members %}`{{ m.interface }}`{% if not loop.last %}・{% endif %}{% endfor %})
+が既存のファイアウォールポリシーでどのように参照されているかを事前に確認して
+おきます(SD-WANゾーンへの参加後は、ポリシー側の参照先をゾーン名
+`{{ sdwan_zone }}` に更新する必要がある場合があります)。
+
+### 2. SD-WANゾーンとメンバーを構成する
+
+`Network > SD-WAN > Members and Zones` を開き、ゾーン `{{ sdwan_zone }}` を
+作成したうえで、次のメンバーを追加します。
+
+{% for m in wan_members %}- `{{ m.interface }}`({{ m.role }}): ゲートウェイ
+  `{{ m.gateway }}`、コスト `{{ m.cost }}`
+{% endfor %}
+CLIで同じ内容を設定する場合:
+
+```bash
+config system sdwan
+    config zone
+        edit "{{ sdwan_zone }}"
+        next
+    end
+    config members
+{% for m in wan_members %}        edit {{ m.seq }}
+            set interface "{{ m.interface }}"
+            set zone "{{ sdwan_zone }}"
+            set gateway {{ m.gateway }}
+            set cost {{ m.cost }}
+        next
+{% endfor %}    end
+end
+```
+
+### 3. Performance SLA(ヘルスチェック)を構成する
+
+`Network > SD-WAN > Performance SLA` を開き、次のとおりヘルスチェック
+`{{ health_check_name }}` を作成します。
+
+```bash
+config system sdwan
+    config health-check
+        edit "{{ health_check_name }}"
+            set server "{{ health_check_server }}"
+            set protocol {{ health_check_protocol }}
+            set interval {{ health_check_interval }}
+            set failtime {{ health_check_failtime }}
+            set recoverytime {{ health_check_recoverytime }}
+            config sla
+                edit 1
+                    set latency-threshold {{ latency_threshold_ms }}
+                    set jitter-threshold {{ jitter_threshold_ms }}
+                    set packetloss-threshold {{ packetloss_threshold_percent }}
+                next
+            end
+            config members
+{% for m in wan_members %}                edit {{ m.seq }}
+                next
+{% endfor %}            end
+        next
+    end
+end
+```
+
+### 4. SD-WANルール(Lowest Cost (SLA))を構成する
+
+`Network > SD-WAN > SD-WAN Rules` を開き、ルールID `{{ sdwan_rule_id }}` を
+モード `{{ sdwan_rule_mode }}`(Lowest Cost (SLA))で作成し、ヘルスチェック
+`{{ health_check_name }}` のSLA基準(手順3で作成したSLAターゲット `edit 1`)を
+紐付けます。優先順は
+{% for s in priority_member_seqs %}{{ s }}{% if not loop.last %} > {% endif %}{% endfor %}
+(seq番号、コストの低い順)です。
+
+```bash
+config system sdwan
+    config service
+        edit {{ sdwan_rule_id }}
+            set mode {{ sdwan_rule_mode }}
+            set src "{{ source_address }}"
+            set dst "{{ destination_address }}"
+            config sla
+                edit "{{ health_check_name }}"
+                    set id 1
+                next
+            end
+            set priority-members {% for s in priority_member_seqs %}{{ s }}{% if not loop.last %} {% endif %}{% endfor %}
+
+        next
+    end
+end
+```
+
+### 5. 意図的にリンクを疑似障害させてフェイルオーバーを検証する
+
+優先順が最も高いメンバー(seq `{{ priority_member_seqs[0] }}`、
+`{{ wan_members[0].interface }}`)について、ケーブルの一時的な抜線、または
+そのインターフェース経由でプローブ先 `{{ health_check_server }}` への疎通を
+一時的に遮断し、SLA未達の状態を意図的に発生させます。
+
+- `Network > SD-WAN > Performance SLA` のウィジェットで、対象メンバーの
+  レイテンシ/ジッタ/パケットロスの表示が閾値(それぞれ
+  {{ latency_threshold_ms }}ms/{{ jitter_threshold_ms }}ms/
+  {{ packetloss_threshold_percent }}%)を超えてSLA未達の表示に変わることを
+  確認します。
+- `Network > SD-WAN > SD-WAN Rules` で、ルール `{{ sdwan_rule_id }}` の実際の
+  選択メンバーが、次点の優先順のメンバーへ切り替わったことを確認します。
+- 遮断してから切り替わりが確認できるまでの時間を計測し、
+  `target_failover_seconds`({{ target_failover_seconds }}秒)以内に収まって
+  いるかを記録します。
+
+### 6. リンクを復旧させてフェイルバック(自動復帰)を検証する
+
+手順5で遮断した経路を復旧させ、`recoverytime`
+({{ health_check_recoverytime }}回連続の成功判定)を満たした時点で、
+`Network > SD-WAN > SD-WAN Rules` の選択メンバーが優先順どおりに
+`{{ wan_members[0].interface }}` へ自動的に戻ることを確認します。
+
+## 動作確認
+
+- `Network > SD-WAN > Members and Zones` で、ゾーン `{{ sdwan_zone }}` に
+  {{ wan_members | length }}本すべてのメンバーが表示されていること
+- `Network > SD-WAN > Performance SLA` で、ヘルスチェック
+  `{{ health_check_name }}` が全メンバーに対してプローブを実行しており、
+  平常時はすべてSLA基準内(レイテンシ{{ latency_threshold_ms }}ms以下、
+  ジッタ{{ jitter_threshold_ms }}ms以下、パケットロス
+  {{ packetloss_threshold_percent }}%以下)であること
+- `Network > SD-WAN > SD-WAN Rules` で、ルール `{{ sdwan_rule_id }}` の平常時
+  の選択メンバーが優先順1位(`{{ wan_members[0].interface }}`)であること
+- 手順5で、優先順1位のリンクを疑似障害させた際に、選択メンバーが次点へ
+  切り替わり、その所要時間が `target_failover_seconds`
+  ({{ target_failover_seconds }}秒)以内であること
+- 手順6で、リンク復旧後に選択メンバーが `{{ wan_members[0].interface }}` へ
+  自動的に戻ること
+
+## 注意事項
+
+- **本番回線での疑似障害試験は、必ずメンテナンス時間帯に実施すること。**
+  手順5の遮断中は、優先順1位のリンクの帯域・経路が一時的に使用できなくなる。
+- SLA基準値(`latency-threshold`/`jitter-threshold`/
+  `packetloss-threshold`)を実際の回線特性より厳しく設定しすぎると、平常時の
+  ゆらぎでも頻繁にフェイルオーバーが発生する(フラッピング)おそれがある。
+  本番投入前に実際の回線で数日程度の実測を行い、閾値を調整すること。
+- `target_failover_seconds`({{ target_failover_seconds }}秒)は業務要件上の
+  目標値であり、実際の切替時間は `interval` と `failtime` の設定値および
+  回線状況によって変動する。手順5の実測結果が目標値を超える場合は、これらの
+  値を見直すこと。
+- 手順2でメンバーをゾーン `{{ sdwan_zone }}` に参加させた後、既存のファイア
+  ウォールポリシーがインターフェース名(
+  {% for m in wan_members %}`{{ m.interface }}`{% if not loop.last %}・{% endif %}{% endfor %}
+  )を直接参照している場合は、参照先をゾーン名 `{{ sdwan_zone }}` に更新しない
+  と通信断が発生するおそれがある。
+- diagnose系コマンドによる詳細なCLI診断は、一次情報のこのページでは具体的な
+  構文を確認できなかったため本手順書には含めていません。必要な場合は最新の
+  FortiOSドキュメントを別途確認してください。

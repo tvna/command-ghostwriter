@@ -1,0 +1,40 @@
+entry_point_switches:
+  - name: core-switch-01
+    ip_address: 10.10.0.1
+  - name: core-switch-02
+    ip_address: 10.10.0.2
+
+discovery_scope_cidrs:
+  - 10.10.0.0/16
+  - 10.20.0.0/16
+
+snmp_community_string: "****"
+polling_interval_minutes: 30
+max_hop_count: 10
+snmp_timeout_ms: 2000
+snmp_retry_count: 2
+
+known_static_devices:
+  - hostname: mgmt-server-01
+    ip_address: 10.10.5.10
+    os_group: Linux
+  - hostname: printer-floor2-01
+    ip_address: 10.20.3.20
+    os_group: "-"
+  - hostname: badge-reader-01
+    ip_address: 10.20.4.15
+    os_group: "-"
+
+asset_inventory_columns:
+  - デバイス名
+  - デバイスプロファイル
+  - デバイスカテゴリ
+  - ベンダー
+  - モデル
+  - OSグループ
+  - OSバージョン
+  - IPアドレス
+  - 信頼度スコア
+  - MACアドレス
+
+review_cycle_days: 7

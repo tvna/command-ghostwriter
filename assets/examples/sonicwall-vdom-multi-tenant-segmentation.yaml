@@ -1,0 +1,53 @@
+appliance_model: "NSsp 15700"
+logical_blades_reserved: 2
+reserved_front_panel_ports:
+  - "X2"
+  - "X3"
+  - "X4"
+tenants:
+  - organization_name: "Acme Retail Holdings"
+    tenant_name: "acme-retail"
+    firmware_version: "SonicOSX 7.0.1-5165"
+    mgmt_cores: 1
+    dp_cores: 2
+    ha_enabled: false
+    front_panel_port: "X2"
+    vlan_id: 101
+    x0_mode: "Static"
+    x0_ip: "10.10.1.1"
+    x0_netmask: "255.255.255.0"
+    x1_mode: "DHCP"
+    x1_ip: "-"
+    firmware_file: "SonicOSX-7.0.1-5165-mi.swi"
+    description: "小売部門テナント。POS/在庫システム系トラフィックを収容する"
+  - organization_name: "Acme Logistics Division"
+    tenant_name: "acme-logistics"
+    firmware_version: "SonicOSX 7.0.1-5165"
+    mgmt_cores: 1
+    dp_cores: 2
+    ha_enabled: false
+    front_panel_port: "X3"
+    vlan_id: 102
+    x0_mode: "Static"
+    x0_ip: "10.10.2.1"
+    x0_netmask: "255.255.255.0"
+    x1_mode: "DHCP"
+    x1_ip: "-"
+    firmware_file: "SonicOSX-7.0.1-5165-mi.swi"
+    description: "物流部門テナント。倉庫管理システム系トラフィックを収容する"
+  - organization_name: "Acme Financial Services"
+    tenant_name: "acme-finance"
+    firmware_version: "SonicOSX 7.0.1-5165"
+    mgmt_cores: 2
+    dp_cores: 4
+    ha_enabled: true
+    front_panel_port: "X4"
+    vlan_id: 103
+    x0_mode: "Static"
+    x0_ip: "10.10.3.1"
+    x0_netmask: "255.255.255.0"
+    x1_mode: "Static"
+    x1_ip: "203.0.113.50"
+    firmware_file: "SonicOSX-7.0.1-5165-mi.swi"
+    description: "金融部門テナント。PCI-DSS対象トラフィックのため、他テナントと独立したライフサイクル・HA構成を要する"
+verification_tenant_name: "acme-finance"

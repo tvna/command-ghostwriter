@@ -1,0 +1,251 @@
+# OPNsenseでのユーザー/グループ単位ファイアウォールポリシー適用
+
+Captive Portal ゾーン `{{ zone_name }}`({{ capture_interface }} インターフェース)を、
+System ‣ Access ‣ Servers に登録した{% if auth_backend == "ldap" %}LDAP{% else %}RADIUS{% endif %}
+認証サーバーと連携させ、ディレクトリサービス上のグループメンバーシップを、
+ゾーンが自動生成するファイアウォールエイリアス
+`__captiveportal_zone_{{ zone_id }}` を介してファイアウォールルールから
+参照できるようにします。
+
+## 目的
+
+IPアドレスではなくユーザー/グループ単位でファイアウォールポリシーを適用
+するために、AD/LDAP等のディレクトリサービスとログオン情報を連携し、
+ID-IPマッピングを維持できるようになることを目指します。他ベンダーの
+ネイティブなID-IPマッピング機構(例: ログオン情報を常時追跡し続ける専用
+エージェント連携)とは異なり、OPNsenseではCaptive Portal と
+Access Servers (LDAP/RADIUS) の連携という別機構で同じ運用課題を解決します。
+すなわち、ユーザーがゾーンで認証に成功した瞬間だけ、そのIPアドレスが
+ゾーン専用のエイリアスに登録される、セッション駆動型のマッピングです。
+
+## 用語解説
+
+- **Access Servers**: `System ‣ Access ‣ Servers` で登録する認証バックエンド
+  (LDAP/RADIUSなど)の設定画面。Captive Portalゾーンの認証元として選択する
+- **Extended Query**(LDAP): LDAP Access Serverの検索フィルタに追加条件を
+  加えるフィールド。`&(memberOf=CN=...)` の形式で、指定したAD/LDAPグループ
+  のメンバーだけを認証対象に絞り込める
+- **Read properties / Synchronize groups**(LDAP/RADIUS): Access Serverが
+  返す属性を読み取り、リモートグループのメンバーシップをOPNsense側の
+  ローカルグループ空間に同期する設定。両方を有効化しないと、Captive
+  Portalゾーンの `Enforce local group` でリモートグループを参照できない
+- **CLASS属性**(RADIUS): RADIUSサーバーが認証応答で返す属性。`CN=` を
+  前置した文字列(例: `CLASS="CN=fw-policy-hr"`)でグループ名を通知し、
+  改行区切りで複数グループを表現する。LDAPのmemberOfに相当する、RADIUS側
+  のグループ判定手段
+- **Enforce local group**: Captive Portalゾーンの設定項目。選択したローカル
+  グループのメンバーのみ、そのゾーンでの認証を許可する
+- **`__captiveportal_zone_<zoneid>` エイリアス**: ゾーンで認証に成功した
+  クライアントのIPアドレスをOPNsenseが自動的に保持するファイアウォール
+  エイリアス。`Firewall ‣ Diagnostics ‣ Aliases` で内容を確認でき、
+  ファイアウォールルールの送信元/宛先として参照できる。本手順における
+  ID-IPマッピングの実体はこのエイリアスである
+- **System ‣ Access ‣ Tester**: 設定したAccess Serverに対し、実際の
+  ユーザー名/パスワードでテスト認証を行い、memberOfやCLASS由来のグループ
+  同期結果を確認できる診断ツール
+
+## シナリオ設定
+
+今回、ユーザー/グループ単位のポリシーを適用する対象は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| ゾーン名(zone_name) | {{ zone_name }} |
+| 対象インターフェース(capture_interface) | {{ capture_interface }} |
+| 認証バックエンド(auth_backend) | {{ auth_backend }} |
+| Enforce local groupで指定するローカルグループ(sync_local_group) | {{ sync_local_group }} |
+| アイドルタイムアウト(idle_timeout_minutes) | {{ idle_timeout_minutes }} 分 |
+| ハードタイムアウト(hard_timeout_minutes) | {{ hard_timeout_minutes }} 分 |
+| 同一ユーザーの同時ログインを許可するか(allow_concurrent_logins) | {{ allow_concurrent_logins }} |
+
+{% if auth_backend == "ldap" %}LDAP Access Serverの設定値:
+
+| 項目 | 値 |
+|------|-----|
+| ホスト(ldap_host) | {{ ldap_host }} |
+| ポート(ldap_port) | {{ ldap_port }} |
+| Bind DN(ldap_bind_dn) | `{{ ldap_bind_dn }}` |
+| Base DN(ldap_base_dn) | `{{ ldap_base_dn }}` |
+| Extended Query(ldap_extended_query) | `{{ ldap_extended_query | safe }}` |
+{% else %}RADIUS Access Serverの設定値:
+
+| 項目 | 値 |
+|------|-----|
+| ホスト(radius_host) | {{ radius_host }} |
+| 認証ポート(radius_port) | {{ radius_port }} |
+| グループ判定に用いるCLASS値(radius_class_group) | `CN={{ radius_class_group }}` |
+{% endif %}
+グループ単位で許可する通信一覧(policy_rules, {{ policy_rules | length }} 件、
+いずれもエイリアス `__captiveportal_zone_{{ zone_id }}` を送信元とする):
+
+| # | 内容 | 宛先 | ポート | プロトコル |
+|---|------|------|--------|-----------|
+{% for rule in policy_rules %}| {{ loop.index }} | {{ rule.description }} | {{ rule.destination_net }} | {{ rule.destination_port }} | {{ rule.protocol }} |
+{% endfor %}
+
+## 手順
+
+### 1. 現状の設定をバックアップする
+
+Access ServerとCaptive Portalゾーンの追加はいずれも認証経路に影響する
+変更のため、着手前に `config.xml` をAPI経由で退避します。
+`$OPNSENSE_API_KEY` / `$OPNSENSE_API_SECRET` には、`System ‣ Access ‣ Users`
+で発行したAPIキー/シークレットをそれぞれ環境変数として設定してください。
+
+```bash
+export FW_HOST="10.0.0.1"
+curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" \
+  "https://${FW_HOST}/api/core/backup/download/this" \
+  -o "opnsense-config-backup-$(date +%Y%m%d%H%M).xml"
+```
+
+### 2. ディレクトリサービスをAccess Serverとして登録する
+
+`System ‣ Access ‣ Servers` を開き、`+` で新しいAccess Serverを追加します。
+
+{% if auth_backend == "ldap" %}- `Descriptive name`: `{{ zone_name }}-ldap` のように分かりやすい名前を入力
+- `Type`: `LDAP Server` を選択
+- `Hostname or IP address`: `{{ ldap_host }}`
+- `Port value`: `{{ ldap_port }}`
+- `Transport`: 環境のポリシーに従い、暗号化された接続方式を選択
+- `Bind credentials`の`User DN`: `{{ ldap_bind_dn }}`
+- `Bind credentials`の`Password`: バインド用パスワード(****、値は秘密
+  管理ツールから取得し、テンプレートやリポジトリに平文で残さない)
+- `Base DN`: `{{ ldap_base_dn }}`
+- `Extended Query`: `{{ ldap_extended_query | safe }}`
+- `Read properties` と `Synchronize groups` を両方有効化する(この2つが
+  ないと、手順4の `Enforce local group` がリモートグループを参照できない)
+- `Save` を押す
+{% else %}- `Descriptive name`: `{{ zone_name }}-radius` のように分かりやすい名前を入力
+- `Type`: `RADIUS Server` を選択
+- `Hostname or IP address`: `{{ radius_host }}`
+- `Authentication port value`: `{{ radius_port }}`
+- `Shared Secret`: RADIUS共有シークレット(****、値は秘密管理ツールから
+  取得し、テンプレートやリポジトリに平文で残さない)
+- `Synchronize groups` を有効化する(この設定がないと、手順4の
+  `Enforce local group` がCLASS属性由来のグループを参照できない)
+- `Save` を押す
+
+RADIUSサーバー側では、認証応答のCLASS属性に `CN=` を前置した文字列
+(`CLASS="CN={{ radius_class_group }}"`)を、改行区切りで1グループのみ
+返すよう設定してください(MS NPSなど一部のRADIUSサーバーは特殊文字を
+含む戻り値に対応しないため、1行1グループに制限されます)。
+{% endif %}
+
+### 3. System ‣ Access ‣ Testerでグループ同期を検証する
+
+Captive Portalゾーンを作成する前に、`System ‣ Access ‣ Tester` で手順2の
+Access Serverを選択し、対象グループに属する実在ユーザーの
+ユーザー名/パスワードでテスト認証します。
+
+{% if auth_backend == "ldap" %}結果に `memberOf` が含まれ、`{{ ldap_extended_query | safe }}` で
+指定したグループが同期されていることを確認してください。同期後に
+実際にOPNsense側へ作成されるローカルグループの名前を控えておき、
+手順4の `Enforce local group` ではその名前を選択します
+(想定値: `{{ sync_local_group }}`。実際の同期結果と異なる場合は
+テスト結果の表示名を優先してください)。
+{% else %}結果にCLASS由来のグループ(`{{ radius_class_group }}`)が同期されて
+いることを確認してください。同期後に実際にOPNsense側へ作成される
+ローカルグループの名前を控えておき、手順4の `Enforce local group` では
+その名前を選択します(想定値: `{{ sync_local_group }}`。実際の同期結果と
+異なる場合はテスト結果の表示名を優先してください)。
+{% endif %}
+この検証に失敗する場合、手順4でゾーンを有効化しても対象グループの
+ユーザーが誰も認証できない状態になるため、次の手順には進まないで
+ください。
+
+### 4. Captive Portalゾーンを作成し、Access Serverとグループ制限を紐づける
+
+`Services ‣ Captive portal & GuestNET ‣ Administration` で新しいゾーンを
+追加します。
+
+- `Enabled`: チェックする
+- `Interfaces`: `{{ capture_interface }}` を選択
+- `Authenticate using`: 手順2で登録したAccess Serverを選択
+- `Enforce local group`: 手順3で確認したローカルグループ
+  (`{{ sync_local_group }}`)を選択し、対象グループ以外のユーザーが
+  誤って認証できないようにする
+- `Idle timeout (minutes)`: `{{ idle_timeout_minutes }}`
+- `Hard timeout (minutes)`: `{{ hard_timeout_minutes }}`
+{% if allow_concurrent_logins %}- `Concurrent user logins`: 同一ユーザーの複数端末からの同時ログインを
+  許可する
+{% else %}- `Concurrent user logins`: 同一ユーザーの複数端末からの同時ログインを
+  許可しない
+{% endif %}{% if auth_backend == "radius" %}- `Always send accounting requests`: 有効化し、セッション状態の変化を
+  RADIUSサーバーにも通知する
+{% endif %}- `Save` を押し、ゾーン一覧で割り当てられた `Zone number` を確認する
+  (この値が本手順の `zone_id`({{ zone_id }})に対応する。実際に割り当て
+  られた番号が異なる場合は、以降の手順・データファイルの `zone_id` を
+  実際の値に置き換えること)
+
+### 5. ゾーンのエイリアスを確認し、グループ単位のファイアウォールルールを追加する
+
+`Firewall ‣ Diagnostics ‣ Aliases` を開き、`__captiveportal_zone_{{ zone_id }}`
+という名前のエイリアスが作成されていることを確認します。これが
+「認証済みユーザーのIPアドレス一覧」であり、以降のルールはIPアドレス
+ではなくこのエイリアス(=グループ)を送信元として記述します。
+
+```bash
+{% for rule in policy_rules %}curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST \
+  "https://${FW_HOST}/api/firewall/filter/addRule" \
+  -H "Content-Type: application/json" \
+  -d '{"rule":{"action":"pass","quick":"1","interface":"{{ capture_interface }}","direction":"in","ipprotocol":"inet","protocol":"{{ rule.protocol }}","source_net":"__captiveportal_zone_{{ zone_id }}","destination_net":"{{ rule.destination_net }}","destination_port":"{{ rule.destination_port }}","description":"{{ zone_name }}: {{ rule.description }}","log":"1"}}'
+{% endfor %}
+curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST "https://${FW_HOST}/api/firewall/filter/apply"
+```
+
+### 6. テストユーザーでログインし、ID-IPマッピングを確認する
+
+対象グループに属するテストユーザーの端末から `{{ capture_interface }}`
+配下のネットワークに接続し、Captive Portalのログイン画面で認証します。
+
+```bash
+# ログイン後、別ターミナルから現在のエイリアス内容を確認する
+curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" \
+  "https://${FW_HOST}/api/firewall/alias_util/list/__captiveportal_zone_{{ zone_id }}"
+```
+
+出力に、ログインした端末のIPアドレスが含まれていることを確認して
+ください。含まれていれば、手順5で追加したルールがこのユーザーに対して
+即座に有効になっています。
+
+## 動作確認
+
+- `System ‣ Access ‣ Tester` で対象グループのユーザーが認証に成功し、
+  {% if auth_backend == "ldap" %}`memberOf`{% else %}CLASS由来のグループ{% endif %}
+  が同期結果に表示されること
+- 対象グループ外のユーザーで認証を試み、`Enforce local group` により
+  拒否されること
+- テストユーザーがCaptive Portalで認証した直後、
+  `__captiveportal_zone_{{ zone_id }}` エイリアスに当該ユーザーのIPが
+  追加されること(`Firewall ‣ Diagnostics ‣ Aliases` または手順6のAPI)
+- 手順5で追加したルールの宛先(policy_rules, {{ policy_rules | length }} 件)
+  へ、認証済みユーザーからは到達でき、未認証の同一インターフェース内の
+  IPからは到達できないこと
+- `{{ idle_timeout_minutes }}` 分操作がない場合、または `{{ hard_timeout_minutes }}`
+  分が経過した場合に、セッションが切断されエイリアスから当該IPが除去
+  されること
+
+## 注意事項
+
+- **エイリアスの内容はセッションに連動する。** `__captiveportal_zone_{{ zone_id }}`
+  はログイン中のIPのみを保持するセッション駆動型のマッピングであり、
+  静的なユーザー/IP対応表ではない。端末のIPアドレスが変わった場合や、
+  ハードタイムアウト(`{{ hard_timeout_minutes }}` 分)経過後は再認証が
+  必要になる
+- **Enforce local groupは手順3の同期確認より前に設定しないこと。** グループ
+  同期(`Read properties` / `Synchronize groups`)が正しく機能していない
+  状態でゾーンを有効化すると、対象グループの誰も認証できずアクセス断に
+  なる
+- バインドパスワード・共有シークレットは平文でリポジトリやログに残さず、
+  環境変数や秘密管理ツール経由で扱うこと。本手順内の `****` は実際の値
+  ではない
+{% if auth_backend == "radius" %}- RADIUSのCLASS属性はサーバーによって特殊文字を扱えない場合があるため、
+  `CN={{ radius_class_group }}` の形式・1行1グループの制約を送信側で
+  遵守すること
+{% endif %}- `zone_id`({{ zone_id }})は手順4でOPNsenseが実際に割り当てた
+  `Zone number` に読み替えること。想定と異なる番号が割り当てられた
+  まま手順5・6を実行すると、存在しないエイリアスを参照してルール追加が
+  失敗する
+- APIキー/シークレットは平文でリポジトリやログに残さず、環境変数や
+  秘密管理ツール経由で扱うこと

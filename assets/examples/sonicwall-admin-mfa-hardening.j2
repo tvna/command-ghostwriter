@@ -1,0 +1,155 @@
+# SonicWall (SonicOS) 管理者ログインのMFA必須化とフェイルセーフ設計
+
+`Device | Settings | Administration` の `Firewall Administrator` で
+`One-time Password Method` を `{{ otp_method }}` に設定し、対象の
+管理者アカウント({{ target_admins | length }} 件)ごとに認証アプリで
+QRコードを登録してログイン時の二要素認証を必須化します。登録時に
+発行される Emergency Scratch Code は保管計画に従って保管し、モバイル
+端末の紛失・初期化などでTOTPコードを入力できなくなった場合の緊急時
+フェイルセーフ手順として備えます。展開は影響範囲の小さい検証用
+アカウントから順に行い、全アカウントを一度に切り替えて誰もログイン
+できなくなる事態を避けます。
+
+## 目的
+
+管理者アカウントへの不正アクセスを防ぐため、SonicOSのTOTPベース
+二要素認証を管理者ログインに必須化できるようになることを目指します。
+あわせて、Emergency Scratch CodeとCLIでのTOTP無効化という2段構えの
+緊急時フェイルセーフ手順を、事前の保管計画に基づいて準備してから
+展開する進め方を身につけます。
+
+## 用語解説
+
+- **Device | Settings | Administration > Firewall Administrator**:
+  管理者ログインの認証方式を設定する管理画面ナビゲーションパス。
+  この画面の `One-time Password Method` ドロップダウンで、管理者
+  ログイン時の二要素認証方式を選択する
+- **One-time Password Method: {{ otp_method }}**: 上記ドロップダウンで
+  選択する認証方式。`{{ otp_method }}` を選択すると、対象アカウントの
+  次回ログイン時にTOTP(Time-based One-Time Password)登録フローが
+  開始される
+- **認証アプリ(Authenticator App)**: TOTPコードを生成するモバイル
+  アプリ。一次情報では次のアプリが利用可能と案内されている。
+  {% for app in authenticator_apps %}`{{ app }}`{% if not loop.last %}、{% endif %}{% endfor %}
+- **QRコード登録**: `One-time Password Method` を `{{ otp_method }}` に
+  設定した対象アカウントで次回ログインした際に画面へ表示されるQRコード
+  を認証アプリで読み取り、以降のログインでそのアプリが生成するコードを
+  入力できるようにする初回登録操作
+- **Emergency Scratch Code**: QRコード登録と同じ画面で同時に発行される
+  緊急時用の予備コード。モバイル端末を紛失または初期化してTOTPコードを
+  生成できなくなった場合に、このコードを使ってHTTPS経由でログインできる
+- **CLIでのTOTP無効化(最終手段)**: Emergency Scratch Codeも使用できない
+  場合の最終手段。一次情報では、CLIにログインして対象アカウントのTOTPを
+  無効化する手順が別途案内されている(具体的なコマンド構文は稼働中の
+  SonicOS バージョンに応じて `{{ cli_recovery_kb_title }}` 等の一次情報を
+  実施時に確認すること)
+
+## シナリオ設定
+
+`{{ otp_method }}` を必須化する対象の管理者アカウントと、展開順序・
+理由は次のとおりです({{ target_admins | length }} 件)。
+
+| # | Username | Role | 展開順序 | 理由 |
+|---|----------|------|----------|------|
+{% for a in target_admins %}| {{ loop.index }} | `{{ a["username"] }}` | {{ a["role"] }} | {% if a["is_verification"] %}検証(最初){% else %}本展開{% endif %} | {{ a["reason"] }} |
+{% endfor %}
+
+Emergency Scratch Codeの保管計画は次のとおりです({{ scratch_code_storage | length }} 件、いずれもコードの値そのものは本手順書やログに記載しません)。
+
+| # | 保管責任者 | 保管場所 | 見直しサイクル |
+|---|-----------|----------|----------------|
+{% for s in scratch_code_storage %}| {{ loop.index }} | {{ s["custodian"] }} | {{ s["location"] }} | {{ s["review_cycle"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 展開前にEmergency Scratch Codeの保管計画が整っていることを確認する
+
+**この確認を飛ばして手順2に進まないでください。** シナリオ設定の
+保管計画({{ scratch_code_storage | length }} 件)について、保管責任者
+と保管場所が実際に確保済みであることを確認します。保管計画が整って
+いない状態でTOTPを有効化すると、Emergency Scratch Codeを受け取っても
+安全に保管できず、モバイル端末紛失時に緊急時フェイルセーフ手順が
+機能しません。
+
+### 2. 検証用アカウントでOne-time Password MethodをTOTPに設定する
+
+{% for a in target_admins %}{% if a["is_verification"] %}まず `{{ a["username"] }}`({{ a["role"] }})のみを対象とします。
+{% endif %}{% endfor %}
+`Device | Settings | Administration` を開き、`Firewall Administrator`
+の該当アカウントで `One-time Password Method` を `{{ otp_method }}` に
+変更して保存します。全対象アカウントを一度に切り替えず、まず1件の
+検証用アカウントに限定することで、設定ミスがあっても他の管理者は
+引き続き既存の認証方式でログインできる状態を残します。
+
+### 3. 検証用アカウントでQRコード登録とEmergency Scratch Codeの保管を行う
+
+{% for a in target_admins %}{% if a["is_verification"] %}`{{ a["username"] }}` で次回ログインすると、QRコードと
+Emergency Scratch Codeが画面に表示されます。
+{% endif %}{% endfor %}
+{% for app in authenticator_apps %}`{{ app }}`{% if not loop.last %} / {% endif %}{% endfor %}
+のいずれかの認証アプリでQRコードを読み取って登録します。表示された
+Emergency Scratch Codeは、手順1で確認した保管計画の保管責任者へ直ちに
+引き渡し、保管場所に登録します。
+
+### 4. 検証用アカウントでログインを確認する
+
+{% for a in target_admins %}{% if a["is_verification"] %}`{{ a["username"] }}` で一度ログアウトし、認証アプリが生成する
+現在のTOTPコードを使って再ログインできることを確認します。
+{% endif %}{% endfor %}
+ここで問題が見つかった場合は、手順5に進む前に原因を解消してください。
+
+### 5. 残りの対象管理者アカウントに展開する
+
+検証用アカウントでの確認が取れたら、残る対象アカウントについても
+手順2〜3と同じ手順(`One-time Password Method` を `{{ otp_method }}` に
+設定 → QRコード登録 → Emergency Scratch Codeの保管)を1件ずつ実施します。
+
+{% for a in target_admins %}{% if not a["is_verification"] %}- `{{ a["username"] }}`({{ a["role"] }}): {{ a["reason"] }}
+{% endif %}{% endfor %}
+
+### 6. Emergency Scratch Codeの保管状況を保管計画と突き合わせる
+
+シナリオ設定の保管計画({{ scratch_code_storage | length }} 件)の
+各保管責任者に、対象アカウント全{{ target_admins | length }}件分の
+Emergency Scratch Codeが保管場所に登録済みであることを確認してもらい
+ます。
+
+{% for s in scratch_code_storage %}- {{ s["custodian"] }}: {{ s["location"] }}
+{% endfor %}
+
+### 7. CLIでのTOTP無効化手順(最終手段)を関係者に周知する
+
+Emergency Scratch Codeも使用できない場合の最終手段として、CLIに
+ログインして対象アカウントのTOTPを無効化できることを、管理者間で
+周知します。具体的なコマンド構文はSonicOSのバージョンに依存するため、
+実施時に一次情報(`{{ cli_recovery_kb_title }}`)を確認してから操作する
+ことをあわせて周知してください。
+
+## 動作確認
+
+- `Device | Settings | Administration` の `Firewall Administrator` で、
+  対象{{ target_admins | length }}件すべての `One-time Password Method`
+  が `{{ otp_method }}` になっていること
+- {% for a in target_admins %}{% if a["is_verification"] %}検証用アカウント `{{ a["username"] }}` {% endif %}{% endfor %}を含む全対象アカウントで、
+  認証アプリのTOTPコードによるログインが成功すること
+- シナリオ設定の保管計画({{ scratch_code_storage | length }} 件)の
+  各保管場所に、対象{{ target_admins | length }}件分のEmergency
+  Scratch Codeが保管済みであること
+- CLIでのTOTP無効化手順(最終手段)が関係者に周知済みであること
+
+## 注意事項
+
+- **全対象アカウントを一度に切り替えないこと。** 手順2〜4で検証用
+  アカウント1件による確認を終えてから、手順5で残りのアカウントに
+  展開してください。
+- **Emergency Scratch Codeの値は、本手順書・チャット・チケットなど
+  どこにも平文で記載しないこと。** 記録が必要な場合でも `****` の
+  ようにマスクし、保管計画に定めた保管場所にのみ保管してください。
+- CLIでのTOTP無効化の具体的なコマンド構文は、本手順書の一次情報
+  (SonicOS技術ドキュメントの当該ナレッジベース記事)には掲載されて
+  いないため記載していません。実施時に `{{ cli_recovery_kb_title }}`
+  等の一次情報でSonicOSのバージョンに応じた構文を確認してください。
+- Emergency Scratch Codeとモバイル端末の両方を同時に紛失した場合に
+  備え、CLIやコンソールポートへの代替アクセス経路を、TOTP必須化の
+  展開前にあらかじめ確保しておいてください。

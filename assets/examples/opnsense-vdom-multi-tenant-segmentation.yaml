@@ -1,0 +1,41 @@
+physical_if: "igc0"
+tenants:
+  - name: "tenant-a"
+    display_name: "Tenant A（営業部）"
+    vlan_tag: 100
+    vlan_descr: "VLAN100-TENANT-A"
+    if_name: "TENANT_A"
+    subnet_cidr: "10.10.100.0/24"
+    gateway_ip: "10.10.100.1"
+    subnet_bits: 24
+    dhcp_enabled: true
+    dhcp_range_start: "10.10.100.10"
+    dhcp_range_end: "10.10.100.200"
+    dns_override: "-"
+    allow_internet: true
+  - name: "tenant-b"
+    display_name: "Tenant B（経理部）"
+    vlan_tag: 110
+    vlan_descr: "VLAN110-TENANT-B"
+    if_name: "TENANT_B"
+    subnet_cidr: "10.10.110.0/24"
+    gateway_ip: "10.10.110.1"
+    subnet_bits: 24
+    dhcp_enabled: false
+    dhcp_range_start: "-"
+    dhcp_range_end: "-"
+    dns_override: "-"
+    allow_internet: false
+  - name: "tenant-c"
+    display_name: "Tenant C（来訪者ゲスト）"
+    vlan_tag: 120
+    vlan_descr: "VLAN120-TENANT-C"
+    if_name: "TENANT_C"
+    subnet_cidr: "10.10.120.0/24"
+    gateway_ip: "10.10.120.1"
+    subnet_bits: 24
+    dhcp_enabled: true
+    dhcp_range_start: "10.10.120.50"
+    dhcp_range_end: "10.10.120.250"
+    dns_override: "9.9.9.9"
+    allow_internet: true

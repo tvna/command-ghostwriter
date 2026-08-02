@@ -1,0 +1,5 @@
+no,row_type,target_name,action,ip_or_range,reason,description
+1,category,Phishing and other Frauds,Block,-,-,なりすまし・詐欺サイトの自動遮断(セキュリティ関連カテゴリ、既定のBlockを維持)
+2,category,Hacking,Block,-,-,不正アクセス支援・マルウェア配布関連サイトの自動遮断(セキュリティ関連カテゴリ、既定のBlockを維持)
+3,exception,excl-partner-portal,Allow,203.0.113.10,Hackingカテゴリに誤分類された取引先ポータルへの業務アクセスを確保するため,誤検知(過検知)によるブロックを解除する例外
+4,exception,excl-saas-vendor,Allow,198.51.100.20,Phishing and other Fraudsカテゴリに誤分類されたSaaSベンダーサイトへの業務アクセスを確保するため,誤検知(過検知)によるブロックを解除する例外

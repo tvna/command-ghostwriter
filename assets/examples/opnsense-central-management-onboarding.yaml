@@ -1,0 +1,19 @@
+central_host_fqdn: central-host.opnsense.local
+host_group_name: site-fw-tenant-a
+managed_hosts:
+  - name: node-a1
+    fqdn: node-a1.opnsense.local
+    api_key_masked: "****"
+    validate_ssl: true
+  - name: node-b1
+    fqdn: node-b1.opnsense.local
+    api_key_masked: "****"
+    validate_ssl: false
+provisioning_classes:
+  - "Aliases (Firewall)"
+  - "Firewall rules"
+  - "NAT (Firewall)"
+  - "Firewall categories"
+enable_centralized_backups: true
+backup_sequential_count: 5
+provisioning_cron_enabled: true

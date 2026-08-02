@@ -1,0 +1,210 @@
+# PAN-OS管理者ログインのMFA必須化とフェイルセーフ構成
+
+管理者Web UIログインに、RADIUS経由でMFAベンダーと連携する
+Authentication Profileを必須化しつつ、RADIUSサーバーに到達できない
+緊急時のみローカルデータベース認証へフォールバックするAuthentication
+Sequenceを構成します。フォールバックは「認証サーバに到達できない」場合
+にのみ発動し、IDやパスワードそのものが拒否された場合には発動しない
+ため、ローカルデータベースへの迂回によるMFAバイパスを防ぎながら
+ロックアウトを回避できます。
+
+## 目的
+
+PAN-OS(Palo Alto Networks ファイアウォール)の管理者Web UIログインに
+多要素認証(MFA)を必須化し、あわせてMFAデバイス紛失やRADIUSサーバー
+障害時にもロックアウトしないフェイルセーフ手順(RADIUSサーバー
+プロファイル作成 → MFA用Authentication Profile作成 → ローカル
+フォールバック用Authentication Profile作成 → Authentication Sequence
+作成 → 管理者アカウントへの割り当て → Commit → 検証)を実践できる
+ようになることを目指します。
+
+## 用語解説
+
+- **Authentication Profile**: `Device > Authentication Profile` で作成する、
+  1つの認証方式(Type)とその接続先(Server Profile)を束ねる設定オブジェクト。
+  Typeには RADIUS や Local Database などを指定できる
+- **MFAベンダーAPI統合の非対応**: 一次情報には管理者認証について
+  "MFA services through vendor APIs are not supported in these use cases"
+  (このユースケースではMFAベンダーAPI経由のサービスはサポートされない)
+  と明記されており、管理者認証のMFA連携はRADIUSまたはSAML経由に限られる
+- **RADIUS Server Profile**: `Device > Server Profiles > RADIUS` で作成する、
+  MFAベンダーのRADIUSプロキシへの接続情報。Profile Name、サーバーリスト内の
+  Name/RADIUS Server(IPまたはFQDN)/Secret/Server Port、Timeout(デフォルト
+  3秒、範囲1-120秒)、Retries、Authentication Protocol(デフォルト
+  PEAP-MSCHAPv2)を設定する。Secretの値はMFAベンダー側の払い出し情報に
+  合わせて別途安全に入力し、本手順書には記載しない
+- **Authentication Sequence**: `Device > Authentication Sequence` で作成する、
+  複数のAuthentication Profileを並べたリスト。上から順に1件ずつ認証を
+  試行し、いずれかが成功した時点で認証完了となる
+- **Exit the sequence on failed authentication**: Authentication Sequenceの
+  オプション。有効にすると、認証拒否(IDまたはパスワードが誤っている等)
+  が発生した時点でシーケンスを終了し、次のプロファイルへは進まない。
+  一方、認証サーバへの到達不能やタイムアウトの場合は、このオプションの
+  有効/無効に関わらず次のプロファイルへ進む。このオプションを無効にすると
+  認証拒否の場合も次のプロファイルを試すため、MFAを拒否された認証情報が
+  ローカルデータベース側で通ってしまう恐れがある
+- **ローカルデータベース(Local Database)フォールバック**: Type を
+  Local Database に設定したAuthentication Profile。`Device >
+  Administrators` に登録済みのローカル管理者アカウントを使い、
+  RADIUSサーバーに到達できない緊急時のみログインを可能にする
+
+## シナリオ設定
+
+MFA連携に使うRADIUSサーバープロファイルと、Authentication Profile/
+Authentication Sequenceの名称、割り当て対象の管理者アカウントは
+次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| RADIUS Server Profile名(radius_server_profile_name) | {{ radius_server_profile_name }} |
+| Timeout(radius_timeout_seconds) | {{ radius_timeout_seconds }} 秒 |
+| Retries(radius_retries) | {{ radius_retries }} 回 |
+| MFA用Authentication Profile名(mfa_auth_profile_name) | {{ mfa_auth_profile_name }} |
+| フォールバック用Authentication Profile名(fallback_auth_profile_name) | {{ fallback_auth_profile_name }} |
+| Authentication Sequence名(auth_sequence_name) | {{ auth_sequence_name }} |
+| Exit the sequence on failed authentication(exit_on_failed_auth) | {% if exit_on_failed_auth %}有効{% else %}無効{% endif %} |
+
+RADIUSサーバーリスト(radius_servers, {{ radius_servers | length }} 件):
+
+| # | Name | RADIUS Server | Server Port |
+|---|------|----------------|-------------|
+{% for server in radius_servers %}| {{ loop.index }} | {{ server["name"] }} | {{ server["server"] }} | {{ server["port"] }} |
+{% endfor %}
+
+Authentication Sequenceを割り当てる管理者アカウント一覧
+(admin_accounts, {{ admin_accounts | length }} 件):
+
+| # | 管理者名 | Administrator Type / Role |
+|---|----------|----------------------------|
+{% for admin in admin_accounts %}| {{ loop.index }} | {{ admin["name"] }} | Dynamic / {{ admin["dynamic_role"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 現状の管理者認証方式を確認する(変更前の基準を取る)
+
+`Device > Administrators` を開き、対象の管理者アカウント
+({% for admin in admin_accounts %}{{ admin["name"] }}{% if not loop.last %} / {% endif %}{% endfor %})
+が現在どのAuthentication Profileまたはローカルデータベースで認証
+しているかを確認します。現在使用しているGUIセッションは、手順7の
+検証が終わるまで切断しないでください。
+
+### 2. RADIUS Server Profileを作成する
+
+`Device > Server Profiles > RADIUS > Add` から新しいプロファイルを
+作成します。
+
+- Profile Name: `{{ radius_server_profile_name }}`
+- Timeout: `{{ radius_timeout_seconds }}`
+- Retries: `{{ radius_retries }}`
+- Authentication Protocol: MFAベンダーのRADIUSプロキシが要求する
+  プロトコルをベンダーのドキュメントに従って選択する(既定値は
+  PEAP-MSCHAPv2)
+- サーバーリストに、次のRADIUSサーバーを1件ずつ追加する
+
+{% for server in radius_servers %}- Name: `{{ server["name"] }}` / RADIUS Server: `{{ server["server"] }}` /
+  Secret: `****`(値はMFAベンダーから払い出された秘密情報を直接入力し、
+  本手順書には記載しない) / Server Port: `{{ server["port"] }}`
+{% endfor %}
+設定後、`OK` をクリックして保存します(この時点ではまだ `Commit` しません)。
+
+### 3. MFA用のAuthentication Profileを作成する
+
+`Device > Authentication Profile > Add` から新しいプロファイルを
+作成します。
+
+- Name: `{{ mfa_auth_profile_name }}`
+- Type: `RADIUS`
+- Server Profile: `{{ radius_server_profile_name }}`(手順2で作成した
+  プロファイル)
+
+設定後、`OK` をクリックして保存します。
+
+### 4. フォールバック用のAuthentication Profile(Local Database)を作成する
+
+`Device > Authentication Profile > Add` から、緊急時用のプロファイルを
+作成します。
+
+- Name: `{{ fallback_auth_profile_name }}`
+- Type: `Local Database`
+
+このプロファイルが参照するローカル管理者アカウントは、`Device >
+Administrators` に事前に登録済みであることを確認してください
+(未登録の場合、フォールバック自体が機能しません)。設定後、`OK` を
+クリックして保存します。
+
+### 5. Authentication Sequenceを作成し、フェイルセーフの順序を設定する
+
+`Device > Authentication Sequence > Add` から新しいシーケンスを
+作成します。
+
+- Name: `{{ auth_sequence_name }}`
+- Profile List に、手順3のプロファイルを先に、手順4のプロファイルを
+  後になるよう `Add` する(必要に応じて `Move Up` / `Move Down` で
+  順序を調整する)
+  1. `{{ mfa_auth_profile_name }}`
+  2. `{{ fallback_auth_profile_name }}`
+- Exit the sequence on failed authentication:
+  {% if exit_on_failed_auth %}チェックを入れる(有効にする)。これにより、
+  MFA認証がID/パスワード不一致等で拒否された場合はそこでシーケンスを
+  終了し、ローカルデータベース側への迂回を防ぐ{% else %}チェックを
+  外したままにする{% endif %}
+
+設定後、`OK` をクリックして保存します(この時点ではまだ `Commit` しません)。
+
+### 6. 管理者アカウントにAuthentication Sequenceを割り当てる
+
+`Device > Administrators` から対象アカウントを1件ずつ開き、
+`Authentication Profile` のドロップダウンで手順5のシーケンスを
+選択します。
+
+{% for admin in admin_accounts %}- `{{ admin["name"] }}` > Authentication Profile = `{{ auth_sequence_name }}` > OK
+{% endfor %}
+
+### 7. Commitし、MFAログインとフェイルセーフの両方を検証する
+
+`Commit` を実行し、設定を一括で反映します。反映後、手順1で使用していた
+セッションとは別に、次を確認します。
+
+- 対象の管理者アカウントでGUIにログインし、RADIUS経由のMFA(MFAベンダー
+  側のプッシュ承認等)を求められ、承認後にログインできること
+- 意図的に誤ったパスワードでログインを試み、MFAへ進まずログインが
+  拒否されること(ローカルデータベース側への迂回が発生しないこと)
+- RADIUSサーバーへの到達性を一時的に断ってから同じアカウントでログイン
+  し、ローカルデータベース側の認証情報でログインできること(フェイル
+  セーフの動作確認)
+
+この検証がすべて成功するまで、手順1のセッションは切断しないでください。
+
+## 動作確認
+
+- 対象の管理者アカウント({{ admin_accounts | length }} 件)がGUIログイン時に
+  RADIUS経由のMFAを求められること
+- 誤ったID/パスワードでのログイン試行が、ローカルデータベース側へ迂回
+  されずに拒否されること
+- RADIUSサーバー({{ radius_servers | length }} 件のいずれも)へ到達できない
+  状態でも、ローカルデータベースの認証情報でログインできること
+- 各対象アカウントの `Authentication Profile` が `{{ auth_sequence_name }}`
+  に設定されていること
+- Authentication Sequence `{{ auth_sequence_name }}` のProfile Listが
+  `{{ mfa_auth_profile_name }}` → `{{ fallback_auth_profile_name }}` の
+  順になっていること
+
+## 注意事項
+
+- **Exit the sequence on failed authenticationは必ず有効にすること。**
+  無効のままだと、MFAで拒否された認証情報でもローカルデータベース側で
+  再試行されてしまい、MFA必須化の効果が損なわれる。
+- **RADIUS Secretなどの認証情報は、本手順書や生成される設定メモに平文で
+  残さないこと。** 値はMFAベンダーから払い出された秘密情報を都度確認し、
+  画面上で直接入力する。
+- **フォールバック用ローカル管理者アカウントは、緊急時専用として
+  パスワードを厳重に管理すること。** 一次情報の範囲では、当該アカウント
+  への追加のアクセス制限(専用グループ化や利用時アラート等)は確認できて
+  いないため、必要であれば運用手順として別途定める。
+- **元のセッションは、手順7の検証がすべて成功するまで切断しないこと。**
+  設定誤りに気づいた場合の復旧手段を残しておくため。
+- 管理者認証のMFA連携は、一次情報に明記されている通りRADIUSまたはSAML
+  経由に限られ、MFAベンダーのAPIを直接統合する方式は使用できない。
+- Authentication Profile/Sequenceの適用はCommitで一括反映されるため、
+  Commit前に手順1〜6の設定内容を画面上で再確認すること。

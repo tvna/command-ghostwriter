@@ -1,0 +1,27 @@
+tenants:
+  - name: "顧客A社"
+    vdom_name: "tenant-a"
+    interface: "port3"
+    admin_account: "vdomadmin_a"
+    accprofile: "tenant_a_prof"
+    log_server_ip: "10.10.1.5"
+    log_server_port: 514
+    log_severity: "information"
+  - name: "顧客B社"
+    vdom_name: "tenant-b"
+    interface: "port4"
+    admin_account: "vdomadmin_b"
+    accprofile: "tenant_b_prof"
+    log_server_ip: "10.10.2.5"
+    log_server_port: 1514
+    log_severity: "warning"
+  - name: "総務部門"
+    vdom_name: "dept-soumu"
+    interface: "port5"
+    admin_account: "vdomadmin_soumu"
+    accprofile: "dept_soumu_prof"
+    log_server_ip: "10.10.3.5"
+    log_server_port: 514
+    log_severity: "information"
+global_admin_account: "global_admin_ichiro"
+root_vdom_name: "root"

@@ -1,0 +1,5 @@
+no,scope,bandwidth,bandwidth_metric,mask,interface,interface2,proto,source,destination,direction,target,description
+1,shared,2,Mbit/s,-,wan,guestnet,ip,any,any,in,PipeDown-2Mbps,Guest全体の下り帯域を2Mbpsで共有制限(全クライアントで均等按分)
+2,shared,1,Mbit/s,-,wan,guestnet,ip,any,any,out,PipeUp-1Mbps,Guest全体の上り帯域を1Mbpsで共有制限(全クライアントで均等按分)
+3,peruser,1,Mbit/s,destination,wan,-,ip,any,192.168.2.0/24,-,PipeDown-1Mbps-PerUser,Guestクライアント1台あたりの下り上限(宛先IPごとに動的パイプを生成)
+4,peruser,1,Mbit/s,source,wan,-,ip,192.168.2.0/24,any,-,PipeUp-1Mbps-PerUser,Guestクライアント1台あたりの上り上限(送信元IPごとに動的パイプを生成)

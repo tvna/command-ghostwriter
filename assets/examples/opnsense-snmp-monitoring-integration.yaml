@@ -1,0 +1,19 @@
+snmp_listen_ips:
+  - 10.0.30.5
+  - 127.0.0.1
+snmp_community: "****"
+snmp_syslocation: "DC1-Rack12-OPNsense-fw01"
+snmp_syscontact: "netops@example.com"
+enable_l3visibility: true
+monitoring_interface: "vlan_monitoring"
+monitoring_network: "10.0.30.0/24"
+zabbix_server_ip: "10.0.30.20"
+snmpv3_users:
+  - username: "zbx_ro_v3"
+    readwrite: false
+    auth_password: "****"
+    priv_enckey: "****"
+  - username: "zbx_audit_rw"
+    readwrite: true
+    auth_password: "****"
+    priv_enckey: "****"

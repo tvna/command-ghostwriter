@@ -1,0 +1,226 @@
+# PAN-OSファイアウォールのSNMP監視連携設定
+
+外部監視基盤(Zabbix等)からSNMPでファイアウォールのCPU/メモリ/インター
+フェース状態などをポーリングできるようにし、あわせて障害発生時には
+ファイアウォール自身からSNMP Trapを外部SNMPマネージャへ能動通知します。
+ポーリング用の閲覧権限(View)とトラップ送信先は別々の画面で設定するため、
+両方の設定後に忘れずCommitし、監視サーバー側で実際に値が取得できる
+こととTrap受信ができることの両方を検証します。
+
+## 目的
+
+PAN-OS(Palo Alto Networks ファイアウォール、{{ device_name }})に対して、
+SNMPv3によるポーリング(統計値の取得)とSNMP Trapによるイベント通知の
+両方を有効化し、外部監視基盤({{ zabbix_server_name }})からヘルス
+チェックを行えるようにする設定手順(ポーリング設定 → トラップ送信先設定
+→ Log Forwarding紐付け → Commit → 検証)を実践できるようになることを
+目指します。
+
+## 用語解説
+
+- **SNMP Setup**: `Device > Setup > Operations` のMiscellaneousセクション
+  にある歯車アイコンから開く、SNMPポーリングの応答設定画面。SNMPv2cの
+  場合は **SNMP Community String**、SNMPv3の場合は **Views**(OIDと
+  16進マスクによるinclude/exclude指定)と **Users**(Username・View
+  group・Auth Password・Priv Password)を設定する
+- **SNMP Community String**: SNMPv2cで使う認証文字列。一次情報には
+  デフォルト値の `public` を避けて独自の値に変更することが推奨されている
+  旨が記載されている
+- **Views / Users(SNMPv3)**: Viewsは読み出しを許可するOID範囲を
+  include/excludeで指定するグループ、UsersはそのViewを紐づけた
+  ユーザー(Auth Password・Priv Passwordで認証・暗号化を行う)
+- **Interface Management Profile**: `Network > Network Profiles >
+  Interface Mgmt` で作成し、データプレーンのインターフェースに割り当てる
+  プロファイル。SNMPサービスの許可・拒否を含む。一次情報には、
+  データプレーンインターフェース経由でSNMPポーリングに応答させるには
+  Interface Management Profileを作成しSNMPサービスを許可した上で
+  対象インターフェースに割り当てる、という趣旨の記載がある
+- **MGTインターフェースのSNMPサービス**: `Device > Setup > Interfaces`
+  でManagementインターフェースを開き、SNMPのチェックボックスを有効化
+  することで、MGTインターフェース経由のSNMPポーリングに応答する
+- **SNMP Trapサーバープロファイル**: `Device > Server Profiles > SNMP
+  Trap` で作成する、イベント発生時の通知先プロファイル。一次情報には
+  1プロファイルにつき最大4台のSNMPマネージャーを登録できると明記されて
+  いる。各サーバーにはName・SNMP Manager(送信先IP)を設定し、
+  SNMPv3の場合はさらにUser・EngineID・Auth Password・Priv Passwordを
+  設定する。EngineIDは一次情報によれば空欄のままにするとファイアウォール
+  のシリアル番号が使われる
+- **Log Forwardingプロファイル**: どのログ(重大度・種別)をどの
+  SNMP Trapサーバープロファイルへ転送するかを紐付ける設定。一次情報には
+  重大度(severity)やWildFireの判定結果ごとにSNMP Trapサーバー
+  プロファイルを割り当てられる旨の記載がある
+
+## シナリオ設定
+
+SNMPポーリング・トラップ送信の対象ファイアウォールと、外部監視基盤の
+情報は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| 対象ファイアウォール(device_name) | {{ device_name }} |
+| 外部監視基盤(zabbix_server_name) | {{ zabbix_server_name }} |
+| 外部監視基盤のIPアドレス(zabbix_server_ip) | {{ zabbix_server_ip }} |
+| MGTインターフェースのSNMPサービス有効化
+  (mgmt_interface_snmp_enabled) | {{ mgmt_interface_snmp_enabled }} |
+
+データプレーン側でSNMPポーリングに応答させるインターフェース
+(snmp_polled_interfaces, {{ snmp_polled_interfaces | length }} 件。
+Interface Management Profile `{{ interface_mgmt_profile_name }}` を
+割り当てる):
+
+| # | インターフェース名 | ゾーン |
+|---|--------------------|--------|
+{% for iface in snmp_polled_interfaces %}| {{ loop.index }} | {{ iface["name"] }} | {{ iface["zone"] }} |
+{% endfor %}
+
+SNMPv3ポーリング設定(SNMP Setup):
+
+| 項目 | 値 |
+|------|-----|
+| Viewグループ名(snmpv3_view_group_name) | {{ snmpv3_view_group_name }} |
+| 対象OID(snmpv3_view_oid) | {{ snmpv3_view_oid }} |
+| マスク(snmpv3_view_mask) | {{ snmpv3_view_mask }} |
+| Match Type(snmpv3_view_match_type) | {{ snmpv3_view_match_type }} |
+| ユーザー名(snmpv3_user_name) | {{ snmpv3_user_name }} |
+| Auth Password(snmpv3_auth_password) | {{ snmpv3_auth_password }} |
+| Priv Password(snmpv3_priv_password) | {{ snmpv3_priv_password }} |
+
+SNMP Trapサーバープロファイル `{{ snmp_trap_profile_name }}` に登録する
+送信先(snmp_trap_servers, {{ snmp_trap_servers | length }} 件。上限4件):
+
+| # | サーバー名 | SNMP Manager(送信先IP) | User | Auth Password | Priv Password |
+|---|-----------|------------------------|------|----------------|----------------|
+{% for srv in snmp_trap_servers %}| {{ loop.index }} | {{ srv["name"] }} | {{ srv["manager_ip"] }} | {{ srv["user"] }} | {{ srv["auth_password"] }} | {{ srv["priv_password"] }} |
+{% endfor %}
+
+Log Forwardingプロファイル `{{ log_forwarding_profile_name }}` で
+SNMP Trapへ転送する重大度(forwarded_log_severities,
+{{ forwarded_log_severities | length }} 件):
+
+{% for sev in forwarded_log_severities %}- {{ sev }}
+{% endfor %}
+
+## 手順
+
+### 1. MGTインターフェースのSNMPサービスを有効化する
+
+`Device > Setup > Interfaces` を開き、Managementインターフェースの
+設定を開いて `SNMP` のチェックボックスを有効化します(シナリオ設定の
+`mgmt_interface_snmp_enabled` が `{{ mgmt_interface_snmp_enabled }}` の
+状態です)。`OK` をクリックして保存します(この時点ではまだ `Commit`
+しません)。
+
+### 2. データプレーンインターフェース向けにInterface Management Profileを作成・割り当てる
+
+`Network > Network Profiles > Interface Mgmt > Add` から新しい
+プロファイルを作成します。
+
+- Name: `{{ interface_mgmt_profile_name }}`
+- 許可するサービス: `SNMP` のチェックボックスを有効化する
+
+保存後、対象のデータプレーンインターフェースに割り当てます。
+
+{% for iface in snmp_polled_interfaces %}- `{{ iface["name"] }}`({{ iface["zone"] }})を開き、
+  Advanced > Other info > Interface Management Profile =
+  `{{ interface_mgmt_profile_name }}` > OK
+{% endfor %}
+
+### 3. SNMP Setupでポーリング用のSNMPv3 View/Userを設定する
+
+`Device > Setup > Operations` のMiscellaneousセクションにある歯車
+アイコンから `SNMP Setup` を開きます。
+
+- Views: 新しいViewグループ `{{ snmpv3_view_group_name }}` を追加し、
+  次のOID/マスク/Match Typeを設定します。
+
+  | OID | マスク | Match Type |
+  |-----|--------|------------|
+  | {{ snmpv3_view_oid }} | {{ snmpv3_view_mask }} | {{ snmpv3_view_match_type }} |
+
+- Users: 次のユーザーを追加します。
+
+  - Username: `{{ snmpv3_user_name }}`
+  - View group: `{{ snmpv3_view_group_name }}`
+  - Auth Password: `{{ snmpv3_auth_password }}`
+  - Priv Password: `{{ snmpv3_priv_password }}`
+
+`OK` をクリックして保存します(この時点ではまだ `Commit` しません)。
+
+### 4. SNMP Trapサーバープロファイルを作成する
+
+`Device > Server Profiles > SNMP Trap > Add` から新しいプロファイルを
+作成します。
+
+- Name: `{{ snmp_trap_profile_name }}`
+- Servers: 次のサーバーを1件ずつ追加します(最大4件まで登録可能)。
+
+{% for srv in snmp_trap_servers %}- Name: `{{ srv["name"] }}` / SNMP Manager: `{{ srv["manager_ip"] }}` /
+  User: `{{ srv["user"] }}` / EngineID: 空欄(ファイアウォールのシリアル
+  番号を使用) / Auth Password: `{{ srv["auth_password"] }}` /
+  Priv Password: `{{ srv["priv_password"] }}`
+{% endfor %}
+
+`OK` をクリックして保存します(この時点ではまだ `Commit` しません)。
+
+### 5. Log Forwardingプロファイルで重大度とSNMP Trapプロファイルを紐付ける
+
+`Objects > Log Forwarding > Add` から新しいプロファイルを作成します。
+
+- Name: `{{ log_forwarding_profile_name }}`
+- 次の重大度に対して、手順4で作成した `{{ snmp_trap_profile_name }}` を
+  SNMP Trapの転送先として割り当てます。
+
+{% for sev in forwarded_log_severities %}- {{ sev }}
+{% endfor %}
+保存後、このLog Forwardingプロファイルを対象のセキュリティポリシー
+ルールに適用します。
+
+### 6. Commitし、外部監視基盤からポーリング・トラップ受信の両方を検証する
+
+`Commit` を実行し、手順1〜5の設定を一括で反映します。反映後、
+{{ zabbix_server_name }}({{ zabbix_server_ip }})から次を確認します。
+
+- MGTインターフェースおよび{% for iface in snmp_polled_interfaces %}`{{ iface["name"] }}`{% if not loop.last %}・{% endif %}{% endfor %}
+  のIPアドレスへ、SNMPv3(User: `{{ snmpv3_user_name }}`)でポーリング
+  できること
+- ファイアウォール側で意図的にイベントを発生させ、
+{% for srv in snmp_trap_servers %}  `{{ srv["manager_ip"] }}`({{ srv["name"] }})でTrapを受信できること
+{% endfor %}
+
+## 動作確認
+
+- {{ zabbix_server_name }} から、SNMPv3のUser `{{ snmpv3_user_name }}` と
+  Viewグループ `{{ snmpv3_view_group_name }}` の組み合わせで、MGT
+  インターフェースおよびデータプレーン側の
+  {{ snmp_polled_interfaces | length }} インターフェースの統計値が
+  取得できること
+- 誤ったCommunity String・User・Passwordではポーリングが失敗すること
+- {{ snmp_trap_servers | length }} 件のTrap送信先すべてでTrapを受信
+  できること
+- Log Forwardingプロファイル `{{ log_forwarding_profile_name }}` が
+  対象のセキュリティポリシールールに適用されていること
+
+## 注意事項
+
+- **SNMP Community String・SNMPv3のAuth Password/Priv Passwordは実際の
+  値をそのまま平文で扱わないこと。** 本手順書内の値は `****` で
+  マスクしている。実際の値は別途安全な方法(パスワードマネージャー等)で
+  管理すること。
+- **SNMP Community Stringのデフォルト値 `public` は使用しないこと。**
+  一次情報にはデフォルト値を避けて独自の値に変更することが推奨されている
+  旨が記載されている。
+- **SNMP Trapサーバープロファイルに登録できるSNMPマネージャーは
+  1プロファイルにつき最大4台まで。** それ以上の送信先が必要な場合は
+  複数のプロファイルを作成し、Log Forwardingプロファイル側で使い分ける
+  こと。
+- **EngineIDを空欄のままにした場合、ファイアウォールのシリアル番号が
+  使われる。** SNMPマネージャー側でEngineIDを固定値として登録している
+  場合は、空欄のままで問題ないか事前に確認すること。
+- CPU/メモリ/インターフェース状態などを示す具体的なMIB・OIDの一覧は、
+  本手順書が参照した一次情報の範囲には含まれていないため記載していない。
+  外部監視基盤側でOIDを指定する際は、ベンダーが公開するサポート対象
+  MIBのリファレンスを別途確認すること。
+- MGTインターフェース経由のSNMPサービス有効化(`Device > Setup >
+  Interfaces`)と、データプレーンインターフェース向けのInterface
+  Management Profileは別々の設定であり、両方が必要な範囲にのみ
+  適用すること。

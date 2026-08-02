@@ -1,0 +1,34 @@
+ems_connector_name: "EMS-Connector-HQ"
+ems_server_ip: "10.10.30.5"
+ems_server_address_name: "EMS_Server"
+ems_admin_port: 8013
+ems_service_name: "FCTEMS-Admin"
+ssl_vpn_interface: "ssl.root"
+internal_interface: "port1"
+sync_firewall_addresses: true
+ems_tag_address_compliant: "FCTEMS1_ems1_VPN_Compliant_tag"
+ems_tag_address_noncompliant: "FCTEMS1_ems1_VPN_NonCompliant_tag"
+zero_trust_rule_sets:
+  - name: "VPN-Compliant-Baseline"
+    tag: "VPN_Compliant"
+    logic: "and"
+    conditions:
+      - rule_type: "AntiVirus Software"
+        platform: "Windows/macOS/Linux"
+        detail: "AV software installed and runningであり、シグネチャが最新であること"
+      - rule_type: "EMS Management"
+        platform: "全プラットフォーム"
+        detail: "FortiClient installed and Telemetry connected to EMS"
+  - name: "VPN-NonCompliant-Vuln"
+    tag: "VPN_NonCompliant"
+    logic: "or"
+    conditions:
+      - rule_type: "Vulnerable Devices"
+        platform: "Windows/macOS/Linux"
+        detail: "High or higher の脆弱性を検知"
+policy_id_ems_access: 10
+policy_name_ems_access: "EMS-Access-Always-Allow"
+policy_id_deny_noncompliant: 11
+policy_name_deny_noncompliant: "Deny-NonCompliant-VPN"
+policy_id_allow_compliant: 12
+policy_name_allow_compliant: "Allow-Compliant-VPN"

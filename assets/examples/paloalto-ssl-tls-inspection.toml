@@ -1,0 +1,27 @@
+trust_zone = "trust"
+untrust_zone = "untrust"
+
+forward_trust_ca_name = "Forward-Trust-CA"
+forward_trust_ca_common_name = "ssl-inspection-ca.corp.example.local"
+forward_untrust_ca_name = "Forward-Untrust-CA"
+
+globalprotect_portal_name = "gp-portal-corp"
+
+decrypt_rule_name = "Decrypt-Outbound-Web"
+decryption_profile_name = "Decrypt-Profile-Standard"
+
+privacy_no_decrypt_rule_name = "NoDecrypt-Privacy-Sensitive"
+privacy_no_decrypt_profile_name = "NoDecrypt-Profile-CertCheck"
+privacy_url_categories = ["financial-services", "health-and-medicine"]
+
+test_client_source = "10.10.30.55"
+test_general_destination = "198.51.100.10"
+test_privacy_destination = "198.51.100.25"
+
+[[technical_exclusions]]
+hostname = "*.pinning-example.com"
+description = "証明書ピン留めのため復号できないサービス"
+
+[[technical_exclusions]]
+hostname = "update.legacy-vendor-example.com"
+description = "非対応の暗号スイートを使用するレガシーサービス"

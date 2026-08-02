@@ -1,0 +1,137 @@
+# OPNsenseによる脅威インテリジェンスフィード連携遮断
+
+外部の脅威インテリジェンスフィード(既知の悪性IPリスト)を継続的に取り込み、
+{{ wan_interface|upper }}インターフェース宛の通信を自動的に遮断できるように
+します。OPNsense標準の *Firewall > Aliases* にある **URL Table (IPs)** 型
+エイリアスでフィードURLを定期取得し、ファイアウォールルールの送信元として
+参照するだけで実現でき、外部スクリプトや自作の監視デーモンは必要ありません。
+
+## 目的
+
+Firewall > Aliases に **URL Table (IPs)** エイリアス `{{ alias_name }}` を作成して
+複数の脅威インテリジェンスフィードを1つのIPリストに集約し、Refresh Frequency
+による自動再取得と、そのエイリアスを送信元とするブロックルールによって、
+既知の悪性IPからの通信を継続的に遮断できる状態を目指します。
+
+## 用語解説
+
+- **URL Table (IPs)**: 外部URLからIPv4/IPv6アドレスの一覧を定期的に取得し、
+  1つのエイリアスとして保持するOPNsenseのエイリアス種別。取得したファイルは
+  1行1アドレスの形式で解釈され、空白・コロン・セミコロン・パイプ・ハッシュで
+  始まる行はコメントとして無視されます。
+- **Refresh Frequency**: URL Table型エイリアスがフィードURLを再取得する間隔を
+  指定する設定項目。この値に従い、OPNsenseが自動的に最新のリストへ更新します。
+- **Firewall > Diagnostics > Aliases**: エイリアスが実際に解決した内容(取得済みの
+  IPアドレス一覧)を確認できる診断画面。
+- **pfTable**: pf(パケットフィルタ)がエイリアスの内容を保持する内部テーブル。
+  *Firewall > Diagnostics > pfTable* でテーブルの反映状況を確認できます。
+
+## シナリオ設定
+
+{{ wan_interface|upper }}インターフェースへの着信のうち、以下{{ feeds | length }}件の
+脅威インテリジェンスフィードに含まれるIPアドレスからの通信を遮断対象とします。
+
+| 提供元 | フィード識別名 | URL |
+|---|---|---|
+{% for f in feeds %}| {{ f["source"] }} | {{ f["name"] }} | {{ f["url"] }} |
+{% endfor %}
+
+これらは1つのエイリアス `{{ alias_name }}`(URL Table (IPs))に集約し、
+{{ refresh_frequency_days }}日ごとに自動再取得します。エイリアスが実際に機能する
+ことを確認できるまで、既存の暫定許可ルール `{{ legacy_rule_descr }}` は無効化
+しません。
+
+## 手順
+
+### 1. 現状の{{ wan_interface|upper }}ルールを確認する
+
+*Firewall > Rules > {{ wan_interface|upper }}* を開き、現行のルール一覧と、
+暫定許可ルール `{{ legacy_rule_descr }}` が有効なままであることを確認します。
+このルールは新しいブロックルールの動作確認が完了するまで残しておきます。
+
+### 2. 脅威インテリジェンス用のURL Tableエイリアスを作成する
+
+*Firewall > Aliases* で **Add** を押し、以下の内容でエイリアスを作成します。
+
+- Name: `{{ alias_name }}`
+- Type: `URL Table (IPs)`
+- Description: `{{ alias_descr }}`
+- Refresh Frequency: `{{ refresh_frequency_days }}`日
+
+URL欄に、以下{{ feeds | length }}件のフィードURLを1行ずつ追加します。
+
+{% for f in feeds %}- {{ f["url"] }}({{ f["source"] }}: {{ f["name"] }}{% if f["note"] != "-" %}。{{ f["note"] }}{% endif %})
+{% endfor %}
+
+保存後、画面上部の **Apply** を押して反映します。
+
+### 3. エイリアスの取得内容を確認する
+
+*Firewall > Diagnostics > Aliases* を開き、`{{ alias_name }}` を選択して、
+各フィードURLから取得したIPアドレスが一覧として表示されることを確認します。
+一覧が空の場合は、手順2のURL欄の入力内容とネットワーク疎通を再確認します。
+
+### 4. エイリアスを送信元とするブロックルールを作成する
+
+*Firewall > Rules > {{ wan_interface|upper }}* で **Add** を押し、以下の内容で
+ルールを作成します。
+
+- Action: `Block`
+- Interface: `{{ wan_interface|upper }}`
+- TCP/IP Version: IPv4+IPv6
+- Source: `{{ alias_name }}`
+- Destination: `any`
+- Description: `{{ block_rule_descr }}`
+
+保存後、このルールを暫定許可ルール `{{ legacy_rule_descr }}` より **上**
+(評価順で先)に移動します。OPNsenseのルール評価は上から順に最初に一致した
+ルールが適用されるため、ブロックルールが先に評価される位置にあることを
+確認してください。保存後、**Apply changes** を押して反映します。
+
+### 5. pfTableでテーブルへの反映を確認し、暫定ルールを無効化する
+
+新しいブロックルールが正しく機能することを確認するまで、手順1で確認した
+暫定許可ルール `{{ legacy_rule_descr }}` は有効なままにしておきます。
+
+```bash
+# OPNsense本体で、エイリアスに対応するpfのテーブルにエントリが
+# 読み込まれていることを確認(テーブル名はGUIのpfTable画面で確認できる)
+pfctl -t {{ alias_name }} -T show | head
+```
+
+*Firewall > Diagnostics > pfTable* を開き、`{{ alias_name }}` に対応するテーブルに
+手順3で確認したIPアドレスが読み込まれていることを確認します。テーブル名が
+エイリアス名と異なって表示される場合は、GUI上の表示名に読み替えてください。
+
+すべての確認が取れたら、*Firewall > Rules > {{ wan_interface|upper }}* を開き、
+暫定許可ルール `{{ legacy_rule_descr }}` を無効化(Disable)して
+**Apply changes** を押します。
+
+## 動作確認
+
+- *Firewall > Diagnostics > Aliases* で `{{ alias_name }}` を選択し、
+  {{ feeds | length }}件のフィードに由来するIPアドレスが1件以上表示されること
+- `pfctl -t {{ alias_name }} -T show` の出力にIPアドレスが表示されること
+  (テーブル名が異なる場合はGUI表示名で再実行する)
+- *Firewall > Rules > {{ wan_interface|upper }}* にルール `{{ block_rule_descr }}`
+  が存在し、暫定許可ルール `{{ legacy_rule_descr }}` より評価順で先(上)に
+  配置されていること
+- `{{ alias_name }}` に含まれるIPアドレスからの通信試行が、ブロックルール
+  `{{ block_rule_descr }}` にヒットし遮断されること(ログまたはヒットカウントで確認)
+- 手順5で暫定許可ルール `{{ legacy_rule_descr }}` を無効化した後も、正規の
+  通信が引き続き到達できること
+
+## 注意事項
+
+- 各フィードの利用条件を確認すること。特にSpamhausは商用利用に別途ライセンスが
+  必要な場合があるため、上記フィード一覧に付記した注意事項を必ず確認する。
+- ブロックルールを評価順の先頭付近に置くため、フィードの内容によっては正規の
+  通信元が誤って含まれる(誤検知)可能性がある。遮断が疑われる場合に備え、
+  除外用のエイリアスや個別許可ルールを追加できる運用手順を用意しておく。
+- Refresh Frequencyにより自動更新されるが、フィード配信元が到達不能になった
+  場合は取得に失敗し、リストが古いまま保持される。*Firewall > Diagnostics >
+  Aliases* で定期的に取得結果を確認する。
+- テーブルに含まれるエントリ数が非常に多いフィードを追加すると、OPNsense本体の
+  メモリ使用量に影響する場合があるため、必要なフィードのみを選定する。
+- 設定変更前に *System > Configuration > Backups* から{{ config_backup_note }}の
+  バックアップを取得し、意図しない通信断が発生した場合に切り戻せるようにしておく。

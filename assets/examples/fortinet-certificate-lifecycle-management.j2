@@ -1,0 +1,246 @@
+# FortiGateのTLS証明書ライフサイクル管理(ACME自動発行・更新)
+
+管理画面(GUI)およびSSL-VPNポータルで使用するTLS証明書を、FortiOSの
+ACME(RFC 8555)クライアント機能で自動発行・自動更新します。対象は管理画面
+用の`{{ admin_fqdn }}`とSSL-VPNポータル用の`{{ vpn_fqdn }}`の2件です。ACME
+による自動更新に加えて、万一の更新失敗にも気づけるよう、FortiOS標準の
+証明書有効期限監視(Automation機能)を安全網として設定し、有効期限切れに
+よるサービス断を未然に防ぎます。
+
+## 目的
+
+証明書の発行・更新作業を手作業のCSR発行・再インポートに依存させず、
+FortiGateのACMEクライアント機能に一元化することで、更新忘れによる証明書
+失効・サービス断のリスクを下げることを目指します。あわせて、ACMEによる
+自動更新が何らかの理由で失敗した場合にも、FortiOS標準のAutomation機能に
+よる有効期限監視で運用者が事前に気づける状態を作ることを目指します。
+
+## 用語解説
+
+- **ACME(Automated Certificate Management Environment)**: RFC 8555で
+  定義される証明書の自動発行・更新プロトコル。Let's Encrypt等の認証局が
+  採用しており、FortiGateはACMEクライアントとしてこれらの認証局から証明書
+  を取得できる
+- **Import > Local Certificate > Type: Automated**: `System > Certificates`
+  でACME証明書を作成するGUIの操作。`Type` に `Automated` を選択すると
+  `Domain`(FortiGateの公開FQDN)・`Email`・`ACME service`(既定は
+  `Let's Encrypt`)の各フィールドが表示される。`Email` の値は証明書発行
+  プロセス自体では使用されない
+- **ACME Interface**: そのFortiGate上でLet's Encryptと初めて証明書をやり
+  取りする際に表示される設定パネル。ACMEの検証(チャレンジ応答)を待ち
+  受けるインターフェースを選択する。2件目以降の証明書作成では、既に選択
+  済みのインターフェースが使われるため、このパネルは表示されない
+- **Subject Alternative Name (SAN)**: ACME証明書ではFortiGateのDNS
+  ホスト名が自動的に設定され、編集もワイルドカードの使用も複数SANの追加
+  もできない
+- **config vpn certificate local**: FortiOS CLIでローカル証明書を作成する
+  ブロック構文。ACMEで発行する場合は `set enroll-protocol acme2` に加え、
+  `set acme-domain`(公開FQDN)と `set acme-email`(通知先メールアドレス)
+  を設定する
+- **admin-server-cert(config system global)**: 管理画面(GUI/HTTPS)の
+  サーバー証明書を指定するCLIパラメータ。GUIでは `System > Settings` の
+  `Administration Settings` にある `HTTPS Server Certificate` のドロップ
+  ダウンに対応する(既定値は `Fortinet_GUI_Server`)
+- **servercert(config vpn ssl settings)**: SSL-VPNポータルのサーバー証明書
+  を指定するCLIパラメータ。GUIでは `VPN > SSL-VPN Settings` の
+  `Connection Settings` にある `Server Certificate` のドロップダウンに
+  対応する(既定値は `Fortinet_Factory`)
+- **cert-expire-warning(config vpn certificate setting)**: ローカル証明書
+  の有効期限が近づいたことをイベントログに記録するまでの日数を設定する
+  CLIパラメータ。0〜100日の範囲で設定でき、既定値は14日
+- **Local Certificate Expiry(Automation Trigger)**: `Security Fabric >
+  Automation` の `Trigger` タブで作成できる、ローカル証明書が
+  `cert-expire-warning` のしきい値に達したことを検知する標準トリガー。
+  Automation Stitchの`Trigger`にこのトリガーを指定し、`Action`に通知
+  アクション(メール送信等)を組み合わせることで、証明書失効前に運用者へ
+  通知できる
+
+## シナリオ設定
+
+今回、ACMEで発行・更新するTLS証明書と、その安全網として設定する有効期限
+監視の設定値は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| 管理画面用の公開FQDN(admin_fqdn) | `{{ admin_fqdn }}` |
+| 管理画面用の証明書名(admin_cert_name) | `{{ admin_cert_name }}` |
+| SSL-VPNポータル用の公開FQDN(vpn_fqdn) | `{{ vpn_fqdn }}` |
+| SSL-VPNポータル用の証明書名(vpn_cert_name) | `{{ vpn_cert_name }}` |
+| ACME通知先メールアドレス(acme_email) | `{{ acme_email }}` |
+| ACMEチャレンジ応答用インターフェース(acme_interface) | `{{ acme_interface }}` |
+| ACMEサービス(acme_service) | `{{ acme_service | safe }}` |
+| 証明書失効警告のしきい値・日数(cert_expire_warning_days) | {{ cert_expire_warning_days }} |
+| Automation Stitch名(automation_stitch_name) | `{{ automation_stitch_name }}` |
+| 有効期限通知の宛先メールアドレス(notify_email_address) | `{{ notify_email_address }}` |
+
+`{{ admin_fqdn }}` および `{{ vpn_fqdn }}` は、いずれもインターネットから
+名前解決でき、かつFortiGateの `{{ acme_interface }}` インターフェースの
+アドレスを指す公開FQDNであることが前提です。ACMEのHTTP-01検証は
+`{{ acme_interface }}` インターフェースが外部からの検証要求を受け付けられ
+ることに依存するため、この前提が崩れると証明書の発行・更新に失敗します。
+
+## 手順
+
+### 1. 現状の証明書構成を確認する(変更前の基準を取る)
+
+新しい証明書を1件も発行する前に、現状を確認します。
+
+- `System > Certificates` を開き、`{{ admin_cert_name }}` および
+  `{{ vpn_cert_name }}` と同名の証明書が存在しないことを確認します。
+- `System > Settings` の `Administration Settings` にある
+  `HTTPS Server Certificate`、および `VPN > SSL-VPN Settings` の
+  `Server Certificate` に、現在どの証明書が指定されているかを記録します
+  (切り戻し時の基準にします)。
+
+### 2. 管理画面用の証明書をGUIでACME発行する
+
+1. `System > Certificates` を開き、`Import > Local Certificate` を
+   クリックします。
+2. `Type` を `Automated` に設定します。
+3. `Certificate Name` に `{{ admin_cert_name }}` を入力します。
+4. `Domain` に `{{ admin_fqdn }}` を入力します。
+5. `Email` に `{{ acme_email }}` を入力します。
+6. `ACME service` が `{{ acme_service | safe }}` になっていることを確認します。
+7. このFortiGateで初めてACME証明書を発行する場合、`Set ACME Interface`
+   パネルが開きます。ACMEの検証応答を待ち受けるインターフェースとして
+   `{{ acme_interface }}` を選択し、`OK` をクリックします。
+8. `OK` をクリックして証明書の発行を開始します。発行が完了するまで
+   `System > Certificates` の一覧で状態を確認します。
+
+### 3. 同じ内容をCLIでも確認する
+
+GUIでの操作と同じ内容が、`config vpn certificate local` に登録されている
+ことを確認します。
+
+```bash
+config vpn certificate local
+    edit "{{ admin_cert_name }}"
+        set enroll-protocol acme2
+        set acme-domain "{{ admin_fqdn }}"
+        set acme-email "{{ acme_email }}"
+    next
+end
+```
+
+### 4. SSL-VPNポータル用の証明書もACMEで発行する
+
+手順2と同じ操作を、SSL-VPNポータル用のFQDNで繰り返します。
+
+1. `System > Certificates` の `Import > Local Certificate` を開きます。
+2. `Type` を `Automated` に設定します。
+3. `Certificate Name` に `{{ vpn_cert_name }}` を入力します。
+4. `Domain` に `{{ vpn_fqdn }}` を入力します。
+5. `Email` に `{{ acme_email }}` を入力します。
+
+手順2で `{{ acme_interface }}` を既に選択済みのため、`Set ACME Interface`
+パネルは表示されません。CLIでは次の内容が登録されます。
+
+```bash
+config vpn certificate local
+    edit "{{ vpn_cert_name }}"
+        set enroll-protocol acme2
+        set acme-domain "{{ vpn_fqdn }}"
+        set acme-email "{{ acme_email }}"
+    next
+end
+```
+
+### 5. 発行済み証明書を管理画面のHTTPSサーバー証明書に適用する
+
+GUI:
+
+1. `System > Settings` を開きます。
+2. `Administration Settings` の `HTTPS Server Certificate` を
+   `{{ admin_cert_name }}` に変更します。
+3. 画面下部で `Apply` をクリックします。
+
+CLI:
+
+```bash
+config system global
+    set admin-server-cert "{{ admin_cert_name }}"
+end
+```
+
+### 6. 発行済み証明書をSSL-VPNポータルの証明書に適用する
+
+GUI:
+
+1. `VPN > SSL-VPN Settings` を開きます。
+2. `Connection Settings` の `Server Certificate` を `{{ vpn_cert_name }}`
+   に変更します。
+3. `Apply` をクリックします。
+
+CLI:
+
+```bash
+config vpn ssl settings
+    set servercert "{{ vpn_cert_name }}"
+end
+```
+
+### 7. 有効期限監視をFortiOS標準のAutomation機能で設定する(安全網)
+
+ACMEによる自動更新が何らかの理由(FQDNの名前解決変更、ACMEインター
+フェースの構成変更等)で失敗しても気づけるように、証明書失効前の通知を
+設定します。自作の監視スクリプトやcronジョブは使わず、FortiOS標準の
+しきい値設定とAutomation機能をそのまま利用します。
+
+1. `config vpn certificate setting` で、失効警告のしきい値を設定します。
+
+```bash
+config vpn certificate setting
+    set cert-expire-warning {{ cert_expire_warning_days }}
+end
+```
+
+2. `Security Fabric > Automation` の `Trigger` タブを開き、`Create New`
+   をクリックします。`System` セクションから `Local Certificate Expiry`
+   を選択し、保存します。
+3. 同じ画面の `Stitch` タブで `Create New` をクリックし、名前に
+   `{{ automation_stitch_name }}` を入力します。
+4. `Trigger` に手順2の `Local Certificate Expiry` を指定します。
+5. `Action` にメール送信アクションを追加し、宛先を
+   `{{ notify_email_address }}` に設定します。
+
+これにより、`{{ admin_cert_name }}` または `{{ vpn_cert_name }}` の残り
+有効期間が `{{ cert_expire_warning_days }}` 日を下回ると、
+`{{ notify_email_address }}` 宛に通知が届くようになります。
+
+## 動作確認
+
+- `System > Certificates` の一覧で `{{ admin_cert_name }}` と
+  `{{ vpn_cert_name }}` がいずれも有効な状態で表示されていること
+- `System > Settings` の `HTTPS Server Certificate` が
+  `{{ admin_cert_name }}` になっていること、および
+  `https://{{ admin_fqdn }}/` へブラウザでアクセスし、提示される証明書が
+  `{{ admin_cert_name }}` であること
+- `VPN > SSL-VPN Settings` の `Server Certificate` が `{{ vpn_cert_name }}`
+  になっていること、および `https://{{ vpn_fqdn }}/` のSSL-VPNポータル
+  URLへアクセスし、提示される証明書が `{{ vpn_cert_name }}` であること
+- `Security Fabric > Automation` の `Stitch` タブに
+  `{{ automation_stitch_name }}` が表示され、`Trigger` が
+  `Local Certificate Expiry`、`Action` の宛先が
+  `{{ notify_email_address }}` になっていること
+- 手順1で記録した既存の証明書指定(切り戻し用の基準)が、意図せず上書き
+  されていないこと
+
+## 注意事項
+
+- **`{{ acme_interface }}` インターフェースが外部からACME検証要求を受け
+  付けられない状態になると、自動更新に失敗します。** ファイアウォール
+  ポリシーの変更や `{{ acme_interface }}` の構成変更を行う際は、ACME証明書
+  の自動更新に影響しないか事前に確認してください。
+- **`Email` フィールドの値は証明書発行プロセスそのものでは使用されません。**
+  更新失敗時の一次的な検知手段にはならないため、手順7のAutomation機能に
+  よる有効期限監視を必ず併用してください。
+- **SANはFortiGateのDNSホスト名が自動的に設定され、編集もワイルドカード
+  の使用も複数SANの追加もできません。** 複数のFQDNを1枚の証明書で待ち受け
+  たい場合は、この制約の範囲内で運用できるか事前に確認してください。
+- `cert-expire-warning` はイベントログへの記録としきい値の基準であり、
+  値を変更しても既存の証明書の実際の有効期限そのものは変わりません。
+  `{{ cert_expire_warning_days }}` 日という値は、更新失敗に気づいてから
+  手動対応する余裕を確保するための運用上の設定です。
+- CLI/GUIへのログインに使う管理者パスワードやAPIトークンは、本手順書や
+  チケット、ログに平文で残さないでください。記録が必要な場合は
+  `****` のようにマスクし、秘密管理ツール等で別途安全に保管してください。

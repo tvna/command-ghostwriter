@@ -1,0 +1,7 @@
+lan_interface = "internal"
+wan_interface = "wan1"
+policy_id = 5
+policy_name = "out_internal-wan1_internet"
+ips_sensor_name = "ips-botnet-cc-block"
+botnet_action = "block"
+lan_subnet_name = "internal-subnet"

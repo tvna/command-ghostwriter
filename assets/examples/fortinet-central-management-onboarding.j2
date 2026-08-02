@@ -1,0 +1,172 @@
+# 複数拠点FortiGateのFortiManager一元管理オンボーディング
+
+複数拠点に配備した未登録のFortiGate{{ devices | length }}台を、FortiManagerの
+Device Manager(`Add devices` の Discover mode)で検出・登録し、ADOM
+(`{{ target_adom }}`)へ割り当てます。認可(Authorizing devices)が完了して
+FGFMトンネル経由でオンラインになったことを確認したうえで、Install Wizard
+(`Install > Install Wizard` の `Install Policy Package & Device Settings`)
+から共通のポリシーパッケージ(`{{ policy_package_name }}`)を一括インストール
+します。導入失敗時に備え、事前にFortiManager CLIで `rollback-allow-reboot`
+を有効化し、FGFM再接続に失敗した場合はFortiGate側が自動的に設定ファイルへ
+ロールバックして再接続を試みるようにしておきます。
+
+## 目的
+
+複数拠点/多数のFortiGateを、個別のGUI/SSHログインではなくFortiManagerの
+Device Managerに集約登録し、ADOM単位で管理できるようになることを目指します。
+あわせて、Install Wizardによるポリシーパッケージ/デバイス設定の一括インストール
+と、`rollback-allow-reboot` による導入失敗時の自動復旧を組み合わせ、拠点数が
+増えても1回の操作で安全に設定を配布できる運用を実践します。
+
+## 用語解説
+
+- **Device Manager**: FortiManagerのGUIで、管理対象デバイスの登録・グループ化
+  ・状態確認を行うモジュール。`Device & Groups` にデバイス一覧が表示される
+- **ADOM(Administrative Domain)**: デバイスとその設定・ポリシーパッケージを
+  分離して管理するための論理的な管理区画。デバイスは登録時にいずれかのADOMへ
+  割り当てられ、Install Wizardなどの操作は自分が現在選択しているADOMのスコープ
+  内で行われる
+- **Add devices / Discover mode**: `Device Manager` の `Device & Groups` から
+  実行する、未登録デバイスの追加操作。オンラインのFortiGateに対しては
+  Discover modeで検出して追加する方法が用意されている
+- **Authorizing devices**: Add devicesで検出・追加したデバイスを、
+  FortiManager管理下のデバイスとして正式に認可する手順。認可が完了することで
+  デバイスがADOMに組み込まれ、以後の一括インストール対象にできる
+- **FGFMトンネル**: FortiGateとFortiManagerの間で確立される管理用トンネル。
+  デバイスが認可されオンライン状態になると、このトンネル経由でポリシー
+  パッケージやデバイス設定のインストールが行われる
+- **Install Wizard(Install Policy Package & Device Settings)**: ツールバーの
+  `Install` または `Install Wizard` から起動するウィザード。ポリシー
+  パッケージと対象デバイス/デバイスグループを選択し、ポリシー・オブジェクト
+  検証やインターフェース検証を経てからインストールを実行する。実行時には
+  即時の `Install` と、日時を指定する `Schedule Install` のいずれかを選べる
+- **rollback-allow-reboot**: FortiManager CLIの `config system dm` 配下で
+  設定するパラメータ(`set rollback-allow-reboot {enable | disable}`)。
+  有効化しておくと、インストール後にFGFMの再接続が失敗した場合、FortiGateが
+  自動的に再起動して直前の設定ファイルへ復旧し、FortiManagerとの再接続を
+  試みる
+
+## シナリオ設定
+
+登録先ADOM(`target_adom`): `{{ target_adom }}`
+(現在の作業ADOM(current_adom_label): `{{ current_adom_label }}`)
+
+登録・インストール対象の拠点FortiGate({{ devices | length }}台):
+
+| # | 拠点 | 管理IPアドレス |
+|---|------|----------------|
+{% for dev in devices %}| {{ loop.index }} | {{ dev.site_label }} | {{ dev.mgmt_ip }} |
+{% endfor %}
+| 項目 | 値 |
+|------|-----|
+| 適用するポリシーパッケージ(policy_package_name) | {{ policy_package_name }} |
+| rollback-allow-rebootを有効化するか(rollback_allow_reboot) | {{ rollback_allow_reboot }} |
+| Schedule Installを使うか(schedule_install) | {{ schedule_install }} |
+{% if schedule_install %}| インストール予定日時(install_schedule_time) | {{ install_schedule_time }} |
+{% endif %}
+
+## 手順
+
+### 1. 現在の作業ADOMを確認する
+
+Install Wizardや各種操作は、現在選択しているADOMのスコープ内で行われます。
+FortiManager GUI右上のADOM選択で、これから登録するデバイスの割当先である
+`{{ target_adom }}` に切り替わっていることを確認してください(現在
+`{{ current_adom_label }}` が選択されている場合は切り替えます)。
+
+### 2. FortiManager CLIでrollback-allow-rebootを有効化する
+
+一括インストールを始める前に、導入失敗時の自動復旧を有効にしておきます。
+
+```bash
+config system dm
+{% if rollback_allow_reboot %}    set rollback-allow-reboot enable
+{% else %}    set rollback-allow-reboot disable
+{% endif %}end
+```
+
+### 3. Device ManagerのAdd devicesで未登録デバイスをDiscover modeで検出・追加する
+
+`Device Manager` > `Device & Groups` を開き、`Add devices` を実行します。
+以下の拠点FortiGateについて、Discover modeで管理IPアドレスを指定して検出し、
+一覧に追加します。
+
+| # | 拠点 | 管理IPアドレス |
+|---|------|----------------|
+{% for dev in devices %}| {{ loop.index }} | {{ dev.site_label }} | {{ dev.mgmt_ip }} |
+{% endfor %}
+デバイスの管理者アカウントのパスワードは、検出時の入力画面にのみ入力し、本
+手順書や作業ログには `****` のようにマスクした状態以外を記載しないで
+ください。
+
+### 4. 追加したデバイスをAuthorizing devicesで認可し、ADOMへ割り当てる
+
+Add devicesで追加した直後のデバイスは未認可の状態です。`Authorizing
+devices` の手順に従って、{{ devices | length }}台すべてを認可し、
+`{{ target_adom }}` に割り当てます。
+
+{% for dev in devices %}- {{ dev.site_label }}(`{{ dev.mgmt_ip }}`)を認可し、
+  `{{ target_adom }}` への割り当てを確認する
+{% endfor %}
+### 5. デバイスがFGFMトンネル経由でオンライン(認可済み)になっていることを確認する
+
+`Device Manager` > `Device & Groups` の一覧で、{{ devices | length }}台
+すべてのデバイスがオンライン(FGFMトンネル接続済み・認可済み)の状態表示に
+なっていることを確認します。オフラインまたは未認可のままのデバイスがある
+場合、次の手順のInstall Wizardでは選択せず、先に個別に接続状況を確認して
+ください。
+
+### 6. Install Wizardでポリシーパッケージを一括インストールする
+
+ツールバーの `Install` から `Install Wizard` を開き、`Install Policy
+Package & Device Settings` を選択します。ポリシーパッケージとして
+`{{ policy_package_name }}` を指定し、`Next` に進みます。
+
+対象デバイス(Install Targets)の選択画面で、次の{{ devices | length }}台を
+すべて選択します。
+
+{% for dev in devices %}- {{ dev.site_label }}(`{{ dev.mgmt_ip }}`)
+{% endfor %}
+`Next` に進むと、ポリシー・オブジェクトの検証、インターフェースの検証、
+インストール準備が行われます。検証が完了したら、内容を確認したうえで
+{% if schedule_install %}`Schedule Install` を選択し、インストール予定日時
+として `{{ install_schedule_time }}` を指定します。
+{% else %}`Install` を選択し、即時にインストールを実行します。
+{% endif %}
+### 7. インストール結果を確認し、ウィザードを終了する
+
+FortiManagerがインストール状況を表示し、完了後は対象デバイスごとの結果
+(成功、または発生したエラー・警告)が一覧表示されます。{{ devices | length }}
+台すべてが成功していることを確認したら、`Finish` でウィザードを閉じます。
+
+## 動作確認
+
+- `Device Manager` > `Device & Groups` で、{{ devices | length }}台すべての
+  拠点FortiGateが `{{ target_adom }}` に割り当てられ、認可済み・オンライン
+  状態になっていること
+- FortiManager CLIで `config system dm` の設定を確認し、
+  `rollback-allow-reboot` が `{% if rollback_allow_reboot %}enable{% else %}disable{% endif %}`
+  になっていること
+- Install Wizard完了後の結果一覧で、{{ devices | length }}台すべてのデバイス
+  に対して `{{ policy_package_name }}` のインストールが成功していること
+{% if schedule_install %}- Schedule Installで指定した `{{ install_schedule_time }}` の
+  時刻にインストールジョブが実行され、完了していること
+{% endif %}
+## 注意事項
+
+- **デバイスの管理者パスワードや事前共有鍵は、本手順書や作業ログに平文で
+  記載しないこと。** 値を記録する場合は `****` のようにマスクし、秘密管理
+  ツール等で別途安全に保管してください。
+- **Authorizing devicesでの認可・ADOM割り当てを行う前に、Install Wizardの
+  対象デバイス選択に進まないこと。** 未認可またはFGFMトンネル未接続のまま
+  インストールを試みると失敗するため、手順5のオンライン確認を必ず先に
+  行ってください。
+- `rollback-allow-reboot` を有効化していても、FGFM再接続が失敗した場合の
+  復旧はFortiGate自身の再起動を伴います。拠点数が多い一括インストールでは、
+  業務影響を避けるため `schedule_install` を有効にしてメンテナンス
+  ウィンドウ内での実行を検討してください。
+- 本手順書はDevice Managerでのオンラインデバイスの検出・追加(Discover
+  mode)とInstall Wizardの範囲のみを扱います。オフラインモデルデバイスの
+  事前登録(シリアル番号や事前共有鍵による追加)など、一次情報で具体的な
+  入力項目まで確認できなかった手順は対象外としています。導入を検討する
+  場合は最新のFortiManager管理者ガイドを別途確認してください。

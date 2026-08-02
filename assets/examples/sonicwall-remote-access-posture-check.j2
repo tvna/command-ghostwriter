@@ -1,0 +1,193 @@
+# SonicWall (SonicOS) End Point Controlによるリモートアクセス端末の状態検査
+
+SonicOS SSL VPN(NetExtender/リモートアクセス)の `{{ group_name }}` グループに
+対して End Point Control(EPC)を有効化し、トンネル確立前にWindows/macOS/Linux
+端末のアンチウイルス稼働状況やクライアント証明書の有無を検査します。検査結果
+に応じて、準拠端末は `{{ trusted_zone_name }}` ゾーンへ、非準拠・非対応端末は
+`{{ quarantine_zone_name }}` ゾーンへ割り当て、検疫ゾーンからの到達先を
+リメディエーション用サーバーのみに制限します。EPCを有効化する前に、自分の
+検証端末が少なくとも1つのAllowプロファイルに適合することを確認してから
+ロールアウトします。
+
+## 目的
+
+SonicOS標準のEnd Point Control(EPC)機構を用いて、リモートアクセスVPN接続時
+のエンドポイント状態検査(AV稼働・証明書有無)と、判定結果に応じたゾーン
+割り当てによるアクセス制限・隔離の仕組みを構築できるようになることを目指し
+ます。あわせて、外部の監視スクリプトやcronジョブ等を発明せず、EPCの
+Allow/DenyプロファイルとZone Assignment、Access Ruleというネイティブな設定
+項目だけで非準拠端末の隔離を実現する設計を身につけます。
+
+## 用語解説
+
+- **End Point Control(EPC)**: SonicOS SSL VPNの接続時に、クライアント端末
+  (Windows/macOS/Linux)の状態を検査する機構。検査結果は「Device Profile」
+  という単位でAllow(存在すべき条件)・Deny(存在してはならない条件)の
+  どちらかに分類され、条件への適合度に応じてクライアントを異なるZoneへ
+  割り当てる、またはアクセスを拒否する
+- **Device Profile(Allow/Deny)**: EPCの検査条件をまとめた設定単位。Allow
+  Device Profileはクライアント環境に存在すべき条件(AV稼働、クライアント
+  証明書の存在など)を定義し、Deny Device Profileは存在してはならない条件を
+  定義する。複数のプロファイルが定義されている場合、すべてのAllowプロファイル
+  を満たし、かつどのDenyプロファイルにも該当しないクライアントのみ接続が
+  許可される
+- **Zone Assignment(Allow Device Profile)**: Allow Device Profileが一致した
+  クライアントを割り当てるZoneの設定。選択できるのは Zone Type が `SSL VPN`
+  のZoneに限られる
+- **Users | Local Groups > EPC設定**: `{{ group_name }}` などのローカル
+  グループに対してEPCの有効/無効、非対応・未一致クライアントの扱い(既定の
+  プロファイルへ入れるか、検疫用プロファイル/Zoneへ入れるか)、および使用する
+  Device Profileの追加・削除を設定するグループ設定内の項目
+- **Network | System | Zones**: Zoneを作成・編集する管理画面ナビゲーション
+  パス。`Add` から `Name` と `Zone Type` を設定してZoneを1件登録できる。EPCの
+  Zone Assignmentで選択可能にするには `Zone Type` を `SSL VPN` にする
+- **POLICY | Rules and Policies > Access Rules(Matrix view)**: Access Ruleを
+  Zone Matrix形式で表示する管理画面。任意のZone間(例: `{{ quarantine_zone_name }}
+  to LAN`)の矩形をクリックすると、そのZone間のセッションを扱うAccess Ruleの
+  テーブルが開く
+
+## シナリオ設定
+
+EPCを有効化する対象のローカルグループは `{{ group_name }}` です。判定結果に
+応じて割り当てるZoneは次の2つで、いずれも `Zone Type: SSL VPN` で作成します。
+
+- 準拠端末の割り当て先: `{{ trusted_zone_name }}`
+- 非準拠・非対応端末の割り当て先: `{{ unsupported_client_zone }}`
+
+検疫ゾーン `{{ unsupported_client_zone }}` からの到達を許可するリメディエー
+ション用サーバーは次の {{ remediation_hosts | length }} 件です。
+
+| # | Name | IP Address | 用途 |
+|---|------|------------|------|
+{% for h in remediation_hosts %}| {{ loop.index }} | {{ h["name"] }} | {{ h["ip_address"] }} | {{ h["description"] }} |
+{% endfor %}
+
+作成するDevice Profileは次のとおりです。
+
+| # | Name | Profile Type | Zone Assignment | 検査条件 |
+|---|------|--------------|------------------|----------|
+{% for p in epc_profiles %}| {{ loop.index }} | {{ p["name"] }} | {{ p["profile_type"] }} | {% if p["target_zone"] != "-" %}{{ p["target_zone"] }}{% else %}(Denyのため設定なし){% endif %} | {% for c in p["checks"] %}{{ c }}{% if not loop.last %} / {% endif %}{% endfor %} |
+{% endfor %}
+
+非対応・未一致クライアント(どのAllow/Denyプロファイルにも該当しない端末)
+は `{{ unsupported_client_zone }}` ゾーンの検疫プロファイルへ入れます。
+
+検証には次の2種類の端末を用意します。
+
+- 準拠端末(想定): {{ compliant_test_note }}
+- 非準拠端末(想定): {{ noncompliant_test_note }}
+
+## 手順
+
+### 1. 現状のSSL VPN利用状況を確認する(変更前の基準を取る)
+
+新しいZoneやDevice Profileを作成する前に、現状を確認します。
+
+- `Users | Local Groups` を開き、`{{ group_name }}` の `Edit` からEPC設定
+  部分を開き、現在EPCが無効(または `Use Global Setting` のまま)になって
+  いることを確認します。
+- `Network | System | Zones` を開き、`{{ trusted_zone_name }}` と
+  `{{ unsupported_client_zone }}` がまだ存在しないことを確認します。
+
+### 2. 信頼ゾーンと検疫ゾーンを作成する
+
+`Network | System | Zones` の `Add` から、次の2件のZoneをそれぞれ
+`Zone Type: SSL VPN` で作成し、`OK` で保存します。
+
+- `Name`: `{{ trusted_zone_name }}`(準拠端末の割り当て先)
+- `Name`: `{{ unsupported_client_zone }}`(非準拠・非対応端末の割り当て先)
+
+### 3. 検疫ゾーンからの到達先をAccess Ruleで限定する
+
+`POLICY | Rules and Policies > Access Rules` の `Matrix` 表示から
+`{{ unsupported_client_zone }} to LAN` を開き、次の内容でAccess Ruleを設定
+します。
+
+- リメディエーション用サーバー宛(次表の {{ remediation_hosts | length }}
+  件)のみ `Allow` にする
+- それ以外のLAN宛は `Deny` のままにする
+
+{% for h in remediation_hosts %}- {{ loop.index }}件目: `{{ h["name"] }}`(IP Address={{ h["ip_address"] }})宛のみAllow({{ h["description"] }})
+{% endfor %}
+
+### 4. EPC Device Profile(Allow/Deny)を作成する
+
+EPCのDevice Profile設定から、シナリオ設定の各行につき次の内容で
+Device Profileを作成します。
+
+{% for p in epc_profiles %}- {{ loop.index }}件目: `{{ p["name"] }}` / Profile Type={{ p["profile_type"] }}{% if p["target_zone"] != "-" %} / Zone Assignment={{ p["target_zone"] }}{% endif %}({{ p["description"] }})
+  - 検査条件: {% for c in p["checks"] %}{{ c }}{% if not loop.last %} / {% endif %}{% endfor %}
+
+{% endfor %}
+### 5. 自分の検証端末が少なくとも1つのAllowプロファイルに適合することを確認する
+
+**この確認を飛ばして手順6に進まないでください。** 手順4で作成した
+Allowプロファイル(`{{ epc_profiles[0]["name"] }}` 等)の検査条件を、この
+手順書を実行している自分自身の検証端末が満たしていることを確認します。
+満たしていない状態で手順6に進むと、自分自身の接続が
+`{{ unsupported_client_zone }}` へ検疫され、想定した検証ができなくなる
+おそれがあります。
+
+### 6. SSLVPN Servicesグループ(`{{ group_name }}`)でEPCを有効化する
+
+`Users | Local Groups` に戻り、`{{ group_name }}` の `Edit` からEPC設定
+部分を開いて次のとおり設定し、保存します。
+
+- EPCを有効化する
+- 非対応・未一致クライアントの扱いを、検疫プロファイル
+  (`{{ unsupported_client_zone }}` ゾーンへの割り当て)にする
+- 手順4で作成した {{ epc_profiles | length }} 件のDevice Profileをすべて
+  追加する
+
+### 7. Matrixで設定内容を確認する
+
+`POLICY | Rules and Policies > Access Rules` の `Matrix` 表示に戻り、
+`{{ unsupported_client_zone }} to LAN` のAccess Ruleが手順3のとおり
+(リメディエーション用サーバー宛のみAllow)になっていることを確認します。
+
+### 8. 準拠端末・非準拠端末双方の接続を検証する
+
+- 準拠端末({{ compliant_test_note }})でSSL VPN接続を行い、
+  `{{ trusted_zone_name }}` に割り当てられ、通常どおり内部リソースへ到達
+  できることを確認します。
+- 非準拠端末({{ noncompliant_test_note }})でSSL VPN接続を行い、
+  `{{ unsupported_client_zone }}` に割り当てられ、リメディエーション用
+  サーバー({{ remediation_hosts | length }} 件)以外への到達が拒否される
+  ことを確認します。
+
+## 動作確認
+
+- `Network | System | Zones` に `{{ trusted_zone_name }}` と
+  `{{ unsupported_client_zone }}` が `Zone Type: SSL VPN` で存在すること
+- EPCのDevice Profile一覧に、{{ epc_profiles | length }} 件の
+  Device Profile(Allow/Deny)が存在すること
+- `Users | Local Groups` の `{{ group_name }}` でEPCが有効化され、非対応・
+  未一致クライアントの扱いが検疫プロファイルになっていること
+- `POLICY | Rules and Policies > Access Rules` の
+  `{{ unsupported_client_zone }} to LAN` で、リメディエーション用サーバー
+  宛のみAllowになっていること
+- 準拠端末が `{{ trusted_zone_name }}` に割り当てられ内部リソースへ到達
+  できること
+- 非準拠端末が `{{ unsupported_client_zone }}` に割り当てられ、
+  リメディエーション用サーバー以外への到達が拒否されること
+
+## 注意事項
+
+- **手順5の事前確認を必ず行うこと。** 自分の検証端末がAllowプロファイルの
+  条件を満たすことを確認しないまま手順6でEPCを有効化すると、自分自身の
+  接続が検疫ゾーンへ割り当てられ、想定した検証ができなくなるおそれが
+  あります。
+- EPCのDevice Profileが検査できる条件(AV稼働・クライアント証明書の有無等)
+  は、機器のSonicOSバージョンやOSプラットフォーム(Windows/macOS/Linux)
+  によって選択できる項目が異なる場合があります。実際に設定する際は、
+  対象機器のGUI上でDevice Profile作成ダイアログに表示される項目を確認して
+  ください。
+- SonicOS CLIやAPIによるEPC設定の同等の投入方法は本手順書では確認できな
+  かったため記載していません。CLIで投入する場合は、別途SonicOSのCLI
+  リファレンスで構文を確認してから実施してください。
+- EPCを有効化した直後は、想定より多くの既存クライアントが検疫ゾーンへ
+  割り当てられる可能性があります。まず一部のグループやテストユーザーで
+  段階的に有効化し、影響範囲を確認してから対象を広げることを推奨します。
+- 管理者パスワードやクライアント証明書の秘密鍵などの認証情報は、本手順書
+  やログに平文で残さないでください。記録が必要な場合は `********` の
+  ようにマスクし、秘密管理ツール等で別途安全に保管してください。

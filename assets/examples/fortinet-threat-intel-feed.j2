@@ -1,0 +1,257 @@
+# FortiGateへの外部脅威インテリジェンスフィード取り込みと自動遮断への反映
+
+FortiGate (FortiOS) の External Connector(IP address external feed)を使い、
+HTTPサーバー上のプレーンテキストファイルとして配布される既知の悪性IPアドレス
+リストを継続的にインポートします。インポートしたフィード(`{{ connector_name }}`)
+はFirewall PolicyのDestinationおよびDNS FilterプロファイルのExternal IP
+Block Listから参照でき、フィード自体はFortiGateが定期的に自動同期するため、
+一覧の更新は追加のスクリプトなしでポリシーへ即座に反映されます。GUIとCLIの
+両方の手順を併記し、最後に自動遮断とフィード更新状況を検証します。
+
+## 目的
+
+外部の脅威インテリジェンスフィード(既知の悪性IPアドレス)をExternal
+Connectorとして継続的に取り込み、Firewall PolicyのDestinationおよびDNS
+Filterプロファイルの External IP Block List へ反映することで、該当する
+宛先への通信とその名前解決を自動的に遮断できるようになることを目指します。
+あわせて、フィードの追加・更新がFortiGateの標準機能によって自動的に反映
+される仕組みを理解し、GUI・CLIのどちらからでも同じ構成を再現し、遮断が
+実際に機能していることをログで検証できるようになることを目指します。
+
+## 用語解説
+
+- **External Connector / External Feed(IP address external feed)**: HTTP/
+  HTTPSサーバー上のプレーンテキストファイルから、IPv4/IPv6アドレス・アドレ
+  ス範囲・サブネットを1行1エントリで動的にインポートする仕組み。「An IP
+  address external feed is a dynamic list that contains IPv4 and IPv6
+  addresses, address ranges, and subnets. The list is periodically updated
+  from an external server」と説明されており、インポート後は
+  「it can be used as a source or destination in firewall policies, proxy
+  policies, local-in policies, and ZTNA rules」、および「It can also be
+  used as an external IP block list in DNS filter profiles」とされている。
+  GUIでは `Security Fabric > External Connectors`、CLIでは
+  `config system external-resource` で作成する
+- **type address**: External Connectorの種別のうち、IPアドレスリストを
+  扱う種別。同様の仕組みでドメイン名(Domain Name)・URL・マルウェアハッシュ
+  (Malware Hash)を扱う種別も用意されており、それぞれ対応するテキスト
+  ファイル形式(1行1ドメイン、1行1URL、`<hex hash> [説明]`形式のハッシュ)
+  をインポートできる。STIX/TAXII形式のフィードにも対応している
+- **resource**: `config system external-resource` でフィード配布元の
+  URLを指定するパラメータ
+- **server-identity-check**: フィード取得時のHTTPS証明書検証モードを
+  `none` / `basic` / `full` から指定するパラメータ。「To improve the
+  security of the connection, it is recommended to enable server
+  certificate validation (server-identity-check) either in basic or full
+  mode. By default, it is set to none.」と説明されている
+- **IP ADDRESS FEED(Firewall PolicyのDestination/Sourceの選択肢)**:
+  Firewall Policyの `Destination`(または`Source`)フィールドで `+` を
+  クリックした際に表示される分類の1つで、作成済みのIPアドレス系External
+  Connectorをここから選択して指定する
+- **External IP Block Lists(DNS Filterプロファイルのオプション)**: DNS
+  Filterプロファイルで有効にすると、IPアドレス系External Connectorを
+  参照リストとして選択できるようになる。「An IP address external feed can
+  be applied by enabling External IP Block Lists in a DNS filter profile.
+  Any DNS query that passes through the FortiGate and resolves to any of
+  the IP addresses in the external feed list will be dropped.」と説明され
+  ている
+- **Connection Status / View Entries**: `Security Fabric > External
+  Connectors` の一覧に表示される、直近のフィード取得結果を示すステータス
+  と、作成したコネクタを編集して開く、実際にインポートされているエントリ
+  一覧の確認画面。「If the FortiGate loses connectivity with the external
+  server, the external feed will continue to function despite the
+  Connection Status error or reboot. However, the external feed will not
+  be updated and no new entries will be added until the connection is
+  re-established.」と説明されており、接続断があってもインポート済みの
+  リストによる遮断自体は継続する
+
+## シナリオ設定
+
+今回、外部脅威インテリジェンスフィードの取り込みと自動遮断への反映の設定値
+は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| External Connector名(connector_name) | `{{ connector_name }}` |
+| フィード配布元URL(feed_url / resource) | `{{ feed_url }}` |
+| 証明書検証モード(server_identity_check) | `{{ server_identity_check }}` |
+| 内部(LAN)側インターフェース(lan_interface) | `{{ lan_interface }}` |
+| 外部(WAN)側インターフェース(wan_interface) | `{{ wan_interface }}` |
+| 遮断対象とする内部送信元アドレスオブジェクト(egress_source) | `{{ egress_source }}` |
+| Firewall Policy名(policy_name) | `{{ policy_name }}` |
+| Firewall PolicyのID(policy_id) | {{ policy_id }} |
+| DNS Filterプロファイル名(dns_filter_profile_name) | `{{ dns_filter_profile_name }}` |
+
+`{{ egress_source }}` は、社内LANを表す既存のアドレスオブジェクト名を想定
+しています(アドレスオブジェクト自体の作成は本手順書の対象外です)。フィード
+`{{ feed_url }}` は悪性IPアドレスの配布元として運用中の外部脅威インテリジェ
+ンスサービスのURLに読み替えてください。認証が必要なURLの場合でも、ユーザー
+名・パスワードやAPIキーをURLやテンプレートに平文で書かず、`****`のように
+マスクして記録してください。
+
+## 手順
+
+### 1. 現状のExternal ConnectorとFirewall Policy一覧を確認する(変更前の基準を取る)
+
+新しいExternal ConnectorやFirewall Policyを1件も追加する前に、現状を確認
+します。
+
+- `Security Fabric > External Connectors` を開き、`{{ connector_name }}`
+  と同名のコネクタが存在しないことを確認します。
+- `Policy & Objects > Firewall Policy` を開き、既存ポリシーの並び順(評価順)
+  と、`{{ policy_id }}` 番のポリシーIDが未使用であることを確認します。
+
+### 2. IPアドレス脅威インテリジェンスフィードをGUIでExternal Connectorとして作成する
+
+1. `Security Fabric > External Connectors` を開き、`Create New` を
+   クリックします。
+2. `External Feeds` セクションで `IP Address` を選択します。
+3. `Name` に `{{ connector_name }}` を入力します。
+4. `Update method` を `External Feed` に設定します。
+5. `URL of external resource` に `{{ feed_url }}` を入力します。
+6. 残りの設定を必要に応じて行い、`OK` をクリックします。
+7. 作成したコネクタを編集し、`View Entries` をクリックして、フィードから
+   実際にインポートされたIPアドレスの一覧を確認します。
+
+### 3. 同じExternal ConnectorをCLIでも作成する
+
+GUIと同じ内容を、`config system external-resource` でも登録します。証明書
+検証は既定の `none` のまま運用せず、`{{ server_identity_check }}` を明示的
+に設定します。
+
+```bash
+config system external-resource
+    edit "{{ connector_name }}"
+        set type address
+        set resource "{{ feed_url }}"
+        set server-identity-check {{ server_identity_check }}
+    next
+end
+```
+
+この時点ではExternal Connector(フィードのインポート定義)を作成しただけで、
+インポートされたIPアドレスに基づく通信の遮断はまだ行われていません。手順4
+でFirewall Policyの `Destination` に指定するまで、フィード内のIPアドレス
+宛の通信は許可も拒否もされず、既存ポリシーの評価結果に従います。
+
+### 4. Firewall PolicyのDestinationにフィードを指定し、遮断を自動化する
+
+GUI:
+
+1. `Policy & Objects > Firewall Policy` を開き、`Create New` をクリック
+   します。
+2. `Name` に `{{ policy_name }}` を入力します。
+3. `Incoming Interface` を `{{ lan_interface }}` に設定します。
+4. `Outgoing Interface` を `{{ wan_interface }}` に設定します。
+5. `Source` を `{{ egress_source }}` に設定します。
+6. `Destination` フィールドの `+` をクリックし、`IP ADDRESS FEED`
+   セクションから `{{ connector_name }}` を選択します。
+7. `Action` を `DENY` に設定します。
+8. `Log Allowed Traffic` を有効にします。
+9. `OK` をクリックして保存します。
+
+CLI:
+
+```bash
+config firewall policy
+    edit {{ policy_id }}
+        set name "{{ policy_name }}"
+        set srcintf "{{ lan_interface }}"
+        set dstintf "{{ wan_interface }}"
+        set srcaddr "{{ egress_source }}"
+        set dstaddr "{{ connector_name }}"
+        set action deny
+        set schedule "always"
+        set service "ALL"
+        set logtraffic all
+    next
+end
+```
+
+このポリシーを保存した時点で、フィード `{{ connector_name }}` に含まれる
+IPアドレスへの新規セッションはただちに拒否対象になります。以降フィードが
+自動的に更新されても、Firewall Policyを再保存する必要はありません。
+
+### 5. DNS FilterプロファイルのExternal IP Block Listにも同じフィードを適用する
+
+同じフィードを使って、フィード内IPアドレスへ解決されるDNSクエリ自体も遮断
+します。
+
+1. `Security Profiles > DNS Filter` を開き、新規プロファイル
+   `{{ dns_filter_profile_name }}` を作成します(または既存プロファイルを
+   編集します)。
+2. `External IP Block Lists` を有効にします。
+3. `+` をクリックし、一覧から `{{ connector_name }}` を選択します。
+4. `OK` をクリックします。
+5. `Policy & Objects > Firewall Policy` で対象ポリシー(手順4の
+   `{{ policy_name }}`、または該当する他のポリシー)を編集し、
+   `Security Profiles` 内の `DNS Filter` を有効にして
+   `{{ dns_filter_profile_name }}` を選択します。
+6. `Log Allowed Traffic` を有効にします。
+7. `OK` をクリックして保存します。
+
+### 6. フィードの自動更新状況と遮断ログを確認する
+
+- `Security Fabric > External Connectors` の一覧で `{{ connector_name }}`
+  の `Connection Status` が正常であることを確認します。
+- コネクタを編集して `View Entries` を開き、フィード配布元
+  (`{{ feed_url }}`)の内容と一致するIPアドレスがインポートされている
+  ことを確認します。
+- フィード内のIPアドレス宛にテスト通信を発生させ、`{{ policy_name }}`
+  (ID `{{ policy_id }}`)で遮断されることを確認します。
+
+```bash
+diagnose debug flow filter daddr <フィード内のテストIPアドレス>
+diagnose debug flow filter proto 6
+diagnose debug enable
+diagnose debug flow trace start 10
+```
+
+- `Log & Report > Security Events > DNS Query` を開き、フィード内IP
+  アドレスへの名前解決が `{{ dns_filter_profile_name }}` によって遮断
+  (action="redirect" または blocked 相当)されているログを確認します。
+
+## 動作確認
+
+- `Security Fabric > External Connectors` の一覧に `{{ connector_name }}`
+  が表示され、`Connection Status` がエラーになっていないこと
+- `View Entries` で表示されるIPアドレス一覧が、フィード配布元
+  (`{{ feed_url }}`)のテキストファイルの内容と一致していること
+- `Policy & Objects > Firewall Policy` の一覧に `{{ policy_name }}`
+  (ID `{{ policy_id }}`)が表示され、`Destination` が `{{ connector_name }}`、
+  `Action` が `DENY` になっていること
+- フィード内のIPアドレス宛への通信が `{{ policy_name }}` によって拒否され、
+  `diagnose debug flow` または Forward Traffic ログに拒否記録が残ること
+- フィード内のIPアドレスへ解決されるドメインへのDNSクエリが
+  `{{ dns_filter_profile_name }}` によって遮断され、`DNS Query` ログに
+  記録されていること
+- 手順1で確認した既存のExternal Connector・Firewall Policyの並び順・内容
+  が、意図せず変更されていないこと
+
+## 注意事項
+
+- **フィードの自動更新・自動遮断はFortiGateの標準機能で完結します。**
+  External Connectorはフィード配布元を定期的に自動同期し、Firewall
+  Policyの `Destination`(またはDNS Filterの `External IP Block Lists`)
+  に指定した時点で遮断は自動的に有効になります。追加のシェルスクリプトや
+  cronジョブ、自作の監視デーモンを用意する必要はありません。
+- **External Connectorの作成だけでは遮断されません。** 手順4でFirewall
+  Policyの `Destination` に指定するまで、フィードは単にIPアドレスの
+  インポート元として登録されているだけです。手順3までしか実施していない
+  状態を「遮断を設定した」と判断しないでください。
+- **接続断中もインポート済みリストによる遮断は継続しますが、更新は止まり
+  ます。** フィード配布元への接続が切れても、直前にインポート済みの
+  リストによる遮断自体は継続しますが、新規エントリの追加は接続復旧まで
+  行われません。`Connection Status` を定期的に確認してください。
+- **証明書検証を既定の `none` のまま運用しないこと。** フィード配布元への
+  接続はHTTPS化されていても、`server-identity-check` が既定値`none`だと
+  中間者による偽フィードの差し替えを検知できません。`{{
+  server_identity_check }}` のように `basic` または `full` を明示的に
+  設定してください。
+- フィード配布元URLに認証情報が必要な場合でも、ユーザー名・パスワードや
+  APIキーを本手順書やチケット、ログに平文で残さないでください。記録が
+  必要な場合は `****` のようにマスクし、秘密管理ツール等で別途安全に保管
+  してください。
+- 本手順は宛先(Destination)側でのIPアドレス脅威インテリジェンスフィード
+  の適用を扱っていますが、同じExternal Connectorはproxy policy、
+  local-in policy、ZTNAルールの送信元(Source)としても利用できます。
+  それらへ適用する場合は、対象ポリシーの構成に応じて別途検証してください。

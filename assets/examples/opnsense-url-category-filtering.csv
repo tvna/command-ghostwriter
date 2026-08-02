@@ -1,0 +1,5 @@
+seq,filename,url,category,action,description
+1,UT1,ftp://ftp.ut-capitole.fr/pub/reseau/cache/squidguard_contrib/blacklists.tar.gz,phishing,block,フィッシングサイトカテゴリを遮断してクレデンシャル詐取を防止する
+2,UT1,ftp://ftp.ut-capitole.fr/pub/reseau/cache/squidguard_contrib/blacklists.tar.gz,malware,block,マルウェア配布サイトカテゴリを遮断して端末感染を防止する
+3,UT1,ftp://ftp.ut-capitole.fr/pub/reseau/cache/squidguard_contrib/blacklists.tar.gz,adult,block,業務外閲覧対策としてアダルトカテゴリを遮断する
+4,UT1,ftp://ftp.ut-capitole.fr/pub/reseau/cache/squidguard_contrib/blacklists.tar.gz,filehosting,allow,取引先のファイル共有ポータルがfilehostingカテゴリで誤検知・遮断されたためチェックを外して例外的に許可する

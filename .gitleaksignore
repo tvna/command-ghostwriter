@@ -70,3 +70,17 @@ dc3f2e5506116c16390a93f5d7e7ef7f87b02f5d:assets/examples/suricata-flowbits-multi
 # fields in the same file - not a credential. gitleaks' generic-api-key rule
 # flags it on entropy/naming heuristics alone. Refs #619, PR #620.
 cd38a3bfafffd06ef8a3d4b92436eeebf7adcf55:assets/examples/sonicwall-dmz-port-forward.toml:generic-api-key:15
+
+# fortinet-admin-mfa-hardening.yaml's token_serial fields are example
+# FortiToken Mobile hardware-token serial numbers ("FTKMOB0A12345678"),
+# the vendor's real serial format - not an API key or credential. gitleaks'
+# generic-api-key rule flags them on entropy alone. Refs #635, #636.
+616012e38948e4543706463dbd5beb0d6d6dd822:assets/examples/fortinet-admin-mfa-hardening.yaml:generic-api-key:4
+616012e38948e4543706463dbd5beb0d6d6dd822:assets/examples/fortinet-admin-mfa-hardening.yaml:generic-api-key:7
+
+# opnsense-cloud-vm-form-factor-deployment.j2's verification curl command uses
+# a literal `****` mask for the retrieved initial password
+# (`-u ec2-user:'****'`), matching the surrounding instruction to mask the
+# value by hand - not a real credential. gitleaks' curl-auth-user rule flags
+# any `-u user:pass`-shaped text regardless of the value. Refs #635, #636.
+1f8329627e0fa6f207c16e04e8479612611de163:assets/examples/opnsense-cloud-vm-form-factor-deployment.j2:curl-auth-user:87

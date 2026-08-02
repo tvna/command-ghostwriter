@@ -1,0 +1,26 @@
+wan_interface_name: "X1"
+wan_zone: "WAN"
+observation_period_days: 5
+flood_protections:
+  - protocol_label: "TCP (SYN) - Layer 3 SYN Flood Protection - SYN Proxy"
+    menu_tab: "TCP"
+    current_threshold: 300
+    new_threshold: 1000
+    observed_normal_peak: 420
+    mode: "Proxy WAN Client Connections When Attack is Suspected"
+    reason: "WAN側からの新規SYNが閾値を超えた場合のみSYN Proxyを有効化し、平常時は正規クライアントの接続確立を素通しさせて誤検知を避けるため"
+  - protocol_label: "UDP Flood Protection"
+    menu_tab: "UDP"
+    current_threshold: 1000
+    new_threshold: 3000
+    observed_normal_peak: 1800
+    mode: "-"
+    reason: "バックアップジョブ集中時間帯にUDPバーストがあり、現行閾値では過剰遮断が発生していたため、観測ピークを上回る値まで引き上げる"
+  - protocol_label: "ICMP Flood Protection (IPv4)"
+    menu_tab: "UDP > ICMP > IPv4"
+    current_threshold: 200
+    new_threshold: 500
+    observed_normal_peak: 260
+    mode: "-"
+    reason: "監視システムによるICMPポーリング増加後もデフォルト値のままで誤検知が発生していたため、観測ピークを踏まえて引き上げる"
+verification_attacker_note: "本手順書では実際の攻撃トラフィックを発生させる外部ツールの使用は扱いません。設定値の反映確認と、通常運用トラフィックに対する誤検知有無の監視のみを行います。"

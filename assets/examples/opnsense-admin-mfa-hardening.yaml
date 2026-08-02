@@ -1,0 +1,5 @@
+target_users:
+  - admin
+  - netops-oncall
+totp_server_name: "TOTP-Admins"
+token_length: 6

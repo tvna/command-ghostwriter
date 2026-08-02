@@ -1,0 +1,6 @@
+entry_no,sensor_name,policy_name,srcintf,dstintf,srcaddr,dstaddr,service,target_type,target_id,target_name,action,log,description
+1,sensor-saas-p2p-control,lan-to-wan-app-control,lan,wan1,all,all,ALL,category,6,P2P,block,enable,P2Pファイル共有カテゴリの通信を遮断する
+2,sensor-saas-p2p-control,lan-to-wan-app-control,lan,wan1,all,all,ALL,category,15,Proxy,block,enable,プロキシ/迂回通信カテゴリの通信を遮断する
+3,sensor-saas-p2p-control,lan-to-wan-app-control,lan,wan1,all,all,ALL,application,42260,Zoom,pass,enable,Web会議SaaS(Zoom)を許可した上で通信を可視化する
+4,sensor-saas-p2p-control,lan-to-wan-app-control,lan,wan1,all,all,ALL,application,15855,Dropbox,pass,enable,SaaSストレージ(Dropbox)を許可した上で通信を可視化する
+5,sensor-saas-p2p-control,lan-to-wan-app-control,lan,wan1,all,all,ALL,application,16283,BitTorrent,block,enable,個別シグネチャでP2Pアプリケーションを明示的に遮断する

@@ -1,0 +1,19 @@
+lan_zone = "LAN"
+wan_zone = "WAN"
+dmz_zone = "DMZ"
+
+client_dpi_ssl_ca_certificate = "Default SonicWALL DPI-SSL CA Certificate"
+client_dpi_ssl_common_name_exclusion = "clinic-portal.example.com"
+excluded_cfs_category_banking_id = 20
+excluded_cfs_category_banking_name = "Online Banking"
+excluded_cfs_category_brokerage_id = 21
+excluded_cfs_category_brokerage_name = "Online Brokerage and Trading"
+excluded_cfs_category_health_id = 26
+excluded_cfs_category_health_name = "Health"
+
+server_dpi_ssl_target_name = "APP01"
+server_dpi_ssl_target_ip = "172.16.50.30"
+server_dpi_ssl_target_address_object = "H_DMZ_APP01"
+server_dpi_ssl_certificate_name = "CERT_APP01_INTERNAL"
+server_dpi_ssl_excluded_partner_object = "H_PARTNER_CLINIC_API"
+server_dpi_ssl_excluded_partner_ip = "198.51.100.40"

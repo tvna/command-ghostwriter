@@ -1,0 +1,172 @@
+# OPNsenseによる拠点間VPNトンネルの死活監視と自動再接続
+
+拠点間(サイト間)IPsecトンネルの死活を継続的に監視し、断絶を検知した際に
+strongSwan(OPNsenseのIPsec実装)がネイティブに自動再接続、または
+CARPを用いたHA構成へのフェイルオーバーを行うための設定手順です。
+GUI操作と、確認・監視用のCLIコマンドを併記します。
+
+## 目的
+
+*VPN > IPsec > Connections* でDead Peer Detection(DPD、RFC 3706準拠)を
+有効化してトンネル断を早期に検知し、対象Child SAの`DPD action`を
+`restart`に設定することで、外部スクリプトや定期実行ジョブを用意しなくても
+strongSwanが断絶を検知した時点で自身のCHILD_SAを再ネゴシエーションする
+状態を構築します。あわせて、CARP仮想IPを結んだHA構成と組み合わせることで、
+{{ site_name }} と {{ peer_site_name }} 間のトンネルが切れた場合に
+自動的に再接続・フェイルオーバーする状態を実現します。
+
+## 用語解説
+
+- **DPD(Dead Peer Detection)**: RFC 3706に準拠したIPsecの死活監視機能。
+  一定時間パケットの往来がない場合に生存確認メッセージを送り、応答がなければ
+  対向ピアが死んでいると判断する。OPNsenseでは *VPN > IPsec > Connections*
+  の `DPD delay (s)` に0より大きい値を設定することで有効化される(デフォルトは
+  無効)
+- **DPD action(dpd_action)**: DPDが対向ピアの死亡を検知した際にCHILD_SAへ
+  取る動作を指定するstrongSwan(swanctl.conf)のChild SAレベルの設定項目。
+  `clear`(既定値、CHILD_SAを単に閉じるだけで自動再接続はしない)、
+  `trap`(トラップポリシーを設置し、次の通信発生時に再接続を試みる)、
+  `restart`(即座にCHILD_SAの再ネゴシエーションを試みる)の3値を取る。
+  自動再接続を求める本手順では、対象Child SAで明示的に`restart`へ変更する
+  必要がある(既定の`clear`のままでは自動再接続は行われない)
+- **CARP(Common Address Redundancy Protocol)仮想IP**: 複数のOPNsenseノード間で
+  共有するフェイルオーバー用の仮想IPアドレス。マスター側に障害が発生すると
+  バックアップ側が仮想IPを引き継ぐ
+- **MOBIKE**: IKEv2でトンネルのエンドポイントIPアドレス変更を追従させる拡張
+  機能。CARP環境ではバックアップ状態の仮想IPが一時的に消失するため、MOBIKEが
+  有効だと再確立を誤って試行してしまう。CARP HA構成のIKEv2接続ではMOBIKEを
+  無効化することが推奨されている
+- **Local Address(ローカルアドレス)**: IPsec Connectionの接続元アドレスを
+  指定する項目。CARP HA構成では、この項目にCARP仮想IPを指定する必要がある
+- **strongSwan**: OPNsenseがIPsec(IKEv1/IKEv2)の実装として採用している
+  オープンソースのVPNデーモン
+- **Tunables(チューニング可能パラメータ)**: *System > Settings > Tunables*
+  から設定できるカーネルパラメータ。IPsec関連では暗号処理の並列化や
+  マルチコア分散に関わる値を調整できる
+
+## シナリオ設定
+
+{{ site_name }}(WANインターフェース `{{ wan_interface }}`、CARP仮想IP
+`{{ local_carp_vip }}`)と {{ peer_site_name }}(対向ゲートウェイ
+`{{ remote_gateway }}`)の間に、以下 {{ tunnels | length }} 本のサイト間
+IPsecトンネルを構成済みとします。
+
+| Connection名 | Child SA | ローカル網 | リモート網 | IKEバージョン |
+|---|---|---|---|---|
+{% for t in tunnels %}| {{ t["name"] }} | {{ t["child_sa_descr"] }} | {{ t["local_subnet"] }} | {{ t["remote_subnet"] }} | {{ t["ike_version"] }} |
+{% endfor %}
+
+{% for t in tunnels %}{% if t["note"] != "-" %}- `{{ t["name"] }}`: {{ t["note"] }}
+{% endif %}{% endfor %}
+DPDの検知間隔は `DPD delay (s)` = {{ dpd_delay }} 秒とし、IKEv1使用時の
+タイムアウトは {{ dpd_timeout_ikev1 }} 秒とします。全Child SAの
+`DPD action` は `{{ dpd_action }}` に設定し、断絶検知後の再接続を
+strongSwan自身に行わせます。
+
+## 手順
+
+### 1. 現状のトンネル状態を確認する
+
+設定変更前に、対象トンネルが確立済みであることをCLIで確認します。
+
+```bash
+# 全トンネルのSA(Security Association)状態を一覧表示
+swanctl --list-sas
+```
+
+```bash
+# legacy ipsecコマンドでの詳細ステータス確認
+ipsec statusall
+```
+
+{% for t in tunnels %}`{{ t["name"] }}`({{ t["child_sa_descr"] }})が
+`ESTABLISHED`状態であることを確認します。
+{% endfor %}
+
+### 2. Connectionと各Child SAにDead Peer Detection(DPD)を設定する
+
+*VPN > IPsec > Connections* で対象のConnectionを開き、以下を設定します。
+
+- DPD delay (s): `{{ dpd_delay }}`(0より大きい値を設定しないとDPDは無効の
+  ままになる点に注意)
+- IKEv1を使用する場合のタイムアウト(dpdtimeout): `{{ dpd_timeout_ikev1 }}`
+  秒(IKEv2使用時はリトランスミット全般の設定が優先されるため、この値は
+  効果を持たない)
+
+続けて、対象Child SA
+{% for t in tunnels %}(`{{ t["child_sa_descr"] }}`){% if not loop.last %}、{% endif %}{% endfor %}
+それぞれの編集画面を開き、DPD検知時の動作(dpd_action)を既定の`clear`から
+`{{ dpd_action }}` へ変更します。`clear`のままでは、DPDが断絶を検知しても
+CHILD_SAが閉じられるだけで自動再接続は行われません。
+
+保存後、画面上部の **Apply changes** を押して反映します。
+
+### 3. IKEv2 + CARP HA構成の場合はMOBIKEを無効化しLocal AddressをCARP仮想IPにする
+
+CARP仮想IPによるHA/フェイルオーバー構成を用いる場合、*VPN > IPsec >
+Connections* の対象Connectionで以下を設定します。
+
+- Local Address: `{{ local_carp_vip }}`(CARP仮想IPを指定する)
+- Remote Address: `{{ remote_gateway }}`
+- MOBIKE: 無効化(disable)
+
+CARPのバックアップ状態では仮想IPが一時的に消失するため、MOBIKEを有効な
+ままにすると、その消失をきっかけに不要な再確立処理が走ってしまいます。
+CARP HA構成のIKEv2接続ではMOBIKEを無効化してください。保存後、
+**Apply changes** を押します。
+
+### 4. strongSwanのTunablesを設定してフェイルオーバー時間を短縮する
+
+*System > Settings > Tunables* を開き、以下のパラメータを追加・設定します。
+
+- `net.inet.ipsec.async_crypto` = `{{ tunable_async_crypto }}`(暗号処理の
+  並列化を有効化)
+- `net.isr.maxthreads` = `{{ tunable_isr_maxthreads }}`(トラフィック処理を
+  複数CPUコアへ分散)
+
+保存し、**Apply**で反映します。この設定によりCARPフェイルオーバー時の
+strongSwan側の処理遅延を抑えられます。
+
+### 5. 設定変更を適用し、config.xmlのバックアップを取得する
+
+*System > Configuration > Backups* を開き、変更後のconfig.xmlをバックアップ
+取得します。意図しない断絶が発生した場合に、DPD/dpd_action/CARP/Tunables
+設定変更前の状態へ切り戻せるようにしておきます。
+
+## 動作確認
+
+- `swanctl --list-sas` で全トンネル(
+{% for t in tunnels %}`{{ t["child_sa_descr"] }}`{% if not loop.last %}、{% endif %}{% endfor %}
+)が `ESTABLISHED` 状態であること
+- 対向側を意図的に停止させ、`DPD delay (s)` = {{ dpd_delay }} 秒経過後に
+  DPDが断絶を検知し、外部スクリプトを介さずにstrongSwan自身が
+  `{{ dpd_action }}` アクションでCHILD_SAの再ネゴシエーションを開始する
+  ことを `swanctl --list-sas` の再確立ログ(またはOPNsense GUIの
+  *VPN > IPsec > Log File*)で確認すること
+- CARP仮想IP `{{ local_carp_vip }}` を保持するノードを意図的にダウンさせ、
+  バックアップノードが仮想IPを引き継いだ後、IKEv2トンネルが自動的に
+  再確立されること(MOBIKE無効化により不要な再確立処理が発生していない
+  ことも確認)
+- *System > Settings > Tunables* に `net.inet.ipsec.async_crypto` =
+  `{{ tunable_async_crypto }}` と `net.isr.maxthreads` =
+  `{{ tunable_isr_maxthreads }}` が反映されていること
+
+## 注意事項
+
+- **`DPD action` の既定値は`clear`であり、これは自動再接続を意味しない。**
+  自動再接続を求める場合は対象Child SAごとに明示的に`{{ dpd_action }}`
+  (restart)へ変更すること。既定のまま運用すると、DPDが断絶を検知しても
+  トンネルが閉じるだけで復旧を待つことになる。
+- `DPD delay (s)` を0のままにするとDPD自体が無効化され、死活監視が機能
+  しない。必ず {{ dpd_delay }} 秒のように0より大きい値を設定すること。
+- CARP HA構成でMOBIKEを無効化し忘れると、バックアップ状態の仮想IPが
+  一時的に消失するたびに不要な再確立が走り、フェイルオーバー時間が
+  かえって延びるおそれがある。
+- `DPD action` のGUI上の項目名・表示位置はOPNsenseのバージョンにより
+  変わる場合がある。設定前に、実機のChild SA編集画面で該当項目の現在の
+  表示名を確認すること。
+- Tunablesの変更はカーネルパラメータの変更であるため、他のサービスへの
+  影響がないことを事前に確認してから *Apply* すること。
+- 設定変更前には必ず *System > Configuration > Backups* からconfig.xmlの
+  バックアップを取得し、意図しない通信断が発生した場合に切り戻せるように
+  しておくこと。

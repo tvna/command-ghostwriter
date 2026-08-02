@@ -1,0 +1,150 @@
+# OPNsenseによるSSL/TLSインスペクション(SSL Bump)構築
+
+暗号化された通信(HTTPS)の中身を検査してマルウェアや情報漏えいを検知できるように、
+Web Proxy (Squid) の SSL Inspection モード(SSL Bump)を有効化します。あわせて、
+金融・医療等プライバシー配慮が必要な通信先は `SSL no bump sites` に登録して検査
+対象から除外し、GUI操作と確認用のCLIコマンドを併記します。
+
+## 目的
+
+Services > Web Proxy > Administration > Forward Proxy で `Enable SSL inspection`
+を有効化し、内部CAでクライアント向け証明書を動的に発行する「中間者(MITM)」構成
+により、LANセグメント `{{ inspect_network }}` からのHTTPS通信を復号・再検査できる
+状態にすることを目指します。他のセキュリティ製品にある「SSLインスペクション」や
+「復号ポリシー」といった専用機能とは異なり、OPNsenseではWeb Proxy (Squid) の
+SSL Inspection モード(SSL Bump)という別機構で同じ運用課題を解決します。
+
+## 用語解説
+
+- **SSL Inspection(SSL Bump)**: プロキシがクライアントとサーバの間でTLSセッションを
+  一旦終端し、内部CAで動的に発行した証明書を使ってクライアントへ再暗号化・転送する
+  「中間者(MITM)」方式。復号された通信内容をアクセス制御やマルウェア検査の対象に
+  できる
+- **Enable SSL inspection**: Services > Web Proxy > Administration > Forward Proxy
+  にあるチェック項目。有効化するとSSL BumpによるMITM方式のインスペクションが
+  利用可能になる
+- **CA to use**: SSL Inspection時にプロキシがなりすまし証明書を発行するために使う
+  内部CAを指定する項目。このCAはクライアント端末側に信頼済みルート証明書として
+  あらかじめ配布しておく必要がある
+- **SSL no bump sites**: フル(バンプ)モードのSSL Inspection使用時に、指定した
+  サイト/ドメインへの通信をバンプ(復号)対象から除外するための項目。銀行・証券・
+  医療機関などプライバシー上の配慮が必要な通信先をここに列挙する
+- **Log SNI information only**: SSL Inspectionを有効化した状態で、実際の復号(バンプ)
+  は行わずSNI(Server Name Indication)に基づくドメイン単位のログ・ポリシーのみを
+  利用するモード。フルインスペクションへ切り替える前の試験運用に使える
+- **os-squid**: OPNsenseでWeb Proxyを利用するために `System > Firmware > Plugins`
+  からインストールが必要なプラグインパッケージ
+
+## シナリオ設定
+
+LANセグメント `{{ inspect_network }}`(`{{ proxy_interface|upper }}`インターフェース、
+プロキシIP `{{ proxy_ip }}`、ポート `{{ proxy_port }}`)からのHTTPS通信をSSL
+Inspectionの対象とします。ただし、以下 {{ no_bump_sites | length }} 件の通信先は
+プライバシー配慮のため `SSL no bump sites` に登録し、検査(復号)対象から除外します。
+
+| カテゴリ | 除外対象ドメイン | 除外理由 |
+|---|---|---|
+{% for s in no_bump_sites %}| {{ s["category"] }} | {{ s["domain"] }} | {{ s["reason"] }} |
+{% endfor %}
+
+SSL Inspection用の内部CAは `{{ ca_descr }}` という名前で新規に作成し、社内端末には
+検証用CAとしてあらかじめ配布済みであることを前提とします。CA秘密鍵のパスフレーズ
+などの秘匿情報は、値そのものを本手順書やテンプレートに記載せず `****` のように
+マスクして扱います。
+
+## 手順
+
+### 1. os-squidプラグインを導入する
+
+`System > Firmware > Plugins` を開き、`squid` で検索して `os-squid` を見つけ、
+インストールします。Web Proxyを利用するには、事前にこのプラグインの導入が
+必須です。
+
+### 2. SSL Inspection用の内部CAを作成する
+
+`System > Trust > Certificates` の配下で、SSL Inspection専用の内部CA
+`{{ ca_descr }}` を新規に作成します。CA作成時に生成される秘密鍵のパスフレーズは
+`****`(実際の値はここに記載しない)として強力なものを設定し、パスワード管理
+システム等の安全な場所に保管します。
+
+### 3. Web Proxyを有効化する
+
+`Services > Web Proxy > Administration > General Proxy Settings` を開き、
+プロキシの待受インターフェースとポートを設定します。
+
+- 待受インターフェース: `{{ proxy_interface|upper }}`(`{{ proxy_ip }}`)
+- 待受ポート: `{{ proxy_port }}`
+
+保存後、画面上部の **Apply** を押して反映します。
+
+### 4. SNI監視モードで試験運用する
+
+いきなりフルインスペクションへ切り替えず、まず `Services > Web Proxy >
+Administration > Forward Proxy` で `Enable SSL inspection` と
+`Log SNI information only` の両方を有効にします。この状態では実際の復号(バンプ)
+は行われず、SNIに基づくドメイン単位のログ・ポリシーのみが有効になるため、既存の
+通信を止めずに構成の妥当性を確認できます。この試験運用は `{{ sni_trial_days }}`
+日間継続します。
+
+### 5. 除外サイトを登録してフルインスペクションへ切り替える
+
+試験運用で問題が確認されなければ、`Forward Proxy` タブで以下を設定します。
+
+- CA to use: `{{ ca_descr }}`
+- SSL no bump sites: 以下のドメインを1行1件で登録します
+{% for s in no_bump_sites %}  - {{ s["domain"] }}
+{% endfor %}
+- Log SNI information only: 無効化(チェックを外す)
+
+保存後、**Apply** を押して反映します。これによりフルインスペクション(SSL Bump)
+が有効になり、`SSL no bump sites` に登録した通信先のみ復号対象から除外されます。
+
+### 6. クライアント端末に内部CA証明書を配布する
+
+内部CA `{{ ca_descr }}` の証明書(公開鍵のみ、秘密鍵は含めない)をエクスポートし、
+社内端末のブラウザ/OSの信頼済みルート証明書ストアへ配布します。配布が完了する前に
+フルインスペクションを有効化すると、対象端末で証明書エラーが発生し通信できなく
+なるため、手順5より前に配布を完了させてください。
+
+## 動作確認
+
+```bash
+# 検査対象ドメインへプロキシ経由でHTTPS接続し、証明書の発行者(issuer)を確認する
+# 内部CA "{{ ca_descr }}" を含む発行者名が表示されればSSL Bumpが機能している
+curl -v --proxy http://{{ proxy_ip }}:{{ proxy_port }} https://{{ verify_domain }}/ 2>&1 | grep -i "issuer"
+```
+
+```bash
+# no bump対象ドメインへプロキシ経由でHTTPS接続し、証明書の発行者が
+# 内部CAではなく元のサーバ証明書のままであることを確認する
+{% for s in no_bump_sites %}curl -v --proxy http://{{ proxy_ip }}:{{ proxy_port }} https://{{ s["verify_host"] }}/ 2>&1 | grep -i "issuer"
+{% endfor %}
+```
+
+- `{{ verify_domain }}` への接続で、発行者に `{{ ca_descr }}` を含む値が表示される
+  こと(SSL Bumpによる再暗号化が機能している)
+- `SSL no bump sites` に登録した各ドメイン({% for s in no_bump_sites %}{{ s["verify_host"] }}{% if not loop.last %}, {% endif %}{% endfor %})
+  への接続では、発行者が内部CAではなく元のサーバ証明書のままであること
+- `Forward Proxy` タブの `SSL no bump sites` に、シナリオ設定で挙げた
+  {{ no_bump_sites | length }}件のドメインがすべて登録されていること(GUI上で
+  設定内容を目視確認する)
+- 社内端末のブラウザで検査対象サイトにアクセスしても証明書エラーが表示されない
+  こと(内部CAが正しく配布・信頼されている)
+
+## 注意事項
+
+- SSL Inspectionは通信内容を復号するため、プライバシーや法令(通信の秘密、個人
+  情報保護法等)への配慮が必要です。`SSL no bump sites` による除外対象は、組織の
+  ポリシーや法務部門の確認を経て決定してください。
+- フルインスペクションを有効化する前に、必ず手順4のSNI監視モードで試験運用し、
+  想定外の通信断が発生しないことを確認してから切り替えてください。先にフル
+  インスペクションを有効化すると、CA未配布の端末で通信断や証明書エラーが
+  多発するおそれがあります。
+- 内部CAの秘密鍵が漏えいすると、第三者が任意のサイトになりすます証明書を発行
+  できてしまうため、秘密鍵は最小権限のアクセス制御下で保管し、パスフレーズ
+  (`****`)を安全な場所に保管してください。
+- `SSL no bump sites` に登録した通信先は検査対象から完全に除外され、マルウェア
+  検知やアクセスログの対象にもならないため、登録は本当にプライバシー配慮が
+  必要な通信先のみに限定してください。
+- 設定変更前に `System > Configuration > Backups` からconfig.xmlのバックアップを
+  取得し、意図しない通信断が発生した場合に切り戻せるようにしておいてください。

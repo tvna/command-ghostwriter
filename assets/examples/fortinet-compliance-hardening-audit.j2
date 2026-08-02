@@ -1,0 +1,127 @@
+# FortiGateのCISハードニング基準準拠監査
+
+CIS Benchmark等の公開されたハードニング基準に基づき、FortiGate (FortiOS) の設定
+がどこまで準拠しているかを監査し、逸脱している{{ csv_rows | length }}件の項目
+を是正します。監査にはFortiOSの `Security Fabric > Security Rating` 機能を用い、
+CISコンプライアンス基準にマッピングされたチェック結果を確認したうえで、GUIの
+Easy Applyで是正できる項目と、CLIで手動是正が必要な項目に分けて対応します。
+
+## 目的
+
+CIS Benchmarkのような公開されたハードニング基準に対する設定の準拠状況を、
+FortiOSのSecurity Rating機能で可視化し、逸脱項目をEasy ApplyまたはCLIで是正
+できるようになることを目指します。他ベンダーのネイティブ機能とは異なり、
+Fortinet (FortiOS)では、CIS Benchmark自体を直接読み込んで判定する専用コマン
+ドではなく、FortiOS Security Rating機能という別機構(Fortinet Security Best
+Practicesの監査結果をCISコンプライアンス基準にマッピングして表示・是正する
+仕組み)で同じ運用課題を解決します。あわせて、是正後に再評価し、逸脱が解消
+したことを確認できるようになることを目指します。
+
+## 用語解説
+
+- **Security Rating**: `Security Fabric > Security Rating` から参照できる、
+  FortiGate自身および配下のSecurity Fabricデバイスの設定を監査する機能。
+  Fortinet Security Best Practices(FSBP)に基づいて設定を評価し、その結果を
+  PCI DSSやCISといったコンプライアンス基準にマッピングして表示する
+- **スコアカード**: Security Ratingの結果は「Security Posture」「Fabric
+  Coverage」「Optimization」の3枚のスコアカードに分かれ、それぞれ総合グレード
+  と内訳が表示される。CIS Benchmarkにマッピングされたチェック結果は、この
+  うち「Security Posture」カードを開き、内訳のドロップダウンから「CIS」を
+  選択することで表示できる
+- **Attack Surface Security Rating ライセンス**: CIS等のコンプライアンス基準
+  でグルーピングした表示を見るために必要なライセンス。有効なライセンスが無い
+  場合、ドロップダウンの「CIS」の項目はグレーアウトして選択できない
+- **Recommendations / Easy Apply**: スコアカードをクリックして開く詳細レポー
+  ト画面の右側に表示される是正案の一覧。「EZ」マークが付いたチェック項目は
+  Easy Applyに対応しており、Recommendations内の「Apply」をクリックするだけで
+  推奨設定を適用できる。EZマークが無い項目はEasy Apply非対応であり、対応する
+  設定をGUIまたはCLIで手動で修正する必要がある
+- **Run Now**: Security Ratingページから、その場でチェックを再実行し、最新の
+  設定状態でスコアと逸脱項目を再評価するボタン
+
+## シナリオ設定
+
+今回CIS Benchmarkとの差分として洗い出した{{ csv_rows | length }}件の逸脱項目
+は次のとおりです。`easy_apply` が `yes` の行はEasy Applyで是正し、`no` の行
+はCLIで手動是正します。
+
+| check_no | check_item | current_value | target_value | easy_apply |
+|----------|------------|----------------|---------------|------------|
+{% for r in csv_rows %}| {{ r["check_no"] }} | {{ r["check_item"] }} | {{ r["current_value"] }} | {{ r["target_value"] }} | {{ r["easy_apply"] }} |
+{% endfor %}
+`remediation_cli` 列にCLIコマンドが記載されている行(`easy_apply` が `no` の
+行)は、手順4でそのコマンドをそのまま投入します。
+
+## 手順
+
+### 1. 現状のSecurity Ratingを確認する(変更前の基準を取る)
+
+是正を始める前に、現状のスコアと逸脱項目を記録します。
+
+- `Security Fabric > Security Rating` を開き、`Run Now` をクリックして最新の
+  チェックを実行します。
+- 「Security Posture」スコアカードを開き、内訳のドロップダウンから「CIS」を
+  選択し、現在の総合グレードと逸脱項目の件数を記録します。
+
+### 2. CISマッピングされた逸脱項目をシナリオ設定と照合する
+
+「Security Posture」カードのCIS表示のRecommendations一覧から、シナリオ設定
+に挙げた{{ csv_rows | length }}件の `check_item` に対応するチェック結果を
+探し、それぞれの現在の設定がシナリオ設定の `current_value` と一致すること、
+また「EZ」マークの有無がシナリオ設定の `easy_apply` 列と一致することを確認
+します。
+
+### 3. Easy Apply対応項目をGUIで是正する
+
+`easy_apply` が `yes` の行は、Recommendations上で対応するチェック項目の
+「Apply」をクリックして推奨設定を適用します。
+
+{% for r in csv_rows %}{% if r["easy_apply"] == "yes" %}- check_no {{ r["check_no"] }}: `{{ r["check_item"] }}` の「Apply」をクリックし、`{{ r["target_value"] }}` の状態にします。
+{% endif %}{% endfor %}
+
+### 4. Easy Apply非対応項目をCLIで是正する
+
+`easy_apply` が `no` の行は、Easy Apply非対応のためCLIで手動是正します。
+`remediation_cli` 列のコマンドを、CLIコンソールへ順に投入してください。
+
+{% for r in csv_rows %}{% if r["easy_apply"] == "no" %}check_no {{ r["check_no"] }}(`{{ r["check_item"] }}`):
+
+```bash
+{{ r["remediation_cli"] | safe }}
+```
+
+{% endif %}{% endfor %}
+### 5. 是正後にRun Nowで再評価する
+
+`Security Fabric > Security Rating` に戻り、`Run Now` を再度クリックして
+チェックを再実行します。「Security Posture」カードのCIS表示を開き、手順3・4
+で是正した項目の逸脱が解消され、総合グレードが手順1で記録した値より改善して
+いることを確認します。
+
+## 動作確認
+
+- 「Security Posture」スコアカードのCIS表示で、シナリオ設定の{{ csv_rows | length }}件それぞれの `check_item` に対応するチェックが「合格」側の判定に変わっ
+  ていること
+{% for r in csv_rows %}- check_no {{ r["check_no"] }}: `{{ r["check_item"] }}` が `{{ r["target_value"] }}` の状態になっていること
+{% endfor %}
+- 手順1で記録した総合グレード・逸脱件数と比較して、逸脱件数が減少しているか
+  グレードが改善していること
+- 手順3・4の是正によって、シナリオ設定に無い既存の許可設定(管理アクセスの
+  正当な経路等)が意図せず無効化されていないこと
+
+## 注意事項
+
+- CIS Benchmark自体はCIS(第三者団体)が発行するものであり、Security Rating
+  の「CIS」表示は、FortiOSがFSBPに基づいて監査した結果をCISコンプライアンス
+  基準にマッピングしたものです。CISが発行する基準そのものを直接読み込んで
+  照合しているわけではない点に留意してください。
+- 「CIS」表示にはAttack Surface Security Ratingライセンスが必要です。ライ
+  センスが無効・期限切れの場合はドロップダウンの「CIS」がグレーアウトし、
+  選択できません。事前にライセンス状態を確認してください。
+- 手順4でロックアウト閾値(`admin-lockout-threshold`)やアクセス元IP制限
+  (`trusthost1`)を誤って設定すると、管理者自身がGUI/CLIからロックアウト
+  される可能性があります。適用前にコンソールポート等、別経路での管理アクセ
+  ス手段を確保してから作業してください。
+- CLI/GUIへのログインに使う管理者パスワードやAPIトークンは、本手順書やログ
+  に平文で残さないでください。値を記録する場合は `****` のようにマスクし、
+  秘密管理ツール等で別途安全に保管してください。

@@ -1,0 +1,167 @@
+# Palo Alto Networks(PAN-OS)によるゲストWiFi帯域・同時接続数の上限制御
+
+ゲストWiFi収容ゾーン`guest-wifi`を対象に、CSVで定義した{{ csv_rows | length }}件の
+設定により、QoS Policy(`Policies > QoS`)で1ユーザー当たりの目安帯域を
+Egress Max/Guaranteedで制限し、あわせてDoS Protection Profile
+(`Objects > Security Profiles > DoS Protection`)で送信元IPごとの最大同時
+セッション数を制限します。最後に`show running qos-policy`と
+`show dos-protection rule`コマンド、および`Network > QoS > Statistics`画面で
+実際に制限が効いているかを検証します。
+
+## 目的
+
+ゲストWiFi利用者が社内ネットワークの帯域や同時接続リソースを占有しないよう、
+PAN-OSのQoS ProfileとQoS Policyルールでゲストゾーンのトラフィックを帯域上限の
+異なるクラスへ振り分け、あわせてDoS Protection Profileで送信元IPごとの最大
+同時セッション数に上限を設けられるようになることを目的とします。他ベンダーの
+ネイティブ機能とは異なり、Palo Alto Networks (PAN-OS)ではQoS Policy(ゾーン/
+ユーザー/アプリケーション単位のEgress Max/Guaranteed帯域制御)と、Zone
+Protection配下のDoS Protection Profile(送信元ごとの最大同時セッション数上限)
+を組み合わせ、ゲスト用ゾーン/セグメントに適用して帯域上限・同時接続数を制御
+するという別機構で同じ運用課題を解決します。
+
+## 用語解説
+
+- **QoS Profile(`Network > Network Profiles > QoS Profile`)**: プロファイル
+  全体のEgress Max/Egress Guaranteedと、最大8個までのQoS Class(Class1〜
+  Class8)ごとのPriority(real-time/high/medium/low)・Egress Max・Egress
+  Guaranteedを定義するプロファイル
+- **インターフェースQoS設定(`Network > QoS`)**: 物理インターフェース単位で
+  QoSシェーピングを有効化し、そのインターフェース全体のEgress Maxと、平文
+  トラフィックに適用するDefault Profileを指定する設定
+- **QoS Policy(`Policies > QoS`)**: Source/Destination・Application・
+  Service/URL Category・DSCP/ToS・Source Usersなどでトラフィックを照合し、
+  一致した通信を`Other Settings`で指定したQoS Class(1〜8)へ割り当てる
+  ポリシールール
+- **DoS Protection Profile(`Objects > Security Profiles > DoS Protection`)**:
+  Type(`Aggregate`/`Classified`)を選択できるプロファイル。`Classified`かつ
+  Address種別を`source-ip-only`にすると、送信元IPごとに`Resources
+  Protection`タブの`Sessions`セクションにある`Maximum Concurrent Sessions`
+  欄で最大同時セッション数を制限できる
+- **DoS Protectionポリシールール(`Policies > DoS Protection`)**: 上記の
+  DoS Protection Profileを、どのゾーン/送信元/宛先宛の通信に適用するかを
+  指定するポリシールール
+- **commit**: PAN-OSはcandidate configとrunning configを分離する二段階構成
+  モデルを採る。GUIで`Save`した設定もcommitするまで実機の動作には反映
+  されない
+
+## シナリオ設定
+
+ゲストWiFi利用者が収容される`guest-wifi`ゾーンに対して、次の
+{{ csv_rows | length }}件で帯域クラス・QoS Policyルール・DoS Protection
+Profile/ルールを管理します。
+
+| row_no | row_type | zone | name | match_source | match_application | qos_class | priority | egress_max | egress_guaranteed | unit | dos_max_sessions | description |
+|--------|----------|------|------|--------------|--------------------|-----------|----------|------------|-------------------|------|------------------|--------------|
+{% for r in csv_rows %}| {{ r["row_no"] }} | {{ r["row_type"] }} | {{ r["zone"] }} | {{ r["name"] }} | {{ r["match_source"] }} | {{ r["match_application"] }} | {{ r["qos_class"] }} | {{ r["priority"] }} | {{ r["egress_max"] }} | {{ r["egress_guaranteed"] }} | {{ r["unit"] }} | {{ r["dos_max_sessions"] }} | {{ r["description"] }} |
+{% endfor %}
+
+`guest-wifi`は自組織のゲストWiFi収容ゾーン名として本手順書内で用いる仮称
+です。実際の環境に存在するゾーン名・インターフェース名に読み替えてください。
+
+## 手順
+
+### 1. QoS Profileでクラスを定義する(Network > Network Profiles > QoS Profile)
+
+`Network > Network Profiles > QoS Profile`で新規プロファイルを追加し、
+シナリオ設定の`row_type`が`qos_class`の行ごとにクラスを定義します。
+
+{% for r in csv_rows %}{% if r["row_type"] == "qos_class" %}- {{ r["name"] }}: Class{{ r["qos_class"] }}にPriority `{{ r["priority"] }}`、Egress Max `{{ r["egress_max"] }} {{ r["unit"] }}`、Egress Guaranteed `{{ r["egress_guaranteed"] }} {{ r["unit"] }}` を設定する({{ r["description"] }})
+{% endif %}{% endfor %}
+各クラスの入力後、プロファイル全体の`Egress Max`/`Egress Guaranteed`は
+インターフェース側の設定に合わせて既定値のままとし、`OK`をクリックします。
+
+### 2. インターフェースでQoSを有効化する(Network > QoS)
+
+`Network > QoS`で対象インターフェースを追加し、手順1で作成したQoS
+Profileを`Default Profile`に指定します。
+
+{% for r in csv_rows %}{% if r["row_type"] == "interface" %}- {{ r["name"] }}: ゾーン`{{ r["zone"] }}`を収容するインターフェースで、Egress Maxを`{{ r["egress_max"] }} {{ r["unit"] }}`に設定し、Default Profileに手順1のQoS Profileを指定する({{ r["description"] }})
+{% endif %}{% endfor %}
+入力後は`OK`のみを行い、この時点ではまだ`Commit`は実行しません。
+
+### 3. QoS Policyルールでゲストゾーントラフィックをクラスに割り当てる(Policies > QoS)
+
+`Policies > QoS`で`Add`を選び、シナリオ設定の`row_type`が`qos_rule`の行
+ごとにルールを登録します。Source タブで`Source Zone`にゲストゾーンを設定
+し、Other Settings タブで`QoS Class`を割り当てます。
+
+{% for r in csv_rows %}{% if r["row_type"] == "qos_rule" %}- {{ r["name"] }}: Source Zone `{{ r["zone"] }}` / source={{ r["match_source"] }} / application={{ r["match_application"] }} をQoS Class {{ r["qos_class"] }} に割り当てる({{ r["description"] }})
+{% endif %}{% endfor %}
+入力後は`OK`のみを行います。
+
+### 4. DoS Protection ProfileでMaximum Concurrent Sessionsを設定する(Objects > Security Profiles > DoS Protection)
+
+`Objects > Security Profiles > DoS Protection`で新規プロファイルを追加し、
+`Type`を`Classified`、Address種別を`source-ip-only`に設定した上で、
+`Resources Protection`タブの`Sessions`セクションにある`Maximum Concurrent
+Sessions`欄へ上限値を入力します。
+
+{% for r in csv_rows %}{% if r["row_type"] == "dos_profile" %}- {{ r["name"] }}: Maximum Concurrent Sessionsを`{{ r["dos_max_sessions"] }}`に設定する({{ r["description"] }})
+{% endif %}{% endfor %}
+入力後は`OK`のみを行います。
+
+### 5. DoS Protectionポリシールールでプロファイルを適用する(Policies > DoS Protection)
+
+`Policies > DoS Protection`で`Add`を選び、シナリオ設定の`row_type`が
+`dos_rule`の行に従ってルールを登録し、手順4のプロファイルを適用します。
+
+{% for r in csv_rows %}{% if r["row_type"] == "dos_rule" %}- {{ r["name"] }}: ゾーン`{{ r["zone"] }}`宛/source={{ r["match_source"] }}・application={{ r["match_application"] }}の通信に手順4のDoS Protection Profileを適用する({{ r["description"] }})
+{% endif %}{% endfor %}
+入力後は`OK`のみを行います。
+
+### 6. 変更を確定する(commit)
+
+`Commit`を実行し、候補設定(candidate config)を実行中の設定(running
+config)へ反映します。commitが完了するまで、手順1〜5で入力した内容は実機の
+動作に反映されません。
+
+## 動作確認
+
+CLIから`show running qos-policy`を実行し、手順3で登録したQoS Policyルール
+が候補通り反映されていることを確認します。
+
+```bash
+show running qos-policy
+{% for r in csv_rows %}{% if r["row_type"] == "qos_rule" %}show session all filter qos-rule {{ r["name"] }}
+show session all filter qos-class {{ r["qos_class"] }}
+{% endif %}{% endfor %}```
+
+各`show session all filter qos-rule`の出力に、対応するルールへ一致した
+セッションが表示され、`show session all filter qos-class`の出力にそのクラス
+へ割り当てられたセッションが表示されることを確認します。
+
+続けて、DoS Protectionポリシールールの設定と実測値をCLIで確認します。
+
+```bash
+{% for r in csv_rows %}{% if r["row_type"] == "dos_rule" %}show dos-protection rule {{ r["name"] }} settings
+show dos-protection rule {{ r["name"] }} statistics
+{% endif %}{% endfor %}```
+
+`settings`の出力で、適用されているDoS Protection Profileの`Maximum
+Concurrent Sessions`がシナリオ設定の`dos_max_sessions`と一致していること、
+`statistics`の出力で送信元IPごとの現在の同時セッション数が上限内に収まって
+いることを確認します。
+
+最後に、GUIの`Network > QoS > Statistics`画面を開き、`Bandwidth`タブで
+手順1・2で設定したEgress Max/Guaranteedに対する実測帯域のグラフを、
+`QoS Rules`タブで手順3のルールに一致したトラフィックを確認します。
+
+## 注意事項
+
+- QoS Profile・DoS Protection Profileの数値はいずれも1ユーザー当たりでは
+  なく、クラス単位・送信元IP単位の目安上限です。実際の同時利用人数や回線
+  容量に応じて、シナリオ設定の`egress_max`/`egress_guaranteed`/
+  `dos_max_sessions`の値を見直してください。
+- `Network > QoS`でインターフェースにQoSを有効化しても、`Policies > QoS`
+  でトラフィックをQoS Classへ振り分けるルールが存在しなければ、既定の
+  クラスにしか制限がかからない場合があります。手順3のQoS Policyルールを
+  必ずあわせて登録してください。
+- DoS Protection Profileの`Type`を`Classified`ではなく`Aggregate`のまま
+  にすると、`Maximum Concurrent Sessions`はゲストゾーン全体の合計に対する
+  上限になり、送信元IPごとの制限にはなりません。送信元ごとに制限する場合は
+  必ず`Classified`かつAddress種別`source-ip-only`を選択してください。
+- `Commit`を実行するまでcandidate configはrunning configに反映されません。
+  手順1〜5で入力した内容は、手順6のcommitまで実機の動作に影響しません。
+- `guest-wifi`はこの手順書内の仮称であり、実際の環境に存在するゾーン名・
+  インターフェース名に読み替えてください。

@@ -1,0 +1,181 @@
+# FortiGateのログを外部SIEMへ確実に転送する構成
+
+FortiGate (FortiOS) の `config log syslogd setting` を使い、ファイアウォールの
+ログを外部SIEMサーバー`{{ primary_server_ip }}`へ転送します。転送モードには
+RFC 3195のRAWプロファイルに基づく`legacy-reliable`(TCPベースのreliable
+delivery)を指定し、UDP転送で起こり得るパケットロスによるログ欠落を防ぎます。
+さらに`syslogd2`を使って冗長系のSIEMサーバー`{{ secondary_server_ip }}`にも
+同時に転送する2系統構成とすることで、片方の転送経路や受信側SIEMに障害が
+発生してもログが失われない状態を目指します。
+
+## 目的
+
+ファイアウォールのログを外部SIEMへ確実に転送し、転送遅延・欠落を防ぐことを
+目的とします。具体的には、FortiOSの`syslogd`設定で転送モードを
+`legacy-reliable`(RFC 3195に基づくreliable delivery、TCP)にすることで
+UDP転送特有の欠落リスクを抑止し、`syslogd2`によるセカンダリ転送先の追加で
+単一障害点を排除し、設定後にパケット送出を実機で確認できるようになることを
+目指します。
+
+## 用語解説
+
+- **config log syslogd setting / config log syslogd2 setting**: FortiOSで
+  外部syslogサーバーへのログ転送を設定するCLIブロック。一次情報には
+  「You can configure FortiOS to send logs to up to four external syslog
+  servers: syslogd, syslogd2, syslogd3, syslogd4」と説明されており、
+  `syslogd`から`syslogd4`まで最大4台の外部syslogサーバーをそれぞれ独立した
+  設定ブロックとして構成できる
+- **mode(reliable delivery)**: syslog転送のプロトコル/信頼性モードを選択
+  する設定。`udp`(既定、ポート514、到達保証なし)、`legacy-reliable`
+  (「Enable legacy reliable syslogging by RFC3195 (Reliable Delivery for
+  Syslog)」と説明される、TCPベースのRFC 3195 RAWプロファイル)、`reliable`
+  (「Enable reliable syslogging by RFC6587 (Transmission of Syslog Messages
+  over TCP)」)の3種類がある。今回はUDPの欠落リスクを避けるため
+  `legacy-reliable`を使用する
+- **format(csv)**: 転送するログのフォーマット。一次情報には「csv — CSV
+  (Comma Separated Values) format.」と説明されており、既定の`default`形式
+  のほか`csv`/`cef`/`rfc5424`を選択できる。SIEM側でのフィールド分割を
+  容易にするため`csv`を使用する
+- **facility**: syslogのファシリティ値。`local0`から`local7`等、標準的な
+  syslogファシリティの中から選択する
+- **source-ip**: 転送するsyslogパケットの送信元IPアドレスを固定する設定。
+  SIEM側でFortiGateからのログをアドレスで識別・フィルタしやすくする
+- **interface-select-method / interface**: 送信元インターフェースの選択
+  方法。`auto`/`sdwan`/`specify`から選択でき、`specify`を選んだ場合は
+  `interface`で送信インターフェースを明示する
+- **max-log-rate**: syslog転送のレート上限(整数、ログ/秒)。上限に達すると
+  超過分のログが送信されない可能性があるため、レート起因のログ欠落を防ぐ
+  には`0`(無制限)を指定する
+- **enc-algorithm**: syslog転送時の暗号化アルゴリズム。
+  `high-medium`/`high`/`low`/`disable`から選択する。今回の目的は
+  reliable deliveryによる欠落・遅延防止であり、暗号化(TLS証明書の管理)は
+  本手順の対象外のため`disable`とする
+
+## シナリオ設定
+
+今回、外部SIEMへのログ転送設定値は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| 送信インターフェース(wan_interface) | `{{ wan_interface }}` |
+| インターフェース選択方法(interface_select_method) | `{{ interface_select_method }}` |
+| 送信元IPアドレス(source_ip) | `{{ source_ip }}` |
+| プライマリSIEMサーバー(primary_server_ip) | `{{ primary_server_ip }}` |
+| プライマリSIEMサーバーのポート(primary_server_port) | {{ primary_server_port }} |
+| セカンダリSIEMサーバー(secondary_server_ip) | `{{ secondary_server_ip }}` |
+| セカンダリSIEMサーバーのポート(secondary_server_port) | {{ secondary_server_port }} |
+| 転送モード(mode) | `{{ mode }}` |
+| ファシリティ(facility) | `{{ facility }}` |
+| ログフォーマット(log_format) | `{{ log_format }}` |
+| レート上限(max_log_rate) | {{ max_log_rate }} |
+| 暗号化アルゴリズム(enc_algorithm) | `{{ enc_algorithm }}` |
+
+`primary_server_ip`と`secondary_server_ip`は、あらかじめSIEM側で
+`{{ mode }}`(TCP)での受信ポート`{{ primary_server_port }}`
+/`{{ secondary_server_port }}`を待ち受け状態にしておいてください
+(SIEM側の受信設定自体は本手順書の対象外です)。
+
+## 手順
+
+### 1. 現状のsyslogd設定を確認する(変更前の基準を取る)
+
+新しい設定を投入する前に、既存の`syslogd`/`syslogd2`設定を確認します。
+
+```bash
+show log syslogd setting
+show log syslogd2 setting
+```
+
+いずれかがすでに`status enable`で異なる宛先へ設定されている場合は、変更に
+よって既存の転送経路が失われないよう、事前に運用担当者へ確認してください。
+
+### 2. プライマリSIEMサーバー向けにsyslogdを設定する
+
+```bash
+config log syslogd setting
+    set status enable
+    set server {{ primary_server_ip }}
+    set port {{ primary_server_port }}
+    set mode {{ mode }}
+    set facility {{ facility }}
+    set format {{ log_format }}
+    set source-ip {{ source_ip }}
+    set interface-select-method {{ interface_select_method }}
+{% if interface_select_method == "specify" %}    set interface "{{ wan_interface }}"
+{% endif %}    set max-log-rate {{ max_log_rate }}
+    set enc-algorithm {{ enc_algorithm }}
+end
+```
+
+### 3. セカンダリ(冗長)SIEMサーバー向けにsyslogd2を設定する
+
+同じモード・フォーマットで、宛先だけを変えたセカンダリ転送先を
+`syslogd2`に設定します。これにより、プライマリ側の経路やSIEMに問題が
+発生した場合でも、セカンダリ側へのログ転送は独立して継続します。
+
+```bash
+config log syslogd2 setting
+    set status enable
+    set server {{ secondary_server_ip }}
+    set port {{ secondary_server_port }}
+    set mode {{ mode }}
+    set facility {{ facility }}
+    set format {{ log_format }}
+    set source-ip {{ source_ip }}
+    set interface-select-method {{ interface_select_method }}
+{% if interface_select_method == "specify" %}    set interface "{{ wan_interface }}"
+{% endif %}    set max-log-rate {{ max_log_rate }}
+    set enc-algorithm {{ enc_algorithm }}
+end
+```
+
+### 4. パケット送出を実機で確認する
+
+設定投入直後に、実際に`{{ mode }}`(TCP)のパケットが両方の宛先へ送出
+されているかを、送信インターフェース上でスニファして確認します。
+
+```bash
+diagnose sniffer packet {{ wan_interface }} 'host {{ primary_server_ip }} and port {{ primary_server_port }}' 4 5
+diagnose sniffer packet {{ wan_interface }} 'host {{ secondary_server_ip }} and port {{ secondary_server_port }}' 4 5
+```
+
+両方のコマンドで、送信元`{{ source_ip }}`からそれぞれの宛先IP・ポートへ
+向かうTCPパケットが捕捉されることを確認します。
+
+## 動作確認
+
+- `show log syslogd setting` / `show log syslogd2 setting` の出力で、
+  `status`が`enable`、`server`・`port`・`mode`・`facility`・`format`・
+  `source-ip`・`max-log-rate`・`enc-algorithm`がシナリオ設定と一致して
+  いること
+- 手順4のスニファ結果で、プライマリ(`{{ primary_server_ip }}:
+  {{ primary_server_port }}`)・セカンダリ(`{{ secondary_server_ip }}:
+  {{ secondary_server_port }}`)の両方へ、送信元`{{ source_ip }}`からの
+  TCPパケットが観測されること
+- SIEM側の管理画面で、プライマリ・セカンダリの両方の受信元に
+  FortiGateからの新規ログイベントが到達していること(SIEM側の確認手順は
+  導入製品に応じて読み替えてください)
+- 手順1で確認した既存の`syslogd`/`syslogd2`設定(他の宛先が設定されて
+  いた場合)が、意図せず上書き・喪失していないこと
+
+## 注意事項
+
+- **`mode`を`udp`(既定)のままにしないこと。** UDPは到達確認を行わない
+  ため、ネットワーク輻輳やSIEM側の受信遅延時にログが欠落する可能性が
+  あります。転送遅延・欠落を防ぐという今回の目的では、必ず
+  `legacy-reliable`(またはRFC 6587に基づく`reliable`)を明示的に設定して
+  ください。
+- **`max-log-rate`を`0`以外の低い値にすると、レート超過分のログが送信
+  されず欠落する可能性があります。** 転送量が想定より多い環境では、
+  `0`(無制限)のままにするか、実際のログ発生量を踏まえて十分に大きい
+  値を設定してください。
+- **`syslogd`から`syslogd4`までは最大4台までしか設定できません。** 3台目
+  以降のSIEM連携が必要になった場合は、`syslogd3`/`syslogd4`の空き枠を
+  事前に確認してください。
+- 本手順は`legacy-reliable`によるreliable delivery(転送の到達性)を
+  対象としており、通信経路の暗号化(TLS)は対象外です。暗号化が必要な
+  要件がある場合は、`enc-algorithm`を`disable`以外に変更し、あわせて
+  `certificate`の設定(証明書の準備・管理)を別途検討してください。
+- CLIへのログインに使う管理者パスワードやAPIトークンは、本手順書や
+  チケット、ログに平文で残さないでください。記録が必要な場合は
+  `****`のようにマスクし、秘密管理ツール等で別途安全に保管してください。

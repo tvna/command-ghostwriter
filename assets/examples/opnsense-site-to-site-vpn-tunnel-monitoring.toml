@@ -1,0 +1,26 @@
+site_name = "Tokyo-HQ"
+peer_site_name = "Osaka-DR"
+wan_interface = "wan"
+local_carp_vip = "203.0.113.5"
+remote_gateway = "198.51.100.10"
+dpd_delay = 10
+dpd_timeout_ikev1 = 30
+dpd_action = "restart"
+tunable_async_crypto = 1
+tunable_isr_maxthreads = -1
+
+[[tunnels]]
+name = "s2s-main"
+child_sa_descr = "HQ-DR-main"
+local_subnet = "10.10.0.0/16"
+remote_subnet = "10.20.0.0/16"
+ike_version = "IKEv2"
+note = "-"
+
+[[tunnels]]
+name = "s2s-backup-isp"
+child_sa_descr = "HQ-DR-backup"
+local_subnet = "10.10.0.0/16"
+remote_subnet = "10.20.0.0/16"
+ike_version = "IKEv2"
+note = "バックアップISP経由の冗長経路"

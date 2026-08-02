@@ -1,0 +1,243 @@
+# Palo Alto Networks(PAN-OS)のボットネットC2通信検知・遮断構成
+
+マルウェアに感染した端末が外部のC2(コマンド&コントロール)サーバーと通信
+するのを検知・遮断するため、`Objects > Security Profiles > Anti-Spyware`で
+Anti-Spywareプロファイル`{{ anti_spyware_profile_name }}`を新規作成します。
+Signature Policiesタブでは既知のC2マルウェアシグネチャに対する遮断アクション
+を設定し、DNS PoliciesタブではDNS Securityサブスクリプションを署名ソースと
+して有効化してC2ドメイン・DNSトンネリング・DGA(ドメイン生成アルゴリズム)を
+検知し、Sinkholeアクションで名前解決を無害化します。作成したプロファイルを
+既存のSecurity Policyルール`{{ security_rule_name }}`にアタッチし、commit後
+にPAN-OS公式のDNS Securityテストドメインを用いて動作を検証します。
+
+## 目的
+
+PAN-OSのAnti-Spywareセキュリティプロファイルには、既知のスパイウェア/C2
+マルウェアの通信パターンに一致させるSignature Policiesと、DNSクエリの内容
+から悪性ドメインへの名前解決を検知するDNS Policiesという、性質の異なる
+2つの検知経路があることを理解した上で、双方を組み合わせてボットネットの
+C2通信を検知・遮断できるようになることを目指します。特にDNS Policiesの
+Sinkholeアクションは、悪性ドメインへのDNSクエリに対して実際のC2サーバーの
+アドレスではなく偽装したSinkholeアドレスを応答として返すことで、感染端末
+からC2サーバーへの実通信を未然に防ぎつつ、Sinkholeアドレス宛の通信が
+Trafficログに記録されることを利用して感染端末そのものを特定できるという
+一次情報上の仕組みを理解することを目指します。あわせて、PAN-OSが公式に
+提供するDNS Securityテストドメインを用いることで、実際の悪性ドメインに
+アクセスすることなく検知・遮断の動作を安全に検証できるようになることを
+目指します。
+
+## 用語解説
+
+- **Anti-Spyware Security Profile**: `Objects > Security Profiles >
+  Anti-Spyware`で作成する、スパイウェアおよびC2マルウェアの通信を検知する
+  ためのセキュリティプロファイル。Security Policyルールにアタッチして
+  初めて有効になる
+- **Signature Policies タブ**: Anti-Spywareプロファイル内でシグネチャ
+  ベースのルールを追加するタブ。`Rule Name`(ルール名)、`Threat Name`
+  (シグネチャ名。既定は`any`で全シグネチャに一致)、`Category`(脅威
+  カテゴリ。既定は`any`で全カテゴリに一致)、`Severity`(`critical`・
+  `high`・`medium`・`low`・`informational`から選択)、`Action`(検知時の
+  動作)、`Packet Capture`(`single-packet`または`extended-capture`)を
+  設定する
+- **Action(Signature Policies)**: 一致したシグネチャに対する動作。
+  `Default`・`Allow`・`Alert`・`Drop`・`Reset Client`・`Reset Server`・
+  `Reset Both`・`Block IP`から選択する
+- **DNS Policies タブ**: Anti-Spywareプロファイル内でDNSクエリに対する
+  検知を設定するタブ。`DNS Signature Source`(署名ソース。
+  `Palo Alto Networks Content`・`DNS Security`・`External Dynamic Lists`
+  から選択)ごとに`Log Severity`と`Policy Action`(悪性サイトへのDNS
+  ルックアップ発生時の動作。`alert`・`allow`・`block`・`sinkhole`から
+  選択)を設定する
+- **DNS Security サブスクリプション**: `DNS Signature Source`として選択
+  できる、クラウドベースで更新されるDNSシグネチャのサブスクリプション。
+  C2ドメイン・DNSトンネリング・DGA(ドメイン生成アルゴリズム)などの
+  DNSベースの脅威を検知対象に含む
+- **DNS Sinkhole Settings**: `Policy Action`を`sinkhole`にした場合に
+  参照される設定項目。悪性ドメインへのDNSクエリに対し、実際のIPアドレス
+  ではなく指定したSinkhole用のIPv4/IPv6アドレスを応答として返す。既定値
+  はPalo Alto Networksが運用するサーバーを指すが、自社内のローカルサーバー
+  のアドレスに変更できる
+- **Sinkholeアドレスとゾーンの関係**: 一次情報には「The sinkhole IP must
+  be in a different zone than your clients so the firewall can log and
+  intercept infected sessions」と説明されています。Sinkholeアドレスは
+  クライアントとは異なるゾーン(本手順では`{{ sinkhole_zone }}`)に配置する
+  ことで、感染端末がSinkholeアドレスへ接続を試みた際にファイアウォールを
+  経由させ、そのセッションをログに記録・遮断できるようにします
+- **DNS sinkholingによる感染端末の特定**: 一次情報には「Viewing the
+  traffic log on the firewall allows you to identify any client host that
+  is sending traffic to the sinkhole address」と説明されています。悪性
+  ドメインへの名前解決がSinkholeアドレスに書き換えられた結果、感染端末が
+  そのSinkholeアドレス宛に接続を試みる通信がTrafficログに残るため、
+  ファイアウォールがDNSクエリ自体を見ていない場合でも感染端末を特定でき
+  ます
+- **Profile Setting(Security PolicyルールのActionsタブ)**: Security
+  Policyルールにセキュリティプロファイルをアタッチする設定箇所。
+  `Profile Type`ドロップダウンで`Profiles`を選択すると、個々のプロファイル
+  (`Anti-Spyware`ドロップダウン等)を直接選択できる
+- **DNS Security テストドメイン**: PAN-OSが公式に提供する検証専用のドメイン
+  群。実際の悪性ドメインへアクセスすることなく、C2・DNSトンネリング・DGA
+  それぞれのカテゴリに対する検知・遮断動作を安全に確認できる
+- **commit**: PAN-OSはcandidate configとrunning configを分離する二段階
+  構成モデルを採る。GUIで`OK`を押しただけの設定もcommitするまで実機の
+  動作には反映されない
+
+## シナリオ設定
+
+今回、ボットネットC2通信の検知・遮断として構成する値は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| 内部(クライアント)側ゾーン(internal_zone) | `{{ internal_zone }}` |
+| 外部側ゾーン(external_zone) | `{{ external_zone }}` |
+| Sinkholeアドレス用ゾーン(sinkhole_zone) | `{{ sinkhole_zone }}` |
+| Anti-Spywareプロファイル名(anti_spyware_profile_name) | `{{ anti_spyware_profile_name }}` |
+| Signature Policiesルール名(signature_rule_name) | `{{ signature_rule_name }}` |
+| 対象Severity(signature_severity_list) | {{ signature_severity_list }} |
+| Signature PoliciesのAction(signature_action) | `{{ signature_action }}` |
+| Packet Captureモード(packet_capture_mode) | `{{ packet_capture_mode }}` |
+| DNS Signature Source(dns_signature_source) | `{{ dns_signature_source }}` |
+| DNS PoliciesのLog Severity(dns_log_severity) | `{{ dns_log_severity }}` |
+| DNS PoliciesのPolicy Action(dns_policy_action) | `{{ dns_policy_action }}` |
+| Sinkhole IPv4アドレス(sinkhole_ipv4) | `{{ sinkhole_ipv4 }}` |
+| アタッチ先の既存Security Policyルール名(security_rule_name) | `{{ security_rule_name }}` |
+| 検証に使う感染端末のIPアドレス(infected_host_ip) | `{{ infected_host_ip }}` |
+| DNS Securityテストドメイン(C2)(test_domain_c2) | `{{ test_domain_c2 }}` |
+| DNS Securityテストドメイン(DNSトンネリング)(test_domain_dnstunnel) | `{{ test_domain_dnstunnel }}` |
+| DNS Securityテストドメイン(DGA)(test_domain_dga) | `{{ test_domain_dga }}` |
+
+`{{ security_rule_name }}`は、`{{ internal_zone }}`から`{{ external_zone }}`
+へのアウトバウンド通信を許可する既存のSecurity Policyルールで、本手順の
+開始時点ではまだセキュリティプロファイルがアタッチされていない前提と
+します。`{{ sinkhole_zone }}`はSinkholeアドレス`{{ sinkhole_ipv4 }}`を
+配置するために新設するゾーン(仮称)で、`{{ internal_zone }}`とは異なる
+ゾーンにします。
+
+## 手順
+
+### 1. 現状を確認する(変更前の基準を取る)
+
+新しいプロファイル・アタッチを1件も行う前に、現状を確認します。
+
+- `Objects > Security Profiles > Anti-Spyware`を開き、
+  `{{ anti_spyware_profile_name }}`と同名のプロファイルが存在しないことを
+  確認します。
+- `Policies > Security`を開き、`{{ security_rule_name }}`のProfile欄
+  (Actionsタブ内Profile Setting)を確認し、現時点でAnti-Spywareプロファイル
+  がアタッチされていないことを確認します。
+
+### 2. Anti-Spywareプロファイルを新規作成する(Objects > Security Profiles > Anti-Spyware)
+
+`Objects > Security Profiles > Anti-Spyware`を開き、プロファイルを新規
+作成します。`Name`に`{{ anti_spyware_profile_name }}`を入力します。
+
+### 3. Signature Policiesタブでシグネチャベースのルールを追加する
+
+Signature Policiesタブで新しいルールを追加し、次の値を設定します。
+
+- Rule Name: {{ signature_rule_name }}
+- Threat Name: any
+- Category: any
+- Severity: {{ signature_severity_list }}(該当する重大度をすべて選択)
+- Action: {{ signature_action }}
+- Packet Capture: {{ packet_capture_mode }}
+
+既知のC2マルウェアシグネチャに一致した通信を`{{ signature_action }}`で
+遮断できるようにします。
+
+### 4. DNS PoliciesタブでDNS Securityによる検知を有効化する
+
+DNS Policiesタブで、DNS Signature Sourceに`{{ dns_signature_source }}`を
+追加し、次の値を設定します。
+
+- Log Severity: {{ dns_log_severity }}
+- Policy Action: {{ dns_policy_action }}
+
+`{{ dns_signature_source }}`をDNS Signature Sourceに追加することで、C2
+ドメイン・DNSトンネリング・DGAを含むDNSベースの脅威に対する検知が有効に
+なり、該当ドメインへのDNSクエリ発生時の動作が`{{ dns_policy_action }}`に
+なります。
+
+### 5. DNS Sinkhole Settingsでシンクホール先アドレスを設定する
+
+DNS Policiesタブ内のDNS Sinkhole Settingsセクションで、Sinkholeが有効に
+なっていることを確認し、IPv4アドレスを`{{ sinkhole_ipv4 }}`に変更します。
+既定値はPalo Alto Networksが運用するサーバーを指しますが、感染端末からの
+接続を自組織のファイアウォールで確実にログ・遮断するため、
+`{{ sinkhole_zone }}`ゾーンに配置した`{{ sinkhole_ipv4 }}`に変更します。
+
+### 6. 既存のSecurity Policyルールにプロファイルをアタッチする(Policies > Security)
+
+`Policies > Security`で`{{ security_rule_name }}`を開き、Actionsタブで
+次の設定を行います。
+
+- `Log at Session Start`チェックボックスを有効にします。
+- Profile Setting内の`Profile Type`ドロップダウンで`Profiles`を選択し、
+  `Anti-Spyware`ドロップダウンで`{{ anti_spyware_profile_name }}`を
+  選択します。
+
+入力後は`OK`のみを行い、この時点ではまだ`Commit`は実行しません。
+
+### 7. 変更を確定する(commit)
+
+`Commit`を実行し、候補設定(candidate config)を実行中の設定(running
+config)へ反映します。commitが完了するまで、手順2〜6で入力した内容は実機
+の動作に反映されません。
+
+### 8. DNS Securityテストドメインで動作を検証する
+
+commit完了後、感染端末に見立てた`{{ infected_host_ip }}`から、PAN-OSが
+公式に提供するDNS Securityテストドメインへの名前解決を試行します。実際の
+悪性ドメインへアクセスすることなく、カテゴリごとの検知・遮断動作を安全に
+確認できます。
+
+```bash
+nslookup {{ test_domain_c2 }}
+nslookup {{ test_domain_dnstunnel }}
+nslookup {{ test_domain_dga }}
+```
+
+いずれの問い合わせに対しても、応答が実際のドメイン所有者のアドレスでは
+なく`{{ sinkhole_ipv4 }}`になっていることを確認します。
+
+## 動作確認
+
+- `Objects > Security Profiles > Anti-Spyware`の`{{ anti_spyware_profile_name }}`
+  内、Signature Policiesタブに`{{ signature_rule_name }}`が表示され、
+  Severity・Actionが手順3の設定どおりであること
+- DNS Policiesタブで`{{ dns_signature_source }}`のPolicy Actionが
+  `{{ dns_policy_action }}`になっていること、DNS Sinkhole SettingsのIPv4
+  アドレスが`{{ sinkhole_ipv4 }}`になっていること
+- `Policies > Security`の`{{ security_rule_name }}`にAnti-Spywareプロファイル
+  `{{ anti_spyware_profile_name }}`がアタッチされていること
+- `{{ test_domain_c2 }}`・`{{ test_domain_dnstunnel }}`・
+  `{{ test_domain_dga }}`のいずれの名前解決結果も`{{ sinkhole_ipv4 }}`へ
+  書き換えられていること
+- Trafficログに、`{{ infected_host_ip }}`から`{{ sinkhole_ipv4 }}`宛の
+  セッションが記録されていること(感染端末がSinkholeアドレスへの接続を
+  試みたことを示す)
+- 手順1で確認した`{{ security_rule_name }}`以外の既存ルール・プロファイル
+  の内容が意図せず変更されていないこと
+
+## 注意事項
+
+- **Sinkholeアドレスは、クライアントとは異なるゾーンに配置すること。**
+  同一ゾーンに配置すると、感染端末からSinkholeアドレスへの通信がファイア
+  ウォールを経由せず、セッションのログ記録・遮断ができなくなります。本
+  手順では`{{ internal_zone }}`とは異なる`{{ sinkhole_zone }}`に
+  `{{ sinkhole_ipv4 }}`を配置します。
+- **DNS Policiesの検知はプロファイルをSecurity Policyルールにアタッチする
+  までは動作しません。** 手順2〜5でプロファイルを作成しただけでは無効の
+  ままで、手順6のアタッチと手順7のcommitまでは実機の動作に影響しません。
+- **Signature PoliciesのActionを`{{ signature_action }}`より弱いアクション
+  (`Alert`など)に変更すると、シグネチャに一致した通信を検知はしても遮断
+  はしなくなります。** 検知のみで十分な用途以外では変更前に影響範囲を
+  確認してください。
+- 動作検証には本手順に記載したPAN-OS公式のDNS Securityテストドメインのみ
+  を使用し、実際の悪性ドメインや実在するC2サーバーへ接続しないでください。
+- CLI/GUIへのログインに使う管理者パスワードやAPIキーは、本手順書やチケ
+  ット、ログに平文で残さないでください。記録が必要な場合は`********`の
+  ようにマスクし、秘密管理ツール等で別途安全に保管してください。
+- 本手順は`{{ security_rule_name }}`が`{{ internal_zone }}`から
+  `{{ external_zone }}`へのアウトバウンド通信を許可する既存ルールとして
+  既に存在することを前提とします。該当するルールが存在しない環境では、
+  先にそのSecurity Policyルール自体を作成してください。

@@ -1,0 +1,163 @@
+# OPNsenseによるIPv6デュアルスタックDefault-Denyパリティ構築
+
+IPv4環境で運用中のWAN最小許可ルールと同じ粒度で、IPv6側にも明示的な
+許可ルールと明示的デフォルト拒否ルールを登録し、CSVで定義した
+{{ csv_rows | length }} 件のルールを IPv4/IPv6 両プロトコルで対称に
+維持します。GUIでの登録手順と、同内容を投入するAPI(curl)手順を併記し、
+最後に Live View ログで IPv4/IPv6 双方の許可・遮断状況を比較検証します。
+
+## 目的
+
+IPv4側で既に確立している「明示的に許可されない通信はデフォルトで拒否する」
+という設計(default-denyパリティ)を、IPv6側でも同じ粒度のルールとして
+明示的に構成し、GUI・APIのどちらから登録しても同じ評価順のルールセットを
+再現できるようになることを目指します。あわせて、IPv4/IPv6双方のログを
+突き合わせて、片方のプロトコルだけが緩い設定のまま放置されていないかを
+検証します。
+
+## 用語解説
+
+- **default-denyパリティ**: IPv4側の「明示的に許可されない通信は拒否する」
+  という設計を、IPv6側でも同じルール粒度・同じ評価順で再現し、プロトコル間
+  でポリシーの強さに差が生じないようにする考え方
+- **TCP/IP Version**: OPNsenseのファイアウォールルール編集画面にあるフィールド。
+  公式ドキュメントでは「The IP protocol version that should match, e.g.,
+  IPv4 or IPv6.」と説明されており、ルールごとに一致させるIPプロトコル
+  バージョンを `IPv4` または `IPv6` として個別に指定する
+- **IPv6設定方式 `None`**: インターフェースのIPv6設定方式を選択するプルダウンの
+  選択肢の一つ。公式ドキュメントでは「This mode turns off IPv6 connectivity
+  for this particular interface」と説明されており、選択するとそのインター
+  フェースのIPv6通信自体が丸ごと無効化される。ファイアウォールルールによる
+  個別の許可/拒否とは異なるインターフェース単位の一括遮断であるため、本手順の
+  default-denyパリティ(ルール単位での明示的許可・拒否)の代替にはならない
+- **quick評価(先勝ちルール)**: OPNsense (pfベース) は上から順にルールを評価し、
+  最初に一致したルールを適用する。以降のルールは評価されない。IPv4/IPv6を
+  問わず、許可ルールは明示的デフォルト拒否ルールより必ず前に置く必要がある
+- **Live View**: `Firewall > Log Files > Live View` で確認できる、フィルタ
+  ルールの許可/遮断結果をリアルタイム表示するログ画面。`TCP/IP Version`
+  列でIPv4/IPv6を判別できる
+- **API key/secret**: `System > Access > Users` で発行するOPNsense REST API
+  認証情報。`curl -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET"` の Basic 認証
+  として使う(値は環境変数として渡し、平文で書き残さない)
+
+## シナリオ設定
+
+WANに登録するIPv4/IPv6対の許可ルールと、各プロトコルの明示的デフォルト
+拒否ルールは、次の {{ csv_rows | length }} 件です。`rule_no` の昇順が
+そのままルールの並び順(評価順)になります。
+
+| rule_no | interface | tcpip_version | action | proto | src | src_port | dst | dst_port | description |
+|---------|-----------|----------------|--------|-------|-----|----------|-----|----------|--------------|
+{% for r in csv_rows %}| {{ r["rule_no"] }} | {{ r["interface"] }} | {{ r["tcpip_version"] }} | {{ r["action"] }} | {{ r["proto"] }} | {{ r["src"] }} | {{ r["src_port"] }} | {{ r["dst"] }} | {{ r["dst_port"] }} | {{ r["description"] }} |
+{% endfor %}
+
+表中の `*` は「すべて/指定なし」を表します(例: 送信元ポート任意)。
+
+## 手順
+
+### 1. WANインターフェースのIPv6設定方式が`None`になっていないことを確認する
+
+先にIPv6設定方式を確認しないと、手順2以降で登録するIPv6許可ルールが
+インターフェース単位の一括遮断によって無意味になっていることに気づけません。
+
+- `Interfaces > [WAN]` を開き、`IPv6 Configuration Type` が `None` に
+  なっていないことを確認します。`None` の場合、このインターフェースの
+  IPv6通信自体が丸ごと無効化されるため、以降の手順でIPv6許可ルールを
+  いくら登録しても着信できません。
+- `Firewall > Log Files > Live View` を開き、現在のIPv4/IPv6それぞれの
+  正常通信(保守アクセスや既存の公開サービス宛の通信)が表示されることを
+  確認し、スクリーンショットまたはメモとして記録します。この基準は手順5
+  で再確認するために使います。
+
+### 2. IPv4許可ルールに対応するIPv6許可ルールをGUIで登録する
+
+`Firewall > Rules > WAN > Add` から、シナリオ設定の `action` が `pass`
+の行を上から順に登録します。`TCP/IP Version` はシナリオ設定の
+`tcpip_version` 列の値(`IPv4` または `IPv6`)をそのまま選択し、既存の
+IPv4ルールと同じ `proto` / `description` の対をIPv6側にも登録します。
+
+{% for r in csv_rows %}{% if r["action"] == "pass" %}- rule_no {{ r["rule_no"] }}: TCP/IP Version={{ r["tcpip_version"] }} / Action={{ r["action"] }} / {{ r["proto"] }} / {{ r["src"] }}:{{ r["src_port"] }} -> {{ r["dst"] }}:{{ r["dst_port"] }} ({{ r["description"] }})
+{% endif %}{% endfor %}
+入力後は `Save` のみを行い、この時点ではまだ `Apply Changes` を押しません。
+
+### 3. 同じルールをAPI(curl)で登録する
+
+GUIと同じ内容を、`/api/firewall/filter/addRule` へのPOSTでも登録できます。
+`ipprotocol` にはシナリオ設定の `tcpip_version` の値(`IPv4` または `IPv6`)を
+そのまま渡します。`$OPNSENSE_API_KEY` / `$OPNSENSE_API_SECRET` には、
+`System > Access > Users` で発行したAPIキー/シークレットをそれぞれ環境変数
+として設定してください(値はマスクし、コマンド中に平文で書かないでください:
+例 `****`)。
+
+```bash
+{% for r in csv_rows %}{% if r["action"] == "pass" %}curl -k -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" https://fw.example.internal/api/firewall/filter/addRule \
+  -H "Content-Type: application/json" \
+  -d '{"rule":{"interface":"{{ r["interface"] }}","action":"{{ r["action"] }}","direction":"in","ipprotocol":"{{ r["tcpip_version"] }}","protocol":"{{ r["proto"] | upper }}","source_net":"{{ r["src"] }}","source_port":"{% if r["src_port"] != "*" %}{{ r["src_port"] }}{% endif %}","destination_net":"{{ r["dst"] }}","destination_port":"{% if r["dst_port"] != "*" %}{{ r["dst_port"] }}{% endif %}","description":"{{ r["description"] }}","log":"1"}}'
+{% endif %}{% endfor %}```
+
+### 4. IPv4/IPv6それぞれの明示的デフォルト拒否ルールを最後尾に登録する
+
+`action` が `block` の行は、暗黙拒否と同じ効果をプロトコルごとに明示化
+してログに残すためのルールです。IPv4/IPv6のいずれも、手順2・3で登録した
+`pass` ルールより**必ず後ろ**(評価順で最後)に置いてください。quick評価
+のため、先に `block` を置くと後続の `pass` ルールが評価されなくなります。
+
+```bash
+{% for r in csv_rows %}{% if r["action"] == "block" %}curl -k -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" https://fw.example.internal/api/firewall/filter/addRule \
+  -H "Content-Type: application/json" \
+  -d '{"rule":{"interface":"{{ r["interface"] }}","action":"{{ r["action"] }}","direction":"in","ipprotocol":"{{ r["tcpip_version"] }}","protocol":"{{ r["proto"] | upper }}","source_net":"{{ r["src"] }}","destination_net":"{{ r["dst"] }}","description":"{{ r["description"] }}","log":"1"}}'
+{% endif %}{% endfor %}```
+
+### 5. 変更を適用し、Live ViewでIPv4/IPv6双方のログを比較検証する
+
+ここで初めて設定を反映します。GUIなら `Apply Changes`、APIなら
+`/api/firewall/filter/apply` を呼び出します。
+
+```bash
+curl -k -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST https://fw.example.internal/api/firewall/filter/apply
+```
+
+反映後、`Firewall > Log Files > Live View` を再度開き、`TCP/IP Version`
+列でIPv4/IPv6を絞り込みながら、次の順序で確認します。
+
+1. 手順1で記録した既存のIPv4/IPv6双方の正常通信が、引き続き許可(Pass)
+   として表示される
+2. シナリオ設定の `pass` 行に対応する新しい通信が、IPv4/IPv6それぞれの
+   description付きで許可表示される
+3. 想定外の送信元・宛先向けの通信が、IPv4/IPv6それぞれの明示的デフォルト
+   拒否ルール(`action` が `block` の行)に一致して遮断(Block)表示される
+
+この3点をすべて確認できるまで、既存の一時的な広めの許可ルールや旧ルール
+を無効化・削除しないでください。
+
+## 動作確認
+
+- WANインターフェースの `IPv6 Configuration Type` が `None` になっておらず、
+  IPv6通信がインターフェース単位で一括遮断されていないこと
+- Live Viewに、手順1で記録した既存のIPv4/IPv6双方の正常通信が変更後も
+  引き続きPassとして表示されること
+- シナリオ設定の `pass` 行に対応する通信が、IPv4/IPv6それぞれのdescription
+  付きで許可されること
+- シナリオ設定の `block` 行に対応する未許可の通信が、IPv4/IPv6それぞれで
+  遮断としてログに記録されること
+- `Firewall > Rules > WAN` 上で、IPv4/IPv6を問わず `pass` ルールが `block`
+  ルールより上位(評価順で先)に並んでいること
+
+## 注意事項
+
+- **`IPv6 Configuration Type` を安易に`None`にしないこと。** `None` は
+  インターフェース単位でIPv6通信そのものを丸ごと無効化する設定であり、
+  ルール単位の明示的許可・拒否によるdefault-denyパリティとは別の挙動です。
+  IPv6を意図的に完全遮断する場合を除き、本手順のルール構成による制御と
+  混同しないでください。
+- **IPv4とIPv6を必ず対で見直すこと。** 片方のプロトコルにだけ許可ルールを
+  追加し、もう片方の明示的デフォルト拒否ルールの追加を忘れると、そちらの
+  プロトコルだけ暗黙拒否のみに依存した状態になり、ルールセットの意図が
+  IPv4/IPv6間で非対称になります。
+- quick評価のため、`pass` ルールと `block` ルールの並び順を誤ると意図しない
+  遮断・許可が発生します。並び順は `Firewall > Rules > WAN` でドラッグ操作
+  により随時修正できます。
+- 旧ルール・一時的な広い許可ルールの無効化は、手順5の3点確認が完了した後に
+  のみ行います。
+- API key/secretは平文でリポジトリやログに残さず、環境変数や秘密管理ツール
+  経由で扱ってください。

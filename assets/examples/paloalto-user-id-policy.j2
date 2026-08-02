@@ -1,0 +1,192 @@
+# PAN-OSでUser-IDによるユーザー/グループベースのファイアウォールポリシー運用
+
+LDAPサーバプロファイルとGroup Mapping Settingsを使って、Active
+Directory上のユーザー/グループ情報をPAN-OSのuser-to-groupマッピング
+テーブルに取り込み、Security policyのSource UserフィールドでIPアドレス
+ではなくユーザー/グループ単位のルール({{ security_policy_rules | length }}
+件)を適用します。RADIUSやSAML、TACACS+など認証専用のソースだけでは
+このマッピングテーブルは作られないため、グループベースのポリシーを
+組む場合は必ずLDAPによるGroup Mappingを併用します。
+
+## 目的
+
+IPアドレスの変化に依存せず、AD上のユーザー/グループ単位でPAN-OSの
+Security policyを適用できるようにするため、LDAPサーバプロファイルの
+作成 → Group Mapping Settingsの設定 → Commit → Security policyでの
+Source User参照 → マッピング状況の確認、という一連の手順を実践できる
+ようになることを目指します。
+
+## 用語解説
+
+- **LDAP Server Profile**: `Device > Server Profiles > LDAP` で作成する、
+  ディレクトリサーバへの接続情報。Profile Name、接続先サーバ(Name /
+  IP・FQDN / Port、デフォルト389)、Server Type(例: `active-directory`)、
+  Base DN、Bind DN、Bind Timeout・Search Timeout(いずれもデフォルト30秒)
+  を設定する
+- **Group Mapping Settings**: `Device > User Identification > Group
+  Mapping Settings` で作成する、グループ情報取得の設定。Name、参照する
+  LDAP Server Profile、Update Interval(60〜86400秒、デフォルト3600秒)を
+  設定する
+- **User and Group Attributes**: Group Mapping Settings内のタブ。
+  Primary Username(ユーザーを識別する属性、例: `sAMAccountName`)、
+  Group Name(グループ名属性、例: `cn`)、Group Member(メンバー属性、例:
+  `member`)を設定する
+- **Group Include List**: Group Mapping Settings内で、ポリシーに使用
+  可能なグループを絞り込むための一覧。設定後、この画面で「firewallが
+  すべてのグループを取得できているか」を確認できる
+- **Source User(Security policyのフィールド)**: Security policyのルール
+  で、送信元をIPアドレスではなくマッピング済みのユーザー/グループで
+  指定するフィールド
+- **RADIUS/SAML/TACACS+との違い**: 一次情報には、これらの認証専用の
+  ソースは認証時点のユーザー属性を渡すのみで、firewallはそのデータを
+  user-to-groupマッピングテーブルの構築には使わないと明記されている。
+  そのため、グループベースのSecurity policyを組むにはLDAPによるGroup
+  Mappingの併用が必須となる
+
+## シナリオ設定
+
+Group Mappingに使用するLDAPサーバプロファイルの設定内容と、Security
+policyで参照するグループ・ルールは次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| LDAP Server Profile名(ldap_server_profile_name) | {{ ldap_server_profile_name }} |
+| Server Type(ldap_server_type) | {{ ldap_server_type }} |
+| Base DN(ldap_base_dn) | {{ ldap_base_dn }} |
+| Bind DN(ldap_bind_dn) | {{ ldap_bind_dn }} |
+| Bind Password | **** (マスク表記。実際の値はテンプレートに記載しない) |
+| Group Mapping名(group_mapping_name) | {{ group_mapping_name }} |
+| Update Interval(update_interval_seconds) | {{ update_interval_seconds }} 秒 |
+| Primary Username属性(primary_username_attribute) | {{ primary_username_attribute }} |
+| Group Name属性(group_name_attribute) | {{ group_name_attribute }} |
+| Group Member属性(group_member_attribute) | {{ group_member_attribute }} |
+
+接続先LDAPサーバ一覧(ldap_servers, {{ ldap_servers | length }} 件):
+
+| # | Name | IP・FQDN | Port |
+|---|------|----------|------|
+{% for srv in ldap_servers %}| {{ loop.index }} | {{ srv["name"] }} | {{ srv["host"] }} | {{ srv["port"] }} |
+{% endfor %}
+
+Group Include List(group_include_list, {{ group_include_list | length }} 件):
+
+{% for grp in group_include_list %}- `{{ grp }}`
+{% endfor %}
+
+Security policyルール一覧(security_policy_rules, {{ security_policy_rules | length }} 件):
+
+| # | ルール名 | 送信元ゾーン | 宛先ゾーン | Source User | Action |
+|---|----------|--------------|------------|--------------|--------|
+{% for rule in security_policy_rules %}| {{ loop.index }} | {{ rule["name"] }} | {{ rule["source_zone"] }} | {{ rule["dest_zone"] }} | {{ rule["source_user"] }} | {{ rule["action"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. LDAP Server Profileを作成する
+
+`Device > Server Profiles > LDAP > Add` から新しいプロファイルを作成
+します。
+
+- Profile Name: `{{ ldap_server_profile_name }}`
+- Server(接続先サーバ、{{ ldap_servers | length }} 件を1件ずつ追加する):
+
+{% for srv in ldap_servers %}  - Name: `{{ srv["name"] }}` / IP・FQDN: `{{ srv["host"] }}` / Port: `{{ srv["port"] }}`
+{% endfor %}
+- Server Type: `{{ ldap_server_type }}`
+- Base DN: `{{ ldap_base_dn }}`
+- Bind DN: `{{ ldap_bind_dn }}`
+- Password: 実際の値を入力する(このドキュメントには記載しない。
+  マスク表記: ****)
+
+設定後、`OK` をクリックして保存します(この時点ではまだ `Commit` しません)。
+
+### 2. Group Mapping Settingsを設定する
+
+`Device > User Identification > Group Mapping Settings > Add` から
+新しい設定を作成します。
+
+- Name: `{{ group_mapping_name }}`
+- Server Profile: 手順1で作成した `{{ ldap_server_profile_name }}` を選択
+- Update Interval: `{{ update_interval_seconds }}`
+
+`User and Group Attributes` タブで、次の属性を設定します。
+
+- Primary Username: `{{ primary_username_attribute }}`
+- Group Name: `{{ group_name_attribute }}`
+- Group Member: `{{ group_member_attribute }}`
+
+`Group Include List` タブで、ポリシーに使用するグループを追加します。
+
+{% for grp in group_include_list %}- `{{ grp }}`
+{% endfor %}
+設定後、`OK` をクリックして保存します。
+
+### 3. Commitする
+
+`Commit` を実行し、LDAP Server ProfileとGroup Mapping Settingsを反映
+します。Commit後、手順5の確認でuser-to-groupマッピングテーブルが
+構築されていることを確かめてから、次の手順に進みます。
+
+### 4. Security policyでSource Userを指定したルールを作成する
+
+シナリオ設定のルール一覧に従い、`Policies > Security > Add` から各
+ルールを作成します。`Source` タブの `Source User` フィールドに、IP
+アドレスの代わりにマッピング済みのユーザー/グループを指定します。
+
+{% for rule in security_policy_rules %}- ルール名: `{{ rule["name"] }}` / 送信元ゾーン: `{{ rule["source_zone"] }}` /
+  宛先ゾーン: `{{ rule["dest_zone"] }}` / Source User: `{{ rule["source_user"] }}` /
+  Action: `{{ rule["action"] }}`
+{% endfor %}
+作成後、`Commit` を実行して反映します。
+
+### 5. user-to-groupマッピングの状況を確認する
+
+CLIで次のコマンドを実行し、Group Mappingが機能していることを確認
+します。
+
+- `show user group-mapping statistics`(次回のキャッシュ更新タイミング
+  などを確認)
+- `show user user-attributes user all`(ユーザー属性が正しく取得できて
+  いるかを確認)
+
+反映が遅い、または一部のグループが見当たらない場合は、次のコマンドで
+キャッシュを手動更新してから再確認します。
+
+- `debug user-id refresh group-mapping all`
+
+## 動作確認
+
+- `Device > User Identification > Group Mapping Settings > Group Include
+  List` で、シナリオ設定の {{ group_include_list | length }} 件のグループ
+  がすべて取得できていること
+- `show user user-attributes user all` の出力で、対象ユーザーの
+  Primary Username(`{{ primary_username_attribute }}`)とグループ所属が
+  正しく表示されること
+- `Monitor > Logs > Traffic` の Source User列に、該当セッションの
+  ユーザー名が正しく表示されること
+- `Monitor > Logs > User-ID` の User Provided by Source列に、正しい
+  ユーザー名がマッピングされて表示されること
+- シナリオ設定のSecurity policyルール({{ security_policy_rules | length }}
+  件)が、各ルールで指定したSource Userの条件どおりに許可・拒否として
+  動作すること
+
+## 注意事項
+
+- **RADIUS/SAML/TACACS+など認証専用のソースだけではuser-to-group
+  マッピングテーブルは作られない。** 一次情報には、これらの認証機構は
+  認証時点のユーザー属性を渡すのみで、firewallはそのデータをuser-to-
+  groupマッピングテーブルの構築には使わないと明記されている。グループ
+  ベースのSecurity policyを運用する場合は、必ずLDAPによるGroup Mapping
+  を併用すること。
+- **Bind DN用のパスワードは、このドキュメントや設定ファイルに平文で
+  残さないこと。** マスク表記(`****`)のみを記載し、実際の値はPAN-OS
+  のGUI上でのみ入力する。
+- **Update Interval(`{{ update_interval_seconds }}` 秒)の間は、AD側の
+  グループメンバーシップ変更がSecurity policyに反映されない。** 反映を
+  急ぐ場合は `debug user-id refresh group-mapping all` で手動更新する。
+- Group Include Listに追加していないグループは、Security policyの
+  Source Userフィールドで選択できない。運用開始後にグループを追加する
+  場合は、このリストへの追加とCommitを忘れないこと。
+- ロックアウトやポリシー誤適用が発生した場合の具体的な復旧手順は、
+  本手順書が参照した一次情報の範囲外のため記載していない。適用前に、
+  既存のSecurity policyへの影響を必ず確認すること。

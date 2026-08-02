@@ -1,0 +1,126 @@
+# OPNsense における CIS Benchmark 準拠状況の監査とハードニング是正
+
+CIS(Center for Internet Security)が公開する OPNsense 専用の CIS Benchmark、
+および OPNsense 公式の Security/Hardening ドキュメントの推奨設定を基準として、
+{{ csv_rows | length }} 件のチェック項目の現状設定を突き合わせ、逸脱している
+項目のみを是正します。あわせて、設定ハードニングの監査とは別機能である
+pkgレベルの既知脆弱性監査（`System > Firmware > Status` の `Run an Audit`）
+を切り分けて実施し、両者を混同しないようにします。
+
+## 目的
+
+CIS Benchmark（OPNsense版）と OPNsense 公式 Security/Hardening ドキュメントの
+推奨設定を基準に、現行設定の準拠状況を項目単位で確認し、非準拠と判定された
+項目だけを GUI 上で是正します。他ベンダーのネイティブ機能とは異なり、
+OPNsense自体には自動化されたCIS準拠監査エンジンはないが、CIS
+(Center for Internet Security)がOPNsense専用のCIS Benchmarkを公式に公開して
+おり、これとOPNsense公式のSecurity/Hardeningドキュメントの推奨設定を突き合わ
+せて手動監査・是正する運用が可能という別機構で同じ運用課題を解決します。
+是正後は、pkgレベルの脆弱性監査結果とあわせて設定変更を証跡として残します。
+
+## 用語解説
+
+- **CIS Benchmark（OPNsense版）**: CIS が https://www.cisecurity.org/benchmark/opnsense で無償公開する、OPNsense向けの公式ハードニング基準書（PDF、非商用利用向け）。OPNsense本体には、この基準への準拠状況を自動判定する機能はない
+- **Security/Hardening ドキュメント**: OPNsense 公式ドキュメントが示す推奨事項（最小権限での管理者アクセス、管理インターフェースの信頼済みネットワークへの制限、強固な認証と追加の認証要素、不要なサービス/プラグイン/アカウントの削除、ロギングと監視、定期的な設定バックアップなど）
+- **pkgレベル既知脆弱性監査**: `System > Firmware > Status` の `Run an Audit` ボタンから実行できる、インストール済みパッケージの既知脆弱性チェック。本テンプレートが扱う設定ハードニングの準拠監査（`category` が `config_hardening` の項目）とは別機能であり、混同しないこと
+- **Listen Interfaces**: `System > Settings > Administration` の設定項目。Web GUI/SSH の待受インターフェースを制限するパラメータで、既定値はすべてのインターフェースで待受
+- **OTP seed**: `System > Access > Users` の各ユーザー編集画面にある TOTP（Google Authenticator等）用の秘密鍵フィールド。パスワードと同等の機密情報として扱う
+- **`-`（センチネル値）**: シナリオ設定の表で、是正が不要（`status` が `compliant`）なため remediation 列に該当情報がないことを表す
+
+## シナリオ設定
+
+今回突き合わせるチェック項目は次の {{ csv_rows | length }} 件です。`category`
+が `config_hardening` の項目は CIS Benchmark／Security ドキュメントに基づく
+設定ハードニングの準拠監査対象、`pkg_audit` の項目は前述のパッケージ脆弱性
+監査を区別のため併記したものです。
+
+| control_no | cis_ref | category | title | opnsense_menu | check_item | expected_value | observed_value | status |
+|---|---|---|---|---|---|---|---|---|
+{% for r in csv_rows %}| {{ r["control_no"] }} | {{ r["cis_ref"] }} | {{ r["category"] }} | {{ r["title"] }} | {{ r["opnsense_menu"] | safe }} | {{ r["check_item"] }} | {{ r["expected_value"] }} | {{ r["observed_value"] }} | {{ r["status"] }} |
+{% endfor %}
+
+## 手順
+
+### 1. 監査基準を準備する
+
+CIS Benchmark（OPNsense版）のPDFを https://www.cisecurity.org/benchmark/opnsense
+から取得し、OPNsense 公式 Security/Hardening ドキュメントの推奨事項とあわせて
+確認します。今回はこの2つの基準を突き合わせ済みの結果として、上記シナリオ
+設定の `expected_value` 列にまとめています。この時点ではまだ設定変更を行い
+ません。
+
+### 2. config_hardening 項目をGUIで確認する
+
+`category` が `config_hardening` の項目について、`opnsense_menu` に記載した
+画面を開き、`check_item` の現在値が `expected_value` と一致しているかを
+1件ずつ確認します。
+
+{% for r in csv_rows | selectattr("category", "equalto", "config_hardening") %}- control_no {{ r["control_no"] }}（{{ r["cis_ref"] }}）: {{ r["opnsense_menu"] | safe }} の {{ r["check_item"] }} を確認 → 現状値「{{ r["observed_value"] }}」/ 基準値「{{ r["expected_value"] }}」/ 判定: {{ r["status"] }}
+{% endfor %}
+
+### 3. 非準拠項目を是正する
+
+手順2で `status` が `non-compliant` と判定された項目のみ、`remediation_menu`
+の画面で `remediation_action` の内容を実施します。`compliant` の項目には
+変更を加えません。
+
+{% for r in csv_rows | selectattr("status", "equalto", "non-compliant") %}- control_no {{ r["control_no"] }}（{{ r["cis_ref"] }}）: {{ r["remediation_menu"] | safe }} で「{{ r["remediation_action"] }}」を実施
+{% endfor %}
+
+`Listen Interfaces` を是正する場合は、変更後に現在の管理アクセス経路
+（LANまたはVPN管理セグメント）からの接続を必ず維持したまま `Save` してくだ
+さい。誤って現在アクセス中のインターフェースを外すと、管理画面にアクセス
+できなくなるおそれがあります。
+
+### 4. pkgレベル既知脆弱性監査を実施し、区別して記録する
+
+手順2・3の設定ハードニング監査とは別に、`category` が `pkg_audit` の項目に
+ついて `System > Firmware > Status` を開き、`Run an Audit` を実行します。
+
+{% for r in csv_rows | selectattr("category", "equalto", "pkg_audit") %}- control_no {{ r["control_no"] }}: {{ r["opnsense_menu"] | safe }} で {{ r["check_item"] }} を実行 → 結果「{{ r["observed_value"] }}」/ 基準値「{{ r["expected_value"] }}」/ 判定: {{ r["status"] }}
+{% endfor %}
+
+この結果は設定ハードニングの準拠可否とは別軸の記録として、手順5の証跡に
+含めます。
+
+### 5. 是正後の設定をバックアップとして証跡化する
+
+`System > Configuration > Backups` を開き、`Password protect export` を有効
+にした状態で設定エクスポートを実行し、是正後の設定を証跡として保存します。
+エクスポート用パスワードは `****` のようにマスクした状態で管理し、実際の
+値は秘密管理ツール側にのみ保管してください。
+
+## 動作確認
+
+- シナリオ設定の `config_hardening` 項目すべてについて、`opnsense_menu` の
+  画面上で現在値が `expected_value` と一致していること
+{% for r in csv_rows | selectattr("category", "equalto", "config_hardening") %}  - control_no {{ r["control_no"] }}（{{ r["cis_ref"] }}）: {{ r["title"] }}
+{% endfor %}
+- 手順3で是正した項目について、再度手順2と同じ画面を開き `status` が
+  `compliant` 相当（現在値が基準値と一致）に変わっていること
+- `System > Firmware > Status` の `Run an Audit` 結果が「0 problem(s) found」
+  のように問題なしを示していること（設定ハードニング監査とは別記録として
+  確認する）
+- `System > Configuration > Backups` に是正後の設定を含むバックアップが
+  作成され、パスワード保護が有効になっていること
+- `Listen Interfaces` を変更した場合、変更後も現在の管理セッションが維持
+  されていること（ロックアウトが発生していないこと）
+
+## 注意事項
+
+- CIS Benchmark（OPNsense版）のPDFは非商用利用向けに無償公開されているもの
+  であり、社内外への再配布条件はCIS配布元の利用条件に従ってください。
+- `Run an Audit`（`System > Firmware > Status`）はpkgレベルの既知脆弱性監査
+  であり、本テンプレートが扱う設定ハードニングの準拠監査とは別機能です。
+  両者の結果を混同して報告しないでください。
+- `Listen Interfaces` の変更は、誤った設定のまま `Save` すると管理画面や
+  SSHにアクセスできなくなるおそれがあります。変更前に必ず現在の管理アクセ
+  ス経路を確認し、変更後も同じ経路から接続できることを確かめてから次の
+  項目に進んでください。
+- `OTP seed` はパスワードと同等の機密情報です。値そのものをチケットや
+  ログ、スクリーンショットに残さず、`****` のようにマスクして扱ってくだ
+  さい。
+- バックアップのエクスポート用パスワードも同様に、値を平文でリポジトリや
+  チケットに残さず、秘密管理ツール経由で扱ってください。
+- 是正はシナリオ設定で `non-compliant` と判定された項目のみに限定し、
+  `compliant` の項目には変更を加えないでください。

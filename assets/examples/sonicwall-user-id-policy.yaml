@@ -1,0 +1,67 @@
+ad_domain: "corp.example.com"
+
+sso_configuration_tabs:
+  - name: "SSO Agents"
+    used_in_this_procedure: true
+    purpose: "AD環境に導入済みのSSO Agent(またはTerminal Services Agent)を登録し、ログオン情報の問い合わせ先とする"
+  - name: "Enforcement"
+    used_in_this_procedure: true
+    purpose: "SSOによるユーザー識別を適用する送信元ゾーン/ネットワークを指定する"
+  - name: "Users"
+    used_in_this_procedure: true
+    purpose: "現在SSOで識別されているユーザー名と、その時点の送信元IPアドレスの対応(ID-IPマッピング)を一覧表示する"
+  - name: "Terminal Services"
+    used_in_this_procedure: false
+    purpose: "-"
+  - name: "NTLM"
+    used_in_this_procedure: false
+    purpose: "-"
+  - name: "RADIUS Accounting"
+    used_in_this_procedure: false
+    purpose: "-"
+  - name: "3rd Party API"
+    used_in_this_procedure: false
+    purpose: "-"
+  - name: "Capture Client"
+    used_in_this_procedure: false
+    purpose: "-"
+  - name: "Test"
+    used_in_this_procedure: false
+    purpose: "-"
+
+sso_agent_hosts:
+  - name: "dc01-sso-agent"
+    ip_address: "10.20.0.11"
+    role: "プライマリドメインコントローラ上で稼働するSSO Agent"
+  - name: "dc02-sso-agent"
+    ip_address: "10.20.0.12"
+    role: "セカンダリドメインコントローラ上で稼働するSSO Agent(フェイルオーバー用)"
+
+enforcement_zones:
+  - zone_name: "LAN"
+    reason: "社内クライアントの大半が接続するゾーンのため、SSOによるユーザー識別を適用する"
+  - zone_name: "WLAN"
+    reason: "社内無線LANに接続する端末もユーザー/グループ単位のポリシー対象とするため"
+
+ldap_groups:
+  - name: "GRP-Finance-RO"
+    description: "経理部門のADセキュリティグループ"
+    access_rule_note: "経理システムサーバー宛てAccess RuleのSourceをこのグループに限定する"
+  - name: "GRP-IT-Admin"
+    description: "情報システム部門のADセキュリティグループ"
+    access_rule_note: "管理用サブネット宛てAccess RuleのSourceをこのグループに限定する"
+  - name: "GRP-Guest-Contractors"
+    description: "委託先常駐スタッフのADセキュリティグループ"
+    access_rule_note: "社内サーバー宛てAccess RuleでこのグループをSourceとするルールをDenyにする"
+
+verification_case:
+  user_name: "yamada.taro"
+  group_name: "GRP-Finance-RO"
+  workstation_ip: "10.20.5.40"
+  target_resource: "経理システムサーバー(10.20.30.50)"
+
+verification_denied_case:
+  user_name: "sato.jiro"
+  group_name: "GRP-Guest-Contractors"
+  workstation_ip: "10.20.5.90"
+  target_resource: "経理システムサーバー(10.20.30.50)"

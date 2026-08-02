@@ -1,0 +1,171 @@
+# OPNsenseのクラウドVMフォームファクタ導入
+
+クラウド環境({{ cloud_provider_label }})上にOPNsenseを仮想アプライアンス(VM)として
+展開し、ライセンス形態(Community Edition / Business Edition)を確定した上で、
+需要増に備えた冗長化(CARPによる高可用性構成)へ拡張できる状態を作ります。GUI操作
+と、確認用のCLIコマンドを併記します。
+
+## 目的
+
+{{ marketplace_name }}が提供する公式VMイメージ `{{ vm_image_name }}` を起動して
+OPNsenseを導入し、ライセンス形態を `{{ edition }}` として確定します。あわせて、
+単一インスタンスでの運用から、需要に応じて第2ノード(`{{ nodes[1]["name"] }}`)を
+追加しCARPによる冗長化へ移行できる構成を目指します。
+
+## 用語解説
+
+- **{{ marketplace_name }}**: クラウド事業者が提供する公式VMイメージの配布経路。
+  OPNsenseの公式AMIは Deciso Sales B.V. を通じて提供される
+- **Community Edition**: 無料・オープンソースのOPNsense本体。標準のコミュニティ
+  ファームウェアリポジトリを使用する
+- **Business Edition**: {{ business_edition_subscription_url }} で購入する年間
+  サブスクリプション。OPNsense公式(Deciso)が提供する有償ティアであり、無料版とは
+  別に、商用ファームウェアリポジトリ・公式OVA仮想イメージ・統合GeoIPデータベース
+  などが追加される。無料のCommunity Editionで地理情報フィルタリング(GeoIP)を使う
+  場合は、利用者自身がMaxMindの無料アカウントでGeoLite2ライセンスキーを取得し、
+  Firewall > Aliases のGeoIP設定タブへ個別に登録する必要がある(Business Edition
+  ではこの個別登録が不要になる)
+- **CARP(Common Address Redundancy Protocol)**: 複数ノード間で仮想IP(VIP)を
+  共有し、プライマリ障害時にセカンダリへ自動的にフェイルオーバーさせるOPNsense
+  ネイティブの高可用性機構。Interfaces > Virtual IPs で設定する
+- **Advertising Frequency(Skew)**: CARP VIPの優先度を決めるパラメータ。値が
+  小さいノードほどマスターになりやすい
+- **pfsync**: System > High Availability > Settings で有効化する、ノード間の
+  状態テーブル同期プロトコル
+
+## シナリオ設定
+
+{{ marketplace_name }}({{ aws_region }}リージョン)で、インスタンスタイプ
+`{{ instance_type }}` を使い、イメージ `{{ vm_image_name }}` からOPNsenseを
+起動します。ライセンス形態は `{{ edition }}` とし、管理アクセスは
+`{{ mgmt_source_cidr }}` からのHTTPSのみ許可します。
+
+需要増加時に備え、以下{{ nodes | length }}ノード構成でCARPによる冗長化への拡張を
+計画します。
+
+| ノード名 | 役割 | AZ | プライベートIP | CARP Skew |
+|---|---|---|---|---|
+{% for n in nodes %}| {{ n["name"] }} | {{ n["role"] }} | {{ n["az"] }} | {{ n["private_ip"] }} | {{ n["carp_skew"] }} |
+{% endfor %}
+
+CARP仮想IP(VIP)は `{{ vip_address }}` とし、pfsync同期インターフェースには
+`{{ ha_pfsync_interface }}` を使用します。
+
+## 手順
+
+### 1. ライセンス形態を確定する
+
+導入前に、無償のCommunity Editionのまま運用するか、{{ business_edition_subscription_url }}
+からBusiness Editionを購入するかを決定します。Business EditionはOPNsense公式
+(Deciso)が提供する有償の年間サブスクリプションであり、商用リポジトリ・公式OVA
+イメージ・統合GeoIPデータベース等が含まれます。今回は `{{ edition }}` を選択した
+ものとして以降の手順を進めます。
+
+### 2. {{ marketplace_name }} からVMイメージを起動する
+
+**Instances > Launch instance > AWS Marketplace** でOPNsenseを検索し、イメージ
+`{{ vm_image_name }}` を選択します。
+
+- Instance type: `{{ instance_type }}`
+- Region: `{{ aws_region }}`
+- Security group: `{{ mgmt_source_cidr }}` からのHTTPS(443)のみ許可
+- Advanced details > User data: 初期パスワードを指定する場合はここに設定します
+  (値は環境ごとに個別に設定し、本手順書には記載しません)
+
+Azureマーケットプレイスから展開する場合は、初期管理ユーザー名に `admin` や `root`
+などの予約名を使用できない点に注意してください(例: `{{ azure_admin_user_example }}`)。
+Azure版はデフォルトでSSHが有効になっているため、不要であれば System > Settings >
+Administration で無効化してください。
+
+### 3. 初期パスワードを取得しGUIへログインする
+
+起動したインスタンスを選択し **Actions > Monitor and troubleshoot > Get system
+log** を開き、ec2-userおよびrootの初期パスワードを取得します。
+
+```bash
+# 取得した初期パスワードで最初のHTTPSログインを確認する(値は手元でマスクして管理する)
+curl -vk https://{{ nodes[0]["private_ip"] }}/ -u ec2-user:'****'
+```
+
+ログイン後、初期パスワードは速やかに変更してください。
+
+### 4. Business Editionの場合、商用リポジトリを登録する
+
+`{{ edition }}` が business の場合、{{ business_edition_subscription_url }} で
+購入したサブスクリプションキーを使い、System > Firmware > Settings を開き、
+Firmware Mirror を「Deciso (HTTPS, NL, Commercial)」、Type を「Business」に設定
+した上でライセンスキーを貼り付けて保存します。登録後、Community Editionの
+コミュニティリポジトリから切り替わり、公式OVAイメージや統合GeoIPデータベースが
+利用可能になります。
+
+```bash
+# OPNsense本体で、リポジトリ設定が商用(Deciso)に切り替わっていることを確認する
+cat /usr/local/etc/pkg/repos/OPNsense.conf
+```
+
+### 5. 需要増に備え、第2ノードをCARPで追加する
+
+需要が増した場合、`{{ nodes[1]["name"] }}`({{ nodes[1]["az"] }})を同一サブネット
+内に追加起動し、Interfaces > Virtual IPs で以下のCARP VIPを両ノードに設定します。
+
+- Type: Carp
+- IP address: `{{ vip_address }}`
+- VHID Group: `{{ ha_vhid }}`
+- Virtual password: `****`
+- Advertising Frequency(Skew): `{{ nodes[0]["name"] }}` は `{{ nodes[0]["carp_skew"] }}`、
+  `{{ nodes[1]["name"] }}` は `{{ nodes[1]["carp_skew"] }}`
+
+続けて `{{ nodes[0]["name"] }}` の System > High Availability > Settings で以下を
+設定します。
+
+- Synchronize States: 有効化
+- Synchronize Interface: `{{ ha_pfsync_interface }}`
+- Synchronize Config to IP: `{{ nodes[1]["private_ip"] }}`
+- Remote system username / password: `{{ nodes[1]["name"] }}` の管理者アカウントを
+  指定(値はマスク)
+
+OPNsense公式ドキュメントは、スイッチング層が抽象化されたクラウド/仮想化環境では
+マルチキャストやGratuitous ARPの制約により、信頼性の高いCARP構成が困難な場合が
+あると明記しています。本番投入前に、利用するクラウド事業者のVPC/VNet内でCARPの
+マルチキャスト/ARPフェイルオーバーが実際に機能するかを必ず検証してください。
+
+## 動作確認
+
+- System > Firmware > Status で、`{{ edition }}` に応じたリポジトリ
+  (Community/商用)が意図通り設定されていること
+- 初回ログイン後、初期パスワードが変更済みであること
+- `{{ mgmt_source_cidr }}` 以外からの管理アクセスがブロックされること
+- System > High Availability > Status で `{{ nodes[0]["name"] }}` が MASTER、
+  `{{ nodes[1]["name"] }}` がBACKUPとして表示されること
+
+```bash
+# CARP VIPの状態(MASTER/BACKUP)をCLIから確認する
+ifconfig -a | grep 'carp:'
+```
+
+`{{ nodes[0]["name"] }}` 側では `carp: MASTER vhid {{ ha_vhid }} advbase 1 advskew
+{{ nodes[0]["carp_skew"] }}`、`{{ nodes[1]["name"] }}` 側では `carp: BACKUP vhid
+{{ ha_vhid }} advbase 1 advskew {{ nodes[1]["carp_skew"] }}` が表示されることを
+確認します。
+
+- `{{ nodes[0]["name"] }}` を意図的に停止し、`{{ vip_address }}` 宛の通信が
+  `{{ nodes[1]["name"] }}` へフェイルオーバーすることを確認すること(クラウド
+  環境特有の制約があるため、実際にフェイルオーバーが機能するかを本番投入前に
+  必ず検証する)
+
+## 注意事項
+
+- Business Editionは年間サブスクリプションであり、更新が切れると商用リポジトリ
+  へのアクセスが停止する。契約満了日を管理し、事前に更新手続きを行うこと。
+- OPNsenseにはクラウド向けの自動スケールアウト機構は存在しない。需要増への
+  ネイティブな対応はCARPによる冗長化(手順5)のみであり、負荷分散そのものが
+  必要な場合は別途クラウド事業者側のロードバランサ等の追加検討が要る。
+- CARPはクラウド/仮想化環境ではマルチキャストやARPフェイルオーバーの制約により
+  期待通りに動作しない場合があると公式ドキュメントが明記している。本番投入前に
+  実機検証を行い、机上の設計だけで冗長化が成立していると判断しないこと。
+- 初期パスワード・CARP Virtual password・リモート同期用アカウントの値は本手順書
+  や関連ログに平文で残さず、`****` のようにマスクして管理すること。
+- 商用リポジトリの登録やライセンス変更を行う前に、System > Configuration >
+  Backups からconfig.xmlのバックアップを取得し、切り戻せる状態にしておくこと。
+- Azureマーケットプレイス版はデフォルトでSSHが有効なため、社内ポリシー上不要で
+  あれば System > Settings > Administration で無効化を検討すること。

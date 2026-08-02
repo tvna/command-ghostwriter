@@ -1,0 +1,188 @@
+# GlobalProtect HIPチェックによるリモートアクセス端末の状態検査と非準拠端末の隔離
+
+リモートアクセスVPN(GlobalProtectゲートウェイ `{{ gp_gateway_name }}`)への接続時に、
+エンドポイントの状態(AV稼働・パッチ適用状況・ディスク暗号化)をHIP(Host
+Information Profile)チェックで評価し、HIP Profile `{{ hip_profile_name }}` に
+一致した端末のみアクセスを許可します。一致しない端末はQuarantine Device List
+への追加(隔離)対象とし、Security Policyでネットワークアクセスを制限します。
+HIP ObjectとHIP Profileの作成、Log Forwarding ProfileでのQuarantineアクション
+設定、Security Policy Ruleへの反映まで一連の流れをCommitして初めて有効になる
+ため、Commit前に各設定の対応関係を確認してから作業を終えてください。
+
+## 目的
+
+GlobalProtectのHIPチェック機構を用いて、リモートアクセスVPN接続時のエンド
+ポイントの状態(AV/パッチ適用状況/ディスク暗号化)を検査し、非準拠端末を
+Quarantine Device Listへ自動的に登録してSecurity Policyでアクセスを制限・
+隔離する一連の設定(HIP Object → HIP Profile → Log Forwarding Profile →
+Security Policy Rule → Commit → 検証)を実践できるようになることを目指します。
+
+## 用語解説
+
+- **HIP(Host Information Profile)**: GlobalProtectアプリが収集したエンド
+  ポイントの情報(AV稼働状況・パッチ適用状況・ディスク暗号化など)をもとに
+  評価されるプロファイル
+- **HIP Object**(`Objects > GlobalProtect > HIP Objects`): 収集した生データ
+  をフィルタするマッチ条件を、カテゴリ別のタブ(General・Mobile Device・
+  Patch Management・Firewall・Anti-Malware・Disk Backup・Disk Encryption・
+  Data Loss Prevention・Certificate・Custom Checksなど)で個別に定義した
+  オブジェクト。本シナリオでは Anti-Malware・Patch Management・
+  Disk Encryption の3カテゴリを使用する
+- **HIP Profile**(`Objects > GlobalProtect > HIP Profiles`): 複数のHIP
+  Objectを `Add Match Criteria` でAND/OR/NOTのブール演算により組み合わせた
+  もの。Security PolicyのUserタブにある `HIP Profiles` にこのプロファイルを
+  指定すると、一致したトラフィックにルールが適用される
+- **Quarantine Device List**(`Device > Device Quarantine`。Panorama管理下
+  では `Panorama > Device Quarantine`): 隔離対象端末の一覧。列にはHost ID・
+  Reason・Time Stamp・Source Device/App・Serial Number・User Nameが表示
+  される。`Add` から Host ID(必須)と Serial Number(任意)を入力して手動
+  追加するほか、GlobalProtect/Threat/Traffic/Unifiedログ上でHost IDを
+  右クリックし `Block Device` を選ぶことでも手動追加できる
+- **HIP Match Log SettingのQuarantineアクション**: Log Forwarding
+  Profileの HIP Match ログ向け設定で、Built-in Actionsに `Quarantine` を
+  追加すると、HIP Matchログの発生に応じて端末をQuarantine Device Listへ
+  自動追加できる
+- **Match Quarantined Devices**: Security Policy RuleのSource/Destination
+  タブにあるDEVICES区分の条件。これを選択すると、送信元トラフィックでは
+  Source Device、宛先トラフィックではDestination DeviceとしてQuarantine
+  Device Listがマッチ条件に使われる
+- **ライセンス要件**: 端末をQuarantine Device Listへ手動・自動を問わず
+  追加するにはGlobalProtectサブスクリプションライセンスが必要。ライセンス
+  が無い状態で追加しようとすると "You must have a valid GlobalProtect
+  subscription to add the device to the quarantine list." というエラーに
+  なる。既存の隔離済み端末を削除する操作にはライセンスは不要で、ライセンス
+  が失効しても隔離リスト自体は保持される。GlobalProtectアプリは最低
+  バージョン5.1が必要
+
+## シナリオ設定
+
+GlobalProtectゲートウェイとHIP関連オブジェクトの設定内容は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| GlobalProtectゲートウェイ名(gp_gateway_name) | {{ gp_gateway_name }} |
+| HIP Profile名(hip_profile_name) | {{ hip_profile_name }} |
+| Log Forwarding Profile名(log_forwarding_profile_name) | {{ log_forwarding_profile_name }} |
+| VPN側ゾーン(vpn_zone) | {{ vpn_zone }} |
+| 内部ゾーン(trust_zone) | {{ trust_zone }} |
+
+HIP Object一覧(hip_objects, {{ hip_objects | length }} 件。HIP Profile
+`{{ hip_profile_name }}` にAND条件ですべて組み込む):
+
+| # | HIP Object名 | カテゴリ | 目的 |
+|---|--------------|----------|------|
+{% for obj in hip_objects %}| {{ loop.index }} | {{ obj["name"] }} | {{ obj["category"] }} | {{ obj["purpose"] }} |
+{% endfor %}
+
+準拠端末に許可するサービス(allowed_services, {{ allowed_services | length }} 件):
+
+{% for svc in allowed_services %}- {{ svc }}
+{% endfor %}
+
+Security Policy Rule名:
+
+| 項目 | 値 |
+|------|-----|
+| 準拠端末向けルール(security_policy_compliant_name) | {{ security_policy_compliant_name }} |
+| 隔離端末向けルール(security_policy_quarantine_name) | {{ security_policy_quarantine_name }} |
+
+検証用端末一覧(test_devices, {{ test_devices | length }} 件):
+
+| # | Host ID | Serial Number | ユーザー | HIP判定 | 備考 |
+|---|---------|---------------|----------|---------|------|
+{% for d in test_devices %}| {{ loop.index }} | {{ d["host_id"] }} | {{ d["serial_number"] }} | {{ d["user"] }} | {{ d["hip_match"] }} | {% if d["note"] != "-" %}{{ d["note"] }}{% else %}(なし){% endif %} |
+{% endfor %}
+
+## 手順
+
+### 1. HIP Objectを作成する
+
+`Objects > GlobalProtect > HIP Objects > Add` から、シナリオ設定の各HIP
+Objectをカテゴリごとのタブで作成します。
+
+{% for obj in hip_objects %}- カテゴリタブ `{{ obj["category"] }}` を開き、Name: `{{ obj["name"] }}` で
+  作成する({{ obj["purpose"] }})
+{% endfor %}
+
+### 2. HIP Profileを作成し、HIP Objectを組み合わせる
+
+`Objects > GlobalProtect > HIP Profiles > Add` から新しいプロファイルを
+作成します。
+
+- Name: `{{ hip_profile_name }}`
+- `Add Match Criteria` で、手順1で作成したHIP Objectをすべて選択し、AND条件
+  で組み合わせる
+
+{% for obj in hip_objects %}- `{{ obj["name"] }}`{% if not loop.last %} and{% endif %}
+{% endfor %}
+設定後、`OK` をクリックして保存します(この時点ではまだ `Commit` しません)。
+
+### 3. Log Forwarding ProfileのHIP Match設定でQuarantineアクションを設定する
+
+`Objects > Log Forwarding > Add` から新しいプロファイル
+`{{ log_forwarding_profile_name }}` を作成し、HIP Match ログ向けの設定
+セクションを編集します。
+
+- Log Forwarding Profile名: `{{ log_forwarding_profile_name }}`
+- HIP Match セクションの Built-in Actions に `Quarantine` を追加する
+
+この設定により、HIP Profile `{{ hip_profile_name }}` に一致しない接続で
+HIP Matchログが発生した際、対象端末がQuarantine Device Listへ自動追加
+されます。
+
+### 4. 準拠端末向けSecurity Policy Ruleを作成する
+
+`Policies > Security > Add` からルール `{{ security_policy_compliant_name }}`
+を作成します。
+
+- Source Zone: `{{ vpn_zone }}` / Destination Zone: `{{ trust_zone }}`
+- Userタブの `HIP Profiles` に `{{ hip_profile_name }}` を追加する
+- 許可するサービス: {% for svc in allowed_services %}{{ svc }}{% if not loop.last %} / {% endif %}{% endfor %}
+- Action: Allow
+
+### 5. 非準拠端末を隔離するSecurity Policy Ruleを作成する
+
+`Policies > Security > Add` からルール `{{ security_policy_quarantine_name }}`
+を作成し、手順4のルールより上位(優先度の高い位置)に配置します。
+
+- Source ZoneのDEVICES区分で `Match Quarantined Devices` を選択する
+  (送信元トラフィックのためSource Deviceとして機能する)
+- Action: Deny
+
+### 6. Commitし、Quarantine Device Listの状態を確認する
+
+`Commit` を実行して手順1〜5の設定を一括反映します。反映後、
+`Device > Device Quarantine` を開き、隔離された端末のHost ID・Reason・
+Time Stamp・Source Device/App・Serial Number・User Nameの各列を確認します。
+
+## 動作確認
+
+{% for d in test_devices %}{% if d["hip_match"] == "compliant" %}- Host ID `{{ d["host_id"] }}`(ユーザー: {{ d["user"] }})はHIP Profile
+  `{{ hip_profile_name }}` に一致し、ルール `{{ security_policy_compliant_name }}`
+  により{% for svc in allowed_services %}{{ svc }}{% if not loop.last %} / {% endif %}{% endfor %}でのアクセスが許可されること
+{% else %}- Host ID `{{ d["host_id"] }}`(ユーザー: {{ d["user"] }})はHIP Profile
+  `{{ hip_profile_name }}` に一致せず、`Device > Device Quarantine` の一覧に
+  Host IDが追加され、ルール `{{ security_policy_quarantine_name }}` により
+  アクセスが拒否されること{% if d["note"] != "-" %}({{ d["note"] }}){% endif %}
+
+{% endif %}{% endfor %}
+- Log Forwarding Profile `{{ log_forwarding_profile_name }}` のHIP Matchログ
+  で、非準拠端末に対して `Quarantine` アクションが記録されていること
+
+## 注意事項
+
+- **Quarantine Device Listへの端末追加(手動・自動を問わず)にはGlobalProtect
+  サブスクリプションライセンスが必要。** ライセンスが無い状態では追加でき
+  ず、既存のリストから削除する操作のみライセンス不要で実行できる。
+- **ライセンスが失効しても、Quarantine Device List自体は保持される。**
+  ただし新規追加はライセンス復旧まで行えない。
+- **GlobalProtectアプリは最低バージョン5.1が必要。** これより古いバージョン
+  ではQuarantine機能が動作しない。
+- **手順5のルールは手順4のルールより優先度を高く配置すること。** Security
+  Policyはルールの評価順が上から適用されるため、順序を誤ると隔離対象の端末
+  が先に準拠端末向けルールにマッチしてしまう。
+- 誤って正当な端末を隔離してしまった場合は、`Device > Device Quarantine`
+  で対象を選択し `Delete` から削除できる(この操作にライセンスは不要)。
+- 本手順書は一次情報で確認できた範囲のGUI操作のみを記載しており、CLI
+  (operational command)での同等操作は一次情報の範囲に含まれていないため
+  記載していない。

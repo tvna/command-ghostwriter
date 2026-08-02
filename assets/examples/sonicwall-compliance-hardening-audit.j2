@@ -1,0 +1,174 @@
+# SonicWall (SonicOS) コンプライアンス・ハードニング監査
+
+CIS Benchmark 等の公開されたハードニング基準に基づき、SonicWall ファイア
+ウォールの設定準拠状況を監査し、逸脱を是正するための手順書です。SonicOS
+自体には設定準拠を自動評価する機構がないため、SonicWall (Cysurance連携)
+のベストプラクティス基準に基づいて構成健全性を評価する NSM (Network
+Security Manager) の **Configuration Auditor** を用いて監査を実施しま
+す。Configuration Auditor は読み取り専用の監査テンプレートを対象ファイア
+ウォールへ適用し、各チェック項目を pass/fail 判定してセキュリティポス
+チャスコアとして提示するものであり、設定の変更は行いません。以下では
+{{ csv_rows | length }} 件のチェック項目を対象に、監査 → 是正 →
+再監査 → 継続監視の一連の流れを実施します。
+
+## 目的
+
+公開されたハードニング基準(CIS Benchmark 等)に対応させた社内チェック
+項目一覧をもとに、NSM Configuration Auditor によるオンデマンド監査で
+SonicOS の現状設定を pass/fail 判定し、fail と判定された項目を SonicOS
+の該当設定画面で是正できるようになることを目指します。他ベンダーのネイ
+ティブ機構(ファイアウォール本体が備える準拠監査機能)とは異なり、
+SonicWall (SonicOS) では SonicOS 本体ではなく NSM の Configuration
+Auditor という別機構で同じ運用課題(準拠監査と逸脱是正)を解決する点に
+留意してください。あわせて、是正後の再監査とスケジュール監査(継続監視
+・逸脱検知)の設定まで行い、準拠状態を一時点の確認で終わらせない運用を
+身につけます。
+
+## 用語解説
+
+- **NSM (Network Security Manager)**: SonicWall のファイアウォール集中
+  管理プラットフォーム。SonicOS(ファイアウォール本体の OS)とは別製品
+  であり、本手順書が扱う準拠監査機能は NSM 側にのみ存在する
+- **Configuration Auditor**: NSM 上で、単一または複数のファイアウォール
+  に対し読み取り専用の監査テンプレートを適用し、SonicWall
+  (Cysurance連携)のベストプラクティス基準に基づく構成健全性評価レポー
+  トを生成する機構。各チェック項目を pass/fail 判定し、結果をセキュリ
+  ティポスチャスコアとして提示する。設定変更は行わない(読み取り専用)
+- **オンデマンド監査 / スケジュール監査**: Configuration Auditor が対応
+  する2つの監査方式。オンデマンド監査は設定変更直後などに即時実行する
+  監査、スケジュール監査は継続的な監視のために定期実行し、構成の逸脱
+  (ドリフト)を検知し続けるための監査
+- **セキュリティポスチャスコア**: Configuration Auditor のレポートで、
+  各チェック項目の pass/fail 判定結果を集約して示される、対象ファイア
+  ウォールの保護レベルを表す指標
+- **baseline_ref**: 本手順書のシナリオ設定で用いる社内管理番号。CIS
+  Benchmark 等の公開されたハードニング基準にある一般的なチェック観点
+  (アイドルタイムアウト、パスワード複雑性、SNMP、NTP 等)に対応させた
+  ものであり、特定の公式ベンチマーク文書の項番そのものではない
+- **DEVICE | Settings > Administration**: SonicOS 管理画面で、管理者ロ
+  グインに関する設定(アイドルタイムアウト・パスワード複雑性・ログイン
+  失敗時のロックアウト等)を行うナビゲーションパス
+- **DEVICE | Settings > SNMP**: SonicOS 管理画面で SNMP の有効化・
+  バージョン・コミュニティ名等を設定するナビゲーションパス
+- **DEVICE | Settings > Time**: SonicOS 管理画面で NTP による時刻同期を
+  設定するナビゲーションパス
+
+## シナリオ設定
+
+今回 NSM Configuration Auditor で監査する {{ csv_rows | length }} 件の
+チェック項目は次のとおりです。
+
+| check_no | baseline_ref | category | check_item | setting_name | expected_value | current_value | audit_result | description |
+|----------|--------------|----------|------------|--------------|-----------------|----------------|---------------|--------------|
+{% for r in csv_rows %}| {{ r["check_no"] }} | {{ r["baseline_ref"] }} | {{ r["category"] }} | {{ r["check_item"] }} | {{ r["setting_name"] }} | {{ r["expected_value"] }} | {{ r["current_value"] }} | {{ r["audit_result"] }} | {{ r["description"] }} |
+{% endfor %}
+
+`audit_result` が `Fail` の行は、NSM Configuration Auditor の初回監査で
+不合格と判定された項目、`Pass` の行は初回監査の時点で既に合格している
+項目です。`setting_name` は SonicOS 側の該当設定項目名、`expected_value`
+/ `current_value` はそれぞれ監査基準として期待される値 / 監査時点で確認
+された値を表します。
+
+## 手順
+
+### 1. Configuration Auditor テンプレートを作成し、オンデマンド監査を実行する
+
+NSM の管理コンソールで Configuration Auditor 用の監査テンプレート(読み
+取り専用)を新規作成し、シナリオ設定の {{ csv_rows | length }} 件に相当
+するチェック観点を含むベストプラクティス監査項目として保存します。作成
+したテンプレートを監査対象の SonicWall ファイアウォールへ適用し、オン
+デマンド監査を実行します。
+
+### 2. 監査結果(pass/fail・セキュリティポスチャスコア)を確認する
+
+Configuration Auditor が生成したレポートで、各チェック項目の pass/fail
+判定とセキュリティポスチャスコアを確認します。シナリオ設定と照合し、次
+の項目が `Fail` 判定であることを確認します。
+
+{% for r in csv_rows %}{% if r["audit_result"] == "Fail" %}- {{ r["baseline_ref"] }}({{ r["category"] }}): {{ r["check_item"] }} / 期待値={{ r["expected_value"] }} / 現状値={{ r["current_value"] }}
+{% endif %}{% endfor %}
+
+次の項目は初回監査の時点で既に `Pass` 判定であり、是正不要であることを
+あわせて確認します。
+
+{% for r in csv_rows %}{% if r["audit_result"] == "Pass" %}- {{ r["baseline_ref"] }}({{ r["category"] }}): {{ r["check_item"] }}(現状値={{ r["current_value"] }})
+{% endif %}{% endfor %}
+
+### 3. Admin Access の Fail 項目を是正する
+
+`category` が `Admin Access` かつ `audit_result` が `Fail` の項目を、
+SonicOS の `DEVICE | Settings > Administration` で是正します。
+
+{% for r in csv_rows %}{% if r["category"] == "Admin Access" %}{% if r["audit_result"] == "Fail" %}- `{{ r["setting_name"] }}` を `{{ r["current_value"] }}` から `{{ r["expected_value"] }}` へ変更します({{ r["description"] }})
+{% endif %}{% endif %}{% endfor %}
+
+パスワードそのものや API キーなど認証情報の値は本手順書やログに残さず、
+記録が必要な場合は `****` のようにマスクしてください。
+
+### 4. SNMP の Fail 項目を是正する
+
+`category` が `SNMP` かつ `audit_result` が `Fail` の項目を、SonicOS の
+`DEVICE | Settings > SNMP` で是正します。
+
+{% for r in csv_rows %}{% if r["category"] == "SNMP" %}{% if r["audit_result"] == "Fail" %}- `{{ r["setting_name"] }}` を `{{ r["current_value"] }}` から `{{ r["expected_value"] }}` へ変更します({{ r["description"] }})。あわせて Get Community Name / Trap Community Name を組織で定めた複雑な文字列(`****`)へ変更し、既定値のまま残さないようにします
+{% endif %}{% endif %}{% endfor %}
+
+### 5. NTP の Fail 項目を是正する
+
+`category` が `NTP` かつ `audit_result` が `Fail` の項目を、SonicOS の
+`DEVICE | Settings > Time` で是正します。
+
+{% for r in csv_rows %}{% if r["category"] == "NTP" %}{% if r["audit_result"] == "Fail" %}- `{{ r["setting_name"] }}` を `{{ r["current_value"] }}` から `{{ r["expected_value"] }}` へ変更します({{ r["description"] }})
+{% endif %}{% endif %}{% endfor %}
+
+### 6. Configuration Auditor でオンデマンド監査を再実行し、是正結果を確認する
+
+手順3〜5の是正がすべて完了したら、手順1で作成した Configuration Auditor
+テンプレートをそのまま用いて、対象ファイアウォールへ再度オンデマンド
+監査を実行します。手順2で `Fail` 判定だった次の項目が、再監査で `Pass`
+判定に変わっていることを確認します。
+
+{% for r in csv_rows %}{% if r["audit_result"] == "Fail" %}- {{ r["baseline_ref"] }}: {{ r["check_item"] }}
+{% endif %}{% endfor %}
+
+### 7. 継続監視のためスケジュール監査を設定する
+
+同じ Configuration Auditor テンプレートに対し、スケジュール監査を設定
+し、継続的な構成監視と逸脱(ドリフト)検知を有効にします。以後、設定変更
+のたびに手動でオンデマンド監査を実行しなくても、定期的にセキュリティ
+ポスチャスコアの推移と pass/fail 判定の変化を確認できるようにします。
+
+## 動作確認
+
+- Configuration Auditor の再監査レポートで、シナリオ設定のうち初回
+  `Fail` 判定だった {{ csv_rows | length }} 件中の該当項目がすべて
+  `Pass` 判定になっていること
+- 再監査後のセキュリティポスチャスコアが、初回監査時点のスコアより
+  改善していること
+- 初回監査時点で `Pass` 判定だった項目(ログイン失敗時のロックアウト等)
+  が、是正作業によって意図せず変更されていないこと
+- Configuration Auditor にスケジュール監査が設定され、次回以降の実行
+  予定が確認できること
+- SonicOS の `DEVICE | Settings > Administration` / `DEVICE | Settings
+  > SNMP` / `DEVICE | Settings > Time` で、シナリオ設定の
+  `expected_value` どおりに設定が反映されていること
+
+## 注意事項
+
+- **Configuration Auditor は読み取り専用であり、設定を自動的には是正
+  しません。** レポートで `Fail` と判定された項目は、本手順書の手順3〜
+  5のとおり SonicOS 側で手動で是正する必要があります。
+- Configuration Auditor の利用可否・監査対象にできるファイアウォールの
+  世代やライセンス要件は環境によって異なるため、事前に NSM 側のライセ
+  ンス状態を確認してください。
+- SNMP の Get Community Name / Trap Community Name、管理者パスワードな
+  ど認証情報に相当する値は、本手順書・監査レポート・ログのいずれにも
+  平文で残さず、`****` のようにマスクしたうえで秘密管理ツール等に安全に
+  保管してください。
+- スケジュール監査の実行間隔は、既存の変更管理プロセス(設定変更の頻度
+  やメンテナンスウィンドウ)と整合させて設定し、頻度が業務影響を与えな
+  いか事前に確認してください。
+- 本手順書はシナリオ設定にある {{ csv_rows | length }} 件のチェック項目
+  のみを対象とします。組織で定めるハードニング基準の全項目を網羅するも
+  のではなく、CIS Benchmark 等の公開基準そのものを代替するものでもない
+  ため、必要に応じてシナリオ設定へ項目を追加してください。

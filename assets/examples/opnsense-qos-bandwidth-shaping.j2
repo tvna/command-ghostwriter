@@ -1,0 +1,177 @@
+# OPNsenseによる輻輳時の帯域制御(トラフィックシェーピング)
+
+回線輻輳時に重要な業務トラフィックを優先し、非重要トラフィックの帯域を制限する
+ことで業務影響を最小化します。Firewall > Shaper の Pipe(帯域の器) と
+Queue(重み付け優先) を組み合わせて構成し、GUI操作と確認用のCLIコマンドを
+併記します。
+
+## 目的
+
+Firewall > Shaper > Pipes で帯域上限を持つ Pipe を作成し、Firewall > Shaper >
+Queues で WF2Q+ による重み付け優先制御を設定した上で、Firewall > Shaper > Rules
+で実際のトラフィックを各Queueへ振り分け、輻輳時にも重要業務トラフィックが
+優先されることを Shaper Status ページとCLIの双方で確認できるようになることを
+目指します。
+
+## 用語解説
+
+- **Pipe(パイプ)**: 帯域幅・伝搬遅延・キューサイズ・パケットロス率を模した
+  仮想リンク。トラフィックシェーピングの帯域上限そのものを定義する器
+- **Queue(キュー)**: 1つのPipeを参照し、重み(weight)に応じて複数のトラフィック
+  フローへ帯域を按分配分する仕組み。WF2Q+(重み付け公平キューイング)アルゴリズム
+  により、同一Pipe内で輻輳した際も重みの比率で帯域が配分される
+- **Shaper Rule**: インターフェース、送信元/宛先、方向(in/out)、ポート番号などの
+  条件に基づき、該当するトラフィックをPipeまたはQueueへ振り分けるルール
+- **Shaper Status**: Firewall > Shaper > Status で、設定済みのPipe・Queue・Rule
+  ごとにサービス再起動以降の通過トラフィック量を確認できるページ。輻輳時に
+  想定どおりの配分になっているかをここで確認する
+- **ipfw/dummynet**: OPNsenseのシェーパはIPFWとdummynetを用いて実装されており、
+  ALTQベースの旧方式とは異なる
+
+## シナリオ設定
+
+WAN側(`{{ wan_interface }}`)の実効帯域を上り/下りとも `{{ uplink_mbit }}Mbit/s`
+/ `{{ downlink_mbit }}Mbit/s` とし、LAN側(`{{ lan_interface }}`)から見て以下の
+{{ traffic_classes | length }}件のサービスを重要度別に2つのPipeへ振り分けます。
+
+| サービス | プロトコル | ポート | 対象ホスト | 優先度 | 振り分け先Queue |
+|---|---|---|---|---|---|
+{% for t in traffic_classes %}| {{ t["service"] }} | {{ t["proto"] }} | {{ t["port"] }} | {% if t["host"] != "-" %}{{ t["host"] }}{% else %}(LAN全体){% endif %} | {{ t["priority"] }} | {{ t["queue_name"] }} |
+{% endfor %}
+
+重要トラフィック用Pipeの上限は `{{ critical_pipe_mbit }}Mbit/s`、非重要トラフィック
+用Pipeの上限は `{{ noncritical_pipe_mbit }}Mbit/s` とし、輻輳時に非重要トラフィック
+が回線全体を占有しないよう明確に頭打ちにします。あわせて重要Queueの重みを
+`{{ critical_queue_weight }}`、非重要Queueの重みを `{{ noncritical_queue_weight }}`
+とし、同一Pipe内で複数フローが競合した場合も重要トラフィックが優先されるように
+します。なお、構築初期の暫定ルール(`{{ temp_shaper_disabled_descr }}`、シェーパを
+バイパスして全トラフィックを無制限に通す設定)は、新設定の動作確認が完了する
+まで無効化しません。
+
+## 手順
+
+### 1. 現状のトラフィックとシェーパの無効状態を確認する
+
+作業前に、OPNsense本体で現在ipfwに登録されているPipe/Queueの有無と、暫定ルール
+`{{ temp_shaper_disabled_descr }}` がまだ有効であることを確認します。
+
+```bash
+# OPNsense本体で、現在登録済みのPipe/Queueを確認(初回は空のはず)
+ipfw pipe show
+ipfw queue show
+```
+
+GUIでは *Firewall > Shaper > Rules* を開き、暫定ルール
+`{{ temp_shaper_disabled_descr }}` が有効(Enabled)のままであることを確認します。
+このルールは新しいシェーピング設定への切り替えが完了するまで残しておきます。
+
+### 2. 帯域の上限となるPipeを作成する
+
+*Firewall > Shaper > Pipes* で **+** を押し、以下の2つのPipeを作成します。
+
+#### 2-1. 重要トラフィック用Pipe
+
+- Enabled: 有効化
+- Bandwidth: `{{ critical_pipe_mbit }}` (Mbit/s)
+- Description: `PIPE-CRITICAL`
+
+#### 2-2. 非重要トラフィック用Pipe
+
+- Enabled: 有効化
+- Bandwidth: `{{ noncritical_pipe_mbit }}` (Mbit/s)
+- Description: `PIPE-BULK`
+
+保存後、画面上部の **Apply changes** を押して反映します。
+
+### 3. Pipeに紐づく重み付けQueueを作成する
+
+*Firewall > Shaper > Queues* で **+** を押し、手順2で作成した各Pipeを参照する
+Queueを作成します。
+
+- Queue 1: Pipe = `PIPE-CRITICAL` を参照、Weight = `{{ critical_queue_weight }}`、
+  Description = `{{ traffic_classes[0]["queue_name"] }}`
+- Queue 2: Pipe = `PIPE-BULK` を参照、Weight = `{{ noncritical_queue_weight }}`、
+  Description = `{{ traffic_classes[2]["queue_name"] }}`
+
+同一Pipeを共有する複数のフローが輻輳した場合、WF2Q+により重み
+(`{{ critical_queue_weight }}` : `{{ noncritical_queue_weight }}`)の比率で帯域が
+按分されます。保存後、**Apply changes** を押して反映します。
+
+### 4. トラフィックを各Queueへ振り分けるShaper Ruleを作成する
+
+*Firewall > Shaper > Rules* で **+** を押し、以下 {{ traffic_classes | length }}件の
+ルールを作成し、それぞれ対応するQueueへ振り分けます。
+
+{% for t in traffic_classes %}#### 4-{{ loop.index }}. {{ t["service"] }}({{ t["proto"] }}/{{ t["port"] }} -> {{ t["queue_name"] }})
+
+- Interface: `{{ lan_interface|upper }}`
+- Protocol: `{{ t["proto"] }}`
+{% if t["host"] != "-" %}- Source/Destination: `{{ t["host"] }}` を含む方向で指定
+{% else %}- Source/Destination: `{{ lan_interface|upper }} net`(LAN全体を対象)
+{% endif %}- Destination port range: from `{{ t["port"] }}` to `{{ t["port"] }}`
+- Target: Queue `{{ t["queue_name"] }}`
+- Description: `{{ t["service"] }}`
+
+{% endfor %}
+ルールの評価順は上から順に最初に一致したものが適用されるため、重要トラフィック
+(`{{ traffic_classes[0]["service"] }}` や `{{ traffic_classes[1]["service"] }}`)の
+ルールを、非重要トラフィックのルールより上に配置してください。保存後、
+**Apply changes** を押して反映します。
+
+### 5. Shaper Statusで輻輳時の挙動を確認する
+
+回線を輻輳させた状態(重要・非重要の両トラフィックを同時に発生させた状態)で、
+*Firewall > Shaper > Status* を開き、各Pipe/Queue/Ruleの通過トラフィック量を
+確認します。
+
+```bash
+# OPNsense本体で、Pipe/QueueごとのCLI上の統計を確認
+ipfw pipe show
+ipfw queue show
+```
+
+`ipfw queue show` の出力で、重要Queue(`{{ traffic_classes[0]["queue_name"] }}`)
+側のドロップ数が非重要Queue(`{{ traffic_classes[2]["queue_name"] }}`)側より
+少ないこと、および重要トラフィックのスループットが `{{ critical_pipe_mbit }}Mbit/s`
+に近い水準を維持できていることを確認します。
+
+問題がなければ、*Firewall > Shaper > Rules* を開き、暫定ルール
+`{{ temp_shaper_disabled_descr }}` を無効化(Disable)して **Apply changes** を
+押します。
+
+## 動作確認
+
+- `ipfw pipe show` に `PIPE-CRITICAL`(`{{ critical_pipe_mbit }}Mbit/s`)と
+  `PIPE-BULK`(`{{ noncritical_pipe_mbit }}Mbit/s`)の2つのPipeが表示されること
+- `ipfw queue show` に重み `{{ critical_queue_weight }}` の
+  `{{ traffic_classes[0]["queue_name"] }}` と、重み `{{ noncritical_queue_weight }}`
+  の `{{ traffic_classes[2]["queue_name"] }}` が表示されること
+- *Firewall > Shaper > Status* で、輻輳を発生させた状態でも重要トラフィック
+  (`{{ traffic_classes[0]["service"] }}`、`{{ traffic_classes[1]["service"] }}`)側の
+  スループットが優先的に確保され、非重要トラフィック(`{{ traffic_classes[2]["service"] }}`、
+  `{{ traffic_classes[3]["service"] }}`)側の帯域が `{{ noncritical_pipe_mbit }}Mbit/s`
+  以内に収まっていること
+- 輻輳試験用ホスト `{{ congestion_test_host }}` 宛の非重要トラフィックを流しても、
+  重要業務トラフィックの応答遅延が悪化しないこと
+- 動作確認完了後、暫定ルール `{{ temp_shaper_disabled_descr }}` が無効化されている
+  こと
+
+## 注意事項
+
+- 重要Pipeと非重要Pipeの帯域合計(`{{ critical_pipe_mbit }}Mbit/s` +
+  `{{ noncritical_pipe_mbit }}Mbit/s`)が回線の実効帯域(`{{ uplink_mbit }}Mbit/s`
+  / `{{ downlink_mbit }}Mbit/s`)を超えないよう設計すること。超過すると輻輳時の
+  挙動がかえって不安定になる。
+- 暫定ルール `{{ temp_shaper_disabled_descr }}` は、手順5でShaper Statusおよび
+  CLIの双方で意図通りの優先制御が確認できるまで無効化しないこと。先に無効化
+  すると、設定不備があった場合に全トラフィックが未検証のシェーピング設定の
+  影響を受ける。
+- Shaper Ruleの評価順は上から順に最初に一致したものが適用されるため、重要
+  トラフィックのルールが非重要トラフィックのルールより必ず上に来るよう
+  定期的に確認すること。
+- 業務トラフィックの構成(利用サービスやポート)が変わった場合は
+  `traffic_classes` の内容も見直し、新しいサービスが誤って非重要Queue
+  (`{{ traffic_classes[2]["queue_name"] }}`)に振り分けられたままにならないよう
+  注意する。
+- 設定変更前に *System > Configuration > Backups* からconfig.xmlのバックアップを
+  取得し、意図しない帯域制御の悪化が発生した場合に切り戻せるようにしておく。

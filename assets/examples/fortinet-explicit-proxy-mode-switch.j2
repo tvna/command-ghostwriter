@@ -1,0 +1,247 @@
+# FortiGate 明示的プロキシ/透過型プロキシの使い分け設定
+
+FortiGate(FortiOS)で、クライアント側にプロキシ設定が必要な明示的プロキシ
+(Explicit Web Proxy)と、クライアント側の設定が不要な透過型プロキシ
+(Transparent Proxy)を、クライアントセグメントの事情に応じて使い分けます。
+GPOやMDMでPAC/プロキシ設定を配布できるセグメント({{ explicit_segments | length }}
+件)には明示的プロキシを、BYOD・IoT機器など配布できないセグメント
+({{ transparent_segments | length }}件)には透過型プロキシを適用します。
+明示的プロキシは `config web-proxy explicit` とインターフェースの
+`explicit-web-proxy` 有効化、`firewall proxy-policy`(`proxy explicit-web`)
+で構成し、透過型プロキシは通常の `firewall policy` に `inspection-mode proxy`
+とプロキシ型セキュリティプロファイルを組み合わせて構成します。
+
+## 目的
+
+FortiGateのExplicit Web ProxyとTransparent Proxyという2つのネイティブ機構の
+違い(クライアント側のプロキシ設定要否)を理解し、セグメントごとの事情
+(プロキシ設定を配布できるか否か)に応じてどちらを適用するかを判断・構成
+できるようになることを目指します。あわせて、明示的プロキシ用の
+proxy-policyと、透過型プロキシ用の通常のfirewall policyという、構成の
+異なる2種類のポリシーを混同せずに投入できるようになることを目指します。
+
+## 用語解説
+
+- **Explicit Web Proxy(明示的プロキシ)**: `Network > Explicit and
+  transparent proxies > Explicit web proxy` で構成する機構。クライアントの
+  ブラウザ側にプロキシサーバー(アドレス・ポート)の設定、または設定を配布
+  するPACファイルが必要になる。CLIでは `config web-proxy explicit` で
+  グローバルなプロキシ動作(待受ポート、FTP over HTTP、SOCKSの可否)を
+  設定し、`config system interface` の対象インターフェースで
+  `set explicit-web-proxy enable` を有効化したうえで、`config firewall
+  proxy-policy` に `set proxy explicit-web` を指定したポリシーを作成する
+- **Transparent Proxy(透過型プロキシ)**: `Network > Explicit and
+  transparent proxies > Transparent proxy` で説明される機構。クライアント側
+  の設定は不要で、通常の `config firewall policy` に `set inspection-mode
+  proxy` を指定し、プロキシ型(feature-set proxy)のセキュリティプロファイル
+  (Webフィルタ等)を割り当てることで、既定ゲートウェイ経由の通信を透過的に
+  プロキシ処理へ回す
+- **explicit-web-proxy(インターフェース設定)**: `config system interface`
+  の `edit <interface-name>` 配下のパラメータ。有効化したインターフェース
+  だけが、`config web-proxy explicit` の待受ポート(`http-incoming-port`
+  等)でプロキシ接続を受け付けるようになる
+- **feature-set(proxy/flow)の一致**: Webフィルタ等のセキュリティ
+  プロファイルは `feature-set` として `proxy` または `flow` のいずれかを
+  持ち、割り当て先のfirewall policyの `inspection-mode` と一致しない場合、
+  GUI上でそのプロファイルが選択肢に表示されず、CLIでも割り当てが拒否される
+- **System > Feature Visibility の Explicit Proxy 項目**: GUIに明示的
+  プロキシ関連の設定画面を表示させるための機能表示切り替え。モデルによって
+  は(RAM 2GB以下等)既定でプロキシ関連機能がGUIから隠されている場合がある
+- **PACファイルについて(範囲外)**: 一次情報では明示的プロキシがPAC
+  (Proxy Auto-Configuration)によるクライアント設定配布に対応している旨の
+  記載はあるものの、本セッションで再アクセスした一次情報のページからは
+  FortiGate側でPACファイルを配布・ホストするための具体的なCLI構文を確認
+  できませんでした。そのため本手順書では、明示的プロキシ対象クライアントに
+  対する「プロキシサーバー名/ポートの手動設定、またはGPO等既存の配布手段で
+  のPAC配布」までを対象とし、FortiGate上でのPACファイルホスティング自体は
+  範囲外とします(導入を検討する場合は最新の一次情報を別途確認してください)
+
+## シナリオ設定
+
+明示的プロキシを適用するセグメント({{ explicit_segments | length }}件、
+プロキシ設定の配布が可能):
+
+| # | セグメント | インターフェース | ネットワーク |
+|---|------------|-------------------|--------------|
+{% for seg in explicit_segments %}| {{ loop.index }} | {{ seg.label }} | {{ seg.interface }} | {{ seg.network }} |
+{% endfor %}
+透過型プロキシを適用するセグメント({{ transparent_segments | length }}件、
+プロキシ設定の配布が不可):
+
+| # | セグメント | インターフェース | ネットワーク |
+|---|------------|-------------------|--------------|
+{% for seg in transparent_segments %}| {{ loop.index }} | {{ seg.label }} | {{ seg.interface }} | {{ seg.network }} |
+{% endfor %}
+| 項目 | 値 |
+|------|-----|
+| 共通の外部(WAN)インターフェース(wan_interface) | {{ wan_interface }} |
+| 明示的プロキシの待受ポート(explicit_http_port) | {{ explicit_http_port }} |
+| FTP over HTTPを許可するか(enable_ftp_over_http) | {{ enable_ftp_over_http }} |
+| SOCKSを許可するか(enable_socks) | {{ enable_socks }} |
+| 明示的プロキシ用proxy-policy ID(explicit_proxy_policy_id) | {{ explicit_proxy_policy_id }} |
+| 明示的プロキシ用proxy-policy名(explicit_proxy_policy_name) | {{ explicit_proxy_policy_name }} |
+| 透過型プロキシ用policy ID(transparent_policy_id) | {{ transparent_policy_id }} |
+| 透過型プロキシ用policy名(transparent_policy_name) | {{ transparent_policy_name }} |
+| 割り当てるWebフィルタプロファイル(webfilter_profile、feature-set: proxy) | {{ webfilter_profile }} |
+| 割り当てるprofile-protocol-options(protocol_options_profile) | {{ protocol_options_profile }} |
+| SSL/SSHディープインスペクションを有効化するか(enable_deep_inspection) | {{ enable_deep_inspection }} |
+| ディープインスペクション用ssl-ssh-profile(ssl_ssh_profile) | {{ ssl_ssh_profile }} |
+| 明示的プロキシ対象クライアントに配布するプロキシホスト名(client_proxy_hostname) | {{ client_proxy_hostname }} |
+
+## 手順
+
+### 1. Feature Visibilityで明示的プロキシ関連の設定画面を表示する
+
+`System > Feature Visibility` を開き、`Explicit Proxy` を有効化して
+`Apply` を押します。この項目が既に有効な場合は変更不要です。RAM 2GB以下等
+のモデルでは既定でこの項目が隠れている場合があるため、表示されない場合は
+モデルとFortiOSバージョンでのサポート状況を確認してください。
+
+### 2. 明示的プロキシのグローバル設定を行う
+
+`config web-proxy explicit` で、待受ポートおよびFTP over HTTP/SOCKSの可否
+を設定します。
+
+```bash
+config web-proxy explicit
+    set status enable
+    set http-incoming-port {{ explicit_http_port }}
+{% if enable_ftp_over_http %}    set ftp-over-http enable
+{% else %}    set ftp-over-http disable
+{% endif %}{% if enable_socks %}    set socks enable
+{% else %}    set socks disable
+{% endif %}end
+```
+
+### 3. 明示的プロキシ対象インターフェースで explicit-web-proxy を有効化する
+
+明示的プロキシを適用するセグメント({{ explicit_segments | length }}件)の
+インターフェースそれぞれで `explicit-web-proxy` を有効化します。有効化した
+インターフェースだけが、手順2の待受ポート(`{{ explicit_http_port }}`)で
+プロキシ接続を受け付けます。
+
+```bash
+config system interface
+{% for seg in explicit_segments %}    edit "{{ seg.interface }}"
+        set explicit-web-proxy enable
+    next
+{% endfor %}end
+```
+
+GUIで行う場合は `Network > Interfaces` で対象インターフェースを編集し、
+`Explicit Web Proxy` を有効化します。
+
+### 4. 明示的プロキシ用の proxy-policy を作成する
+
+`proxy explicit-web` を指定した proxy-policy を、外部インターフェース
+(`{{ wan_interface }}`)向けに作成します。
+
+```bash
+config firewall proxy-policy
+    edit {{ explicit_proxy_policy_id }}
+        set name "{{ explicit_proxy_policy_name }}"
+        set proxy explicit-web
+        set dstintf "{{ wan_interface }}"
+        set srcaddr "all"
+        set dstaddr "all"
+        set service "webproxy"
+        set action accept
+        set schedule "always"
+        set webfilter-profile "{{ webfilter_profile }}"
+{% if enable_deep_inspection %}        set ssl-ssh-profile "{{ ssl_ssh_profile }}"
+{% endif %}        set logtraffic all
+    next
+end
+```
+
+### 5. 透過型プロキシ用の firewall policy を作成する
+
+透過型プロキシを適用するセグメント({{ transparent_segments | length }}件)
+から外部インターフェース(`{{ wan_interface }}`)への通常のfirewall policy
+に `inspection-mode proxy` とプロキシ型のセキュリティプロファイルを設定し
+ます。このポリシーの `srcintf` はクライアントセグメント側のインターフェース
+であり、クライアント側にプロキシの設定は行いません。
+
+```bash
+config firewall policy
+    edit {{ transparent_policy_id }}
+        set name "{{ transparent_policy_name }}"
+        set srcintf {% for seg in transparent_segments %}"{{ seg.interface }}"{% if not loop.last %} {% endif %}{% endfor %}
+        set dstintf "{{ wan_interface }}"
+        set srcaddr "all"
+        set dstaddr "all"
+        set action accept
+        set schedule "always"
+        set service "ALL"
+        set inspection-mode proxy
+        set utm-status enable
+        set webfilter-profile "{{ webfilter_profile }}"
+        set profile-protocol-options "{{ protocol_options_profile }}"
+{% if enable_deep_inspection %}        set ssl-ssh-profile "{{ ssl_ssh_profile }}"
+{% endif %}        set nat enable
+        set logtraffic all
+    next
+end
+```
+
+### 6. 明示的プロキシ対象クライアントにプロキシ情報を配布する
+
+明示的プロキシを適用するセグメント({{ explicit_segments | length }}件)の
+クライアントに対し、既存のGPO/MDM等の配布手段で、プロキシホスト名
+`{{ client_proxy_hostname }}`・ポート `{{ explicit_http_port }}` を手動
+設定、またはこれらを反映したPACファイルとして配布します(PACファイルの
+作成・配布自体はFortiGateの範囲外のため、既存の配布手段を利用してくださ
+い)。透過型プロキシを適用するセグメント({{ transparent_segments | length }}
+件)のクライアントには、いかなるプロキシ設定も行わないでください。
+
+## 動作確認
+
+- `System > Feature Visibility` で `Explicit Proxy` が有効になっていること
+- 明示的プロキシを適用するセグメント({% for seg in explicit_segments %}`{{ seg.interface }}`{% if not loop.last %}・{% endif %}{% endfor %})
+  それぞれで、GUIの `Network > Interfaces` 上、対象インターフェースの
+  `Explicit Web Proxy` が有効になっていること
+- 明示的プロキシ対象セグメントの端末に `{{ client_proxy_hostname }}:{{ explicit_http_port }}`
+  をプロキシとして手動設定した状態でWebアクセスできること、かつ
+  proxy-policy(`{{ explicit_proxy_policy_name }}`)のトラフィックログに
+  該当セッションが記録されること
+- 透過型プロキシを適用するセグメント({% for seg in transparent_segments %}`{{ seg.interface }}`{% if not loop.last %}・{% endif %}{% endfor %})
+  の端末で、プロキシ設定を一切行わない状態のままWebアクセスができ、
+  firewall policy(`{{ transparent_policy_name }}`)のトラフィックログに
+  該当セッションが記録され、`{{ webfilter_profile }}` によるWebフィルタが
+  適用されていること
+- `{{ webfilter_profile }}` と `{{ protocol_options_profile }}` の
+  feature-setが、割り当て先ポリシーの `inspection-mode`(いずれも
+  `proxy`)と一致しており、GUI上でプロファイルが選択肢として表示される
+  こと
+
+## 注意事項
+
+- **明示的プロキシと透過型プロキシは、構成するポリシーの種類が異なりま
+  す。** 明示的プロキシは `firewall proxy-policy`(`proxy explicit-web`)、
+  透過型プロキシは通常の `firewall policy`(`inspection-mode proxy`)で
+  構成するため、混同して同じ種類のポリシーに両方の設定を投入しないよう
+  注意してください。
+- `explicit-web-proxy` を有効化したインターフェースは、手順2の待受ポート
+  (`{{ explicit_http_port }}`)でプロキシ接続を受け付けるようになります。
+  既存の他サービスと同一ポートが競合しないことを事前に確認してください。
+- Webフィルタ等のセキュリティプロファイルは `feature-set`(`proxy`/
+  `flow`)を持ち、割り当て先ポリシーの `inspection-mode` と一致しない場合
+  はGUI上で選択できず、CLIでも割り当てが拒否されます。`{{ webfilter_profile }}`
+  および `{{ protocol_options_profile }}` は `proxy` 用のプロファイルを
+  用意してください。
+- {% if enable_deep_inspection %}SSL/SSHディープインスペクション
+  (`{{ ssl_ssh_profile }}`)を有効化する場合、クライアント側にFortiGateの
+  内部CA証明書を事前に配布しておく必要があります。証明書の配布状況を
+  確認してから適用してください。{% else %}本シナリオではSSL/SSHディープ
+  インスペクションを無効にしているため、HTTPS通信の内容はプロキシ/
+  ファイアウォールポリシー上で検査されません。{% endif %}
+- PACファイルのFortiGate側でのホスティング・配布については、本手順書
+  作成時点で一次情報から具体的なCLI構文を確認できなかったため対象外
+  としています。導入する場合は最新の一次情報を別途確認し、既存の配布
+  手段(GPO/MDM等)を優先してください。
+- 明示的プロキシで認証を有効化する場合、ユーザー名・パスワードなどの
+  認証情報を本手順書やログに平文で記載しないでください。値を記録する
+  場合は `****` のようにマスクしてください。
+- 透過型プロキシ対象セグメントの端末に誤ってプロキシ設定を行うと、
+  意図しない二重プロキシ経路になるおそれがあります。手順6の配布範囲を
+  セグメント単位で厳密に管理してください。

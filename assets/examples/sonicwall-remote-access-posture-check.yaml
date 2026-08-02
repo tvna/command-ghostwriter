@@ -1,0 +1,27 @@
+group_name: "SSLVPN Services"
+trusted_zone_name: "SSLVPN-Trusted"
+quarantine_zone_name: "SSLVPN-Quarantine"
+remediation_hosts:
+  - name: "remediation-wsus"
+    ip_address: "10.10.90.10"
+    description: "社内WSUS(Windows Update配信サーバ)"
+  - name: "remediation-av-mgmt"
+    ip_address: "10.10.90.20"
+    description: "AV管理コンソール(パターン配信・エージェント再インストール用)"
+epc_profiles:
+  - name: "epc-allow-corp-endpoint"
+    profile_type: "Allow"
+    target_zone: "SSLVPN-Trusted"
+    checks:
+      - "指定ベンダーのアンチウイルスソフトが導入され、プロセスが実行中であること"
+      - "指定のクライアント証明書(社内PKI発行)が端末に存在すること"
+    description: "AV稼働と社内発行クライアント証明書の両方を満たす社給端末向けAllowプロファイル"
+  - name: "epc-deny-av-disabled"
+    profile_type: "Deny"
+    target_zone: "-"
+    checks:
+      - "指定ベンダーのアンチウイルスソフトのプロセスが停止していること"
+    description: "AVプロセスが停止している端末を明示的に拒否するDenyプロファイル"
+unsupported_client_zone: "SSLVPN-Quarantine"
+compliant_test_note: "epc-allow-corp-endpointの条件(AV稼働・クライアント証明書あり)を満たす検証端末"
+noncompliant_test_note: "検証用にAVサービスを一時停止するか、クライアント証明書を未インストールにした端末"

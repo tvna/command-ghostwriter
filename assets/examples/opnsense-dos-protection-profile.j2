@@ -1,0 +1,187 @@
+# OPNsenseにおけるSYNフラッド/DoS対策の閾値・モード調整
+
+SYNフラッド等のDoS/DDoS攻撃を検知・緩和しつつ、正常な通信を過剰に遮断
+しないよう、公開サービス向けルールのAdvanced Optionsとグローバルな
+syncookies設定を段階的に調整します。
+
+## 目的
+
+インターネット公開サービスへのSYNフラッド等のDoS/DDoS攻撃を、ルール
+単位のper-host閾値とファイアウォール全体のsyncookiesモードの組み合わせ
+で検知・緩和しつつ、正常な通信への誤検知(過剰遮断)を避けられるよう
+閾値やモードを段階的に調整できるようになることを目指します。他ベンダー
+のネイティブ機能とは異なり、OPNsenseでは単一の「DoS Protection Profile」
+オブジェクトではなく、ルール単位のAdvanced Options(State Type:
+Synproxy state、Max. established connections per host、Max. new
+connections per second per host、Max. state entries per host)と、
+Firewall > Settings > Advanced のグローバル「Enable syncookies」設定を
+組み合わせてSYN Flood等のしきい値を調整するという別機構で同じ運用課題を
+解決します。
+
+## 用語解説
+
+- **SYNフラッド**: TCPの3-way handshakeを完了させないSYNパケットを大量に
+  送りつけ、対向のstateテーブルやリソースを枯渇させる攻撃手法
+- **Advanced Options(ルール詳細設定)**: `Firewall > Rules` の各ルール
+  編集画面にある詳細設定欄。State Typeやper-hostの接続数・state数の
+  上限をルール単位で設定できる
+- **State Type: Synproxy state**: ルールのAdvanced Optionsで選べる状態
+  追跡方式の一つ。「TCPの3-way handshakeを完了する前にOPNsense自身が
+  代理応答し、正規のハンドシェイクが完了した接続だけを背後のサーバーへ
+  中継する」ことで、なりすましSYNフラッドから保護する
+- **Max. established connections per host**: 1つの送信元ホストが同時に
+  確立できる(3-way handshakeを完了した)TCPコネクション数の上限
+- **Max. new connections per second per host**: 1つの送信元ホストからの
+  新規コネクション生成レートの上限。「一定時間内に許容する新規接続数」を
+  指定する形で設定する
+- **Max. state entries per host**: 1つの送信元ホストが同時に保持できる
+  state テーブルエントリ数の上限
+- **Enable syncookies**: `Firewall > Settings > Advanced` にあるグローバル
+  設定。`never`(既定)・`always`・`adaptive` から選択でき、`adaptive` を
+  選ぶ場合は state テーブル使用率に対する低/高のしきい値(%)を指定する。
+  pf の state テーブル枯渇そのものを防ぐ、ルール単位の設定とは別レイヤの
+  防御
+- **Firewall Diagnostics(States / Sessions)**: `Firewall > Diagnostics >
+  States` で現在のstateテーブルエントリを、`Firewall > Diagnostics >
+  Sessions` でセッション一覧を確認できる画面
+- **Live View**: `Firewall > Log Files > Live View` で、ルールに一致した
+  通信をリアルタイムに確認できる画面
+
+## シナリオ設定
+
+Advanced Optionsを適用する公開サービス向けルール({{ protected_rules | length }} 件)
+は次のとおりです。
+
+| # | interface | ルールのdescription | 宛先ポート |
+|---|-----------|----------------------|------------|
+{% for rule in protected_rules %}| {{ loop.index }} | {{ rule["interface"] }} | {{ rule["description"] }} | {{ rule["dest_port"] }} |
+{% endfor %}
+
+per-hostのしきい値設定は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| Max. established connections per host(max_established_per_host) | {{ max_established_per_host }} |
+| Max. new connections per second per host(max_new_conn_count/max_new_conn_interval) | {{ max_new_conn_count }} 件 / {{ max_new_conn_interval }} 秒 |
+| Max. state entries per host(max_state_entries_per_host) | {{ max_state_entries_per_host }} |
+
+グローバルsyncookies設定は次のとおりです。
+
+| 項目 | 値 |
+|------|-----|
+| Enable syncookies(syncookies_mode) | {{ syncookies_mode }} |
+| Low watermark(syncookies_low_watermark) | {{ syncookies_low_watermark }}% |
+| High watermark(syncookies_high_watermark) | {{ syncookies_high_watermark }}% |
+
+対象ファイアウォール(fw_host): `{{ fw_host }}`
+
+## 手順
+
+### 1. 現状の設定をバックアップする
+
+ルール変更前に `config.xml` をAPI経由で退避します。`$OPNSENSE_API_KEY` /
+`$OPNSENSE_API_SECRET` には、`System > Access > Users` で発行したAPIキー
+/シークレットをそれぞれ環境変数として設定してください(値は****で伏せ、
+コマンド中に直接書かないこと)。
+
+```bash
+export FW_HOST="{{ fw_host }}"
+curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" \
+  "https://${FW_HOST}/api/core/backup/download/this" \
+  -o "opnsense-config-backup-$(date +%Y%m%d%H%M).xml"
+```
+
+### 2. 保護対象ルールを特定する
+
+`Firewall > Rules > <interface>` を開き、以下のdescriptionで既存の許可
+ルールを特定します(このシナリオでは新規ルールの作成ではなく、既存の
+公開サービス向け許可ルールにAdvanced Optionsを追加適用します)。
+
+{% for rule in protected_rules %}- `Firewall > Rules > {{ rule["interface"] }}` 配下の
+  「{{ rule["description"] }}」(宛先ポート {{ rule["dest_port"] }})
+{% endfor %}
+
+対象ルールの鉛筆アイコンをクリックして編集画面を開き、下部の
+`Advanced options` を展開してください(既定では折りたたまれています)。
+
+### 3. State Type を Synproxy state に変更する
+
+各対象ルールの `Advanced options` 内、`State Type` ドロップダウンで
+`Synproxy state` を選択します。既定値は `Keep state` です。
+
+**注意**: Synproxy state はTCPプロトコルのルールにのみ適用してください。
+UDP等ステートレス/コネクションレスなプロトコルのルールには適用できません。
+
+### 4. per-hostの接続数・state数のしきい値を設定する
+
+同じ `Advanced options` 内で、以下のとおり値を入力します。
+
+- `Max. established connections per host`: `{{ max_established_per_host }}`
+- `Max. new connections per second per host`: `{{ max_new_conn_count }}` 件 /
+  `{{ max_new_conn_interval }}` 秒の間隔で測定
+- `Max. state entries per host`: `{{ max_state_entries_per_host }}`
+
+入力後、画面下部の `Save` を押します。
+
+### 5. 変更を適用する
+
+全ての対象ルールの編集・保存が終わったら、変更を適用します。
+
+```bash
+curl -ks -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" -X POST \
+  "https://${FW_HOST}/api/firewall/filter/apply"
+```
+
+GUI上で操作している場合は、ルール一覧画面上部の `Apply changes` ボタンを
+押しても同じ操作になります。
+
+### 6. グローバルのsyncookiesモードを設定する
+
+`Firewall > Settings > Advanced` を開き、`Enable syncookies` を
+`{{ syncookies_mode }}` に設定します。
+{% if syncookies_mode == "adaptive" %}`adaptive` 選択時は、state テーブル
+使用率に対する以下のしきい値もあわせて入力します。
+
+- Low watermark: `{{ syncookies_low_watermark }}`%
+- High watermark: `{{ syncookies_high_watermark }}`%
+{% endif %}
+入力後、画面下部の `Save` を押して適用します(このページの変更はAPIでの
+Apply操作を必要とせず、Save時点で即時反映されます)。
+
+## 動作確認
+
+- `Firewall > Rules > <interface>` の対象ルールを開き直し、`Advanced
+  options` の `State Type` が `Synproxy state`、各しきい値が手順4の
+  設定値になっていること
+- `Firewall > Diagnostics > States` で対象ルールに紐づくstateエントリを
+  確認し、synproxyの状態(SYN受信直後に代理応答している状態)が表示される
+  こと
+- `Firewall > Diagnostics > Sessions` で、想定される同時接続数が
+  `Max. established connections per host`({{ max_established_per_host }})
+  を大きく超えていないこと
+- `Firewall > Log Files > Live View` で対象ルールをフィルタし、正常な
+  クライアントからの通信がpassされ続けていること(閾値超過によるblock
+  が正常なクライアントに対して発生していないこと)
+- `Firewall > Settings > Advanced` を開き直し、`Enable syncookies` が
+  `{{ syncookies_mode }}` になっていること
+
+## 注意事項
+
+- しきい値は一度に本番相当の値へ変更せず、まず現状のピーク接続数より
+  十分大きい値から開始し、`Firewall > Diagnostics > Sessions` や
+  `Live View` で正常な通信がblockされていないことを確認しながら段階的に
+  絞り込むこと。過剰に低い値は正規クライアントの誤遮断(過剰遮断)に
+  直結する
+- `Synproxy state` はTCPの3-way handshakeを代理する分、初回接続時の
+  レイテンシがわずかに増加する。レイテンシに敏感なサービスでは影響を
+  事前に検証すること
+- `Synproxy state` はUDPやその他のステートレスなプロトコルには効果が
+  ない。UDPベースの増幅攻撃等への対策は別途検討すること
+- `Enable syncookies` の `adaptive` モードはpfのstateテーブル全体の
+  枯渇を防ぐグローバルな最終防御であり、ルール単位のper-host閾値の
+  代替にはならない。両方を組み合わせて運用すること
+- 本手順で扱う設定はいずれもOPNsenseコア(Deciso公式)の機能であり、
+  Zenarmor等のサードパーティ製プラグインやBusiness Edition限定機能は
+  使用していない
+- APIキー/シークレットは平文でリポジトリやログに残さず、環境変数や
+  秘密管理ツール経由で扱うこと

@@ -1,0 +1,116 @@
+# OPNsense(Zenarmor)によるアプリケーション制御ポリシー構築
+
+ポート番号だけでは判別できないアプリケーション(SaaS、P2P、迂回通信等)を
+レイヤ7で識別し、アプリケーション単位で許可/監視/遮断のポリシーを適用します。
+CSV で定義した{{ csv_rows | length }}件のアプリケーションについて、
+Zenarmor (旧Sensei) プラグインの Application Control Rules に登録し、
+Dashboard / Reports で実際の識別・制御結果を検証します。
+
+## 目的
+
+ポート番号だけでは判別できないアプリケーション通信を、Zenarmorの
+ディープパケットインスペクション(DPI)によりレイヤ7で識別し、
+アプリケーション単位で許可・監視・遮断のいずれかのポリシーを適用できる
+ようになることを目指します。あわせて、Dashboard / Reports の実データで
+ポリシーが意図どおりに機能していることを確認します。
+
+## 用語解説
+
+- **Zenarmor (旧Sensei)**: OPNsenseにプラグインとして追加するDPIベースの
+  次世代アプリケーション識別・可視化エンジン。他ベンダーのネイティブ機能
+  (ファイアウォール本体組み込みのアプリケーション識別機構)とは異なり、
+  OPNsenseではこのZenarmorプラグインという別機構で同じ運用課題(ポート
+  番号だけでは判別できないアプリケーションのレイヤ7識別と単位制御)を
+  解決します。**Zenarmorは OPNsense 本体の開発元(Deciso)ではなく、
+  Sunny Valley Cyber Security 社が開発・提供するサードパーティ製品です。**
+  無料のFree/Homeティアは可視化(Dashboard/Reports)が中心で、
+  `Policies > Application Control Rules` によるアプリケーション遮断・
+  許可のポリシー適用(Application Controls機能)は、NGFW Home以上の
+  有償ティアから提供されます(公式プラン比較ページで無料ティアは
+  Application Controlsが「N/A」表記)。本手順を実施する前に、導入環境の
+  Zenarmorティアで Application Control Rulesの作成・保存が可能かを
+  確認してください。
+- **DPI (Deep Packet Inspection)**: パケットのヘッダだけでなくペイロード
+  内容も解析し、通信が属するアプリケーション/プロトコルを識別する技術。
+- **Policies > Application Control Rules**: Zenarmorの管理画面で
+  アプリケーション単位の許可/監視/遮断ルールを登録するメニュー。
+- **Dashboard**: Zenarmorが識別したアプリケーション通信をリアルタイムに
+  可視化する画面。
+- **Reports**: 識別されたアプリケーション/カテゴリ別の通信実績を集計・
+  参照できる画面。
+
+## シナリオ設定
+
+今回 Application Control Rules に登録するアプリケーションポリシーは、
+次の{{ csv_rows | length }}件です。`rule_no` の昇順を登録順の目安とします。
+
+| rule_no | category | application | action | description |
+|---------|----------|-------------|--------|--------------|
+{% for r in csv_rows %}| {{ r["rule_no"] }} | {{ r["category"] }} | {{ r["application"] }} | {{ r["action"] }} | {{ r["description"] }} |
+{% endfor %}
+
+action の意味は次のとおりです: `block`=遮断、`monitor`=許可しつつ可視化
+(トラフィックは通す)、`allow`=業務利用として明示的に許可。
+
+## 手順
+
+### 1. Zenarmorプラグインの導入状況を確認する
+
+`System > Firmware > Plugins` からZenarmorプラグインが導入済みであることを
+確認します。未導入の場合は、公式ドキュメント記載のWebインターフェース
+またはコマンドラインでのインストール手順に従って導入してから次に進みます。
+
+### 2. アプリケーションごとにApplication Control Ruleを登録する
+
+`Policies > Application Control Rules` を開き、シナリオ設定の各行について
+category / application の組み合わせに対するルールを追加し、action を
+表のとおりに設定します。
+
+{% for r in csv_rows %}- rule_no {{ r["rule_no"] }}: category={{ r["category"] }} / application={{ r["application"] }} / action={{ r["action"] }} ({{ r["description"] }})
+{% endfor %}
+
+登録後、変更を保存します。反映結果は手順4のDashboard / Reportsで確認します。
+
+### 3. block/monitor/allowの適用順序を確認する
+
+同一アプリケーションに複数ルールが一致しないよう、`category` と
+`application` の組み合わせが重複していないことを一覧上で確認します。
+重複がある場合は、意図しないルールが先に一致して他のルールが評価
+されなくなるおそれがあるため、登録前に整理してください。
+
+### 4. Dashboard / Reportsで識別・制御結果を検証する
+
+しばらく通信を発生させたのち、`Dashboard` と `Reports` を開き、次の順序で
+確認します。
+
+1. `action` が `block` の行に対応するアプリケーション通信が、遮断として
+   記録されている(通信が成立していない)
+2. `action` が `monitor` の行に対応するアプリケーション通信が、通信自体は
+   許可されつつ、アプリケーション名/カテゴリ付きで可視化されている
+3. `action` が `allow` の行に対応するアプリケーション通信が、通常どおり
+   許可されている
+
+## 動作確認
+
+- `Policies > Application Control Rules` の一覧が、シナリオ設定の
+  `category` / `application` / `action` と一致していること
+- `block` 行のアプリケーションについて、Dashboard / Reportsで通信が
+  遮断として記録されていること
+- `monitor` 行のアプリケーションについて、通信は許可されたまま
+  Dashboard / Reportsで可視化されていること
+- `allow` 行のアプリケーションについて、業務利用が通常どおり継続
+  できていること
+
+## 注意事項
+
+- **`monitor` は遮断ではありません。** 可視化のみを目的としており、
+  トラフィック自体は通過します。遮断が必要なアプリケーションを誤って
+  `monitor` として登録しないでください。
+- **category / application の重複登録を避けること。** 同じアプリケー
+  ションに対して複数のルールが登録されていると、どのルールが優先される
+  かが分かりにくくなり、意図しない許可・遮断につながります。
+- 新しい `block` ルールを登録した直後は、業務に必要な通信まで誤って
+  遮断していないか、Dashboard / Reportsで実際の通信状況を確認してから
+  次のアプリケーションの登録に進んでください。
+- Zenarmorのメニュー構成・項目名はバージョンにより変更される場合が
+  あるため、実機のGUI表示を必ず確認したうえで作業してください。
