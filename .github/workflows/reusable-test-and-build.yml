@@ -295,7 +295,7 @@ jobs:
           summary-title: "Gitleaks Analysis Results"
 
       - name: Upload Gitleaks scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v4.38.0
+        uses: github/codeql-action/upload-sarif@v4.38.1
         with:
           category: gitleaks
           sarif_file: "results.sarif"
@@ -367,7 +367,7 @@ jobs:
 
       - name: Upload Pyre scan results to GitHub Security tab
         if: ${{ hashFiles('sarif.json') != '' }}
-        uses: github/codeql-action/upload-sarif@v4.38.0
+        uses: github/codeql-action/upload-sarif@v4.38.1
         with:
           category: pyre
           sarif_file: "sarif.json"
@@ -460,7 +460,7 @@ jobs:
           summary-title: "Trivy Vulnerability Scan Results"
 
       - name: Upload Trivy scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v4.38.0
+        uses: github/codeql-action/upload-sarif@v4.38.1
         with:
           category: trivy
           sarif_file: "trivy-results.json"
@@ -583,7 +583,7 @@ jobs:
           verbose: true
 
       - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@0b35c9ecc4f0529d0eb674914510c22f85b196b4 # v7.1.0
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           verbose: true
