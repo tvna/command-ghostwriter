@@ -256,7 +256,7 @@ jobs:
         run: actionlint -color
 
       - name: Check typos
-        uses: crate-ci/typos@512fc24f32f44ab01972217aaaf3dc86ec234d53 # v1.50.2
+        uses: crate-ci/typos@00f422f3b19c57bc6338715ebfe3316d38768461 # v1.50.3
 
   guard-api-key:
     name: Guard API Key
@@ -295,7 +295,7 @@ jobs:
           summary-title: "Gitleaks Analysis Results"
 
       - name: Upload Gitleaks scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v4.38.1
+        uses: github/codeql-action/upload-sarif@v4.38.2
         with:
           category: gitleaks
           sarif_file: "results.sarif"
@@ -367,7 +367,7 @@ jobs:
 
       - name: Upload Pyre scan results to GitHub Security tab
         if: ${{ hashFiles('sarif.json') != '' }}
-        uses: github/codeql-action/upload-sarif@v4.38.1
+        uses: github/codeql-action/upload-sarif@v4.38.2
         with:
           category: pyre
           sarif_file: "sarif.json"
@@ -460,7 +460,7 @@ jobs:
           summary-title: "Trivy Vulnerability Scan Results"
 
       - name: Upload Trivy scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v4.38.1
+        uses: github/codeql-action/upload-sarif@v4.38.2
         with:
           category: trivy
           sarif_file: "trivy-results.json"
