@@ -1,11 +1,11 @@
 lockfile_version: '1'
-generated_at: '2026-07-06T09:57:35.374029+00:00'
+generated_at: '2026-10-12T13:55:37.807667+00:00'
 apm_version: 0.12.1
 dependencies:
 - repo_url: obra/superpowers
   host: github.com
-  resolved_commit: f2cbfbefebbfef77321e4c9abc9e949826bea9d7
-  resolved_ref: f2cbfbefebbfef77321e4c9abc9e949826bea9d7
+  resolved_commit: bb92a77741419a4ab5f06e711a283343f1ada0c3
+  resolved_ref: bb92a77741419a4ab5f06e711a283343f1ada0c3
   package_type: marketplace_plugin
   deployed_files:
   - .claude/skills/brainstorming
