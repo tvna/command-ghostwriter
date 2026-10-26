@@ -188,7 +188,7 @@ jobs:
         run: echo "$GITHUB_CONTEXT" | jq -r '. | {event_name, workflow_ref, repository, run_id, run_number}'
 
       - name: Compare versions (Semver)
-        uses: madhead/semver-utils@4cf918affe9106ea59f86c6250e5ec4570ac4389 # v5.0.0
+        uses: madhead/semver-utils@092ff2bc46cae343afb90c5efbd606411fc45b49 # v5.1.1
         id: compare-versions
         with:
           version: ${{ needs.get-develop-npm-version.outputs.version }}
@@ -301,7 +301,7 @@ jobs:
 
       # Setup Python required by the create_pr.py script
       - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ env.GLOBAL_PYTHON_VERSION }}
 
