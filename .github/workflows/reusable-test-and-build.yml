@@ -132,7 +132,7 @@ jobs:
 
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: true
@@ -157,7 +157,7 @@ jobs:
 
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: true
@@ -183,7 +183,7 @@ jobs:
 
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: true
@@ -256,7 +256,7 @@ jobs:
         run: actionlint -color
 
       - name: Check typos
-        uses: crate-ci/typos@7f9d0819ca1c008ade73f4b41fa9d258d48f605b # v1.51.1
+        uses: crate-ci/typos@4c8b7f51ca60df14e3c5ca82770dfbbe6c3dae85 # v1.52.0
 
   guard-api-key:
     name: Guard API Key
@@ -269,7 +269,7 @@ jobs:
 
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: true
@@ -295,7 +295,7 @@ jobs:
           summary-title: "Gitleaks Analysis Results"
 
       - name: Upload Gitleaks scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v4.39.1
+        uses: github/codeql-action/upload-sarif@v4.39.3
         with:
           category: gitleaks
           sarif_file: "results.sarif"
@@ -313,7 +313,7 @@ jobs:
 
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: true
@@ -367,7 +367,7 @@ jobs:
 
       - name: Upload Pyre scan results to GitHub Security tab
         if: ${{ hashFiles('sarif.json') != '' }}
-        uses: github/codeql-action/upload-sarif@v4.39.1
+        uses: github/codeql-action/upload-sarif@v4.39.3
         with:
           category: pyre
           sarif_file: "sarif.json"
@@ -386,7 +386,7 @@ jobs:
 
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: true
@@ -460,7 +460,7 @@ jobs:
           summary-title: "Trivy Vulnerability Scan Results"
 
       - name: Upload Trivy scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v4.39.1
+        uses: github/codeql-action/upload-sarif@v4.39.3
         with:
           category: trivy
           sarif_file: "trivy-results.json"
@@ -493,7 +493,7 @@ jobs:
 
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: true
@@ -534,7 +534,7 @@ jobs:
 
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: true
@@ -603,7 +603,7 @@ jobs:
 
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: true
@@ -669,7 +669,7 @@ jobs:
 
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: true

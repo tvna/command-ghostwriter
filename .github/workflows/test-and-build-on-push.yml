@@ -98,7 +98,7 @@ jobs:
 
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: true
@@ -131,7 +131,7 @@ jobs:
 
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: true
@@ -167,7 +167,7 @@ jobs:
 
     steps:
       - name: Harden the runner (Audit all outbound calls)
-        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: ${{ env.HARDEN_RUNNER_EGRESS_POLICY }}
           disable-sudo: true
@@ -188,7 +188,7 @@ jobs:
         run: echo "$GITHUB_CONTEXT" | jq -r '. | {event_name, workflow_ref, repository, run_id, run_number}'
 
       - name: Compare versions (Semver)
-        uses: madhead/semver-utils@092ff2bc46cae343afb90c5efbd606411fc45b49 # v5.1.1
+        uses: madhead/semver-utils@46f4caeac2202a1e850a7bbcabe22e750d28493c # v5.1.2
         id: compare-versions
         with:
           version: ${{ needs.get-develop-npm-version.outputs.version }}
